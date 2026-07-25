@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { health } from "../api";
 import { useCopilot } from "../hooks/useCopilot";
-import { modelShort, providerLabel, useConfig } from "../hooks/useConfig";
+import { modelShort, useConfig } from "../hooks/useConfig";
 import { useMe } from "../hooks/useMe";
 import { AdminPanel } from "./AdminPanel";
 import { SignupModal } from "./SignupModal";

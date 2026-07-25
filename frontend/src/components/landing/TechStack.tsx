@@ -1,6 +1,6 @@
-import { useRef, useMemo } from 'react'
-import { Canvas, useFrame, useLoader } from '@react-three/fiber'
-import { Float, Text, Billboard } from '@react-three/drei'
+import { useRef } from 'react'
+import { Canvas, useFrame } from '@react-three/fiber'
+import { Text, Billboard } from '@react-three/drei'
 import { motion } from 'framer-motion'
 import * as THREE from 'three'
 
@@ -21,79 +21,6 @@ const TECH_STACK = [
   { name: 'Helm', color: '#0F1689', icon: 'helm' },
   { name: 'Elastic', color: '#005571', icon: 'elastic' }
 ]
-
-function LogoSprite({
-  tech,
-  position,
-  scale = 1
-}: {
-  tech: typeof TECH_STACK[0]
-  position: [number, number, number]
-  scale?: number
-}) {
-  const meshRef = useRef<THREE.Group>(null)
-  const initialY = position[1]
-
-  useFrame((state) => {
-    if (meshRef.current) {
-      meshRef.current.position.y = initialY + Math.sin(state.clock.elapsedTime + position[0]) * 0.3
-      meshRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.5 + position[0]) * 0.2
-    }
-  })
-
-  return (
-    <Float speed={1.5} rotationIntensity={0.2} floatIntensity={0.3}>
-      <group ref={meshRef} position={position}>
-        <Billboard follow={true} lockX={false} lockY={false} lockZ={false}>
-          {/* Glowing background circle */}
-          <mesh>
-            <circleGeometry args={[0.7 * scale, 32]} />
-            <meshBasicMaterial
-              color={tech.color}
-              transparent
-              opacity={0.15}
-            />
-          </mesh>
-          {/* Inner circle */}
-          <mesh position={[0, 0, 0.01]}>
-            <circleGeometry args={[0.55 * scale, 32]} />
-            <meshBasicMaterial
-              color="#0a0f1a"
-              transparent
-              opacity={0.9}
-            />
-          </mesh>
-          {/* Border ring */}
-          <mesh position={[0, 0, 0.02]}>
-            <ringGeometry args={[0.5 * scale, 0.55 * scale, 32]} />
-            <meshBasicMaterial
-              color={tech.color}
-              transparent
-              opacity={0.6}
-            />
-          </mesh>
-          {/* Tech name label */}
-          <Text
-            position={[0, -0.9 * scale, 0.03]}
-            fontSize={0.18 * scale}
-            color={tech.color}
-            anchorX="center"
-            anchorY="middle"
-            font="/fonts/inter-medium.woff"
-          >
-            {tech.name}
-          </Text>
-        </Billboard>
-        {/* Glow effect */}
-        <pointLight
-          color={tech.color}
-          intensity={0.5}
-          distance={3}
-        />
-      </group>
-    </Float>
-  )
-}
 
 function OrbitingLogo({
   tech,

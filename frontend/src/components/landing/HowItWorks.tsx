@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Terminal,
   MessageSquare,
   Search,
   FileText,
@@ -245,7 +244,7 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
           <div className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-3 border border-white/10">
             <Sparkles className="w-5 h-5 text-primary" />
             <span className="text-white flex-1">
-              {isActive ? <TypeWriter text={demo.content} /> : demo.content}
+              {isActive ? <TypeWriter text={demo.content as string} /> : (demo.content as string)}
             </span>
           </div>
         </div>
@@ -437,7 +436,7 @@ export function HowItWorks() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [hasStarted, setHasStarted] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     const observer = new IntersectionObserver(
