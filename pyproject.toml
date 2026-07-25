@@ -53,6 +53,7 @@ dev = [
 
 [project.scripts]
 copilot = "app.cli:main"
+copilot-setup = "app.setup:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,76 @@
+# Render Blueprint - DevOps Copilot
+# https://render.com/docs/blueprint-spec
+
+services:
+  # Main application (Backend + Frontend)
+  - type: web
+    name: devops-copilot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    healthCheckPath: /healthz
+    envVars:
+      # LLM Provider (Required)
+      - key: COPILOT_PROVIDER
+        value: anthropic
+      - key: ANTHROPIC_API_KEY
+        sync: false  # User must set manually in Render dashboard
+
+      # Production settings
+      - key: COPILOT_ENV
+        value: production
+      - key: COPILOT_API_TOKEN
+        generateValue: true  # Auto-generate secure token
+
+      # Database
+      - key: COPILOT_CHECKPOINT_DB
+        fromDatabase:
+          name: copilot-db
+          property: connectionString
+
+      # Defaults
+      - key: TARGET_REPO_PATH
+        value: ./sample_repo
+      - key: COPILOT_MAX_ITERATIONS
+        value: "8"
+      - key: COPILOT_VERIFY_FIX
+        value: "true"
+      - key: COPILOT_LEARN_INCIDENTS
+        value: "true"
+      - key: LOG_FORMAT
+        value: json
+
+  # Alternative: Separate backend and frontend
+  # Uncomment below if you want to deploy separately
+
+  # - type: web
+  #   name: devops-copilot-api
+  #   runtime: python
+  #   buildCommand: pip install -e .
+  #   startCommand: uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
+  #   plan: free
+  #   healthCheckPath: /healthz
+  #   envVars:
+  #     - key: COPILOT_PROVIDER
+  #       value: anthropic
+  #     - key: ANTHROPIC_API_KEY
+  #       sync: false
+
+  # - type: web
+  #   name: devops-copilot-web
+  #   runtime: static
+  #   buildCommand: cd frontend && npm install && npm run build
+  #   staticPublishPath: ./frontend/dist
+  #   plan: free
+  #   routes:
+  #     - type: rewrite
+  #       source: /*
+  #       destination: /index.html
+
+databases:
+  - name: copilot-db
+    plan: free
+    databaseName: copilot
+    user: copilot

@@ -43,5 +43,7 @@ ENV COPILOT_CHECKPOINT_DB=/data/copilot_checkpoints.sqlite
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8000/healthz || exit 1
-CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    CMD curl -fsS http://localhost:${PORT:-8000}/healthz || exit 1
+
+# Use PORT env variable for Render compatibility (defaults to 8000)
+CMD uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}

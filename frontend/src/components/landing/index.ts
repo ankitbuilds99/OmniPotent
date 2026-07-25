@@ -1,6 +1,7 @@
 export { CinematicLanding } from './CinematicLanding'
 export { Navbar } from './Navbar'
 export { HeroSection } from './HeroSection'
+export { HowItWorks } from './HowItWorks'
 export { Scene3D } from './Scene3D'
 export { Terminal } from './Terminal'
 export { FeatureCards } from './FeatureCards'

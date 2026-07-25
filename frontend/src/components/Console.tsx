@@ -13,19 +13,10 @@ import { Sidebar } from "./Sidebar";
 import { ThemePicker } from "./ThemePicker";
 
 const SUGGESTIONS = [
-  { text: "Why is the checkout API throwing 500 errors?", icon: "alert" },
-  { text: "What recent deploy caused the failures?", icon: "branch" },
-  { text: "Are any pods crashing in Kubernetes?", icon: "server" },
-  { text: "Have we seen this incident before?", icon: "search" },
-];
-
-const CAPABILITIES = [
-  { icon: "search", label: "Log Analysis" },
-  { icon: "insight", label: "Root Cause" },
-  { icon: "server", label: "K8s & Cloud" },
-  { icon: "branch", label: "Git History" },
-  { icon: "lock", label: "Safe Actions" },
-  { icon: "check", label: "Verification" },
+  "Why is the checkout API throwing 500 errors?",
+  "What deploy caused the checkout failures?",
+  "Are any pods crashing in Kubernetes?",
+  "Have we seen this incident before?",
 ];
 
 function TopBar({
@@ -58,54 +49,28 @@ function TopBar({
   }, []);
 
   return (
-    <header className="pro-topbar">
-      <button className="pro-topbar__brand" onClick={onHome}>
-        <span className="pro-topbar__logo">
-          <Icon name="sparkles" size={18} />
-        </span>
-        <span className="pro-topbar__name">DevOps Copilot</span>
+    <header className="nav">
+      <button className="nav__brand" onClick={onHome}>
+        <span className="nav__logo"><Icon name="sparkles" size={16} /></span>
+        <span className="nav__name">DevOps Copilot</span>
       </button>
 
-      <div className="pro-topbar__actions">
-        <button className="pro-topbar__btn pro-topbar__btn--primary" onClick={onNew}>
+      <div className="nav__right">
+        <button className="nav__btn nav__btn--accent" onClick={onNew}>
           <Icon name="refresh" size={14} />
           <span>New</span>
         </button>
-        <button className="pro-topbar__btn" onClick={onSignup}>
-          Sign up
-        </button>
-        <button className="pro-topbar__btn" onClick={onAdmin}>
-          Admin
-        </button>
-
-        <div className="pro-topbar__sep" />
-
-        {cfg && (
-          <span className="pro-topbar__model">
-            {providerLabel(cfg.provider)} · {modelShort(cfg.model)}
-          </span>
-        )}
-
-        <span className={`pro-topbar__status ${online ? 'online' : ''}`}>
-          <span className="pro-topbar__dot" />
-          {online === null ? "..." : online ? "Online" : "Offline"}
+        <button className="nav__btn" onClick={onSignup}>Sign up</button>
+        <button className="nav__btn" onClick={onAdmin}>Admin</button>
+        <div className="nav__sep" />
+        {cfg && <span className="nav__tag">{modelShort(cfg.model)}</span>}
+        <span className={`nav__status ${online ? 'on' : ''}`}>
+          <span className="nav__dot" />
         </span>
-
         <ThemePicker />
-
-        <span className="pro-topbar__avatar">{me.label.charAt(0).toUpperCase()}</span>
+        <span className="nav__avatar">{me.label.charAt(0).toUpperCase()}</span>
       </div>
     </header>
-  );
-}
-
-function AnimatedOrb() {
-  return (
-    <div className="orb-container">
-      <div className="orb orb--1" />
-      <div className="orb orb--2" />
-      <div className="orb orb--3" />
-    </div>
   );
 }
 
@@ -125,15 +90,8 @@ export function Console({ onHome }: { onHome: () => void }) {
 
   const empty = turns.length === 0;
 
-  const liveStatus = awaitingApproval
-    ? "The agent is waiting for your approval."
-    : busy
-      ? "Investigating, please wait…"
-      : "";
-
   return (
-    <div className="pro-console">
-      <a className="skip-link" href="#pro-main">Skip to main content</a>
+    <div className="app">
       <TopBar
         onHome={onHome}
         onNew={newConversation}
@@ -142,89 +100,42 @@ export function Console({ onHome }: { onHome: () => void }) {
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {signupOpen && <SignupModal onClose={() => setSignupOpen(false)} />}
-      <div className="sr-only" role="status" aria-live="polite">{liveStatus}</div>
 
-      <div className="pro-console__body">
+      <div className="app__body">
         <Sidebar />
-        <main className="pro-console__main" id="pro-main">
+        <main className="main">
           {empty ? (
-            <div className="pro-console__empty">
-              <AnimatedOrb />
-
-              <div className="pro-hero">
-                <div className="pro-hero__badge">
-                  <Icon name="sparkles" size={12} />
-                  AI-Powered Incident Investigation
+            <div className="empty">
+              <div className="empty__content">
+                <div className="empty__icon">
+                  <Icon name="sparkles" size={28} />
                 </div>
-
-                <h1 className="pro-hero__title">
-                  What would you like to<br />
-                  <span className="pro-hero__gradient">investigate?</span>
-                </h1>
-
-                <p className="pro-hero__sub">
-                  Analyze logs, metrics, traces, Kubernetes state, and code to find root causes automatically.
+                <h1 className="empty__title">What can I help investigate?</h1>
+                <p className="empty__sub">
+                  I'll analyze logs, metrics, traces, and code to find the root cause.
                 </p>
 
-                {/* Capabilities strip */}
-                <div className="pro-caps">
-                  {CAPABILITIES.map((cap) => (
-                    <div key={cap.label} className="pro-cap">
-                      <Icon name={cap.icon} size={14} />
-                      <span>{cap.label}</span>
-                    </div>
+                <div className="prompts">
+                  {SUGGESTIONS.map((text) => (
+                    <button
+                      key={text}
+                      className="prompt"
+                      disabled={disabled}
+                      onClick={() => send(text)}
+                    >
+                      {text}
+                    </button>
                   ))}
                 </div>
-              </div>
 
-              {/* Suggestion cards */}
-              <div className="pro-suggestions">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s.text}
-                    className="pro-suggestion"
-                    disabled={disabled}
-                    onClick={() => send(s.text)}
-                  >
-                    <span className="pro-suggestion__icon">
-                      <Icon name={s.icon} size={16} />
-                    </span>
-                    <span className="pro-suggestion__text">{s.text}</span>
-                    <Icon name="send" size={14} className="pro-suggestion__arrow" />
-                  </button>
-                ))}
-              </div>
-
-              <div className="pro-composer-wrap">
-                <Composer disabled={disabled} onSend={send} busy={busy} onStop={stop} />
-              </div>
-
-              {/* Stats footer */}
-              <div className="pro-stats">
-                <div className="pro-stat">
-                  <span className="pro-stat__value">9</span>
-                  <span className="pro-stat__label">MCP Servers</span>
-                </div>
-                <div className="pro-stat__sep" />
-                <div className="pro-stat">
-                  <span className="pro-stat__value">48</span>
-                  <span className="pro-stat__label">Tools</span>
-                </div>
-                <div className="pro-stat__sep" />
-                <div className="pro-stat">
-                  <span className="pro-stat__value">5</span>
-                  <span className="pro-stat__label">LLM Providers</span>
-                </div>
-                <div className="pro-stat__sep" />
-                <div className="pro-stat">
-                  <span className="pro-stat__value">379</span>
-                  <span className="pro-stat__label">Tests</span>
+                <div className="empty__input">
+                  <Composer disabled={disabled} onSend={send} busy={busy} onStop={stop} />
                 </div>
               </div>
             </div>
           ) : (
             <>
-              <div className="pro-console__scroll">
+              <div className="main__scroll">
                 <div className="thread">
                   {turns.map((turn, i) => (
                     <Message
@@ -246,7 +157,7 @@ export function Console({ onHome }: { onHome: () => void }) {
                   <div ref={endRef} />
                 </div>
               </div>
-              <div className="pro-console__dock">
+              <div className="main__dock">
                 <Composer disabled={disabled} onSend={send} busy={busy} onStop={stop} />
               </div>
             </>

@@ -1,96 +1,230 @@
-import { useRef } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { Float, MeshTransmissionMaterial } from '@react-three/drei'
+import { useRef, useMemo } from 'react'
+import { Canvas, useFrame, useLoader } from '@react-three/fiber'
+import { Float, Text, Billboard } from '@react-three/drei'
 import { motion } from 'framer-motion'
 import * as THREE from 'three'
 
 const TECH_STACK = [
-  { name: 'Docker', color: '#0DB7ED', shape: 'box' },
-  { name: 'Kubernetes', color: '#326CE5', shape: 'icosahedron' },
-  { name: 'Terraform', color: '#7B42BC', shape: 'icosahedron' },
-  { name: 'AWS', color: '#FF9900', shape: 'box' },
-  { name: 'Azure', color: '#0078D4', shape: 'sphere' },
-  { name: 'GCP', color: '#4285F4', shape: 'sphere' },
-  { name: 'Linux', color: '#FCC624', shape: 'sphere' },
-  { name: 'GitHub', color: '#FFFFFF', shape: 'icosahedron' },
-  { name: 'Prometheus', color: '#E6522C', shape: 'icosahedron' },
-  { name: 'Grafana', color: '#F46800', shape: 'box' },
-  { name: 'Vault', color: '#000000', shape: 'box' },
-  { name: 'Redis', color: '#DC382D', shape: 'sphere' },
-  { name: 'PostgreSQL', color: '#336791', shape: 'box' },
-  { name: 'Helm', color: '#0F1689', shape: 'sphere' },
-  { name: 'ELK', color: '#00BFB3', shape: 'icosahedron' }
+  { name: 'Docker', color: '#2496ED', icon: 'docker' },
+  { name: 'Kubernetes', color: '#326CE5', icon: 'kubernetes' },
+  { name: 'Terraform', color: '#844FBA', icon: 'terraform' },
+  { name: 'AWS', color: '#FF9900', icon: 'amazonwebservices' },
+  { name: 'Azure', color: '#0078D4', icon: 'microsoftazure' },
+  { name: 'GCP', color: '#4285F4', icon: 'googlecloud' },
+  { name: 'Linux', color: '#FCC624', icon: 'linux' },
+  { name: 'GitHub', color: '#FFFFFF', icon: 'github' },
+  { name: 'Prometheus', color: '#E6522C', icon: 'prometheus' },
+  { name: 'Grafana', color: '#F46800', icon: 'grafana' },
+  { name: 'Vault', color: '#FFEC6E', icon: 'vault' },
+  { name: 'Redis', color: '#FF4438', icon: 'redis' },
+  { name: 'PostgreSQL', color: '#4169E1', icon: 'postgresql' },
+  { name: 'Helm', color: '#0F1689', icon: 'helm' },
+  { name: 'Elastic', color: '#005571', icon: 'elastic' }
 ]
 
-function Tech3DObject({
-  shape,
-  color,
+function LogoSprite({
+  tech,
   position,
-  rotationSpeed = 0.5
+  scale = 1
 }: {
-  shape: string
-  color: string
+  tech: typeof TECH_STACK[0]
   position: [number, number, number]
-  rotationSpeed?: number
+  scale?: number
 }) {
-  const ref = useRef<THREE.Mesh>(null)
+  const meshRef = useRef<THREE.Group>(null)
+  const initialY = position[1]
 
   useFrame((state) => {
-    if (ref.current) {
-      ref.current.rotation.y = state.clock.elapsedTime * rotationSpeed
-      ref.current.rotation.x = Math.sin(state.clock.elapsedTime * 0.5) * 0.2
+    if (meshRef.current) {
+      meshRef.current.position.y = initialY + Math.sin(state.clock.elapsedTime + position[0]) * 0.3
+      meshRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.5 + position[0]) * 0.2
     }
   })
 
-  const Geometry = () => {
-    switch (shape) {
-      case 'box':
-        return <boxGeometry args={[0.8, 0.8, 0.8]} />
-      case 'icosahedron':
-        return <icosahedronGeometry args={[0.5, 0]} />
-      case 'sphere':
-      default:
-        return <sphereGeometry args={[0.5, 32, 32]} />
-    }
-  }
-
   return (
-    <Float speed={2} rotationIntensity={0.3} floatIntensity={0.5}>
-      <mesh ref={ref} position={position}>
-        <Geometry />
-        <MeshTransmissionMaterial
-          color={color}
-          transmission={0.6}
-          thickness={0.5}
-          roughness={0.2}
-          chromaticAberration={0.05}
+    <Float speed={1.5} rotationIntensity={0.2} floatIntensity={0.3}>
+      <group ref={meshRef} position={position}>
+        <Billboard follow={true} lockX={false} lockY={false} lockZ={false}>
+          {/* Glowing background circle */}
+          <mesh>
+            <circleGeometry args={[0.7 * scale, 32]} />
+            <meshBasicMaterial
+              color={tech.color}
+              transparent
+              opacity={0.15}
+            />
+          </mesh>
+          {/* Inner circle */}
+          <mesh position={[0, 0, 0.01]}>
+            <circleGeometry args={[0.55 * scale, 32]} />
+            <meshBasicMaterial
+              color="#0a0f1a"
+              transparent
+              opacity={0.9}
+            />
+          </mesh>
+          {/* Border ring */}
+          <mesh position={[0, 0, 0.02]}>
+            <ringGeometry args={[0.5 * scale, 0.55 * scale, 32]} />
+            <meshBasicMaterial
+              color={tech.color}
+              transparent
+              opacity={0.6}
+            />
+          </mesh>
+          {/* Tech name label */}
+          <Text
+            position={[0, -0.9 * scale, 0.03]}
+            fontSize={0.18 * scale}
+            color={tech.color}
+            anchorX="center"
+            anchorY="middle"
+            font="/fonts/inter-medium.woff"
+          >
+            {tech.name}
+          </Text>
+        </Billboard>
+        {/* Glow effect */}
+        <pointLight
+          color={tech.color}
+          intensity={0.5}
+          distance={3}
         />
-      </mesh>
+      </group>
     </Float>
   )
 }
 
+function OrbitingLogo({
+  tech,
+  radius,
+  speed,
+  offset,
+  yOffset = 0
+}: {
+  tech: typeof TECH_STACK[0]
+  radius: number
+  speed: number
+  offset: number
+  yOffset?: number
+}) {
+  const groupRef = useRef<THREE.Group>(null)
+
+  useFrame((state) => {
+    if (groupRef.current) {
+      const angle = state.clock.elapsedTime * speed + offset
+      groupRef.current.position.x = Math.cos(angle) * radius
+      groupRef.current.position.z = Math.sin(angle) * radius
+      groupRef.current.position.y = yOffset + Math.sin(state.clock.elapsedTime + offset) * 0.5
+    }
+  })
+
+  return (
+    <group ref={groupRef}>
+      <Billboard follow={true}>
+        {/* Glowing orb background */}
+        <mesh>
+          <circleGeometry args={[0.6, 32]} />
+          <meshBasicMaterial
+            color={tech.color}
+            transparent
+            opacity={0.2}
+          />
+        </mesh>
+        {/* Inner dark circle */}
+        <mesh position={[0, 0, 0.01]}>
+          <circleGeometry args={[0.45, 32]} />
+          <meshBasicMaterial
+            color="#080c14"
+            transparent
+            opacity={0.95}
+          />
+        </mesh>
+        {/* Colored ring */}
+        <mesh position={[0, 0, 0.02]}>
+          <ringGeometry args={[0.4, 0.45, 32]} />
+          <meshBasicMaterial
+            color={tech.color}
+            transparent
+            opacity={0.8}
+          />
+        </mesh>
+        {/* Tech initial/symbol */}
+        <Text
+          position={[0, 0, 0.03]}
+          fontSize={0.25}
+          color={tech.color}
+          anchorX="center"
+          anchorY="middle"
+          fontWeight="bold"
+        >
+          {tech.name.charAt(0)}
+        </Text>
+        {/* Tech name below */}
+        <Text
+          position={[0, -0.7, 0.03]}
+          fontSize={0.12}
+          color="white"
+          anchorX="center"
+          anchorY="middle"
+        >
+          {tech.name}
+        </Text>
+      </Billboard>
+      <pointLight color={tech.color} intensity={0.3} distance={2} />
+    </group>
+  )
+}
+
 function TechScene() {
-  const positions: [number, number, number][] = [
-    [-3, 2, 0], [-1, 2.5, -1], [1, 2, 1], [3, 2.5, 0],
-    [-4, 0, 1], [-2, 0.5, -1], [0, 0, 0], [2, 0.5, 1], [4, 0, -1],
-    [-3, -2, -1], [-1, -2.5, 1], [1, -2, -1], [3, -2.5, 0],
-    [0, 3, 0], [0, -3, 0]
-  ]
+  const innerRing = TECH_STACK.slice(0, 5)
+  const middleRing = TECH_STACK.slice(5, 10)
+  const outerRing = TECH_STACK.slice(10, 15)
 
   return (
     <>
-      <ambientLight intensity={0.5} />
-      <pointLight position={[10, 10, 10]} intensity={1} color="#00E7FF" />
-      <pointLight position={[-10, -10, -10]} intensity={0.5} color="#7C3AED" />
+      <ambientLight intensity={0.3} />
+      <pointLight position={[0, 0, 5]} intensity={1} color="#00E7FF" />
 
-      {TECH_STACK.map((tech, i) => (
-        <Tech3DObject
+      {/* Center glow */}
+      <mesh position={[0, 0, -2]}>
+        <sphereGeometry args={[1.5, 32, 32]} />
+        <meshBasicMaterial color="#00E7FF" transparent opacity={0.05} />
+      </mesh>
+
+      {/* Inner ring - slower, closer */}
+      {innerRing.map((tech, i) => (
+        <OrbitingLogo
           key={tech.name}
-          shape={tech.shape}
-          color={tech.color}
-          position={positions[i] || [0, 0, 0]}
-          rotationSpeed={0.3 + (i % 3) * 0.2}
+          tech={tech}
+          radius={2.5}
+          speed={0.3}
+          offset={(i / innerRing.length) * Math.PI * 2}
+          yOffset={0}
+        />
+      ))}
+
+      {/* Middle ring */}
+      {middleRing.map((tech, i) => (
+        <OrbitingLogo
+          key={tech.name}
+          tech={tech}
+          radius={4}
+          speed={-0.2}
+          offset={(i / middleRing.length) * Math.PI * 2}
+          yOffset={0.5}
+        />
+      ))}
+
+      {/* Outer ring - slowest, furthest */}
+      {outerRing.map((tech, i) => (
+        <OrbitingLogo
+          key={tech.name}
+          tech={tech}
+          radius={5.5}
+          speed={0.15}
+          offset={(i / outerRing.length) * Math.PI * 2}
+          yOffset={-0.5}
         />
       ))}
     </>
@@ -106,7 +240,7 @@ function TechCard({
 }) {
   return (
     <motion.div
-      className="floating-card p-4 flex items-center gap-3 cursor-pointer"
+      className="floating-card p-4 flex items-center gap-3 cursor-pointer group"
       initial={{ opacity: 0, y: 20 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true }}
@@ -114,12 +248,14 @@ function TechCard({
       whileHover={{ scale: 1.05, y: -5 }}
     >
       <div
-        className="w-10 h-10 rounded-lg flex items-center justify-center"
-        style={{ backgroundColor: `${tech.color}20` }}
+        className="w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-300 group-hover:scale-110"
+        style={{ backgroundColor: `${tech.color}15`, boxShadow: `0 0 20px ${tech.color}20` }}
       >
-        <div
-          className="w-4 h-4 rounded"
-          style={{ backgroundColor: tech.color }}
+        <img
+          src={`https://cdn.simpleicons.org/${tech.icon}/${tech.color.replace('#', '')}`}
+          alt={tech.name}
+          className="w-6 h-6"
+          loading="lazy"
         />
       </div>
       <span className="font-medium text-white">{tech.name}</span>
@@ -165,15 +301,15 @@ export function TechStack() {
           </motion.p>
         </div>
 
-        {/* 3D visualization */}
+        {/* 3D visualization - Orbiting logos */}
         <motion.div
-          className="h-[400px] mb-16"
+          className="h-[500px] mb-16"
           initial={{ opacity: 0, scale: 0.9 }}
           whileInView={{ opacity: 1, scale: 1 }}
           viewport={{ once: true }}
           transition={{ duration: 0.8 }}
         >
-          <Canvas camera={{ position: [0, 0, 10], fov: 50 }}>
+          <Canvas camera={{ position: [0, 2, 12], fov: 45 }}>
             <TechScene />
           </Canvas>
         </motion.div>

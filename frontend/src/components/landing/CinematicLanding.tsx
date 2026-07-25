@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import Lenis from 'lenis'
 import { Navbar } from './Navbar'
 import { HeroSection } from './HeroSection'
+import { HowItWorks } from './HowItWorks'
 import { Terminal } from './Terminal'
 import { FeatureCards } from './FeatureCards'
 import { Pipeline } from './Pipeline'
@@ -57,6 +58,9 @@ export function CinematicLanding({ onLaunch }: { onLaunch: () => void }) {
       <main>
         {/* Hero with 3D scene */}
         <HeroSection onLaunch={onLaunch} />
+
+        {/* How It Works - Interactive Tutorial */}
+        <HowItWorks />
 
         {/* Terminal demo */}
         <Terminal />
