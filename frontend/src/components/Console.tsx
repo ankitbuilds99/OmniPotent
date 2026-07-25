@@ -13,10 +13,19 @@ import { Sidebar } from "./Sidebar";
 import { ThemePicker } from "./ThemePicker";
 
 const SUGGESTIONS = [
-  "Why is the checkout API throwing 500 errors?",
-  "What recent deploy caused the checkout failures?",
-  "Are any pods crashing in Kubernetes?",
-  "Have we seen this incident before?",
+  { text: "Why is the checkout API throwing 500 errors?", icon: "alert" },
+  { text: "What recent deploy caused the failures?", icon: "branch" },
+  { text: "Are any pods crashing in Kubernetes?", icon: "server" },
+  { text: "Have we seen this incident before?", icon: "search" },
+];
+
+const CAPABILITIES = [
+  { icon: "search", label: "Log Analysis" },
+  { icon: "insight", label: "Root Cause" },
+  { icon: "server", label: "K8s & Cloud" },
+  { icon: "branch", label: "Git History" },
+  { icon: "lock", label: "Safe Actions" },
+  { icon: "check", label: "Verification" },
 ];
 
 function TopBar({
@@ -90,11 +99,21 @@ function TopBar({
   );
 }
 
+function AnimatedOrb() {
+  return (
+    <div className="orb-container">
+      <div className="orb orb--1" />
+      <div className="orb orb--2" />
+      <div className="orb orb--3" />
+    </div>
+  );
+}
+
 export function Console({ onHome }: { onHome: () => void }) {
   const { turns, busy, awaitingApproval, send, respond, stop, newConversation, sendFeedback } =
     useCopilot();
   const endRef = useRef<HTMLDivElement>(null);
-  useMe(); // Keep hook for auth state
+  useMe();
   const [adminOpen, setAdminOpen] = useState(false);
   const [signupOpen, setSignupOpen] = useState(false);
   const disabled = busy || awaitingApproval;
@@ -130,28 +149,48 @@ export function Console({ onHome }: { onHome: () => void }) {
         <main className="pro-console__main" id="pro-main">
           {empty ? (
             <div className="pro-console__empty">
-              <div className="pro-welcome">
-                <div className="pro-welcome__icon">
-                  <Icon name="sparkles" size={32} />
+              <AnimatedOrb />
+
+              <div className="pro-hero">
+                <div className="pro-hero__badge">
+                  <Icon name="sparkles" size={12} />
+                  AI-Powered Incident Investigation
                 </div>
-                <h1 className="pro-welcome__title">
-                  What would you like to investigate?
+
+                <h1 className="pro-hero__title">
+                  What would you like to<br />
+                  <span className="pro-hero__gradient">investigate?</span>
                 </h1>
-                <p className="pro-welcome__sub">
-                  DevOps Copilot will analyze logs, metrics, traces, and code to find the root cause.
+
+                <p className="pro-hero__sub">
+                  Analyze logs, metrics, traces, Kubernetes state, and code to find root causes automatically.
                 </p>
+
+                {/* Capabilities strip */}
+                <div className="pro-caps">
+                  {CAPABILITIES.map((cap) => (
+                    <div key={cap.label} className="pro-cap">
+                      <Icon name={cap.icon} size={14} />
+                      <span>{cap.label}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
 
+              {/* Suggestion cards */}
               <div className="pro-suggestions">
-                {SUGGESTIONS.map((q) => (
+                {SUGGESTIONS.map((s) => (
                   <button
-                    key={q}
+                    key={s.text}
                     className="pro-suggestion"
                     disabled={disabled}
-                    onClick={() => send(q)}
+                    onClick={() => send(s.text)}
                   >
-                    <Icon name="send" size={14} />
-                    <span>{q}</span>
+                    <span className="pro-suggestion__icon">
+                      <Icon name={s.icon} size={16} />
+                    </span>
+                    <span className="pro-suggestion__text">{s.text}</span>
+                    <Icon name="send" size={14} className="pro-suggestion__arrow" />
                   </button>
                 ))}
               </div>
@@ -160,9 +199,28 @@ export function Console({ onHome }: { onHome: () => void }) {
                 <Composer disabled={disabled} onSend={send} busy={busy} onStop={stop} />
               </div>
 
-              <p className="pro-footer-note">
-                9 MCP servers · 48 tools · Human-in-the-loop approval · Multi-tenant
-              </p>
+              {/* Stats footer */}
+              <div className="pro-stats">
+                <div className="pro-stat">
+                  <span className="pro-stat__value">9</span>
+                  <span className="pro-stat__label">MCP Servers</span>
+                </div>
+                <div className="pro-stat__sep" />
+                <div className="pro-stat">
+                  <span className="pro-stat__value">48</span>
+                  <span className="pro-stat__label">Tools</span>
+                </div>
+                <div className="pro-stat__sep" />
+                <div className="pro-stat">
+                  <span className="pro-stat__value">5</span>
+                  <span className="pro-stat__label">LLM Providers</span>
+                </div>
+                <div className="pro-stat__sep" />
+                <div className="pro-stat">
+                  <span className="pro-stat__value">379</span>
+                  <span className="pro-stat__label">Tests</span>
+                </div>
+              </div>
             </div>
           ) : (
             <>
