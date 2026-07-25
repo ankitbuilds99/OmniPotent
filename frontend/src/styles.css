@@ -2474,7 +2474,7 @@ input:focus-visible {
 }
 
 /* =====================================================================
-   PROFESSIONAL MINIMAL CONSOLE (ChatGPT/Linear style)
+   PROFESSIONAL CONSOLE - Premium Dark UI
    ===================================================================== */
 
 .pro-console {
@@ -2486,55 +2486,66 @@ input:focus-visible {
   background: var(--bg);
 }
 
-/* Top Bar - Clean & Minimal */
+/* Top Bar - Glass Effect */
 .pro-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: 12px 24px;
+  background: color-mix(in srgb, var(--shell) 80%, transparent);
+  backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border-soft);
 }
 
 .pro-topbar__brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   background: none;
   border: none;
   cursor: pointer;
   color: var(--text);
+  padding: 4px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.pro-topbar__brand:hover {
+  background: var(--accent-soft);
 }
 
 .pro-topbar__logo {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   color: #fff;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  border-radius: 8px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px -4px var(--accent);
 }
 
 .pro-topbar__name {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .pro-topbar__actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .pro-topbar__btn {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 12px;
+  padding: 8px 14px;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-dim);
-  background: transparent;
+  background: var(--panel);
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   cursor: pointer;
@@ -2543,32 +2554,35 @@ input:focus-visible {
 
 .pro-topbar__btn:hover {
   color: var(--text);
-  background: var(--panel);
   border-color: var(--border);
+  background: var(--panel-2);
 }
 
 .pro-topbar__btn--primary {
-  color: var(--bg);
-  background: var(--accent);
-  border-color: var(--accent);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border: none;
+  box-shadow: 0 4px 16px -4px var(--accent);
 }
 
 .pro-topbar__btn--primary:hover {
-  filter: brightness(1.1);
+  box-shadow: 0 6px 24px -4px var(--accent);
+  transform: translateY(-1px);
 }
 
 .pro-topbar__sep {
   width: 1px;
-  height: 20px;
+  height: 24px;
   background: var(--border-soft);
-  margin: 0 4px;
+  margin: 0 6px;
 }
 
 .pro-topbar__model {
   font-size: 12px;
-  color: var(--text-faint);
-  padding: 6px 10px;
+  color: var(--text-dim);
+  padding: 6px 12px;
   background: var(--panel);
+  border: 1px solid var(--border-soft);
   border-radius: 6px;
 }
 
@@ -2578,30 +2592,35 @@ input:focus-visible {
   gap: 6px;
   font-size: 12px;
   color: var(--text-faint);
+  padding: 6px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
 }
 
 .pro-topbar__dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--text-faint);
+  background: var(--bad);
 }
 
 .pro-topbar__status.online .pro-topbar__dot {
   background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
 }
 
 .pro-topbar__avatar {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border-soft);
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  border: 2px solid var(--border);
 }
 
 /* Console Body */
@@ -2617,9 +2636,24 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
-/* Empty State - Centered & Minimal */
+/* Ambient background glow */
+.pro-console__main::before {
+  content: '';
+  position: absolute;
+  top: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  height: 400px;
+  background: radial-gradient(ellipse, var(--glow-1) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Empty State - Premium Centered */
 .pro-console__empty {
   flex: 1;
   display: flex;
@@ -2627,83 +2661,99 @@ input:focus-visible {
   align-items: center;
   justify-content: center;
   padding: 40px 24px;
-  max-width: 680px;
+  max-width: 720px;
   margin: 0 auto;
   text-align: center;
+  position: relative;
+  z-index: 1;
 }
 
 .pro-welcome {
-  margin-bottom: 40px;
+  margin-bottom: 48px;
 }
 
 .pro-welcome__icon {
-  width: 56px;
-  height: 56px;
-  margin: 0 auto 20px;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 24px;
   display: grid;
   place-items: center;
   color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent-soft), color-mix(in srgb, var(--accent-2) 15%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 20px;
+  box-shadow:
+    0 8px 32px -8px color-mix(in srgb, var(--accent) 40%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.pro-welcome__icon svg {
+  width: 32px;
+  height: 32px;
 }
 
 .pro-welcome__title {
-  margin: 0 0 12px;
-  font-size: 28px;
+  margin: 0 0 16px;
+  font-size: 32px;
   font-weight: 700;
   color: var(--text);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
 }
 
 .pro-welcome__sub {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--text-dim);
   line-height: 1.6;
+  max-width: 480px;
+  margin: 0 auto;
 }
 
-/* Suggestions - 2x2 Grid */
+/* Suggestions - Premium Glass Cards */
 .pro-suggestions {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  margin-bottom: 32px;
+  margin-bottom: 36px;
 }
 
 .pro-suggestion {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   text-align: left;
-  padding: 14px 16px;
-  font-size: 13.5px;
+  padding: 16px 18px;
+  font-size: 14px;
   font-family: inherit;
-  color: var(--text-dim);
+  color: var(--text);
   background: var(--panel);
   border: 1px solid var(--border-soft);
-  border-radius: 10px;
+  border-radius: 12px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.3);
 }
 
 .pro-suggestion svg {
   flex-shrink: 0;
+  width: 18px;
+  height: 18px;
   color: var(--accent);
-  opacity: 0.7;
 }
 
 .pro-suggestion span {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .pro-suggestion:hover:not(:disabled) {
-  color: var(--text);
   border-color: var(--accent);
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  box-shadow:
+    0 4px 20px -4px color-mix(in srgb, var(--accent) 30%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: translateY(-2px);
 }
 
 .pro-suggestion:disabled {
@@ -2716,11 +2766,12 @@ input:focus-visible {
   width: 100%;
 }
 
-/* Footer Note */
+/* Footer Note - Subtle */
 .pro-footer-note {
-  margin: 24px 0 0;
+  margin: 32px 0 0;
   font-size: 12px;
   color: var(--text-faint);
+  letter-spacing: 0.02em;
 }
 
 /* Scroll Area with Messages */
@@ -2728,12 +2779,16 @@ input:focus-visible {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+  position: relative;
+  z-index: 1;
 }
 
 /* Dock for Composer */
 .pro-console__dock {
-  padding: 16px 24px 24px;
+  padding: 20px 24px 28px;
   border-top: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--shell) 60%, transparent);
+  backdrop-filter: blur(12px);
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
@@ -2743,13 +2798,15 @@ input:focus-visible {
 @media (max-width: 768px) {
   .pro-console__body .sidebar { display: none; }
   .pro-suggestions { grid-template-columns: 1fr; }
-  .pro-welcome__title { font-size: 22px; }
+  .pro-welcome__title { font-size: 24px; }
+  .pro-welcome__icon { width: 56px; height: 56px; }
   .pro-topbar__btn span { display: none; }
 }
 
 @media (max-width: 480px) {
   .pro-topbar__model { display: none; }
   .pro-topbar__status span { display: none; }
+  .pro-console__main::before { display: none; }
 }
 
 /* Hide old console classes */
