@@ -15,10 +15,11 @@ import { ThemePicker } from "./ThemePicker";
 const PIPELINE = [
   { n: 1, icon: "clipboard", name: "Plan", sub: "Scope + prior incidents" },
   { n: 2, icon: "search", name: "Investigate", sub: "Logs · traces · k8s · deploys" },
-  { n: 3, icon: "check", name: "Approve", sub: "Risk-tiered review" },
+  { n: 3, icon: "pause", name: "Approve", sub: "Human gate before writes" },
   { n: 4, icon: "insight", name: "Diagnose", sub: "Find root cause" },
-  { n: 5, icon: "refresh", name: "Reflect", sub: "Close the gaps" },
+  { n: 5, icon: "refresh", name: "Reflect", sub: "Verify completeness" },
   { n: 6, icon: "download", name: "Report", sub: "RCA + postmortem" },
+  { n: 7, icon: "check", name: "Verify", sub: "Prove the fix works" },
 ];
 
 const SUGGESTIONS = [
@@ -29,25 +30,25 @@ const SUGGESTIONS = [
 ];
 
 const FEATURES = [
-  { icon: "insight", title: "Root-cause reports", sub: "Ranked hypotheses + postmortem" },
-  { icon: "server", title: "9 MCP tool servers", sub: "Logs · traces · k8s · sentry · deploys" },
-  { icon: "lock", title: "Risk-tiered approval", sub: "Human-in-the-loop before writes" },
-  { icon: "alert", title: "Injection + PII guardrails", sub: "Untrusted telemetry scrubbed" },
-  { icon: "cpu", title: "Token budget", sub: "Per-investigation cost kill-switch" },
-  { icon: "branch", title: "Multi-tenant + RBAC", sub: "Orgs · roles · scoped API keys" },
-  { icon: "database", title: "Usage metering & billing", sub: "Plan quotas · Stripe sync" },
-  { icon: "check", title: "Tamper-evident audit", sub: "Hash-chained, verifiable trail" },
-  { icon: "tool", title: "SSO login", sub: "Supabase / OIDC JWT" },
-  { icon: "refresh", title: "Deterministic evals", sub: "Record/replay golden gate" },
-  { icon: "send", title: "Triggered → Slack", sub: "PagerDuty auto-investigate + approve" },
-  { icon: "sparkles", title: "Datadog APM + LLMObs", sub: "Trace the agent itself" },
+  { icon: "insight", title: "Root-cause Reports", sub: "Ranked hypotheses + postmortem", color: "#00E7FF" },
+  { icon: "server", title: "9 MCP Tool Servers", sub: "Logs · traces · k8s · sentry · deploys", color: "#7C3AED" },
+  { icon: "lock", title: "Risk-tiered Approval", sub: "Human-in-the-loop before writes", color: "#00FFB3" },
+  { icon: "alert", title: "Injection + PII Guards", sub: "Untrusted telemetry scrubbed", color: "#FF4D6D" },
+  { icon: "cpu", title: "Token Budget", sub: "Per-investigation cost kill-switch", color: "#FFC247" },
+  { icon: "branch", title: "Multi-tenant + RBAC", sub: "Orgs · roles · scoped API keys", color: "#00E7FF" },
+  { icon: "database", title: "Usage Metering", sub: "Plan quotas · Stripe sync", color: "#7C3AED" },
+  { icon: "check", title: "Tamper-evident Audit", sub: "Hash-chained, verifiable trail", color: "#3CF281" },
+  { icon: "tool", title: "SSO Login", sub: "Supabase / OIDC JWT", color: "#00E7FF" },
+  { icon: "refresh", title: "Deterministic Evals", sub: "Record/replay golden gate", color: "#7C3AED" },
+  { icon: "send", title: "Triggered → Slack", sub: "PagerDuty auto-investigate", color: "#00FFB3" },
+  { icon: "sparkles", title: "Datadog APM + LLMObs", sub: "Trace the agent itself", color: "#FFC247" },
 ];
 
 const STATS = [
-  { icon: "server", value: "9", label: "MCP tool servers" },
-  { icon: "cpu", value: "47", label: "agent tools" },
-  { icon: "sparkles", value: "5", label: "LLM providers" },
-  { icon: "check", value: "188", label: "tests passing" },
+  { icon: "server", value: "9", label: "MCP Servers", color: "#00E7FF" },
+  { icon: "cpu", value: "48", label: "Agent Tools", color: "#7C3AED" },
+  { icon: "sparkles", value: "5", label: "LLM Providers", color: "#00FFB3" },
+  { icon: "check", value: "379", label: "Tests Passing", color: "#3CF281" },
 ];
 
 function greeting(): string {
@@ -57,10 +58,7 @@ function greeting(): string {
   return "Good evening";
 }
 
-/** Compact sparkline of the sample environment's checkout 5xx spike — the very
- *  incident the suggested questions ask about. Honest demo signal, not live. */
 function IncidentSignal() {
-  // Real checkout 5xx series from /metrics (fractions → %); demo curve as fallback.
   const [data, setData] = useState<number[]>([2, 1, 3, 2, 4, 3, 6, 11, 22, 40, 60, 71]);
   useEffect(() => {
     let active = true;
@@ -74,8 +72,8 @@ function IncidentSignal() {
       active = false;
     };
   }, []);
-  const W = 132;
-  const H = 46;
+  const W = 180;
+  const H = 60;
   const n = data.length;
   const max = 75;
   const px = (i: number) => (i / (n - 1)) * W;
@@ -84,27 +82,35 @@ function IncidentSignal() {
   const area = `0,${H} ${line} ${W},${H}`;
   const last = Math.round(data[data.length - 1] ?? 0);
   return (
-    <div
-      className="signal"
-      role="img"
-      aria-label={`Sample incident signal: checkout-svc 5xx error rate trending up to about ${last}%`}
-    >
-      <div className="signal__head">
-        <span className="signal__dot" />
-        <span className="signal__svc">checkout-svc</span>
-        <span className="signal__tag">5xx ↑71%</span>
+    <div className="signal-card">
+      <div className="signal-card__header">
+        <div className="signal-card__status">
+          <span className="signal-card__dot" />
+          <span className="signal-card__svc">checkout-svc</span>
+        </div>
+        <span className="signal-card__badge">5xx ↑{last}%</span>
       </div>
-      <svg className="signal__spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+      <svg className="signal-card__chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
         <defs>
-          <linearGradient id="sig-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#ff6b6b" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="#ff6b6b" stopOpacity="0" />
+          <linearGradient id="sig-gradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#FF4D6D" stopOpacity="0.5" />
+            <stop offset="100%" stopColor="#FF4D6D" stopOpacity="0" />
           </linearGradient>
         </defs>
-        <polygon points={area} fill="url(#sig-fill)" />
-        <polyline points={line} className="signal__line" />
+        <polygon points={area} fill="url(#sig-gradient)" />
+        <polyline
+          points={line}
+          fill="none"
+          stroke="#FF4D6D"
+          strokeWidth="2.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
       </svg>
-      <div className="signal__foot">sample incident signal</div>
+      <div className="signal-card__footer">
+        <Icon name="alert" size={12} />
+        <span>Sample incident signal</span>
+      </div>
     </div>
   );
 }
@@ -138,65 +144,99 @@ function TopBar({
     };
   }, []);
 
-  const dot = online === null ? "dot dot--idle" : online ? "dot dot--ok" : "dot dot--bad";
-  const label = online === null ? "connecting" : online ? "Online" : "Offline";
-
   return (
-    <header className="cns-top">
-      <button className="cns-brand" onClick={onHome} title="Back to home">
-        <span className="cns-brand__logo">
-          <Icon name="tool" size={20} />
+    <header className="topbar">
+      <button className="topbar__brand" onClick={onHome} title="Back to home">
+        <span className="topbar__logo">
+          <Icon name="sparkles" size={22} />
         </span>
-        <span className="cns-brand__txt">
+        <span className="topbar__text">
           <strong>DevOps Copilot</strong>
-          <span>Autonomous incident investigation</span>
+          <span>AI-Powered Incident Investigation</span>
         </span>
       </button>
 
-      <div className="cns-top__right">
-        <button
-          className="cns-newbtn"
-          onClick={onNew}
-          title="Start a new conversation"
-          aria-label="Start a new conversation"
-        >
-          <Icon name="refresh" size={15} />
-          <span>New</span>
+      <div className="topbar__actions">
+        <button className="topbar__btn topbar__btn--primary" onClick={onNew}>
+          <Icon name="refresh" size={14} />
+          New Investigation
         </button>
-        <button
-          className="cns-newbtn"
-          onClick={onSignup}
-          title="Create an organization (self-serve)"
-          aria-label="Create an account"
-        >
-          <Icon name="sparkles" size={15} />
-          <span>Sign up</span>
+        <button className="topbar__btn" onClick={onSignup}>
+          <Icon name="sparkles" size={14} />
+          Sign up
         </button>
-        <button
-          className="cns-newbtn"
-          onClick={onAdmin}
-          title="Admin console (multi-tenant)"
-          aria-label="Open admin console"
-        >
-          <Icon name="lock" size={15} />
-          <span>Admin</span>
+        <button className="topbar__btn" onClick={onAdmin}>
+          <Icon name="lock" size={14} />
+          Admin
         </button>
+
+        <div className="topbar__divider" />
+
         {cfg && (
-          <span className="model-badge" title={cfg.model}>
-            <span className="model-badge__provider">{providerLabel(cfg.provider)}</span>
-            <span className="model-badge__model">{modelShort(cfg.model)}</span>
-          </span>
+          <div className="topbar__model">
+            <span className="topbar__model-provider">{providerLabel(cfg.provider)}</span>
+            <span className="topbar__model-name">{modelShort(cfg.model)}</span>
+          </div>
         )}
-        <span className="status">
-          <span className={dot} />
-          <span className="status__label">{label}</span>
-        </span>
+
+        <div className={`topbar__status ${online === null ? '' : online ? 'topbar__status--online' : 'topbar__status--offline'}`}>
+          <span className="topbar__status-dot" />
+          <span>{online === null ? "Connecting" : online ? "Online" : "Offline"}</span>
+        </div>
+
         <ThemePicker />
-        <span className="cns-avatar" role="img" aria-label={`Account: ${me.label}`}>
+
+        <div className="topbar__avatar" title={me.label}>
           {me.label.charAt(0).toUpperCase()}
-        </span>
+        </div>
       </div>
     </header>
+  );
+}
+
+function StatCard({ stat }: { stat: typeof STATS[0] }) {
+  return (
+    <div className="stat-card">
+      <div className="stat-card__icon" style={{ color: stat.color, background: `${stat.color}15` }}>
+        <Icon name={stat.icon} size={18} />
+      </div>
+      <div className="stat-card__content">
+        <span className="stat-card__value">{stat.value}</span>
+        <span className="stat-card__label">{stat.label}</span>
+      </div>
+    </div>
+  );
+}
+
+function FeatureCard({ feature }: { feature: typeof FEATURES[0] }) {
+  return (
+    <div className="feature-card">
+      <div className="feature-card__icon" style={{ color: feature.color, background: `${feature.color}15` }}>
+        <Icon name={feature.icon} size={16} />
+      </div>
+      <div className="feature-card__content">
+        <strong>{feature.title}</strong>
+        <span>{feature.sub}</span>
+      </div>
+    </div>
+  );
+}
+
+function PipelineStep({ step, isLast }: { step: typeof PIPELINE[0]; isLast: boolean }) {
+  return (
+    <div className="pipeline-step">
+      <div className="pipeline-step__header">
+        <span className="pipeline-step__number">{step.n}</span>
+        <span className="pipeline-step__name">{step.name}</span>
+        {!isLast && <span className="pipeline-step__connector" />}
+      </div>
+      <div className="pipeline-step__body">
+        <div className="pipeline-step__icon">
+          <Icon name={step.icon} size={16} />
+        </div>
+        <span className="pipeline-step__sub">{step.sub}</span>
+      </div>
+    </div>
   );
 }
 
@@ -216,7 +256,6 @@ export function Console({ onHome }: { onHome: () => void }) {
 
   const empty = turns.length === 0;
 
-  // Concise screen-reader status — the visible activity trace isn't announced live.
   const liveStatus = awaitingApproval
     ? "The agent is waiting for your approval."
     : busy
@@ -224,8 +263,8 @@ export function Console({ onHome }: { onHome: () => void }) {
       : "";
 
   return (
-    <div className="cns">
-      <a className="skip-link" href="#cns-main">Skip to main content</a>
+    <div className="console">
+      <a className="skip-link" href="#console-main">Skip to main content</a>
       <TopBar
         onHome={onHome}
         onNew={newConversation}
@@ -237,98 +276,107 @@ export function Console({ onHome }: { onHome: () => void }) {
       <div className="sr-only" role="status" aria-live="polite">
         {liveStatus}
       </div>
-      <div className="cns-body">
+
+      <div className="console__body">
         <Sidebar />
-        <main className="cns-main" id="cns-main">
+        <main className="console__main" id="console-main">
           {empty ? (
-            <div className="cns-scroll">
-              <div className="welcome">
-                <div className="welcome__text">
-                  <p className="welcome__greet">{greeting()}, {me.label}!</p>
-                  <h1 className="welcome__title">Investigate a production incident</h1>
-                  <p className="welcome__sub">
+            <div className="console__scroll">
+              {/* Hero Section */}
+              <section className="hero-section">
+                <div className="hero-section__content">
+                  <p className="hero-section__greeting">{greeting()}, {me.label}!</p>
+                  <h1 className="hero-section__title">
+                    Investigate a <span className="gradient-text">Production Incident</span>
+                  </h1>
+                  <p className="hero-section__description">
                     Ask a question and DevOps Copilot will pull logs, metrics, traces, Kubernetes
                     and recent deploys, read the code, correlate the change, and deliver a
-                    structured root-cause report — pausing for your approval before any write.
+                    structured root-cause report — <strong>pausing for your approval before any write.</strong>
                   </p>
                 </div>
                 <IncidentSignal />
+              </section>
+
+              {/* Trust Pills */}
+              <div className="trust-pills">
+                <span className="trust-pill">
+                  <Icon name="lock" size={14} />
+                  Human-in-the-loop
+                </span>
+                <span className="trust-pill">
+                  <Icon name="branch" size={14} />
+                  Multi-tenant + RBAC
+                </span>
+                <span className="trust-pill">
+                  <Icon name="check" size={14} />
+                  Tamper-evident Audit
+                </span>
+                <span className="trust-pill">
+                  <Icon name="server" size={14} />
+                  Self-hostable
+                </span>
               </div>
 
-              <div className="trust-bar">
-                <span className="trust-pill"><Icon name="lock" size={13} /> Human-in-the-loop approval</span>
-                <span className="trust-pill"><Icon name="branch" size={13} /> Multi-tenant + RBAC</span>
-                <span className="trust-pill"><Icon name="check" size={13} /> Tamper-evident audit</span>
-                <span className="trust-pill"><Icon name="server" size={13} /> Self-hostable</span>
-              </div>
-
-              <div className="stat-strip">
-                {STATS.map((s) => (
-                  <div key={s.label} className="stat">
-                    <span className="stat__icon">
-                      <Icon name={s.icon} size={16} />
-                    </span>
-                    <span className="stat__num">{s.value}</span>
-                    <span className="stat__label">{s.label}</span>
-                  </div>
+              {/* Stats Grid */}
+              <div className="stats-grid">
+                {STATS.map((stat) => (
+                  <StatCard key={stat.label} stat={stat} />
                 ))}
               </div>
 
-              <h2 className="feature-head">How it works</h2>
-              <div className="pipe-card">
-                {PIPELINE.map((p, i) => (
-                  <div key={p.name} className="pipe-step">
-                    <div className="pipe-step__top">
-                      <span className="pipe-step__num">{p.n}</span>
-                      <span className="pipe-step__name">{p.name}</span>
-                      {i < PIPELINE.length - 1 && <span className="pipe-step__line" />}
-                    </div>
-                    <div className="pipe-step__body">
-                      <span className="pipe-step__icon">
-                        <Icon name={p.icon} size={16} />
-                      </span>
-                      <span className="pipe-step__sub">{p.sub}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              {/* Pipeline Section */}
+              <section className="section">
+                <h2 className="section__title">
+                  <Icon name="branch" size={18} />
+                  How It Works
+                </h2>
+                <div className="pipeline-grid">
+                  {PIPELINE.map((step, i) => (
+                    <PipelineStep key={step.name} step={step} isLast={i === PIPELINE.length - 1} />
+                  ))}
+                </div>
+              </section>
 
-              <h2 className="feature-head">Built-in capabilities</h2>
-              <div className="feature-row">
-                {FEATURES.map((f) => (
-                  <div key={f.title} className="feature">
-                    <span className="feature__icon">
-                      <Icon name={f.icon} size={16} />
-                    </span>
-                    <span className="feature__txt">
-                      <strong>{f.title}</strong>
-                      <span>{f.sub}</span>
-                    </span>
-                  </div>
-                ))}
-              </div>
+              {/* Features Section */}
+              <section className="section">
+                <h2 className="section__title">
+                  <Icon name="sparkles" size={18} />
+                  Built-in Capabilities
+                </h2>
+                <div className="features-grid">
+                  {FEATURES.map((feature) => (
+                    <FeatureCard key={feature.title} feature={feature} />
+                  ))}
+                </div>
+              </section>
 
-              <div className="suggest-card">
-                <h2 className="suggest-card__head">Suggested questions</h2>
-                <div className="suggest-grid">
+              {/* Suggested Questions */}
+              <section className="section">
+                <h2 className="section__title">
+                  <Icon name="send" size={18} />
+                  Suggested Questions
+                </h2>
+                <div className="suggestions-grid">
                   {SUGGESTIONS.map((q) => (
                     <button
                       key={q}
-                      className="suggest-chip"
+                      className="suggestion-btn"
                       disabled={disabled}
                       onClick={() => send(q)}
                     >
+                      <Icon name="search" size={14} />
                       {q}
                     </button>
                   ))}
                 </div>
-              </div>
+              </section>
 
               <Composer disabled={disabled} onSend={send} busy={busy} onStop={stop} />
             </div>
           ) : (
             <>
-              <div className="cns-scroll">
+              <div className="console__scroll">
                 <div className="thread">
                   {turns.map((turn, i) => (
                     <Message
@@ -350,7 +398,7 @@ export function Console({ onHome }: { onHome: () => void }) {
                   <div ref={endRef} />
                 </div>
               </div>
-              <div className="cns-dock">
+              <div className="console__dock">
                 <Composer disabled={disabled} onSend={send} busy={busy} onStop={stop} />
               </div>
             </>
