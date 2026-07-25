@@ -12,11 +12,21 @@ services:
     region: oregon
     healthCheckPath: /healthz
     envVars:
-      # LLM Provider (Required)
+      # LLM Provider - Choose one: anthropic, groq, openai, gemini, deepseek
       - key: COPILOT_PROVIDER
-        value: anthropic
+        value: groq  # Default to Groq (free tier available)
+
+      # API Keys - Set the one matching your provider
+      - key: GROQ_API_KEY
+        sync: false  # Get free key at https://console.groq.com/keys
       - key: ANTHROPIC_API_KEY
-        sync: false  # User must set manually in Render dashboard
+        sync: false  # Optional: for Anthropic Claude
+      - key: OPENAI_API_KEY
+        sync: false  # Optional: for OpenAI GPT-4
+      - key: GEMINI_API_KEY
+        sync: false  # Optional: for Google Gemini
+      - key: DEEPSEEK_API_KEY
+        sync: false  # Optional: for DeepSeek
 
       # Production settings
       - key: COPILOT_ENV
