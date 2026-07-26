@@ -474,6 +474,35 @@ input {
   font-size: 10.5px;
   color: var(--text-faint);
 }
+.gh__actions {
+  display: flex;
+  gap: 8px;
+}
+.gh__remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.gh__remember input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+.gh__forget {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 4px 0;
+}
+.gh__forget:hover {
+  color: var(--danger);
+}
 
 .pipeline {
   list-style: none;
