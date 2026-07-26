@@ -5,7 +5,8 @@ import { Sparkles, Menu, X, ArrowRight } from 'lucide-react'
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
   { label: 'Pipeline', href: '#pipeline' },
-  { label: 'Dashboard', href: '#dashboard' },
+  { label: 'Docs', href: '#docs' },
+  { label: 'Blog', href: '#blog' },
   { label: 'Pricing', href: '#pricing' }
 ]
 

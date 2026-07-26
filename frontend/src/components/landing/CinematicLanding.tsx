@@ -13,6 +13,8 @@ import { TechStack } from './TechStack'
 import { Metrics } from './Metrics'
 import { Testimonials } from './Testimonials'
 import { Pricing } from './Pricing'
+import { Documentation } from './Documentation'
+import { Blog } from './Blog'
 import { Footer } from './Footer'
 import { CursorGlow } from './CursorGlow'
 
@@ -101,6 +103,12 @@ export function CinematicLanding({ onLaunch }: { onLaunch: () => void }) {
         <section id="pricing">
           <Pricing onLaunch={onLaunch} />
         </section>
+
+        {/* Documentation */}
+        <Documentation />
+
+        {/* Blog */}
+        <Blog />
       </main>
 
       {/* Footer with 3D scene */}

@@ -174,10 +174,10 @@ const FOOTER_LINKS = {
     { label: 'Dashboard', href: '#dashboard' },
     { label: 'Pricing', href: '#pricing' }
   ],
-  Developer: [
+  Resources: [
+    { label: 'Documentation', href: '#docs' },
+    { label: 'Blog', href: '#blog' },
     { label: 'GitHub Repo', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot', external: true },
-    { label: 'Documentation', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot#readme', external: true },
-    { label: 'API Reference', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/tree/main/app/api', external: true },
     { label: 'Changelog', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/commits/main', external: true }
   ],
   Connect: [
