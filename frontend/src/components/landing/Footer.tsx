@@ -169,27 +169,22 @@ function FooterScene() {
 
 const FOOTER_LINKS = {
   Product: [
-    { label: 'Features', href: '#' },
-    { label: 'Pricing', href: '#' },
-    { label: 'Documentation', href: '#' },
-    { label: 'Changelog', href: '#' }
+    { label: 'Features', href: '#features' },
+    { label: 'Pipeline', href: '#pipeline' },
+    { label: 'Dashboard', href: '#dashboard' },
+    { label: 'Pricing', href: '#pricing' }
   ],
-  Company: [
-    { label: 'About', href: '#' },
-    { label: 'Blog', href: '#' },
-    { label: 'Careers', href: '#' },
-    { label: 'Contact', href: 'mailto:ankit25bcs10610@gmail.com' }
+  Developer: [
+    { label: 'GitHub Repo', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot', external: true },
+    { label: 'Documentation', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot#readme', external: true },
+    { label: 'API Reference', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/tree/main/app/api', external: true },
+    { label: 'Changelog', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/commits/main', external: true }
   ],
-  Resources: [
-    { label: 'GitHub', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot' },
-    { label: 'Community', href: '#' },
-    { label: 'Support', href: 'mailto:ankit25bcs10610@gmail.com' },
-    { label: 'Status', href: '#' }
-  ],
-  Legal: [
-    { label: 'Privacy', href: '#' },
-    { label: 'Terms', href: '#' },
-    { label: 'Security', href: '#' }
+  Connect: [
+    { label: 'Contact Me', href: 'mailto:ankit25bcs10610@gmail.com' },
+    { label: 'LinkedIn', href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', external: true },
+    { label: 'GitHub Profile', href: 'https://github.com/ankit25bcs10610', external: true },
+    { label: 'Report Issue', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/issues', external: true }
   ]
 }
 
@@ -248,7 +243,7 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
           </motion.div>
 
           {/* Footer links */}
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-8 mb-12">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-8 mb-12">
             {/* Brand */}
             <div className="col-span-2">
               <div className="flex items-center gap-2 mb-4">
@@ -260,15 +255,26 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
                 </span>
               </div>
               <p className="text-white/60 text-sm mb-4 max-w-xs">
-                AI-powered DevOps automation for modern engineering teams.
+                AI-powered DevOps automation for modern engineering teams. Built with React, FastAPI, and LangGraph.
               </p>
-              <a
-                href="mailto:ankit25bcs10610@gmail.com"
-                className="flex items-center gap-2 text-white/50 text-sm hover:text-primary transition-colors"
-              >
-                <Mail className="w-4 h-4" />
-                <span>ankit25bcs10610@gmail.com</span>
-              </a>
+              <div className="space-y-2">
+                <a
+                  href="mailto:ankit25bcs10610@gmail.com"
+                  className="flex items-center gap-2 text-white/50 text-sm hover:text-primary transition-colors"
+                >
+                  <Mail className="w-4 h-4" />
+                  <span>ankit25bcs10610@gmail.com</span>
+                </a>
+                <a
+                  href="https://www.linkedin.com/in/ankit-pandey-5a28b9379/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 text-white/50 text-sm hover:text-primary transition-colors"
+                >
+                  <Linkedin className="w-4 h-4" />
+                  <span>Ankit Pandey</span>
+                </a>
+              </div>
             </div>
 
             {/* Links */}
@@ -282,9 +288,14 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
                     <li key={link.label}>
                       <a
                         href={link.href}
-                        className="text-white/60 text-sm hover:text-primary transition-colors"
+                        target={(link as { external?: boolean }).external ? '_blank' : undefined}
+                        rel={(link as { external?: boolean }).external ? 'noreferrer' : undefined}
+                        className="inline-flex items-center gap-1 text-white/60 text-sm hover:text-primary transition-colors"
                       >
                         {link.label}
+                        {(link as { external?: boolean }).external && (
+                          <ArrowUpRight className="w-3 h-3" />
+                        )}
                       </a>
                     </li>
                   ))}
@@ -294,21 +305,27 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
           </div>
 
           {/* Bottom bar */}
-          <div className="flex flex-col md:flex-row items-center justify-between pt-8 border-t border-glass-border">
-            <p className="text-white/50 text-sm mb-4 md:mb-0">
-              © 2024 DevOps Copilot. Built by{' '}
-              <a
-                href="https://github.com/ankit25bcs10610"
-                target="_blank"
-                rel="noreferrer"
-                className="text-primary hover:underline"
-              >
-                Ankit Pandey
-              </a>
-            </p>
+          <div className="flex flex-col md:flex-row items-center justify-between pt-8 border-t border-glass-border gap-4">
+            <div className="flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center sm:text-left">
+              <p className="text-white/50 text-sm">
+                © {new Date().getFullYear()} DevOps Copilot
+              </p>
+              <span className="hidden sm:inline text-white/30">•</span>
+              <p className="text-white/50 text-sm">
+                Built with passion by{' '}
+                <a
+                  href="https://www.linkedin.com/in/ankit-pandey-5a28b9379/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary hover:underline font-medium"
+                >
+                  Ankit Pandey
+                </a>
+              </p>
+            </div>
 
             {/* Social links */}
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
               {SOCIAL_LINKS.map((social) => {
                 const Icon = social.icon
                 return (
@@ -317,10 +334,11 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
                     href={social.href}
                     target="_blank"
                     rel="noreferrer"
-                    className="p-2 rounded-lg glass hover:bg-white/10 transition-colors"
+                    className="p-2.5 rounded-xl bg-white/5 hover:bg-primary/20 hover:text-primary border border-white/10 hover:border-primary/30 transition-all duration-200"
                     aria-label={social.label}
+                    title={social.label}
                   >
-                    <Icon className="w-5 h-5 text-white/70" />
+                    <Icon className="w-5 h-5" />
                   </a>
                 )
               })}
