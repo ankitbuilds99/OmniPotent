@@ -4,6 +4,7 @@ import { Stars, Sphere, Box, Float } from '@react-three/drei'
 import { motion } from 'framer-motion'
 import {
   Github,
+  Linkedin,
   Mail,
   ArrowUpRight,
   Sparkles
@@ -194,6 +195,7 @@ const FOOTER_LINKS = {
 
 const SOCIAL_LINKS = [
   { icon: Github, href: 'https://github.com/ankit25bcs10610', label: 'GitHub' },
+  { icon: Linkedin, href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', label: 'LinkedIn' },
   { icon: Mail, href: 'mailto:ankit25bcs10610@gmail.com', label: 'Email' }
 ]
 
