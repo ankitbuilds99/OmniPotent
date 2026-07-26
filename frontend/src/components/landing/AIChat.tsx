@@ -548,29 +548,64 @@ export function AIChat() {
 
             {/* Input */}
             <div className="px-5 py-4 border-t border-white/10 bg-white/[0.02]">
-              <div className="flex items-center gap-3">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  if (inputValue.trim() && !isPlaying) {
+                    // If user types their own prompt, run demo with first matching prompt or show console prompt
+                    const matchingPrompt = DEMO_PROMPTS.find(p =>
+                      p.toLowerCase().includes(inputValue.toLowerCase()) ||
+                      inputValue.toLowerCase().includes(p.toLowerCase().split(' ')[0])
+                    )
+                    if (matchingPrompt) {
+                      const index = DEMO_PROMPTS.indexOf(matchingPrompt)
+                      setCurrentPromptIndex(index)
+                      runDemo(matchingPrompt)
+                    } else {
+                      // Show custom user message and redirect prompt
+                      setMessages([{ role: 'user', content: inputValue }])
+                      setInputValue('')
+                      setIsTyping(true)
+                      setTimeout(() => {
+                        setIsTyping(false)
+                        setMessages(prev => [...prev, {
+                          role: 'assistant',
+                          content: "Great question! To get a real AI-powered response, please launch the full console. This demo only supports the example prompts shown above.",
+                          files: []
+                        }])
+                      }, 1000)
+                    }
+                  }
+                }}
+                className="flex items-center gap-3"
+              >
                 <input
                   type="text"
                   placeholder="Ask anything about DevOps..."
                   value={inputValue}
-                  readOnly
-                  className="
+                  onChange={(e) => !isPlaying && setInputValue(e.target.value)}
+                  disabled={isPlaying}
+                  className={`
                     flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3
                     text-white placeholder-white/30 text-sm
                     focus:outline-none focus:border-cyan-500/50
-                    transition-colors cursor-default
-                  "
+                    transition-colors
+                    ${isPlaying ? 'cursor-not-allowed opacity-70' : 'cursor-text'}
+                  `}
                 />
                 <button
-                  className="
+                  type="submit"
+                  disabled={isPlaying || !inputValue.trim()}
+                  className={`
                     p-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600
                     text-white transition-all hover:shadow-lg hover:shadow-cyan-500/25
                     active:scale-95 cursor-pointer
-                  "
+                    ${(isPlaying || !inputValue.trim()) ? 'opacity-50 cursor-not-allowed' : ''}
+                  `}
                 >
                   <Send className="w-5 h-5" />
                 </button>
-              </div>
+              </form>
               <p className="text-center text-xs text-white/30 mt-3">
                 This is a demo. Click prompts above or{' '}
                 <button
