@@ -64,7 +64,7 @@ export function CinematicLanding({ onLaunch }: { onLaunch: () => void }) {
         <HeroSection onLaunch={onLaunch} />
 
         {/* How It Works - Interactive Tutorial */}
-        <HowItWorks />
+        <HowItWorks onLaunch={onLaunch} />
 
         {/* Terminal demo */}
         <Terminal />

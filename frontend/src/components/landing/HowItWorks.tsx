@@ -435,7 +435,7 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
   }
 }
 
-export function HowItWorks() {
+export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
   const [currentStep, setCurrentStep] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [hasStarted, setHasStarted] = useState(false)
@@ -631,13 +631,13 @@ export function HowItWorks() {
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
         >
-          <a
-            href="#"
-            className="inline-flex items-center gap-2 px-6 py-3 bg-white text-black font-semibold rounded-xl hover:bg-white/90 transition-all"
+          <button
+            onClick={onLaunch}
+            className="inline-flex items-center gap-2 px-6 py-3 bg-white text-black font-semibold rounded-xl hover:bg-white/90 transition-all cursor-pointer"
           >
             Try It Yourself
             <ChevronRight className="w-4 h-4" />
-          </a>
+          </button>
         </motion.div>
       </div>
     </section>

@@ -275,11 +275,11 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
         >
           <p className="text-white/60">
             Have questions?{' '}
-            <a href="#" className="text-primary hover:underline">
-              Check our FAQ
+            <a href="#docs" className="text-primary hover:underline">
+              Check our docs
             </a>{' '}
             or{' '}
-            <a href="#" className="text-primary hover:underline">
+            <a href="mailto:ankit25bcs10610@gmail.com" className="text-primary hover:underline">
               contact us
             </a>
           </p>
