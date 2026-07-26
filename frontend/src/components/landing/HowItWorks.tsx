@@ -250,7 +250,7 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
         </div>
       )
 
-    case 'trace':
+    case 'trace': {
       const steps = demo.steps || []
       return (
         <div className="bg-[#0d1117] rounded-xl border border-white/10 p-4 font-mono text-sm">
@@ -287,8 +287,9 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
           </div>
         </div>
       )
+    }
 
-    case 'rca':
+    case 'rca': {
       const rca = demo.content as { issue: string; commit: string; file: string; confidence: number }
       return (
         <motion.div
@@ -328,8 +329,9 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
           </div>
         </motion.div>
       )
+    }
 
-    case 'approval':
+    case 'approval': {
       const details = demo.details as { title: string; branch: string }
       return (
         <AnimatePresence>
@@ -396,8 +398,9 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
           )}
         </AnimatePresence>
       )
+    }
 
-    case 'success':
+    case 'success': {
       const pr = demo.content as { pr: string; title: string; status: string }
       return (
         <motion.div
@@ -425,6 +428,7 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
           </div>
         </motion.div>
       )
+    }
 
     default:
       return null
