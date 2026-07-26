@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import os
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -43,7 +44,7 @@ LOGO = """
 ╚═══════════════════════════════════════════════════════════╝[/bold cyan]
 """
 
-SERVICES = {
+SERVICES: dict[str, dict[str, Any]] = {
     "llm": {
         "name": "LLM Provider",
         "description": "AI model for investigation",
