@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     # ArgoCD API; otherwise it serves offline fixtures (the checkout-svc app).
     argocd_server_url: str = ""
     argocd_auth_token: str = ""
+    # AWS credentials for cost optimization connector. With credentials set it
+    # queries real AWS Cost Explorer; otherwise it serves demo cost data.
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    # GCP credentials for multi-cloud connector. Project ID + service account key.
+    gcp_project_id: str = ""
+    # Azure credentials for multi-cloud connector.
+    azure_subscription_id: str = ""
+    azure_client_id: str = ""
+    azure_client_secret: str = ""
+    azure_tenant_id: str = ""
 
     # --- Trigger / delivery (webhooks → investigate → Slack) ---
     # PagerDuty webhook → auto-start an investigation (HMAC-verified).

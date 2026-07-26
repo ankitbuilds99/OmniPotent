@@ -1,0 +1,262 @@
+"""Agent registry — catalog of available marketplace agents.
+
+The registry maintains a list of community-contributed agents that can be
+installed into DevOps Copilot. Each agent entry includes metadata, version
+information, and installation requirements.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REGISTRY_PATH = Path(__file__).parent / "agents.json"
+
+
+@dataclass
+class AgentEntry:
+    """An agent available in the marketplace."""
+
+    id: str
+    name: str
+    description: str
+    version: str
+    author: str
+    category: str
+    tools: list[str] = field(default_factory=list)
+    source: str = ""
+    docs_url: str = ""
+    stars: int = 0
+    downloads: int = 0
+    verified: bool = False
+    dependencies: list[str] = field(default_factory=list)
+    env_vars: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentEntry":
+        return cls(
+            id=data.get("id", ""),
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            version=data.get("version", "0.0.0"),
+            author=data.get("author", ""),
+            category=data.get("category", "other"),
+            tools=data.get("tools", []),
+            source=data.get("source", ""),
+            docs_url=data.get("docs_url", ""),
+            stars=data.get("stars", 0),
+            downloads=data.get("downloads", 0),
+            verified=data.get("verified", False),
+            dependencies=data.get("dependencies", []),
+            env_vars=data.get("env_vars", []),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "version": self.version,
+            "author": self.author,
+            "category": self.category,
+            "tools": self.tools,
+            "source": self.source,
+            "docs_url": self.docs_url,
+            "stars": self.stars,
+            "downloads": self.downloads,
+            "verified": self.verified,
+            "dependencies": self.dependencies,
+            "env_vars": self.env_vars,
+        }
+
+
+BUILTIN_AGENTS: list[dict] = [
+    {
+        "id": "prometheus-metrics",
+        "name": "Prometheus Metrics",
+        "description": "Query Prometheus metrics, run PromQL, and analyze time series data",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "monitoring",
+        "tools": ["query_prometheus", "list_metrics", "get_alerts", "analyze_series"],
+        "source": "https://github.com/devops-copilot/agent-prometheus",
+        "verified": True,
+        "env_vars": ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
+    },
+    {
+        "id": "grafana-dashboards",
+        "name": "Grafana Dashboards",
+        "description": "Manage Grafana dashboards, query panels, and create alerts",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "monitoring",
+        "tools": ["list_dashboards", "get_dashboard", "create_alert", "query_panel"],
+        "source": "https://github.com/devops-copilot/agent-grafana",
+        "verified": True,
+        "env_vars": ["GRAFANA_URL", "GRAFANA_API_KEY"],
+    },
+    {
+        "id": "jenkins-ci",
+        "name": "Jenkins CI",
+        "description": "Trigger builds, view job status, and analyze build logs",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "cicd",
+        "tools": ["list_jobs", "trigger_build", "get_build_log", "get_build_status"],
+        "source": "https://github.com/devops-copilot/agent-jenkins",
+        "verified": True,
+        "env_vars": ["JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN"],
+    },
+    {
+        "id": "aws-cloudwatch",
+        "name": "AWS CloudWatch",
+        "description": "Query CloudWatch metrics, logs, and alarms",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "monitoring",
+        "tools": ["get_metric_data", "query_logs", "list_alarms", "describe_alarm"],
+        "source": "https://github.com/devops-copilot/agent-cloudwatch",
+        "verified": True,
+        "env_vars": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+    },
+    {
+        "id": "jira-tickets",
+        "name": "Jira Tickets",
+        "description": "Create, update, and query Jira tickets and projects",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "ticketing",
+        "tools": ["create_ticket", "update_ticket", "search_tickets", "get_ticket"],
+        "source": "https://github.com/devops-copilot/agent-jira",
+        "verified": True,
+        "env_vars": ["JIRA_URL", "JIRA_USER", "JIRA_API_TOKEN"],
+    },
+    {
+        "id": "opsgenie-alerts",
+        "name": "OpsGenie Alerts",
+        "description": "Manage OpsGenie alerts, on-call schedules, and escalations",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "alerting",
+        "tools": ["list_alerts", "acknowledge_alert", "close_alert", "get_oncall"],
+        "source": "https://github.com/devops-copilot/agent-opsgenie",
+        "verified": True,
+        "env_vars": ["OPSGENIE_API_KEY"],
+    },
+    {
+        "id": "elasticsearch-logs",
+        "name": "Elasticsearch Logs",
+        "description": "Query Elasticsearch indices and analyze log data",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "logging",
+        "tools": ["search_logs", "list_indices", "get_mapping", "aggregate_logs"],
+        "source": "https://github.com/devops-copilot/agent-elasticsearch",
+        "verified": True,
+        "env_vars": ["ELASTICSEARCH_URL", "ELASTICSEARCH_API_KEY"],
+    },
+    {
+        "id": "vault-secrets",
+        "name": "HashiCorp Vault",
+        "description": "Manage secrets in HashiCorp Vault",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "security",
+        "tools": ["list_secrets", "get_secret", "rotate_secret", "list_policies"],
+        "source": "https://github.com/devops-copilot/agent-vault",
+        "verified": True,
+        "env_vars": ["VAULT_ADDR", "VAULT_TOKEN"],
+    },
+    {
+        "id": "ansible-automation",
+        "name": "Ansible Automation",
+        "description": "Run Ansible playbooks and manage inventory",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "automation",
+        "tools": ["run_playbook", "list_inventory", "check_syntax", "list_roles"],
+        "source": "https://github.com/devops-copilot/agent-ansible",
+        "verified": True,
+        "dependencies": ["ansible"],
+    },
+    {
+        "id": "pulumi-iac",
+        "name": "Pulumi IaC",
+        "description": "Manage Pulumi stacks and preview/apply changes",
+        "version": "1.0.0",
+        "author": "DevOps Copilot Community",
+        "category": "iac",
+        "tools": ["list_stacks", "preview", "apply", "get_outputs", "refresh"],
+        "source": "https://github.com/devops-copilot/agent-pulumi",
+        "verified": True,
+        "env_vars": ["PULUMI_ACCESS_TOKEN"],
+        "dependencies": ["pulumi"],
+    },
+]
+
+
+class Registry:
+    """Registry of available marketplace agents."""
+
+    def __init__(self):
+        self._agents: dict[str, AgentEntry] = {}
+        self._load_builtin()
+
+    def _load_builtin(self) -> None:
+        """Load built-in agent definitions."""
+        for agent_data in BUILTIN_AGENTS:
+            agent = AgentEntry.from_dict(agent_data)
+            self._agents[agent.id] = agent
+
+    def list_agents(
+        self,
+        category: str | None = None,
+        verified_only: bool = False,
+        search: str | None = None,
+    ) -> list[AgentEntry]:
+        """List available agents with optional filtering."""
+        agents = list(self._agents.values())
+
+        if category:
+            agents = [a for a in agents if a.category == category]
+
+        if verified_only:
+            agents = [a for a in agents if a.verified]
+
+        if search:
+            search_lower = search.lower()
+            agents = [
+                a for a in agents
+                if search_lower in a.name.lower()
+                or search_lower in a.description.lower()
+                or any(search_lower in t.lower() for t in a.tools)
+            ]
+
+        return sorted(agents, key=lambda a: (-a.stars, a.name))
+
+    def get_agent(self, agent_id: str) -> AgentEntry | None:
+        """Get a specific agent by ID."""
+        return self._agents.get(agent_id)
+
+    def list_categories(self) -> list[dict]:
+        """List all agent categories with counts."""
+        categories: dict[str, int] = {}
+        for agent in self._agents.values():
+            categories[agent.category] = categories.get(agent.category, 0) + 1
+
+        return [
+            {"id": cat, "count": count}
+            for cat, count in sorted(categories.items())
+        ]
+
+
+_registry: Registry | None = None
+
+
+def get_registry() -> Registry:
+    """Get the singleton registry instance."""
+    global _registry
+    if _registry is None:
+        _registry = Registry()
+    return _registry

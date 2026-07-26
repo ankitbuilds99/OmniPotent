@@ -1,5 +1,44 @@
 {
+  "0dbf35ec51f13ceb28443c6f48d8959ec1aedb860e3da4b48230c3c533afb23d": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "The services currently emitting logs are checkout-svc and inventory-svc.",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
   "1cd3e965dcec0027d14b484954d3306f7c384b25e99c618c46a6971854b9fa11": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [
+          {
+            "args": {},
+            "id": "call_list_services",
+            "name": "list_services",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
+  "293e1d05be3d2c952a44173b5ca9e8ffd324fa32d76467081544c4fb9e023702": {
     "response": {
       "data": {
         "additional_kwargs": {},
@@ -54,6 +93,22 @@
       "type": "ai"
     }
   },
+  "647ef64b9e98d34e6dc7ea2adede5a4cab6b3ac0ad071aca9e958c536c73ea6b": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "The services currently emitting logs are checkout-svc and inventory-svc.",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
   "66a8d0de91e9a5916f10dcad11138889c328f3bc22414a22f51d4cef8bf5d93a": {
     "response": {
       "data": {
@@ -80,6 +135,29 @@
         "name": null,
         "response_metadata": {},
         "tool_calls": [],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
+  "d67bddd0a91e41f128b99437534499a482c9f998112cdc9514001c1d33458d94": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [
+          {
+            "args": {},
+            "id": "call_list_services",
+            "name": "list_services",
+            "type": "tool_call"
+          }
+        ],
         "type": "ai",
         "usage_metadata": null
       },

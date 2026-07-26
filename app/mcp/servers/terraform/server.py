@@ -6,6 +6,9 @@ plan diffs, and the ability to trigger plans/applies (with human approval). When
 it runs in OFFLINE DEMO mode with fixtures that tie into a sample infrastructure
 incident scenario.
 
+Also provides Terraform code generation tools for creating infrastructure from
+templates, descriptions, or existing cloud resources.
+
 Tools:
   Read (allow):
     - list_workspaces:        list workspaces in the organization
@@ -15,6 +18,13 @@ Tools:
     - get_run_details:        get specific run details
     - get_plan_output:        get plan diff
     - list_state_resources:   list managed resources in current state
+
+  Code Generation (allow):
+    - generate_terraform_module:   generate a complete Terraform module
+    - generate_backend_config:     generate backend configuration
+    - generate_tfvars:             generate variables file from template
+    - generate_provider_config:    generate provider configuration
+    - list_module_templates:       list available module templates
 
   Write (gated via app/policy.py -> human approval):
     - trigger_plan:           queue a speculative or normal plan
@@ -865,6 +875,1390 @@ def trigger_apply(run_id: str, comment: str = "") -> dict:
     return {
         "status": "apply triggered",
         "run_id": run_id,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Terraform Code Generation Templates
+# --------------------------------------------------------------------------- #
+MODULE_TEMPLATES: dict[str, dict] = {
+    "aws-vpc": {
+        "name": "AWS VPC",
+        "description": "Complete VPC with public/private subnets, NAT gateway, and routing",
+        "provider": "aws",
+        "variables": ["vpc_cidr", "environment", "availability_zones", "enable_nat_gateway"],
+        "resources": ["aws_vpc", "aws_subnet", "aws_internet_gateway", "aws_nat_gateway", "aws_route_table"],
+    },
+    "aws-ecs-fargate": {
+        "name": "AWS ECS Fargate",
+        "description": "ECS Fargate cluster with ALB, auto-scaling, and service definition",
+        "provider": "aws",
+        "variables": ["cluster_name", "service_name", "container_image", "cpu", "memory", "desired_count"],
+        "resources": ["aws_ecs_cluster", "aws_ecs_service", "aws_ecs_task_definition", "aws_lb", "aws_lb_target_group"],
+    },
+    "aws-rds-postgres": {
+        "name": "AWS RDS PostgreSQL",
+        "description": "RDS PostgreSQL instance with subnet group and security group",
+        "provider": "aws",
+        "variables": ["identifier", "engine_version", "instance_class", "allocated_storage", "db_name", "username"],
+        "resources": ["aws_db_instance", "aws_db_subnet_group", "aws_security_group"],
+    },
+    "aws-lambda": {
+        "name": "AWS Lambda Function",
+        "description": "Lambda function with IAM role, CloudWatch logs, and optional VPC",
+        "provider": "aws",
+        "variables": ["function_name", "runtime", "handler", "memory_size", "timeout"],
+        "resources": ["aws_lambda_function", "aws_iam_role", "aws_iam_role_policy", "aws_cloudwatch_log_group"],
+    },
+    "aws-s3-static": {
+        "name": "AWS S3 Static Website",
+        "description": "S3 bucket configured for static website hosting with CloudFront",
+        "provider": "aws",
+        "variables": ["bucket_name", "domain_name", "enable_cloudfront"],
+        "resources": ["aws_s3_bucket", "aws_s3_bucket_policy", "aws_cloudfront_distribution"],
+    },
+    "aws-eks": {
+        "name": "AWS EKS Cluster",
+        "description": "EKS cluster with managed node groups and IRSA support",
+        "provider": "aws",
+        "variables": ["cluster_name", "kubernetes_version", "node_instance_types", "node_desired_size"],
+        "resources": ["aws_eks_cluster", "aws_eks_node_group", "aws_iam_role", "aws_security_group"],
+    },
+    "gcp-gke": {
+        "name": "GCP GKE Cluster",
+        "description": "GKE cluster with node pool and workload identity",
+        "provider": "google",
+        "variables": ["cluster_name", "region", "machine_type", "node_count", "kubernetes_version"],
+        "resources": ["google_container_cluster", "google_container_node_pool", "google_service_account"],
+    },
+    "gcp-cloud-run": {
+        "name": "GCP Cloud Run",
+        "description": "Cloud Run service with custom domain and IAM",
+        "provider": "google",
+        "variables": ["service_name", "image", "region", "memory", "cpu"],
+        "resources": ["google_cloud_run_service", "google_cloud_run_service_iam_member"],
+    },
+    "azure-aks": {
+        "name": "Azure AKS Cluster",
+        "description": "AKS cluster with default node pool and Azure CNI",
+        "provider": "azurerm",
+        "variables": ["cluster_name", "location", "node_count", "vm_size", "kubernetes_version"],
+        "resources": ["azurerm_kubernetes_cluster", "azurerm_resource_group"],
+    },
+    "azure-app-service": {
+        "name": "Azure App Service",
+        "description": "App Service with plan and deployment slots",
+        "provider": "azurerm",
+        "variables": ["app_name", "location", "sku_name", "runtime_stack"],
+        "resources": ["azurerm_app_service", "azurerm_app_service_plan", "azurerm_resource_group"],
+    },
+}
+
+MODULE_CODE_TEMPLATES: dict[str, str] = {
+    "aws-vpc": '''# AWS VPC Module
+# Generated by DevOps Copilot
+
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+variable "project" {
+  description = "Project name"
+  type        = string
+}
+
+variable "availability_zones" {
+  description = "List of availability zones"
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+}
+
+variable "enable_nat_gateway" {
+  description = "Enable NAT Gateway for private subnets"
+  type        = bool
+  default     = true
+}
+
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-vpc"
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-igw"
+    Environment = var.environment
+  }
+}
+
+resource "aws_subnet" "public" {
+  count                   = length(var.availability_zones)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 4, count.index)
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-public-${count.index + 1}"
+    Environment = var.environment
+    Type        = "public"
+  }
+}
+
+resource "aws_subnet" "private" {
+  count             = length(var.availability_zones)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 4, count.index + length(var.availability_zones))
+  availability_zone = var.availability_zones[count.index]
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-private-${count.index + 1}"
+    Environment = var.environment
+    Type        = "private"
+  }
+}
+
+resource "aws_eip" "nat" {
+  count  = var.enable_nat_gateway ? 1 : 0
+  domain = "vpc"
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-nat-eip"
+    Environment = var.environment
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+resource "aws_nat_gateway" "main" {
+  count         = var.enable_nat_gateway ? 1 : 0
+  allocation_id = aws_eip.nat[0].id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-nat"
+    Environment = var.environment
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-public-rt"
+    Environment = var.environment
+  }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  dynamic "route" {
+    for_each = var.enable_nat_gateway ? [1] : []
+    content {
+      cidr_block     = "0.0.0.0/0"
+      nat_gateway_id = aws_nat_gateway.main[0].id
+    }
+  }
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-private-rt"
+    Environment = var.environment
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = length(var.availability_zones)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count          = length(var.availability_zones)
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+output "vpc_id" {
+  description = "VPC ID"
+  value       = aws_vpc.main.id
+}
+
+output "public_subnet_ids" {
+  description = "Public subnet IDs"
+  value       = aws_subnet.public[*].id
+}
+
+output "private_subnet_ids" {
+  description = "Private subnet IDs"
+  value       = aws_subnet.private[*].id
+}
+
+output "nat_gateway_ip" {
+  description = "NAT Gateway public IP"
+  value       = var.enable_nat_gateway ? aws_eip.nat[0].public_ip : null
+}
+''',
+    "aws-ecs-fargate": '''# AWS ECS Fargate Module
+# Generated by DevOps Copilot
+
+variable "cluster_name" {
+  description = "ECS cluster name"
+  type        = string
+}
+
+variable "service_name" {
+  description = "ECS service name"
+  type        = string
+}
+
+variable "container_image" {
+  description = "Container image URL"
+  type        = string
+}
+
+variable "container_port" {
+  description = "Container port"
+  type        = number
+  default     = 8080
+}
+
+variable "cpu" {
+  description = "Fargate CPU units"
+  type        = number
+  default     = 256
+}
+
+variable "memory" {
+  description = "Fargate memory (MB)"
+  type        = number
+  default     = 512
+}
+
+variable "desired_count" {
+  description = "Desired task count"
+  type        = number
+  default     = 2
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "Subnet IDs for the service"
+  type        = list(string)
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+resource "aws_ecs_cluster" "main" {
+  name = var.cluster_name
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_ecs_task_definition" "main" {
+  family                   = var.service_name
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.cpu
+  memory                   = var.memory
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name      = var.service_name
+    image     = var.container_image
+    essential = true
+    portMappings = [{
+      containerPort = var.container_port
+      hostPort      = var.container_port
+      protocol      = "tcp"
+    }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.main.name
+        awslogs-region        = data.aws_region.current.name
+        awslogs-stream-prefix = var.service_name
+      }
+    }
+  }])
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_ecs_service" "main" {
+  name            = var.service_name
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.main.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.subnet_ids
+    security_groups  = [aws_security_group.ecs.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.main.arn
+    container_name   = var.service_name
+    container_port   = var.container_port
+  }
+
+  depends_on = [aws_lb_listener.main]
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_lb" "main" {
+  name               = "${var.service_name}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = var.subnet_ids
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_lb_target_group" "main" {
+  name        = "${var.service_name}-tg"
+  port        = var.container_port
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = var.vpc_id
+
+  health_check {
+    path                = "/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 10
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_lb_listener" "main" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.main.arn
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name        = "${var.service_name}-alb-sg"
+  description = "ALB security group"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_security_group" "ecs" {
+  name        = "${var.service_name}-ecs-sg"
+  description = "ECS tasks security group"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = var.container_port
+    to_port         = var.container_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_log_group" "main" {
+  name              = "/ecs/${var.service_name}"
+  retention_in_days = 30
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_iam_role" "ecs_execution" {
+  name = "${var.service_name}-ecs-execution"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role" "ecs_task" {
+  name = "${var.service_name}-ecs-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+}
+
+data "aws_region" "current" {}
+
+output "cluster_name" {
+  description = "ECS cluster name"
+  value       = aws_ecs_cluster.main.name
+}
+
+output "service_name" {
+  description = "ECS service name"
+  value       = aws_ecs_service.main.name
+}
+
+output "alb_dns_name" {
+  description = "ALB DNS name"
+  value       = aws_lb.main.dns_name
+}
+''',
+    "aws-rds-postgres": '''# AWS RDS PostgreSQL Module
+# Generated by DevOps Copilot
+
+variable "identifier" {
+  description = "RDS instance identifier"
+  type        = string
+}
+
+variable "engine_version" {
+  description = "PostgreSQL engine version"
+  type        = string
+  default     = "15.4"
+}
+
+variable "instance_class" {
+  description = "RDS instance class"
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "allocated_storage" {
+  description = "Allocated storage in GB"
+  type        = number
+  default     = 20
+}
+
+variable "db_name" {
+  description = "Database name"
+  type        = string
+}
+
+variable "username" {
+  description = "Master username"
+  type        = string
+  sensitive   = true
+}
+
+variable "password" {
+  description = "Master password"
+  type        = string
+  sensitive   = true
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "Subnet IDs for DB subnet group"
+  type        = list(string)
+}
+
+variable "allowed_cidr_blocks" {
+  description = "CIDR blocks allowed to access the database"
+  type        = list(string)
+  default     = []
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+variable "multi_az" {
+  description = "Enable Multi-AZ deployment"
+  type        = bool
+  default     = false
+}
+
+variable "backup_retention_period" {
+  description = "Backup retention period in days"
+  type        = number
+  default     = 7
+}
+
+resource "aws_db_subnet_group" "main" {
+  name       = "${var.identifier}-subnet-group"
+  subnet_ids = var.subnet_ids
+
+  tags = {
+    Name        = "${var.identifier}-subnet-group"
+    Environment = var.environment
+  }
+}
+
+resource "aws_security_group" "rds" {
+  name        = "${var.identifier}-rds-sg"
+  description = "Security group for RDS instance"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.identifier}-rds-sg"
+    Environment = var.environment
+  }
+}
+
+resource "aws_db_instance" "main" {
+  identifier             = var.identifier
+  engine                 = "postgres"
+  engine_version         = var.engine_version
+  instance_class         = var.instance_class
+  allocated_storage      = var.allocated_storage
+  storage_type           = "gp3"
+  storage_encrypted      = true
+
+  db_name  = var.db_name
+  username = var.username
+  password = var.password
+
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+
+  multi_az                  = var.multi_az
+  publicly_accessible       = false
+  backup_retention_period   = var.backup_retention_period
+  backup_window             = "03:00-04:00"
+  maintenance_window        = "Mon:04:00-Mon:05:00"
+  auto_minor_version_upgrade = true
+  deletion_protection       = var.environment == "production"
+  skip_final_snapshot       = var.environment != "production"
+  final_snapshot_identifier = var.environment == "production" ? "${var.identifier}-final-snapshot" : null
+
+  performance_insights_enabled = true
+
+  tags = {
+    Name        = var.identifier
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+output "endpoint" {
+  description = "RDS instance endpoint"
+  value       = aws_db_instance.main.endpoint
+}
+
+output "address" {
+  description = "RDS instance address"
+  value       = aws_db_instance.main.address
+}
+
+output "port" {
+  description = "RDS instance port"
+  value       = aws_db_instance.main.port
+}
+
+output "database_name" {
+  description = "Database name"
+  value       = aws_db_instance.main.db_name
+}
+''',
+    "aws-lambda": '''# AWS Lambda Function Module
+# Generated by DevOps Copilot
+
+variable "function_name" {
+  description = "Lambda function name"
+  type        = string
+}
+
+variable "runtime" {
+  description = "Lambda runtime"
+  type        = string
+  default     = "python3.11"
+}
+
+variable "handler" {
+  description = "Lambda handler"
+  type        = string
+  default     = "main.handler"
+}
+
+variable "memory_size" {
+  description = "Memory size in MB"
+  type        = number
+  default     = 256
+}
+
+variable "timeout" {
+  description = "Timeout in seconds"
+  type        = number
+  default     = 30
+}
+
+variable "source_dir" {
+  description = "Source directory to package"
+  type        = string
+}
+
+variable "environment_variables" {
+  description = "Environment variables"
+  type        = map(string)
+  default     = {}
+}
+
+variable "vpc_config" {
+  description = "VPC configuration (optional)"
+  type = object({
+    subnet_ids         = list(string)
+    security_group_ids = list(string)
+  })
+  default = null
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+data "archive_file" "lambda" {
+  type        = "zip"
+  source_dir  = var.source_dir
+  output_path = "${path.module}/.terraform/lambda_${var.function_name}.zip"
+}
+
+resource "aws_lambda_function" "main" {
+  function_name    = var.function_name
+  role             = aws_iam_role.lambda.arn
+  handler          = var.handler
+  runtime          = var.runtime
+  memory_size      = var.memory_size
+  timeout          = var.timeout
+
+  filename         = data.archive_file.lambda.output_path
+  source_code_hash = data.archive_file.lambda.output_base64sha256
+
+  environment {
+    variables = var.environment_variables
+  }
+
+  dynamic "vpc_config" {
+    for_each = var.vpc_config != null ? [var.vpc_config] : []
+    content {
+      subnet_ids         = vpc_config.value.subnet_ids
+      security_group_ids = vpc_config.value.security_group_ids
+    }
+  }
+
+  tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "lambda" {
+  name              = "/aws/lambda/${var.function_name}"
+  retention_in_days = 30
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_iam_role" "lambda" {
+  name = "${var.function_name}-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_logs" {
+  name = "${var.function_name}-logs"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.lambda.arn}:*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_vpc" {
+  count = var.vpc_config != null ? 1 : 0
+  name  = "${var.function_name}-vpc"
+  role  = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+output "function_name" {
+  description = "Lambda function name"
+  value       = aws_lambda_function.main.function_name
+}
+
+output "function_arn" {
+  description = "Lambda function ARN"
+  value       = aws_lambda_function.main.arn
+}
+
+output "invoke_arn" {
+  description = "Lambda invoke ARN"
+  value       = aws_lambda_function.main.invoke_arn
+}
+
+output "role_arn" {
+  description = "Lambda IAM role ARN"
+  value       = aws_iam_role.lambda.arn
+}
+''',
+}
+
+BACKEND_TEMPLATES: dict[str, str] = {
+    "s3": '''# S3 Backend Configuration
+terraform {{
+  backend "s3" {{
+    bucket         = "{bucket}"
+    key            = "{key}"
+    region         = "{region}"
+    encrypt        = true
+    dynamodb_table = "{dynamodb_table}"
+  }}
+}}
+''',
+    "gcs": '''# GCS Backend Configuration
+terraform {{
+  backend "gcs" {{
+    bucket = "{bucket}"
+    prefix = "{prefix}"
+  }}
+}}
+''',
+    "azurerm": '''# Azure Backend Configuration
+terraform {{
+  backend "azurerm" {{
+    resource_group_name  = "{resource_group_name}"
+    storage_account_name = "{storage_account_name}"
+    container_name       = "{container_name}"
+    key                  = "{key}"
+  }}
+}}
+''',
+    "remote": '''# Terraform Cloud Backend Configuration
+terraform {{
+  cloud {{
+    organization = "{organization}"
+
+    workspaces {{
+      name = "{workspace}"
+    }}
+  }}
+}}
+''',
+}
+
+PROVIDER_TEMPLATES: dict[str, str] = {
+    "aws": '''# AWS Provider Configuration
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Environment = var.environment
+      Project     = var.project
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+variable "project" {
+  description = "Project name"
+  type        = string
+}
+''',
+    "google": '''# GCP Provider Configuration
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+variable "project_id" {
+  description = "GCP project ID"
+  type        = string
+}
+
+variable "region" {
+  description = "GCP region"
+  type        = string
+  default     = "us-central1"
+}
+''',
+    "azurerm": '''# Azure Provider Configuration
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+variable "location" {
+  description = "Azure location"
+  type        = string
+  default     = "eastus"
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+}
+
+variable "project" {
+  description = "Project name"
+  type        = string
+}
+''',
+    "kubernetes": '''# Kubernetes Provider Configuration
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
+  }
+}
+
+provider "kubernetes" {
+  config_path = var.kubeconfig_path
+}
+
+provider "helm" {
+  kubernetes {
+    config_path = var.kubeconfig_path
+  }
+}
+
+variable "kubeconfig_path" {
+  description = "Path to kubeconfig file"
+  type        = string
+  default     = "~/.kube/config"
+}
+''',
+}
+
+
+# --------------------------------------------------------------------------- #
+# Code Generation Tools
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def list_module_templates() -> list[dict]:
+    """List available Terraform module templates.
+
+    Returns a list of module templates that can be used with
+    generate_terraform_module.
+    """
+    return [
+        {
+            "id": key,
+            "name": template["name"],
+            "description": template["description"],
+            "provider": template["provider"],
+            "variables": template["variables"],
+            "resources": template["resources"],
+        }
+        for key, template in MODULE_TEMPLATES.items()
+    ]
+
+
+@mcp.tool()
+def generate_terraform_module(
+    template: str,
+    project_name: str = "my-project",
+    environment: str = "production",
+    custom_vars: str = "",
+) -> dict:
+    """Generate a complete Terraform module from a template.
+
+    Args:
+        template: Template ID (e.g., "aws-vpc", "aws-ecs-fargate", "aws-rds-postgres")
+        project_name: Project name for resource naming
+        environment: Target environment (production, staging, development)
+        custom_vars: JSON string of custom variable values to set
+
+    Returns:
+        Generated Terraform module code and related files
+    """
+    if template not in MODULE_TEMPLATES:
+        return {
+            "error": f"Template '{template}' not found",
+            "available": list(MODULE_TEMPLATES.keys()),
+        }
+
+    template_info = MODULE_TEMPLATES[template]
+    code = MODULE_CODE_TEMPLATES.get(template, "")
+
+    if not code:
+        return {
+            "error": f"Code template for '{template}' not yet implemented",
+            "template_info": template_info,
+        }
+
+    import json as json_module
+    custom_values = {}
+    if custom_vars:
+        try:
+            custom_values = json_module.loads(custom_vars)
+        except json_module.JSONDecodeError:
+            pass
+
+    tfvars_content = f'# Generated tfvars for {template}\n\n'
+    tfvars_content += f'project     = "{project_name}"\n'
+    tfvars_content += f'environment = "{environment}"\n'
+    for var_name in template_info["variables"]:
+        if var_name in custom_values:
+            value = custom_values[var_name]
+            if isinstance(value, str):
+                tfvars_content += f'{var_name} = "{value}"\n'
+            elif isinstance(value, bool):
+                tfvars_content += f'{var_name} = {str(value).lower()}\n'
+            elif isinstance(value, list):
+                tfvars_content += f'{var_name} = {json_module.dumps(value)}\n'
+            else:
+                tfvars_content += f'{var_name} = {value}\n'
+
+    return {
+        "template": template,
+        "template_info": template_info,
+        "project_name": project_name,
+        "environment": environment,
+        "files": {
+            "main.tf": code,
+            "terraform.tfvars": tfvars_content,
+        },
+        "notes": [
+            "Review and customize variable values before applying",
+            "Ensure required provider credentials are configured",
+            "Run 'terraform init' to initialize the module",
+            "Run 'terraform plan' to preview changes before applying",
+        ],
+    }
+
+
+@mcp.tool()
+def generate_backend_config(
+    backend_type: str,
+    bucket: str = "",
+    key: str = "terraform.tfstate",
+    region: str = "us-east-1",
+    organization: str = "",
+    workspace: str = "",
+    resource_group_name: str = "",
+    storage_account_name: str = "",
+    container_name: str = "",
+    dynamodb_table: str = "",
+    prefix: str = "terraform/state",
+) -> dict:
+    """Generate Terraform backend configuration for remote state.
+
+    Args:
+        backend_type: Backend type ("s3", "gcs", "azurerm", "remote")
+        bucket: S3/GCS bucket name
+        key: State file key/path
+        region: AWS region (for S3)
+        organization: Terraform Cloud organization (for remote)
+        workspace: Terraform Cloud workspace (for remote)
+        resource_group_name: Azure resource group (for azurerm)
+        storage_account_name: Azure storage account (for azurerm)
+        container_name: Azure container name (for azurerm)
+        dynamodb_table: DynamoDB table for state locking (for S3)
+        prefix: GCS prefix (for gcs)
+
+    Returns:
+        Backend configuration file content
+    """
+    if backend_type not in BACKEND_TEMPLATES:
+        return {
+            "error": f"Backend type '{backend_type}' not supported",
+            "available": list(BACKEND_TEMPLATES.keys()),
+        }
+
+    template = BACKEND_TEMPLATES[backend_type]
+
+    config = template.format(
+        bucket=bucket,
+        key=key,
+        region=region,
+        organization=organization,
+        workspace=workspace,
+        resource_group_name=resource_group_name,
+        storage_account_name=storage_account_name,
+        container_name=container_name,
+        dynamodb_table=dynamodb_table or f"{bucket}-lock",
+        prefix=prefix,
+    )
+
+    setup_instructions = []
+    if backend_type == "s3":
+        setup_instructions = [
+            f"Create S3 bucket: aws s3 mb s3://{bucket}",
+            "Enable versioning: aws s3api put-bucket-versioning --bucket {bucket} --versioning-configuration Status=Enabled",
+            f"Create DynamoDB table: aws dynamodb create-table --table-name {dynamodb_table or f'{bucket}-lock'} --attribute-definitions AttributeName=LockID,AttributeType=S --key-schema AttributeName=LockID,KeyType=HASH --billing-mode PAY_PER_REQUEST",
+        ]
+    elif backend_type == "gcs":
+        setup_instructions = [
+            f"Create GCS bucket: gsutil mb gs://{bucket}",
+            "Enable versioning: gsutil versioning set on gs://{bucket}",
+        ]
+    elif backend_type == "azurerm":
+        setup_instructions = [
+            "Create resource group and storage account",
+            "Create blob container for state",
+            "Configure Azure credentials",
+        ]
+    elif backend_type == "remote":
+        setup_instructions = [
+            "Create Terraform Cloud organization and workspace",
+            "Run 'terraform login' to authenticate",
+        ]
+
+    return {
+        "backend_type": backend_type,
+        "config": config,
+        "file_name": "backend.tf",
+        "setup_instructions": setup_instructions,
+        "notes": [
+            "Save this as backend.tf in your Terraform directory",
+            "Run 'terraform init' to migrate existing state",
+            "Ensure credentials are properly configured",
+        ],
+    }
+
+
+@mcp.tool()
+def generate_provider_config(
+    provider: str,
+    region: str = "",
+    project: str = "",
+    environment: str = "production",
+) -> dict:
+    """Generate Terraform provider configuration.
+
+    Args:
+        provider: Provider name ("aws", "google", "azurerm", "kubernetes")
+        region: Cloud region (provider-specific)
+        project: Project name or ID
+        environment: Environment name
+
+    Returns:
+        Provider configuration file content
+    """
+    if provider not in PROVIDER_TEMPLATES:
+        return {
+            "error": f"Provider '{provider}' not supported",
+            "available": list(PROVIDER_TEMPLATES.keys()),
+        }
+
+    config = PROVIDER_TEMPLATES[provider]
+
+    tfvars_lines = [f'environment = "{environment}"']
+    if provider == "aws":
+        tfvars_lines.append(f'aws_region  = "{region or "us-east-1"}"')
+        tfvars_lines.append(f'project     = "{project or "my-project"}"')
+    elif provider == "google":
+        tfvars_lines.append(f'region      = "{region or "us-central1"}"')
+        tfvars_lines.append(f'project_id  = "{project}"')
+    elif provider == "azurerm":
+        tfvars_lines.append(f'location    = "{region or "eastus"}"')
+        tfvars_lines.append(f'project     = "{project or "my-project"}"')
+
+    return {
+        "provider": provider,
+        "files": {
+            "providers.tf": config,
+            "terraform.tfvars": "\n".join(tfvars_lines),
+        },
+        "notes": [
+            f"Configure {provider} credentials before running Terraform",
+            "Review and customize variable defaults",
+            "Run 'terraform init' to download the provider",
+        ],
+    }
+
+
+@mcp.tool()
+def generate_tfvars(
+    template: str,
+    project_name: str = "my-project",
+    environment: str = "production",
+    values: str = "",
+) -> dict:
+    """Generate terraform.tfvars file from a module template.
+
+    Args:
+        template: Module template ID (e.g., "aws-vpc", "aws-ecs-fargate")
+        project_name: Project name
+        environment: Environment name
+        values: JSON string of variable values
+
+    Returns:
+        terraform.tfvars file content
+    """
+    if template not in MODULE_TEMPLATES:
+        return {
+            "error": f"Template '{template}' not found",
+            "available": list(MODULE_TEMPLATES.keys()),
+        }
+
+    import json as json_module
+    template_info = MODULE_TEMPLATES[template]
+
+    custom_values = {}
+    if values:
+        try:
+            custom_values = json_module.loads(values)
+        except json_module.JSONDecodeError:
+            pass
+
+    tfvars_lines = [
+        f"# terraform.tfvars for {template_info['name']}",
+        f"# Environment: {environment}",
+        "",
+        f'project     = "{project_name}"',
+        f'environment = "{environment}"',
+        "",
+    ]
+
+    example_values: dict[str, str | int | bool | list] = {
+        "vpc_cidr": "10.0.0.0/16",
+        "availability_zones": '["us-east-1a", "us-east-1b", "us-east-1c"]',
+        "enable_nat_gateway": "true",
+        "cluster_name": f'"{project_name}-cluster"',
+        "service_name": f'"{project_name}-api"',
+        "container_image": f'"123456789.dkr.ecr.us-east-1.amazonaws.com/{project_name}:latest"',
+        "cpu": "256",
+        "memory": "512",
+        "desired_count": "2",
+        "identifier": f'"{project_name}-db"',
+        "engine_version": '"15.4"',
+        "instance_class": '"db.t3.micro"',
+        "allocated_storage": "20",
+        "db_name": f'"{project_name.replace("-", "_")}"',
+        "function_name": f'"{project_name}-function"',
+        "runtime": '"python3.11"',
+        "handler": '"main.handler"',
+        "memory_size": "256",
+        "timeout": "30",
+    }
+
+    for var_name in template_info["variables"]:
+        if var_name in custom_values:
+            value = custom_values[var_name]
+            if isinstance(value, str):
+                tfvars_lines.append(f'{var_name} = "{value}"')
+            elif isinstance(value, bool):
+                tfvars_lines.append(f'{var_name} = {str(value).lower()}')
+            elif isinstance(value, list):
+                tfvars_lines.append(f'{var_name} = {json_module.dumps(value)}')
+            else:
+                tfvars_lines.append(f'{var_name} = {value}')
+        elif var_name in example_values:
+            tfvars_lines.append(f'{var_name} = {example_values[var_name]}')
+        else:
+            tfvars_lines.append(f'# {var_name} = ""  # TODO: Set value')
+
+    return {
+        "template": template,
+        "tfvars": "\n".join(tfvars_lines),
+        "file_name": "terraform.tfvars",
+        "variables": template_info["variables"],
     }
 
 

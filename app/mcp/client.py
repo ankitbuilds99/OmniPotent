@@ -21,7 +21,8 @@ from app.config import get_settings
 
 _SERVERS = (
     "datadog", "repo", "github", "pagerduty", "kubernetes", "sentry", "memory",
-    "traces", "deploys", "argocd", "terraform",
+    "traces", "deploys", "argocd", "terraform", "docker", "cicd", "security",
+    "costopt", "architect", "docs", "multicloud", "marketplace",
 )
 
 
@@ -147,6 +148,62 @@ def _server_config() -> dict:
                 "TERRAFORM_CLOUD_TOKEN": _isecret("TERRAFORM_CLOUD_TOKEN", s.terraform_cloud_token),
                 "TERRAFORM_ORGANIZATION": _isecret("TERRAFORM_ORGANIZATION", s.terraform_organization),
             },
+        },
+        "docker": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.docker.server"],
+            "transport": "stdio",
+            "env": {"TARGET_REPO_PATH": str(runtime.repo_path())},
+        },
+        "cicd": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.cicd.server"],
+            "transport": "stdio",
+            "env": {"TARGET_REPO_PATH": str(runtime.repo_path())},
+        },
+        "security": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.security.server"],
+            "transport": "stdio",
+            "env": {"TARGET_REPO_PATH": str(runtime.repo_path())},
+        },
+        "costopt": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.costopt.server"],
+            "transport": "stdio",
+            "env": {
+                "AWS_ACCESS_KEY_ID": _isecret("AWS_ACCESS_KEY_ID", s.aws_access_key_id),
+                "AWS_SECRET_ACCESS_KEY": _isecret("AWS_SECRET_ACCESS_KEY", s.aws_secret_access_key),
+            },
+        },
+        "architect": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.architect.server"],
+            "transport": "stdio",
+            "env": {"TARGET_REPO_PATH": str(runtime.repo_path())},
+        },
+        "docs": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.docs.server"],
+            "transport": "stdio",
+            "env": {"TARGET_REPO_PATH": str(runtime.repo_path())},
+        },
+        "multicloud": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.multicloud.server"],
+            "transport": "stdio",
+            "env": {
+                "AWS_ACCESS_KEY_ID": _isecret("AWS_ACCESS_KEY_ID", s.aws_access_key_id),
+                "AWS_SECRET_ACCESS_KEY": _isecret("AWS_SECRET_ACCESS_KEY", s.aws_secret_access_key),
+                "GCP_PROJECT_ID": _isecret("GCP_PROJECT_ID", s.gcp_project_id),
+                "AZURE_SUBSCRIPTION_ID": _isecret("AZURE_SUBSCRIPTION_ID", s.azure_subscription_id),
+            },
+        },
+        "marketplace": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.marketplace.server"],
+            "transport": "stdio",
+            "env": {},
         },
     }
 
