@@ -369,11 +369,11 @@ def cached_async(ttl: int = 300, prefix: str | None = None) -> Callable[[Callabl
             hit, value = await cache.get(key)
             if hit:
                 return value
-            result = await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)  # type: ignore[misc]
             await cache.set(key, result, ttl)
             return result
 
-        return wrapper
+        return wrapper  # type: ignore[return-value]
 
     return decorator
 

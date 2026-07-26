@@ -316,14 +316,14 @@ def list_workspaces(search: str = "", environment: str = "") -> list[dict]:
     if OFFLINE:
         result = list(_DEMO_WORKSPACES)
         if search:
-            result = [ws for ws in result if search.lower() in ws["name"].lower()]
+            result = [ws for ws in result if search.lower() in str(ws["name"]).lower()]
         if environment:
-            result = [ws for ws in result if ws.get("environment", "").lower() == environment.lower()]
+            result = [ws for ws in result if str(ws.get("environment", "")).lower() == environment.lower()]
         return result
 
     import httpx
 
-    params = {"page[size]": 100}
+    params: dict[str, str | int] = {"page[size]": 100}
     if search:
         params["search[name]"] = search
 
@@ -433,7 +433,7 @@ def get_state(workspace: str) -> dict:
             # Count resources by type
             type_counts: dict[str, int] = {}
             for r in _DEMO_STATE_RESOURCES:
-                rtype = r["type"]
+                rtype = str(r["type"])
                 type_counts[rtype] = type_counts.get(rtype, 0) + 1
             return {
                 "workspace": workspace,

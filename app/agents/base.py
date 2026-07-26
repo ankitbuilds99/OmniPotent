@@ -97,10 +97,10 @@ class BaseAgent(ABC):
         if self._llm_with_tools is None:
             llm = self.get_llm()
             if self._tools:
-                self._llm_with_tools = llm.bind_tools(self._tools)
+                self._llm_with_tools = llm.bind_tools(self._tools)  # type: ignore[assignment]
             else:
                 self._llm_with_tools = llm
-        return self._llm_with_tools
+        return self._llm_with_tools  # type: ignore[return-value]
 
     def invoke(
         self,
@@ -121,7 +121,7 @@ class BaseAgent(ABC):
         system = self._build_system_prompt(context, volatile_prompt)
         llm = self.get_llm_with_tools() if self._tools else self.get_llm()
         response = llm.invoke([system, *messages])
-        return response
+        return response  # type: ignore[return-value]
 
     def _build_system_prompt(
         self,
@@ -219,7 +219,7 @@ class BaseAgent(ABC):
             content=content,
             context_id=context.session_id,
             timestamp=datetime.now(timezone.utc),
-            priority=priority,
+            priority=priority,  # type: ignore[arg-type]
             requires_response=requires_response,
         )
         context.send_message(msg)
