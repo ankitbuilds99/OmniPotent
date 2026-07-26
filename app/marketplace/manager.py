@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.marketplace.registry import AgentEntry, get_registry
+from app.marketplace.registry import get_registry
 
 log = logging.getLogger("devcopilot.marketplace")
 
