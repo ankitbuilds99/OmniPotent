@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     # deploys; otherwise it serves offline fixtures (the checkout-svc rollout).
     deploys_api_url: str = ""
     deploys_api_token: str = ""
+    # Terraform Cloud/Enterprise connector. With a token it queries the real API;
+    # otherwise it serves offline workspace/run fixtures. Organization scopes API calls.
+    terraform_cloud_token: str = ""
+    terraform_organization: str = ""
+    # ArgoCD GitOps connector. With a server URL and auth token it queries the real
+    # ArgoCD API; otherwise it serves offline fixtures (the checkout-svc app).
+    argocd_server_url: str = ""
+    argocd_auth_token: str = ""
 
     # --- Trigger / delivery (webhooks → investigate → Slack) ---
     # PagerDuty webhook → auto-start an investigation (HMAC-verified).
@@ -171,9 +179,16 @@ class Settings(BaseSettings):
     copilot_global_spend_window_s: int = 86_400
     copilot_global_spend_alert: float = 0.8
     copilot_checkpoint_db: str = "./copilot_checkpoints.sqlite"
-    # Redis URL for the SHARED (cross-replica) rate limiter. Empty = per-process
-    # in-memory limiter (single-instance only). e.g. redis://host:6379/0
+    # Redis URL for the SHARED (cross-replica) rate limiter and cache. Empty =
+    # per-process in-memory (single-instance only). e.g. redis://host:6379/0
     copilot_redis_url: str = ""
+    # Response cache backend: "memory" (default), "redis", or "none" (disabled).
+    # Redis uses COPILOT_REDIS_URL; falls back to memory if unavailable.
+    copilot_cache_backend: str = "memory"
+    # Default cache TTL in seconds. Individual operations may override.
+    copilot_cache_ttl_default: int = 300
+    # Max entries in the in-memory cache (LRU eviction past this).
+    copilot_cache_max_size: int = 1000
     # Data governance: purge usage/metering rows older than this many days (0 = keep
     # forever). GDPR erasure + audit export are on-demand (see app/governance.py).
     copilot_retention_days: int = 0
@@ -251,6 +266,36 @@ class Settings(BaseSettings):
     copilot_autonomy_dryrun: bool = True
     # How long to watch the signal after applying a remediation before judging recovery.
     copilot_autonomy_watch_s: int = 60
+
+    # --- Multi-agent collaboration ---
+    # Enable multi-agent mode with specialized agents (Investigator, Remediation,
+    # Reviewer, Orchestrator). When false (default), the original single-agent mode
+    # is used. Multi-agent mode provides better separation of concerns and more
+    # structured handoffs between investigation, remediation, and review phases.
+    copilot_multi_agent_enabled: bool = False
+    # Agent mode: "single" (legacy) | "multi" (collaborative agents). When
+    # COPILOT_MULTI_AGENT_ENABLED is true, this defaults to "multi"; otherwise "single".
+    copilot_agent_mode: str = "single"
+
+    # --- WebSocket support (alternative to SSE) ---
+    # Enable WebSocket endpoint at /ws/chat/{thread_id}. When false, WebSocket
+    # connections are refused (SSE remains the default transport).
+    copilot_websocket_enabled: bool = True
+    # Ping interval in seconds for WebSocket heartbeat (connection health).
+    copilot_websocket_ping_interval: int = 30
+
+    # --- Vector RAG (embeddings for semantic search) ---
+    # Vector store backend: chromadb | faiss | none (default). When "none", the
+    # existing BM25 lexical search is used exclusively. When enabled, hybrid search
+    # combines BM25 + vector similarity via RRF (Reciprocal Rank Fusion).
+    copilot_vector_store: str = "none"
+    # Embedding model: OpenAI (text-embedding-3-small, text-embedding-3-large) or
+    # local sentence-transformers (all-MiniLM-L6-v2, all-mpnet-base-v2). OpenAI
+    # models require OPENAI_API_KEY; local models run offline but are slower.
+    copilot_embedding_model: str = "text-embedding-3-small"
+    # Persistence directory for the vector store. Defaults to .vector_store in the
+    # project root.
+    copilot_vector_persist_dir: str = ""
 
     @field_validator("copilot_provider")
     @classmethod

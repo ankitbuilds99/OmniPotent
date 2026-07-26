@@ -1,5 +1,15 @@
 """FastAPI surface for DevOps Copilot.
 
+This module provides the REST API for the DevOps Copilot AI-powered incident
+investigation system. It supports:
+
+- **Chat/Investigation**: Interactive incident investigation with AI assistance
+- **Approval Workflow**: Human-in-the-loop approval for risky actions
+- **Streaming**: Real-time Server-Sent Events for live investigation progress
+- **Webhooks**: PagerDuty, Slack, and Stripe integrations
+- **Multi-tenant**: Organization isolation with RBAC and usage metering
+- **Admin**: Organization management, API keys, and integrations
+
 Endpoints:
     POST /chat     -> start an investigation; returns final answer or an
                       approval request (with the thread_id to resume).
@@ -120,6 +130,26 @@ MCP_CATALOG = [
         "label": "Deploys",
         "custom": True,
         "tools": ["list_deploys", "get_deploy", "deploys_in_window"],
+    },
+    {
+        "name": "argocd",
+        "label": "ArgoCD",
+        "custom": True,
+        "tools": [
+            "list_applications", "get_application", "get_application_history",
+            "get_application_resources", "get_sync_status", "sync_application",
+            "rollback_application",
+        ],
+    },
+    {
+        "name": "terraform",
+        "label": "Terraform",
+        "custom": True,
+        "tools": [
+            "list_workspaces", "get_workspace", "get_state", "get_run_history",
+            "get_run_details", "get_plan_output", "list_state_resources",
+            "trigger_plan", "trigger_apply",
+        ],
     },
 ]
 
@@ -525,11 +555,120 @@ async def quota_gate() -> None:
             )
 
 
+# --------------------------------------------------------------------------- #
+# OpenAPI Tags for endpoint grouping
+# --------------------------------------------------------------------------- #
+OPENAPI_TAGS = [
+    {
+        "name": "Health",
+        "description": "Health and readiness probes for orchestration platforms (Kubernetes, etc.)",
+    },
+    {
+        "name": "Chat",
+        "description": "**Core investigation endpoints.** Start AI-powered investigations, stream "
+        "progress in real-time, and get structured RCA reports.",
+    },
+    {
+        "name": "Approval",
+        "description": "Human-in-the-loop approval workflow. Approve or reject risky actions "
+        "proposed by the AI during investigations.",
+    },
+    {
+        "name": "Config",
+        "description": "Runtime configuration management. Connect GitHub, configure LLM providers, "
+        "and manage data sources.",
+    },
+    {
+        "name": "Metrics",
+        "description": "Observability endpoints. Access real-time metrics, SLO data, and usage statistics.",
+    },
+    {
+        "name": "Feedback",
+        "description": "Investigation quality feedback. Submit ratings to improve the AI over time.",
+    },
+    {
+        "name": "Audit",
+        "description": "Compliance and audit trail. Query events and verify hash-chain integrity.",
+    },
+    {
+        "name": "Admin",
+        "description": "**Multi-tenant administration.** Manage organizations, API keys, members, "
+        "and integrations. Requires appropriate RBAC permissions.",
+    },
+    {
+        "name": "Webhooks",
+        "description": "External service integrations. Receive events from PagerDuty, Slack, and Stripe.",
+    },
+    {
+        "name": "Autonomy",
+        "description": "Progressive autonomy endpoints. Execute and monitor autonomous remediations.",
+    },
+]
+
 app = FastAPI(
-    title="DevOps Copilot",
-    version="0.1.0",
+    title="DevOps Copilot API",
+    version="1.0.0",
+    description="""
+# DevOps Copilot API
+
+AI-powered incident investigation and root cause analysis for DevOps teams.
+
+## Overview
+
+DevOps Copilot is an intelligent assistant that helps SRE and DevOps teams
+investigate incidents faster. It integrates with your observability stack
+(Datadog, PagerDuty, Kubernetes, GitHub) and uses LLMs to:
+
+- **Investigate incidents** by querying logs, metrics, and traces
+- **Identify root causes** with structured RCA reports
+- **Propose fixes** with human-in-the-loop approval for risky actions
+- **Create PRs** to remediate issues automatically
+
+## Authentication
+
+All endpoints (except health checks and webhooks) require authentication:
+
+```
+Authorization: Bearer <api_key>
+```
+
+In single-tenant mode, use `COPILOT_API_TOKEN`. In multi-tenant mode, use
+organization API keys (`dcp_...`).
+
+## Streaming
+
+Chat endpoints support Server-Sent Events (SSE) for real-time progress:
+
+- `POST /chat/stream` - Stream investigation progress
+- `POST /approve/stream` - Stream approval continuation
+
+## Rate Limits
+
+- Default: 60 requests/minute per IP
+- Configurable via `COPILOT_RATE_LIMIT_PER_MIN`
+
+## SDKs
+
+This OpenAPI spec can generate client SDKs. Use `/openapi.json` with your
+preferred code generator (openapi-generator, swagger-codegen, etc.).
+""",
+    contact={
+        "name": "DevOps Copilot Team",
+        "url": "https://github.com/ankit25bcs10610/DevOps-Copilot",
+        "email": "support@devopscopilot.dev",
+    },
+    license_info={
+        "name": "MIT License",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+    openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
     dependencies=[Depends(require_auth)],
+    responses={
+        401: {"description": "Missing or invalid API token"},
+        403: {"description": "Insufficient permissions for this action"},
+        429: {"description": "Rate limit exceeded"},
+    },
 )
 
 # Body-size + rate-limit guard. Added FIRST so it ends up INSIDE the CORS
@@ -547,6 +686,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+# Include WebSocket router for real-time communication (alternative to SSE).
+# WebSocket connections bypass the auth dependency (handled in the WS endpoint).
+from app.api import websocket as ws_module  # noqa: E402
+app.include_router(ws_module.router)
 
 
 class ChatRequest(BaseModel):
@@ -711,16 +855,85 @@ async def _get_session(thread_id: str) -> CopilotSession:
         return session
 
 
-@app.get("/healthz")
+@app.get(
+    "/healthz",
+    tags=["Health"],
+    summary="Liveness probe",
+    description="Check if the service is alive and responding. Returns the number of active "
+    "investigation sessions. Used by Kubernetes liveness probes.",
+    response_description="Service is alive with session count",
+    responses={
+        200: {
+            "description": "Service is healthy",
+            "content": {
+                "application/json": {
+                    "example": {"status": "ok", "active_sessions": 3}
+                }
+            },
+        }
+    },
+)
 async def healthz() -> dict:
-    """Liveness: the process is up and serving."""
-    return {"status": "ok", "active_sessions": len(_SESSIONS)}
+    """Liveness probe endpoint.
+
+    Returns:
+        dict: Status object with 'ok' status and count of active sessions.
+
+    Note:
+        This endpoint bypasses authentication and rate limiting to ensure
+        orchestration platforms can always check service health.
+    """
+    from app.api.websocket import get_connection_stats
+    ws_stats = get_connection_stats()
+    return {
+        "status": "ok",
+        "active_sessions": len(_SESSIONS),
+        "websocket": ws_stats,
+    }
 
 
-@app.get("/readyz")
+@app.get(
+    "/readyz",
+    tags=["Health"],
+    summary="Readiness probe",
+    description="Check if the service is ready to serve investigations. In production, "
+    "this requires an LLM API key to be configured. Returns 503 if not ready.",
+    response_description="Readiness status with any blocking reasons",
+    responses={
+        200: {
+            "description": "Service is ready",
+            "content": {
+                "application/json": {
+                    "example": {"status": "ready", "reasons": []}
+                }
+            },
+        },
+        503: {
+            "description": "Service is not ready",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "not_ready",
+                        "reasons": ["no LLM API key configured for the active provider"]
+                    }
+                }
+            },
+        },
+    },
+)
 async def readyz():
-    """Readiness: can we actually serve an investigation? In production we require
-    an LLM API key to be configured (env or runtime) before reporting ready."""
+    """Readiness probe endpoint for Kubernetes.
+
+    Checks whether the service can actually serve investigations. In production
+    mode (not local dev), requires an LLM API key to be configured.
+
+    Returns:
+        JSONResponse: Status object with 'ready'/'not_ready' and list of blocking reasons.
+
+    Note:
+        In multi-tenant mode, each tenant supplies their own LLM key, so a global
+        key is not required for readiness.
+    """
     s = get_settings()
     reasons: list[str] = []
     # In multi-tenant mode each tenant supplies its own LLM key, so a global key
@@ -734,10 +947,55 @@ async def readyz():
     )
 
 
-@app.get("/me")
+@app.get(
+    "/me",
+    tags=["Config"],
+    summary="Get current identity",
+    description="Returns the current user's identity, organization, and role. In single-tenant "
+    "mode, returns the operator identity. In multi-tenant mode, resolves from the API key.",
+    response_description="Current user identity and permissions",
+    responses={
+        200: {
+            "description": "User identity",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "single_tenant": {
+                            "summary": "Single-tenant mode",
+                            "value": {
+                                "multi_tenant": False,
+                                "authenticated": True,
+                                "org": None,
+                                "role": "owner",
+                                "label": "Operator"
+                            }
+                        },
+                        "multi_tenant": {
+                            "summary": "Multi-tenant authenticated",
+                            "value": {
+                                "multi_tenant": True,
+                                "authenticated": True,
+                                "org": "acme-corp",
+                                "role": "admin",
+                                "plan": "team",
+                                "label": "acme-corp"
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    },
+)
 async def me() -> dict:
-    """The current identity for the UI — real org/role in multi-tenant mode (resolved
-    from the credential by require_auth), or the single-tenant operator otherwise."""
+    """Get the current authenticated identity.
+
+    Returns the user's organization, role, and plan based on their API key.
+    Used by the UI to determine what features and actions are available.
+
+    Returns:
+        dict: Identity object with multi_tenant flag, auth status, org, role, and label.
+    """
     s = get_settings()
     if not s.copilot_multi_tenant:
         return {"multi_tenant": False, "authenticated": True, "org": None,
@@ -750,9 +1008,44 @@ async def me() -> dict:
             "role": cfg.role, "plan": cfg.plan, "label": cfg.org_id[:16]}
 
 
-@app.get("/config")
+@app.get(
+    "/config",
+    tags=["Config"],
+    summary="Get agent configuration",
+    description="Returns the current agent configuration including LLM provider, models, "
+    "available MCP servers, GitHub connection status, and configured data sources.",
+    response_description="Current agent configuration",
+    responses={
+        200: {
+            "description": "Agent configuration",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-20250514",
+                        "fast_model": "claude-haiku-4-20250514",
+                        "offline_mode": False,
+                        "servers": [
+                            {"name": "datadog", "label": "Datadog", "tools": ["search_logs"]}
+                        ],
+                        "github": {"connected": True, "repo": "acme/app", "mode": "live"},
+                        "sources": {"repo_path": "/app/repo", "logs_path": "/app/logs"},
+                        "has_key": True
+                    }
+                }
+            },
+        }
+    },
+)
 async def config() -> dict:
-    """Describe the running agent (provider, models, MCP servers) for the UI."""
+    """Get the running agent's configuration.
+
+    Returns details about the LLM provider, available MCP tool servers,
+    GitHub connection status, and configured data source paths.
+
+    Returns:
+        dict: Configuration object with provider, models, servers, and sources.
+    """
     main_model, fast_model = resolved_models()
     return {
         "provider": runtime.provider(),
@@ -769,8 +1062,34 @@ async def config() -> dict:
     }
 
 
-@app.get("/github/status")
+@app.get(
+    "/github/status",
+    tags=["Config"],
+    summary="Get GitHub connection status",
+    description="Returns the current GitHub connection status including connected repository "
+    "and mode (live or offline).",
+    response_description="GitHub connection status",
+    responses={
+        200: {
+            "description": "GitHub status",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "connected": True,
+                        "repo": "acme/api-server",
+                        "mode": "live"
+                    }
+                }
+            },
+        }
+    },
+)
 async def github_status() -> dict:
+    """Get GitHub connection status.
+
+    Returns:
+        dict: Status object with connected flag, repo name, and mode.
+    """
     return _github_status()
 
 
@@ -788,10 +1107,37 @@ def _normalize_repo(raw: str) -> str:
     return "/".join(parts[:2])  # owner/repo
 
 
-@app.post("/github/connect", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/github/connect",
+    tags=["Config"],
+    summary="Connect GitHub repository",
+    description="Validate a GitHub personal access token and connect to a repository. "
+    "Enables live GitHub operations (commits, PRs, workflow status) for investigations.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Successfully connected to GitHub"},
+        400: {"description": "Invalid token or repository format"},
+        401: {"description": "GitHub rejected the token"},
+        404: {"description": "Repository not found or token lacks access"},
+        502: {"description": "Could not reach GitHub API"},
+    },
+)
 async def github_connect(req: GithubConnectRequest) -> dict:
-    """Validate a GitHub token + repo against the real API, then switch the
-    GitHub MCP server into live mode (in-memory only — not persisted)."""
+    """Connect to a GitHub repository.
+
+    Validates the provided token against GitHub's API and stores the credentials
+    in memory for the duration of the session. All active investigation sessions
+    are rebuilt to pick up the new credentials.
+
+    Args:
+        req: GitHub token and repository (owner/repo or full URL).
+
+    Returns:
+        dict: GitHub status with connected repo details.
+
+    Raises:
+        HTTPException: If validation fails or GitHub is unreachable.
+    """
     token = req.token.strip()
     repo = _normalize_repo(req.repo)  # accept a URL or owner/repo
     if not token or repo.count("/") != 1:
@@ -826,17 +1172,69 @@ async def github_connect(req: GithubConnectRequest) -> dict:
     return status
 
 
-@app.post("/github/disconnect", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/github/disconnect",
+    tags=["Config"],
+    summary="Disconnect GitHub",
+    description="Disconnect from GitHub and revert to offline demo mode. Clears stored "
+    "credentials and rebuilds all active sessions.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Successfully disconnected from GitHub"},
+    },
+)
 async def github_disconnect() -> dict:
+    """Disconnect from GitHub.
+
+    Clears GitHub credentials and reverts to offline mode. All active
+    investigation sessions are rebuilt.
+
+    Returns:
+        dict: Updated GitHub status (offline mode).
+    """
     runtime.clear_github()
     await _evict_all()
     return _github_status()
 
 
-@app.post("/model/configure", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/model/configure",
+    tags=["Config"],
+    summary="Configure LLM provider",
+    description="Switch the LLM provider and model at runtime. Supports Anthropic, OpenAI, "
+    "Google Gemini, Groq, and DeepSeek. Changes take effect immediately for new investigations.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {
+            "description": "Model configured successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-20250514",
+                        "fast_model": "claude-haiku-4-20250514"
+                    }
+                }
+            },
+        },
+        400: {"description": "Invalid provider or missing API key"},
+    },
+)
 async def model_configure(req: ModelConfigRequest) -> dict:
-    """Switch the LLM provider/model (and key) at runtime. Pasting an Anthropic
-    key here unlocks Claude Opus 4.8 without touching .env."""
+    """Configure the LLM provider and model.
+
+    Switch providers at runtime without modifying environment variables.
+    All active sessions are rebuilt to use the new model.
+
+    Args:
+        req: Provider name, API key, and optional model overrides.
+
+    Returns:
+        dict: New provider and model configuration.
+
+    Raises:
+        HTTPException: If the provider is invalid or API key is missing.
+    """
     provider = req.provider.strip().lower()
     if provider not in {"anthropic", "openai", "gemini", "groq", "deepseek"}:
         raise HTTPException(
@@ -874,15 +1272,55 @@ def _set_source(path: str, kind: str, setter) -> str:
     return str(p)
 
 
-@app.post("/sources/repo", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/sources/repo",
+    tags=["Config"],
+    summary="Set repository source path",
+    description="Configure the local repository path for the repo MCP server. "
+    "Path must be within the allowed sources root.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Repository path configured"},
+        403: {"description": "Path outside allowed sources root"},
+        404: {"description": "Path does not exist"},
+    },
+)
 async def set_repo_source(req: SourcePathRequest) -> dict:
+    """Set the repository source path.
+
+    Args:
+        req: Path to the local repository directory.
+
+    Returns:
+        dict: Resolved repository path.
+    """
     resolved = _set_source(req.path, "repo", runtime.set_repo_path)
     await _evict_all()
     return {"repo_path": resolved}
 
 
-@app.post("/sources/logs", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/sources/logs",
+    tags=["Config"],
+    summary="Set logs source path",
+    description="Configure the local logs/metrics path for the logs MCP server. "
+    "Path must be within the allowed sources root.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Logs path configured"},
+        403: {"description": "Path outside allowed sources root"},
+        404: {"description": "Path does not exist"},
+    },
+)
 async def set_logs_source(req: SourcePathRequest) -> dict:
+    """Set the logs source path.
+
+    Args:
+        req: Path to the local logs/metrics directory.
+
+    Returns:
+        dict: Resolved logs path and any missing expected files.
+    """
     resolved = _set_source(req.path, "logs", runtime.set_logs_path)
     # Soft warning if the expected demo files aren't present.
     p = Path(resolved)
@@ -891,9 +1329,25 @@ async def set_logs_source(req: SourcePathRequest) -> dict:
     return {"logs_path": resolved, "missing_files": missing}
 
 
-@app.post("/reset", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/reset",
+    tags=["Config"],
+    summary="Reset configuration",
+    description="Revert all runtime configuration overrides back to the .env defaults. "
+    "This includes LLM provider, GitHub connection, and source paths.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Configuration reset to defaults"},
+    },
+)
 async def reset_config() -> dict:
-    """Revert all runtime overrides back to the .env defaults."""
+    """Reset all runtime configuration to .env defaults.
+
+    Clears all runtime overrides and rebuilds all active sessions.
+
+    Returns:
+        dict: New configuration state after reset.
+    """
     runtime.reset()
     await _evict_all()
     main_model, fast_model = resolved_models()
@@ -909,9 +1363,69 @@ async def reset_config() -> dict:
     }
 
 
-@app.post("/chat", response_model=ChatResponse,
-          dependencies=[Depends(require_perm("run_investigation")), Depends(quota_gate)])
+@app.post(
+    "/chat",
+    tags=["Chat"],
+    summary="Start or continue an investigation",
+    description="""
+Start a new AI-powered investigation or continue an existing one.
+
+The agent will:
+1. Analyze your question/alert description
+2. Query relevant data sources (logs, metrics, traces)
+3. Form and test hypotheses about root causes
+4. Return findings with a structured RCA report
+
+**Thread Management:**
+- Use the same `thread_id` to continue a conversation
+- Each thread maintains investigation context and history
+- Threads can be paused for approval and resumed
+
+**Response Status:**
+- `completed`: Investigation finished, check `report` for structured findings
+- `awaiting_approval`: Agent needs approval for risky action, use POST /approve
+- `error`: Something went wrong, check `answer` for details
+""",
+    response_model=ChatResponse,
+    dependencies=[Depends(require_perm("run_investigation")), Depends(quota_gate)],
+    responses={
+        200: {
+            "description": "Investigation turn completed",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "thread_id": "inv-abc123",
+                        "status": "completed",
+                        "answer": "The root cause was a memory leak...",
+                        "trace": ["Querying logs...", "Found 523 errors"],
+                        "report": {"summary": "Memory leak in connection pool", "severity": "SEV2"},
+                        "tokens_used": 4521
+                    }
+                }
+            },
+        },
+        400: {"description": "Empty message"},
+        402: {"description": "Monthly quota exceeded"},
+        409: {"description": "Thread is paused awaiting approval"},
+        413: {"description": "Message too long"},
+        429: {"description": "Rate limit or token budget exceeded"},
+    },
+)
 async def chat(req: ChatRequest) -> ChatResponse:
+    """Start or continue an investigation.
+
+    Send a message to the AI agent to investigate an incident. The agent
+    will query data sources, analyze findings, and return structured results.
+
+    Args:
+        req: Thread ID and message to investigate.
+
+    Returns:
+        ChatResponse: Investigation results with status, answer, and optional report.
+
+    Raises:
+        HTTPException: On validation errors or if thread is in approval state.
+    """
     _check_message(req.message)
     tid = _scoped(req.thread_id)  # tenant-namespaced internal key (client sees its own id)
     existed = tid in _SESSIONS
@@ -949,9 +1463,61 @@ async def chat(req: ChatRequest) -> ChatResponse:
     return _to_response(req.thread_id, result)
 
 
-@app.post("/approve", response_model=ChatResponse,
-          dependencies=[Depends(require_perm("approve_action"))])
+@app.post(
+    "/approve",
+    tags=["Approval"],
+    summary="Approve or reject a pending action",
+    description="""
+Approve or reject a risky action proposed by the AI agent.
+
+When an investigation reaches a point where it wants to perform a write operation
+(e.g., rollback a deployment, create a PR), it pauses and requests human approval.
+Use this endpoint to continue the investigation.
+
+**Approval Flow:**
+1. Agent proposes an action (response has `status: "awaiting_approval"`)
+2. Review the `approval_request` details (tool, args, risk level)
+3. Call this endpoint with `approved: true` or `approved: false`
+4. Agent continues or takes an alternative path
+
+**Audit Trail:**
+All approval decisions are logged in the audit trail with the actor identity.
+""",
+    response_model=ChatResponse,
+    dependencies=[Depends(require_perm("approve_action"))],
+    responses={
+        200: {
+            "description": "Approval processed, investigation continues",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "thread_id": "inv-abc123",
+                        "status": "completed",
+                        "answer": "Rollback completed successfully...",
+                        "trace": ["Executing rollback...", "Verifying service health"],
+                        "tokens_used": 1234
+                    }
+                }
+            },
+        },
+        404: {"description": "No pending approval for this thread"},
+    },
+)
 async def approve(req: ApproveRequest) -> ChatResponse:
+    """Approve or reject a pending action.
+
+    Continue an investigation that is paused awaiting approval. The agent
+    will either execute the approved action or find an alternative approach.
+
+    Args:
+        req: Thread ID, approval decision, and optional reason.
+
+    Returns:
+        ChatResponse: Continuation results after approval decision.
+
+    Raises:
+        HTTPException: If no pending approval exists for the thread.
+    """
     tid = _scoped(req.thread_id)
     async with _running_turn(tid):
         existed = tid in _SESSIONS
@@ -1006,11 +1572,56 @@ def _stream_payload(thread_id: str, ev: dict) -> dict:
     return out
 
 
-@app.post("/chat/stream",
-          dependencies=[Depends(require_perm("run_investigation")), Depends(quota_gate)])
+@app.post(
+    "/chat/stream",
+    tags=["Chat"],
+    summary="Stream an investigation (SSE)",
+    description="""
+Start an investigation with real-time streaming progress via Server-Sent Events.
+
+**Event Types:**
+- `trace`: Investigation step completed (contains `line` with step description)
+- `approval`: Agent needs approval (contains `approval_request` details)
+- `done`: Investigation complete (contains `answer`, `report`, `tokens_used`)
+- `error`: Something went wrong (contains error message in `answer`)
+
+**Example SSE Stream:**
+```
+data: {"type": "trace", "line": "Querying Datadog for error logs..."}
+
+data: {"type": "trace", "line": "Found 523 errors in the last hour"}
+
+data: {"type": "done", "status": "completed", "answer": "..."}
+```
+
+**Connection Handling:**
+- Abort the request to cancel the investigation
+- Server sends keep-alive pings to maintain connection
+""",
+    dependencies=[Depends(require_perm("run_investigation")), Depends(quota_gate)],
+    responses={
+        200: {
+            "description": "SSE stream of investigation events",
+            "content": {
+                "text/event-stream": {
+                    "example": 'data: {"type": "trace", "line": "Querying logs..."}\n\n'
+                }
+            },
+        },
+    },
+)
 async def chat_stream(req: ChatRequest):
-    """Stream an investigation live (SSE): one event per graph step, then a
-    terminal `approval` or `done` event."""
+    """Stream an investigation with real-time progress.
+
+    Returns a Server-Sent Events stream with trace events as the agent
+    investigates, followed by a terminal done or approval event.
+
+    Args:
+        req: Thread ID and message to investigate.
+
+    Returns:
+        EventSourceResponse: SSE stream of investigation events.
+    """
     _check_message(req.message)  # raise 400/413 before the stream opens
     tid = _scoped(req.thread_id)
     # Capture the tenant here (contextvar reliably set in the auth dependency) and
@@ -1068,9 +1679,36 @@ async def chat_stream(req: ChatRequest):
     return EventSourceResponse(gen())
 
 
-@app.post("/approve/stream", dependencies=[Depends(require_perm("approve_action"))])
+@app.post(
+    "/approve/stream",
+    tags=["Approval"],
+    summary="Stream approval continuation (SSE)",
+    description="Process an approval decision and stream the continuation via Server-Sent Events. "
+    "Same event format as /chat/stream.",
+    dependencies=[Depends(require_perm("approve_action"))],
+    responses={
+        200: {
+            "description": "SSE stream of continuation events",
+            "content": {
+                "text/event-stream": {
+                    "example": 'data: {"type": "trace", "line": "Executing approved action..."}\n\n'
+                }
+            },
+        },
+    },
+)
 async def approve_stream(req: ApproveRequest):
-    """Stream the resume of a paused (approval) turn via SSE."""
+    """Stream the continuation after an approval decision.
+
+    Returns a Server-Sent Events stream as the agent continues
+    after the approved/rejected action.
+
+    Args:
+        req: Thread ID, approval decision, and optional reason.
+
+    Returns:
+        EventSourceResponse: SSE stream of continuation events.
+    """
     tid = _scoped(req.thread_id)
     cfg = tenant_context.get_tenant()
 
@@ -1124,36 +1762,186 @@ async def approve_stream(req: ApproveRequest):
     return EventSourceResponse(gen())
 
 
-@app.get("/metrics")
+@app.get(
+    "/metrics",
+    tags=["Metrics"],
+    summary="Get real-time metrics",
+    description="Returns real-time metric series and error summaries from the configured "
+    "logs/metrics source. Used by the dashboard for visualizations.",
+    responses={
+        200: {
+            "description": "Metrics data",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "services": {
+                            "api-server": {
+                                "latency_p99": [{"ts": "2024-03-15T10:00:00Z", "value": 125.5}]
+                            }
+                        },
+                        "error_summary": {"total_errors": 523, "breakdown": []}
+                    }
+                }
+            },
+        }
+    },
+)
 async def metrics() -> dict:
-    """Real metric series + error summary from the active logs/metrics source."""
+    """Get real-time metrics from configured sources.
+
+    Returns:
+        dict: Services metrics and error summary.
+    """
     return metrics_source.read_all()
 
 
-@app.get("/metrics/slo")
+@app.get(
+    "/metrics/slo",
+    tags=["Metrics"],
+    summary="Get SLO metrics (Prometheus)",
+    description="Agent SLO metrics in Prometheus exposition format. Includes throughput, "
+    "success/abstention rates, token costs, and latency histograms. Scrape into Prometheus/Grafana.",
+    responses={
+        200: {
+            "description": "Prometheus metrics",
+            "content": {
+                "text/plain": {
+                    "example": "# HELP copilot_investigations_total Total investigations\ncopilot_investigations_total 42"
+                }
+            },
+        }
+    },
+)
 async def slo_metrics_endpoint():
-    """Agent SLO metrics in Prometheus exposition format (throughput, success/abstention,
-    token cost, latency histogram) — scrape into Prometheus/Grafana."""
+    """Get SLO metrics in Prometheus format.
+
+    Returns:
+        PlainTextResponse: Prometheus exposition format metrics.
+    """
     from fastapi.responses import PlainTextResponse
 
     from app.slo_metrics import metrics as slo
     return PlainTextResponse(slo().render(), media_type="text/plain; version=0.0.4")
 
 
-@app.get("/usage")
+@app.get(
+    "/usage",
+    tags=["Metrics"],
+    summary="Get usage statistics",
+    description="Current billing period usage and quota for the tenant. Shows investigations "
+    "used, remaining quota, and token consumption. Only applicable in multi-tenant mode.",
+    responses={
+        200: {
+            "description": "Usage statistics",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "multi_tenant": {
+                            "summary": "Multi-tenant usage",
+                            "value": {
+                                "plan": "team",
+                                "period": "2024-03",
+                                "investigations_used": 45,
+                                "investigations_quota": 100,
+                                "investigations_remaining": 55,
+                                "tokens_used": 125000
+                            }
+                        },
+                        "single_tenant": {
+                            "summary": "Single-tenant (no quotas)",
+                            "value": {
+                                "multi_tenant": False,
+                                "detail": "usage quotas apply in multi-tenant mode only"
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    },
+)
 async def usage() -> dict:
-    """Current-period usage + quota for the tenant (cost/limit transparency).
-    In single-tenant mode there are no per-tenant quotas, so it reports that."""
+    """Get current usage and quota information.
+
+    Returns:
+        dict: Usage summary with quota details, or message if not applicable.
+    """
     summary = await metering.usage_summary()
     if summary is None:
         return {"multi_tenant": False, "detail": "usage quotas apply in multi-tenant mode only"}
     return summary
 
 
-@app.post("/feedback")
+@app.get(
+    "/cache/stats",
+    tags=["Metrics"],
+    summary="Get cache statistics",
+    description="Returns cache backend statistics including hit rate, size, and evictions. "
+    "Useful for monitoring cache effectiveness.",
+    responses={
+        200: {
+            "description": "Cache statistics",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "hits": 1234,
+                        "misses": 56,
+                        "hit_rate": 0.956,
+                        "size": 128,
+                        "evictions": 12
+                    }
+                }
+            },
+        }
+    },
+)
+async def cache_stats() -> dict:
+    """Get cache backend statistics.
+
+    Returns:
+        dict: Cache hit rate, size, and eviction counts.
+    """
+    from app.cache import get_cache
+    return get_cache().stats()
+
+
+@app.post(
+    "/feedback",
+    tags=["Feedback"],
+    summary="Submit investigation feedback",
+    description="Submit thumbs up/down feedback on an investigation. Negative feedback on real "
+    "failures seeds the regression eval suite for continuous improvement.",
+    responses={
+        200: {
+            "description": "Feedback recorded",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "recorded",
+                        "feedback": {
+                            "thread_id": "inv-abc123",
+                            "rating": "up",
+                            "comment": "Accurate diagnosis"
+                        }
+                    }
+                }
+            },
+        },
+        400: {"description": "Invalid rating value"},
+    },
+)
 async def submit_feedback(req: FeedbackRequest) -> dict:
-    """Capture a thumbs up/down on an investigation. Thumbs-down on a real failure
-    is the seed for a regression eval case (the trust/learning loop)."""
+    """Submit feedback on an investigation.
+
+    Args:
+        req: Thread ID, rating (up/down), optional comment and question.
+
+    Returns:
+        dict: Confirmation with recorded feedback entry.
+
+    Raises:
+        HTTPException: If rating is invalid.
+    """
     try:
         entry = feedback.record_feedback(req.thread_id, req.rating, req.comment, req.question)
     except ValueError as exc:
@@ -1161,19 +1949,78 @@ async def submit_feedback(req: FeedbackRequest) -> dict:
     return {"status": "recorded", "feedback": entry}
 
 
-@app.get("/audit")
+@app.get(
+    "/audit",
+    tags=["Audit"],
+    summary="Query audit trail",
+    description="Query the audit trail for recent events. Returns approvals, model changes, "
+    "prompt-injection detections, and feedback events. Supports filtering by event type prefix.",
+    responses={
+        200: {
+            "description": "Audit events",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "events": [{
+                            "ts": "2024-03-15T10:30:00Z",
+                            "event": "approval.decided",
+                            "org_id": "acme-corp",
+                            "actor": "user@acme.com",
+                            "thread": "inv-abc123",
+                            "approved": True
+                        }]
+                    }
+                }
+            },
+        }
+    },
+)
 async def get_audit(limit: int = 100, event_prefix: str = "") -> dict:
-    """Queryable audit trail: recent who/what/when events (approvals, model
-    changes, prompt-injection detections, feedback), newest first. Auth-protected
-    like every other route — the read half of the compliance requirement."""
+    """Query the audit trail.
+
+    Args:
+        limit: Maximum events to return (1-1000, default 100).
+        event_prefix: Filter by event type prefix (e.g., "approval.").
+
+    Returns:
+        dict: List of audit events, newest first.
+    """
     limit = max(1, min(limit, 1000))
     return {"events": audit.recent(limit=limit, event_prefix=event_prefix)}
 
 
-@app.get("/audit/verify")
+@app.get(
+    "/audit/verify",
+    tags=["Audit"],
+    summary="Verify audit chain integrity",
+    description="Verify that the audit hash-chain is intact (tamper-evidence check). "
+    "Reports the first broken link if any tampering is detected.",
+    responses={
+        200: {
+            "description": "Verification result",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "valid": {
+                            "summary": "Chain intact",
+                            "value": {"valid": True, "count": 1542}
+                        },
+                        "invalid": {
+                            "summary": "Tampering detected",
+                            "value": {"valid": False, "broken_at": 1234}
+                        }
+                    }
+                }
+            },
+        }
+    },
+)
 async def audit_verify() -> dict:
-    """Verify the audit hash-chain is intact (tamper-evidence) — reports the first
-    broken link if any. The integrity artifact auditors request."""
+    """Verify audit chain integrity.
+
+    Returns:
+        dict: Verification result with valid flag and count or broken index.
+    """
     return audit.verify_chain()
 
 
@@ -1189,8 +2036,39 @@ def _current_org_id() -> str:
     return cfg.org_id
 
 
-@app.get("/admin/org", dependencies=[Depends(require_perm("view"))])
+@app.get(
+    "/admin/org",
+    tags=["Admin"],
+    summary="Get organization details",
+    description="Returns details about the current organization including name, plan, "
+    "member count, and active API keys. Requires multi-tenant mode.",
+    dependencies=[Depends(require_perm("view"))],
+    responses={
+        200: {
+            "description": "Organization details",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": "org_abc123",
+                        "name": "Acme Corp",
+                        "plan": "team",
+                        "members": 5,
+                        "active_api_keys": 3,
+                        "integrations": 4
+                    }
+                }
+            },
+        },
+        400: {"description": "Multi-tenant mode required"},
+        404: {"description": "Organization not found"},
+    },
+)
 async def admin_org() -> dict:
+    """Get organization details.
+
+    Returns:
+        dict: Organization info with member and key counts.
+    """
     org_id = _current_org_id()
     store = tenant_auth.get_store()
     org = await store.get_org(org_id)
@@ -1204,8 +2082,40 @@ async def admin_org() -> dict:
     }
 
 
-@app.get("/admin/api-keys", dependencies=[Depends(require_perm("manage_api_keys"))])
+@app.get(
+    "/admin/api-keys",
+    tags=["Admin"],
+    summary="List API keys",
+    description="List all API keys for the organization. Returns metadata only (not secrets). "
+    "Requires manage_api_keys permission.",
+    dependencies=[Depends(require_perm("manage_api_keys"))],
+    responses={
+        200: {
+            "description": "List of API keys",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "api_keys": [{
+                            "id": "key_abc123",
+                            "prefix": "dcp_abc",
+                            "name": "CI/CD Pipeline",
+                            "role": "responder",
+                            "created_at": "2024-03-01T00:00:00Z",
+                            "last_used_at": "2024-03-15T10:30:00Z",
+                            "active": True
+                        }]
+                    }
+                }
+            },
+        },
+    },
+)
 async def admin_list_api_keys() -> dict:
+    """List all API keys for the organization.
+
+    Returns:
+        dict: List of API key metadata (not secrets).
+    """
     org_id = _current_org_id()
     keys = await tenant_auth.get_store().list_api_keys(org_id)
     return {"api_keys": [
@@ -1215,8 +2125,40 @@ async def admin_list_api_keys() -> dict:
     ]}
 
 
-@app.post("/admin/api-keys", dependencies=[Depends(require_perm("manage_api_keys"))])
+@app.post(
+    "/admin/api-keys",
+    tags=["Admin"],
+    summary="Create API key",
+    description="Create a new API key for the organization. The secret is returned only once. "
+    "Subject to plan quota limits. Requires manage_api_keys permission.",
+    dependencies=[Depends(require_perm("manage_api_keys"))],
+    responses={
+        200: {
+            "description": "API key created",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "api_key": "dcp_xxxxxxxxxxxxxxxxxxxx",
+                        "id": "key_abc123",
+                        "role": "responder",
+                        "name": "CI/CD Pipeline",
+                        "note": "Store this now - the secret is shown only once."
+                    }
+                }
+            },
+        },
+        402: {"description": "API key quota exceeded"},
+    },
+)
 async def admin_create_api_key(req: CreateApiKeyRequest) -> dict:
+    """Create a new API key.
+
+    Args:
+        req: Key name and role.
+
+    Returns:
+        dict: New API key (secret shown only once).
+    """
     org_id = _current_org_id()
     store = tenant_auth.get_store()
     cfg = tenant_context.get_tenant()
@@ -1231,8 +2173,27 @@ async def admin_create_api_key(req: CreateApiKeyRequest) -> dict:
             "note": "Store this now — the secret is shown only once."}
 
 
-@app.delete("/admin/api-keys/{key_id}", dependencies=[Depends(require_perm("manage_api_keys"))])
+@app.delete(
+    "/admin/api-keys/{key_id}",
+    tags=["Admin"],
+    summary="Revoke API key",
+    description="Revoke an API key immediately. The key will no longer authenticate. "
+    "Requires manage_api_keys permission.",
+    dependencies=[Depends(require_perm("manage_api_keys"))],
+    responses={
+        200: {"description": "Key revoked"},
+        404: {"description": "Key not found or already revoked"},
+    },
+)
 async def admin_revoke_api_key(key_id: str) -> dict:
+    """Revoke an API key.
+
+    Args:
+        key_id: The API key ID to revoke.
+
+    Returns:
+        dict: Confirmation of revocation.
+    """
     org_id = _current_org_id()
     revoked = await tenant_auth.get_store().revoke_api_key(key_id, org_id=org_id)
     if not revoked:
@@ -1241,8 +2202,34 @@ async def admin_revoke_api_key(key_id: str) -> dict:
     return {"status": "revoked", "id": key_id}
 
 
-@app.post("/admin/members", dependencies=[Depends(require_perm("manage_members"))])
+@app.post(
+    "/admin/members",
+    tags=["Admin"],
+    summary="Add organization member",
+    description="Add a new member to the organization with the specified role. "
+    "Subject to plan seat quota. Requires manage_members permission.",
+    dependencies=[Depends(require_perm("manage_members"))],
+    responses={
+        200: {
+            "description": "Member added",
+            "content": {
+                "application/json": {
+                    "example": {"email": "user@acme.com", "role": "responder"}
+                }
+            },
+        },
+        402: {"description": "Seat quota exceeded"},
+    },
+)
 async def admin_add_member(req: AddMemberRequest) -> dict:
+    """Add a member to the organization.
+
+    Args:
+        req: Member email and role.
+
+    Returns:
+        dict: Added member details.
+    """
     org_id = _current_org_id()
     store = tenant_auth.get_store()
     cfg = tenant_context.get_tenant()
@@ -1255,15 +2242,56 @@ async def admin_add_member(req: AddMemberRequest) -> dict:
     return {"email": user.email, "role": m.role}
 
 
-@app.get("/admin/integrations", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.get(
+    "/admin/integrations",
+    tags=["Admin"],
+    summary="List integrations",
+    description="List configured integrations for the organization. Returns names only "
+    "(never secrets). Requires manage_integrations permission.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {
+            "description": "Integration names",
+            "content": {
+                "application/json": {
+                    "example": {"integrations": ["datadog", "pagerduty", "slack"]}
+                }
+            },
+        },
+    },
+)
 async def admin_list_integrations() -> dict:
+    """List configured integrations.
+
+    Returns:
+        dict: List of integration names (no secrets).
+    """
     org_id = _current_org_id()
     secrets = await tenant_auth.get_store().get_integration_secrets(org_id)
     return {"integrations": sorted(secrets.keys())}  # names only — never values
 
 
-@app.post("/admin/integrations", dependencies=[Depends(require_perm("manage_integrations"))])
+@app.post(
+    "/admin/integrations",
+    tags=["Admin"],
+    summary="Set integration secret",
+    description="Configure an integration secret (e.g., Datadog API key, PagerDuty token). "
+    "Requires manage_integrations permission.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Integration saved"},
+        400: {"description": "Integration name required"},
+    },
+)
 async def admin_set_integration(req: SetIntegrationRequest) -> dict:
+    """Set an integration secret.
+
+    Args:
+        req: Integration name and secret value.
+
+    Returns:
+        dict: Confirmation with integration name.
+    """
     org_id = _current_org_id()
     name = req.name.strip()
     if not name:
@@ -1273,8 +2301,33 @@ async def admin_set_integration(req: SetIntegrationRequest) -> dict:
     return {"status": "saved", "name": name}
 
 
-@app.patch("/admin/plan", dependencies=[Depends(require_perm("manage_billing"))])
+@app.patch(
+    "/admin/plan",
+    tags=["Admin"],
+    summary="Update organization plan",
+    description="Change the organization's subscription plan. Typically called by "
+    "billing webhooks. Requires manage_billing permission.",
+    dependencies=[Depends(require_perm("manage_billing"))],
+    responses={
+        200: {
+            "description": "Plan updated",
+            "content": {
+                "application/json": {
+                    "example": {"plan": "team"}
+                }
+            },
+        },
+    },
+)
 async def admin_set_plan(req: SetPlanRequest) -> dict:
+    """Update the organization plan.
+
+    Args:
+        req: New plan tier.
+
+    Returns:
+        dict: Updated plan.
+    """
     org_id = _current_org_id()
     plan = tn_models.normalize_plan(req.plan)
     await tenant_auth.get_store().set_plan(org_id, plan)
@@ -1301,9 +2354,28 @@ def _scim_guard(request: Request) -> str:
     return s.copilot_scim_org
 
 
-@app.post("/scim/v2/Users", status_code=201)
+@app.post(
+    "/scim/v2/Users",
+    tags=["Admin"],
+    summary="SCIM user provisioning",
+    description="SCIM 2.0 endpoint for IdP-pushed user provisioning. Creates a user and adds "
+    "them to the configured SCIM organization. Requires COPILOT_SCIM_TOKEN authentication.",
+    status_code=201,
+    responses={
+        201: {"description": "User provisioned"},
+        400: {"description": "Invalid SCIM payload"},
+        401: {"description": "Invalid SCIM token"},
+        403: {"description": "SCIM not configured"},
+    },
+)
 async def scim_create_user(request: Request) -> dict:
-    """SCIM 2.0 provisioning: create a user + org membership from an IdP push."""
+    """SCIM 2.0 user provisioning.
+
+    Creates a user and adds them to the SCIM organization with the default role.
+
+    Returns:
+        dict: SCIM user resource.
+    """
     from app.tenancy import scim
     org_id = _scim_guard(request)
     payload = scim.parse_scim_user(await request.json())
@@ -1317,9 +2389,31 @@ async def scim_create_user(request: Request) -> dict:
                              role=get_settings().copilot_scim_default_role)
 
 
-@app.api_route("/scim/v2/Users/{email}", methods=["PATCH", "DELETE"])
+@app.api_route(
+    "/scim/v2/Users/{email}",
+    methods=["PATCH", "DELETE"],
+    tags=["Admin"],
+    summary="SCIM user deprovisioning",
+    description="SCIM 2.0 endpoint for user deprovisioning. Removes the user's membership from "
+    "the SCIM organization. Requires COPILOT_SCIM_TOKEN authentication.",
+    responses={
+        200: {"description": "User deprovisioned"},
+        400: {"description": "Unsupported SCIM operation"},
+        401: {"description": "Invalid SCIM token"},
+        403: {"description": "SCIM not configured"},
+    },
+)
 async def scim_deprovision_user(email: str, request: Request) -> dict:
-    """SCIM 2.0 deprovisioning: remove the user's membership in the SCIM org."""
+    """SCIM 2.0 user deprovisioning.
+
+    Removes the user's membership from the SCIM organization.
+
+    Args:
+        email: User email to deprovision.
+
+    Returns:
+        dict: Deprovisioning confirmation.
+    """
     from app.tenancy import scim
     org_id = _scim_guard(request)
     # DELETE always deprovisions; PATCH deprovisions when it sets active=false.
@@ -1334,8 +2428,58 @@ async def scim_deprovision_user(email: str, request: Request) -> dict:
     return {"deprovisioned": removed, "email": email}
 
 
-@app.post("/signup")
+@app.post(
+    "/signup",
+    tags=["Admin"],
+    summary="Self-serve organization signup",
+    description="""
+Create a new organization and owner API key without prior authentication.
+
+**Requirements:**
+- Multi-tenant mode must be enabled (COPILOT_MULTI_TENANT=true)
+- Self-serve signup must be enabled (COPILOT_SIGNUP_ENABLED=true)
+
+**Restrictions:**
+- One organization per email address
+- Always provisions the FREE plan (upgrade via billing)
+- IP rate-limited to prevent abuse
+""",
+    responses={
+        200: {
+            "description": "Organization created",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "org_id": "org_abc123",
+                        "org_name": "Acme Corp",
+                        "plan": "free",
+                        "role": "owner",
+                        "api_key": "dcp_xxxxxxxxxxxxxxxxxxxx",
+                        "note": "Store this key now - it is shown only once."
+                    }
+                }
+            },
+        },
+        400: {"description": "Invalid input or multi-tenant not enabled"},
+        403: {"description": "Self-serve signup disabled"},
+        409: {"description": "Email already registered"},
+    },
+)
 async def signup(req: SignupRequest) -> dict:
+    """Create a new organization (self-serve signup).
+
+    Creates a new organization with the FREE plan and returns an owner API key.
+    The API key secret is shown only once.
+
+    Args:
+        req: Organization name and owner email.
+
+    Returns:
+        dict: New organization details and API key.
+
+    Raises:
+        HTTPException: If signup is disabled or email is already registered.
+    """
     s = get_settings()
     if not s.copilot_multi_tenant:
         raise HTTPException(400, "Self-serve signup requires multi-tenant mode (COPILOT_MULTI_TENANT=true).")
@@ -1451,11 +2595,60 @@ async def _slo_trigger(service: str, burn: dict) -> None:
     await _enqueue_investigation(incident)
 
 
-@app.post("/remediate")
+@app.post(
+    "/remediate",
+    tags=["Autonomy"],
+    summary="Execute autonomous remediation",
+    description="""
+Execute an autonomous remediation action with observation and auto-revert.
+
+**Safety Gates:**
+1. COPILOT_AUTONOMY must be enabled
+2. Confidence must be "high" for execution
+3. Only reversible actions allowed (rollback, restart)
+4. Dry-run mode by default (COPILOT_AUTONOMY_DRYRUN=true)
+
+**Observation Loop:**
+After executing, watches metrics for regression. If burn rate increases,
+automatically reverts to the previous state.
+
+**Available Actions:**
+- `rollback_deployment`: Roll back to previous revision
+- `restart_deployment`: Restart deployment pods
+""",
+    responses={
+        200: {
+            "description": "Remediation executed",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "applied",
+                        "action": "rollback_deployment",
+                        "target": "api-server",
+                        "dry_run": False,
+                        "observation": {"burn_rate": 0.02, "verdict": "healthy"}
+                    }
+                }
+            },
+        },
+        400: {"description": "Ineligible for remediation"},
+        403: {"description": "Autonomous remediation disabled"},
+    },
+)
 async def remediate(req: RemediateRequest) -> dict:
-    """Progressive-autonomy remediation: apply a REVERSIBLE fix, watch the signal,
-    auto-revert on regression. Doubly gated — 403 unless COPILOT_AUTONOMY, and a
-    dry-run unless COPILOT_AUTONOMY_DRYRUN=false — and only on high confidence."""
+    """Execute an autonomous remediation.
+
+    Applies a reversible fix, observes metrics, and auto-reverts on regression.
+
+    Args:
+        req: Action, target, confidence, and optional namespace.
+
+    Returns:
+        dict: Remediation result with status and observations.
+
+    Raises:
+        HTTPException: If autonomy is disabled or action is ineligible.
+    """
     from app.autonomy import AutonomyController, RemediationPlan, is_eligible
     from app.mcp.servers.datadog import server as _dd
     from app.mcp.servers.kubernetes import server as _k8s
@@ -1534,9 +2727,37 @@ def _claim_delivery(raw: bytes) -> bool:
     return True
 
 
-@app.post("/webhooks/pagerduty")
+@app.post(
+    "/webhooks/pagerduty",
+    tags=["Webhooks"],
+    summary="PagerDuty webhook receiver",
+    description="Receive PagerDuty v3 webhook events. On incident.triggered, automatically "
+    "starts an AI investigation. Requires valid HMAC signature (PAGERDUTY_WEBHOOK_SECRET).",
+    responses={
+        200: {
+            "description": "Webhook processed",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "accepted": {"value": {"status": "accepted", "incident": "PD-12345"}},
+                        "ignored": {"value": {"status": "ignored", "event": "incident.resolved"}},
+                        "duplicate": {"value": {"status": "duplicate", "incident": "PD-12345"}}
+                    }
+                }
+            },
+        },
+        400: {"description": "Invalid JSON body"},
+        401: {"description": "Invalid webhook signature"},
+    },
+)
 async def pagerduty_webhook(request: Request):
-    """PagerDuty v3 webhook → auto-start an investigation (HMAC-verified)."""
+    """Receive PagerDuty webhook events.
+
+    Verifies the HMAC signature and starts an investigation for triggered incidents.
+
+    Returns:
+        dict: Processing status and incident ID.
+    """
     raw = await request.body()
     s = get_settings()
     sig = request.headers.get("x-pagerduty-signature", "")
@@ -1562,10 +2783,36 @@ async def pagerduty_webhook(request: Request):
     return {"status": "accepted", "incident": incident["id"]}
 
 
-@app.post("/webhooks/stripe")
+@app.post(
+    "/webhooks/stripe",
+    tags=["Webhooks"],
+    summary="Stripe webhook receiver",
+    description="Receive Stripe subscription events. Maps subscription created/updated/deleted "
+    "to tenant plan changes. Requires valid signature (STRIPE_WEBHOOK_SECRET).",
+    responses={
+        200: {
+            "description": "Webhook processed",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "applied": {"value": {"status": "applied", "org_id": "org_123", "plan": "team"}},
+                        "ignored": {"value": {"status": "ignored", "type": "payment_intent.created"}}
+                    }
+                }
+            },
+        },
+        400: {"description": "Malformed event"},
+        401: {"description": "Invalid signature"},
+    },
+)
 async def stripe_webhook(request: Request) -> dict:
-    """Stripe subscription events → tenant plan. Verifies the signature (fails closed
-    without STRIPE_WEBHOOK_SECRET) and maps created/updated/deleted to store.set_plan."""
+    """Receive Stripe webhook events.
+
+    Verifies the signature and updates tenant plans based on subscription events.
+
+    Returns:
+        dict: Processing status, org ID, and new plan.
+    """
     import json as _json
     import time as _time
 
@@ -1590,9 +2837,33 @@ async def stripe_webhook(request: Request) -> dict:
     return {"status": "applied", "org_id": org_id, "plan": plan}
 
 
-@app.post("/webhooks/slack/interactions")
+@app.post(
+    "/webhooks/slack/interactions",
+    tags=["Webhooks"],
+    summary="Slack interactions receiver",
+    description="Receive Slack interactive component callbacks (button clicks). Maps Approve/Reject "
+    "buttons to investigation resume actions. Requires valid signature (SLACK_SIGNING_SECRET).",
+    responses={
+        200: {
+            "description": "Interaction processed",
+            "content": {
+                "application/json": {
+                    "example": {"text": "Approved - continuing the investigation."}
+                }
+            },
+        },
+        400: {"description": "Invalid payload"},
+        401: {"description": "Invalid signature"},
+    },
+)
 async def slack_interactions(request: Request):
-    """Slack interactive callback → map an Approve/Reject button to the resume."""
+    """Receive Slack interactive component callbacks.
+
+    Processes approval button clicks and resumes paused investigations.
+
+    Returns:
+        dict: Slack response message.
+    """
     raw = await request.body()
     s = get_settings()
     ts = request.headers.get("x-slack-request-timestamp", "")

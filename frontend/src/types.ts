@@ -120,17 +120,45 @@ export interface ChatResponse {
 }
 
 // One Server-Sent event from /chat/stream or /approve/stream.
+// Also used for WebSocket messages from /ws/chat/{thread_id}.
 export interface StreamEvent {
-  type: "trace" | "approval" | "done" | "error";
+  type: "trace" | "approval" | "done" | "error" | "connected" | "ping" | "pong";
   thread_id?: string;
   line?: string; // trace line
   status?: TurnStatus;
   answer?: string; // done / error
+  message?: string; // error message (WebSocket)
   approval_request?: ApprovalRequest | null;
   trace?: string[];
   report?: RcaReport | null;
   tokens_used?: number;
+  // WebSocket-specific fields
+  session_id?: string; // returned on "connected" event
+  timestamp?: number; // ping/pong timestamp
 }
+
+// WebSocket connection status
+export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
+
+// WebSocket outbound message types
+export interface WsChatMessage {
+  type: "chat";
+  thread_id: string;
+  message: string;
+}
+
+export interface WsApprovalMessage {
+  type: "approval";
+  thread_id: string;
+  approved: boolean;
+  reason?: string;
+}
+
+export interface WsPingMessage {
+  type: "ping";
+}
+
+export type WsOutboundMessage = WsChatMessage | WsApprovalMessage | WsPingMessage;
 
 // /metrics response (real series from the logs/metrics source).
 export interface MetricPoint {

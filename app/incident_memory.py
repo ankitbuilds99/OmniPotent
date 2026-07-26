@@ -97,10 +97,33 @@ def bm25_rank(query: str, records: list[dict], k1: float = 1.5, b: float = 0.75)
     return [{**rec, "score": round(score, 3)} for score, rec in scored]
 
 
-def search(query: str, limit: int = 3, corpus: str = "") -> list[dict]:
+def search(query: str, limit: int = 3, corpus: str = "", use_vectors: bool = True) -> list[dict]:
     """Top prior incidents similar to `query` (zero-score/no-overlap results dropped,
-    so a miss returns nothing rather than an arbitrary closest record)."""
-    ranked = bm25_rank(query, load_corpus(corpus))
+    so a miss returns nothing rather than an arbitrary closest record).
+
+    When vectors are enabled (COPILOT_VECTOR_STORE != none) and use_vectors=True,
+    uses hybrid search combining BM25 + vector similarity via RRF fusion. This
+    improves semantic recall while maintaining lexical grounding.
+
+    Falls back gracefully to pure BM25 when vectors are disabled or unavailable.
+    """
+    records = load_corpus(corpus)
+
+    # Try hybrid search if vectors are enabled
+    if use_vectors:
+        try:
+            from app.vector_store import is_vector_enabled, hybrid_search
+
+            if is_vector_enabled():
+                results = hybrid_search(query, records, limit=limit)
+                if results:
+                    return results
+        except Exception:
+            # Fall back to BM25 on any vector-related error
+            pass
+
+    # Pure BM25 fallback
+    ranked = bm25_rank(query, records)
     return [r for r in ranked if r["score"] > 0][:limit]
 
 
@@ -184,7 +207,11 @@ def learn_from_report(request: str, report: dict, date: str) -> dict | None:
     Gated to confident outcomes: a root cause must be established and the run must
     not have abstained — we don't want to pollute institutional memory with
     low-confidence guesses. Deduped by root cause so a repeated incident doesn't
-    accumulate duplicates. Returns the stored record, or None if skipped."""
+    accumulate duplicates. Returns the stored record, or None if skipped.
+
+    When vectors are enabled, also adds the record to the vector store for semantic
+    search.
+    """
     from app.config import get_settings
 
     if not get_settings().copilot_learn_incidents:
@@ -198,4 +225,17 @@ def learn_from_report(request: str, report: dict, date: str) -> dict | None:
         return None  # already learned this failure mode
 
     record = build_record(request, report, date=date, seq=len(existing))
-    return record if append_incident(record) else None
+    if not append_incident(record):
+        return None
+
+    # Also add to vector store if enabled
+    try:
+        from app.vector_store import is_vector_enabled, add_document
+
+        if is_vector_enabled():
+            add_document(record)
+    except Exception:
+        # Vector indexing failure is non-fatal; the record is in the JSON corpus
+        pass
+
+    return record

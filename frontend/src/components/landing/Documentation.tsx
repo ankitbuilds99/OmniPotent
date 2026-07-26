@@ -51,13 +51,19 @@ const DOCS_SECTIONS = [
     title: 'API Reference',
     icon: Code,
     color: '#7C3AED',
-    description: 'Complete API documentation',
+    description: 'Complete API documentation with OpenAPI spec',
     content: {
       endpoints: [
-        { method: 'POST', path: '/api/investigate', desc: 'Start an AI investigation' },
-        { method: 'GET', path: '/api/investigate/{id}', desc: 'Get investigation status' },
-        { method: 'POST', path: '/api/chat', desc: 'Send a chat message' },
-        { method: 'GET', path: '/api/health', desc: 'Health check endpoint' }
+        { method: 'POST', path: '/chat', desc: 'Start or continue an AI investigation' },
+        { method: 'POST', path: '/chat/stream', desc: 'Stream investigation progress (SSE)' },
+        { method: 'POST', path: '/approve', desc: 'Approve or reject a pending action' },
+        { method: 'GET', path: '/healthz', desc: 'Liveness probe' },
+        { method: 'GET', path: '/config', desc: 'Get agent configuration' }
+      ],
+      links: [
+        { label: 'Swagger UI', url: '/docs', desc: 'Interactive API explorer' },
+        { label: 'ReDoc', url: '/redoc', desc: 'Beautiful API documentation' },
+        { label: 'OpenAPI Spec', url: '/openapi.json', desc: 'Generate client SDKs' }
       ]
     }
   },
@@ -174,23 +180,44 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
       )}
 
       {section.id === 'api' && section.content.endpoints && (
-        <div className="space-y-3">
-          {section.content.endpoints.map((ep, i) => (
-            <div
-              key={i}
-              className="flex items-center gap-4 p-4 bg-white/5 rounded-lg border border-white/10"
-            >
-              <span
-                className={`px-2 py-1 rounded text-xs font-bold ${
-                  ep.method === 'GET' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'
-                }`}
-              >
-                {ep.method}
-              </span>
-              <code className="text-primary font-mono text-sm flex-1">{ep.path}</code>
-              <span className="text-white/50 text-sm">{ep.desc}</span>
+        <div className="space-y-6">
+          {/* API Links */}
+          {section.content.links && (
+            <div className="flex flex-wrap gap-3 mb-4">
+              {section.content.links.map((link: { label: string; url: string; desc: string }, i: number) => (
+                <a
+                  key={i}
+                  href={`${import.meta.env.VITE_API_URL ?? 'http://localhost:8000'}${link.url}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-lg text-primary text-sm font-medium transition-colors"
+                >
+                  {link.label}
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              ))}
             </div>
-          ))}
+          )}
+
+          {/* Endpoints */}
+          <div className="space-y-3">
+            {section.content.endpoints.map((ep: { method: string; path: string; desc: string }, i: number) => (
+              <div
+                key={i}
+                className="flex items-center gap-4 p-4 bg-white/5 rounded-lg border border-white/10"
+              >
+                <span
+                  className={`px-2 py-1 rounded text-xs font-bold ${
+                    ep.method === 'GET' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'
+                  }`}
+                >
+                  {ep.method}
+                </span>
+                <code className="text-primary font-mono text-sm flex-1">{ep.path}</code>
+                <span className="text-white/50 text-sm">{ep.desc}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

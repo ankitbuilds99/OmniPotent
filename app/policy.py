@@ -52,6 +52,12 @@ _POLICY: dict[str, tuple[Decision, Risk, str]] = {
     "scale_deployment": ("approve", "high", "Changes the replica count of a live deployment"),
     "rollback_deployment": ("approve", "high", "Rolls a deployment back to a previous revision"),
     "restart_deployment": ("approve", "medium", "Triggers a rolling restart of a deployment"),
+    # argocd (GitOps deployment management)
+    "sync_application": ("approve", "high", "Syncs an ArgoCD application (deploys from Git to cluster)"),
+    "rollback_application": ("approve", "high", "Rolls back an ArgoCD application to a previous revision"),
+    # terraform (infrastructure-as-code management)
+    "trigger_plan": ("approve", "medium", "Queues a Terraform plan on a workspace"),
+    "trigger_apply": ("approve", "high", "Applies a Terraform run (changes live infrastructure)"),
 }
 
 
@@ -115,6 +121,19 @@ def describe_action(tool_name: str, args: dict | None = None) -> str:
         return f"Acknowledge incident {_g('incident_id', 'id')}"
     if tool_name == "add_incident_note":
         return f"Add note to incident {_g('incident_id', 'id')}"
+    # argocd
+    if tool_name == "sync_application":
+        rev = _g('revision')
+        rev_str = f" to revision {rev}" if rev != "?" else ""
+        return f"Sync ArgoCD application {_g('name')}{rev_str}"
+    if tool_name == "rollback_application":
+        return f"Roll back ArgoCD application {_g('name')} to revision {_g('revision')}"
+    # terraform
+    if tool_name == "trigger_plan":
+        spec = " (speculative)" if args.get("speculative") else ""
+        return f"Trigger Terraform plan{spec} on workspace {_g('workspace')}"
+    if tool_name == "trigger_apply":
+        return f"Apply Terraform run {_g('run_id')}"
     return tool_name
 
 

@@ -231,3 +231,46 @@ export async function health(): Promise<boolean> {
     return false;
   }
 }
+
+// --------------------------------------------------------------------------- //
+// WebSocket support
+// --------------------------------------------------------------------------- //
+
+/** Get the WebSocket base URL (converts http(s) to ws(s)). */
+export function getWebSocketUrl(): string {
+  const url = new URL(BASE_URL);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString().replace(/\/$/, "");
+}
+
+/** Get the auth token for WebSocket connections. */
+export function getAuthToken(): string {
+  return TOKEN;
+}
+
+/** Health check response type with WebSocket info. */
+export interface HealthResponse {
+  status: string;
+  active_sessions: number;
+  websocket?: {
+    total_connections: number;
+    enabled: boolean;
+  };
+}
+
+/** Extended health check that includes WebSocket status. */
+export async function healthExtended(): Promise<HealthResponse | null> {
+  try {
+    const res = await fetch(`${BASE_URL}/healthz`);
+    if (!res.ok) return null;
+    return res.json() as Promise<HealthResponse>;
+  } catch {
+    return null;
+  }
+}
+
+/** Check if WebSocket is enabled on the server. */
+export async function isWebSocketEnabled(): Promise<boolean> {
+  const health = await healthExtended();
+  return health?.websocket?.enabled ?? false;
+}

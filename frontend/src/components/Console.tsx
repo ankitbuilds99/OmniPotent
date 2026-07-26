@@ -75,8 +75,23 @@ function TopBar({
 }
 
 export function Console({ onHome }: { onHome: () => void }) {
-  const { turns, busy, awaitingApproval, send, respond, stop, newConversation, sendFeedback } =
-    useCopilot();
+  const {
+    turns,
+    busy,
+    awaitingApproval,
+    send,
+    respond,
+    stop,
+    newConversation,
+    sendFeedback,
+    // WebSocket state - available for future UI enhancements (e.g., connection indicator)
+    wsEnabled: _wsEnabled,
+    wsAvailable: _wsAvailable,
+    wsStatus: _wsStatus,
+    toggleWebSocket: _toggleWebSocket,
+  } = useCopilot();
+  // Suppress unused variable warnings - these are intentionally available for UI features
+  void _wsEnabled; void _wsAvailable; void _wsStatus; void _toggleWebSocket;
   const endRef = useRef<HTMLDivElement>(null);
   useMe();
   const [adminOpen, setAdminOpen] = useState(false);

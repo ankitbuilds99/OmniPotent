@@ -21,7 +21,7 @@ from app.config import get_settings
 
 _SERVERS = (
     "datadog", "repo", "github", "pagerduty", "kubernetes", "sentry", "memory",
-    "traces", "deploys",
+    "traces", "deploys", "argocd", "terraform",
 )
 
 
@@ -126,6 +126,26 @@ def _server_config() -> dict:
             "env": {
                 "DEPLOYS_API_URL": _isecret("DEPLOYS_API_URL", s.deploys_api_url),
                 "DEPLOYS_API_TOKEN": _isecret("DEPLOYS_API_TOKEN", s.deploys_api_token),
+            },
+        },
+        "argocd": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.argocd.server"],
+            "transport": "stdio",
+            # ARGOCD_SERVER_URL + ARGOCD_AUTH_TOKEN enable live mode; blank = offline fixtures.
+            "env": {
+                "ARGOCD_SERVER_URL": _isecret("ARGOCD_SERVER_URL", s.argocd_server_url),
+                "ARGOCD_AUTH_TOKEN": _isecret("ARGOCD_AUTH_TOKEN", s.argocd_auth_token),
+            },
+        },
+        "terraform": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.terraform.server"],
+            "transport": "stdio",
+            # TERRAFORM_CLOUD_TOKEN enables live mode; blank = offline fixtures.
+            "env": {
+                "TERRAFORM_CLOUD_TOKEN": _isecret("TERRAFORM_CLOUD_TOKEN", s.terraform_cloud_token),
+                "TERRAFORM_ORGANIZATION": _isecret("TERRAFORM_ORGANIZATION", s.terraform_organization),
             },
         },
     }

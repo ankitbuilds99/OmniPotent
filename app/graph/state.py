@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph.message import add_messages
 
 Status = Literal["investigating", "awaiting_approval", "done", "failed"]
+
+# Multi-agent phases for tracking investigation progress
+MultiAgentPhase = Literal[
+    "initial",
+    "investigating",
+    "root_cause_found",
+    "remediating",
+    "reviewing",
+    "awaiting_approval",
+    "executing",
+    "verifying",
+    "complete",
+    "failed",
+]
 
 
 def _add_int(existing: int | None, update: int | None) -> int:
@@ -54,3 +68,21 @@ class AgentState(TypedDict, total=False):
 
     # Lifecycle marker, used by the API/CLI to know when to stop.
     status: Status
+
+    # --- Multi-agent mode fields ---
+    # These fields are only used when COPILOT_MULTI_AGENT_ENABLED is true.
+
+    # Serialized SharedContext for cross-agent coordination. Contains evidence,
+    # hypotheses, timeline, and inter-agent messages. Persisted so the multi-agent
+    # investigation can be resumed across API calls.
+    multi_agent_context: dict[str, Any] | None
+
+    # Current phase in the multi-agent workflow (see MultiAgentPhase type).
+    multi_agent_phase: MultiAgentPhase
+
+    # Which agent is currently active (orchestrator, investigator, remediation, reviewer).
+    multi_agent_agent: str
+
+    # Pending tool calls that need to be executed. Set by agent nodes when they
+    # request tool execution; cleared by the tools node after execution.
+    pending_tool_calls: list[dict[str, Any]] | None

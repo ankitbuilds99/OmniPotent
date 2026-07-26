@@ -44,6 +44,19 @@ providers = [
 postgres = ["langgraph-checkpoint-postgres>=2.0.0"]  # COPILOT_CHECKPOINT_DB=postgres://...
 secrets = ["cryptography>=42.0"]                     # per-tenant secret vault
 apm = ["ddtrace>=4.0"]                               # Datadog APM (DD_TRACE_ENABLED=true)
+# Vector RAG (embeddings for semantic incident search):
+vectors = [
+    "chromadb>=0.5.0",              # ChromaDB vector store (COPILOT_VECTOR_STORE=chromadb)
+    "openai>=1.0.0",                # OpenAI embeddings (text-embedding-3-small/large)
+]
+vectors-local = [
+    "chromadb>=0.5.0",
+    "sentence-transformers>=2.2.0", # Local embeddings (all-MiniLM-L6-v2, all-mpnet-base-v2)
+]
+vectors-faiss = [
+    "faiss-cpu>=1.7.0",             # FAISS vector store (COPILOT_VECTOR_STORE=faiss)
+    "openai>=1.0.0",
+]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
