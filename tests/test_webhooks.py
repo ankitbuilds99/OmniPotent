@@ -24,7 +24,10 @@ _PROVIDER_KEYS = (
 @pytest.fixture
 def client(monkeypatch):
     for k in _PROVIDER_KEYS:  # ensure no LLM key -> webhook never spawns a real run
-        monkeypatch.delenv(k, raising=False)
+        # Set to empty string, not delenv — env vars override .env file values, so
+        # this clears the key even if .env has one; delenv only removes from os.environ
+        # and the .env file's value would still be loaded by pydantic-settings.
+        monkeypatch.setenv(k, "")
     cfg.get_settings.cache_clear()
     api._RL.clear()
     runtime.reset()

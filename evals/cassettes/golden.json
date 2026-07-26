@@ -54,6 +54,22 @@
       "type": "ai"
     }
   },
+  "66a8d0de91e9a5916f10dcad11138889c328f3bc22414a22f51d4cef8bf5d93a": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "The services currently emitting logs are checkout-svc and inventory-svc.",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
   "6daa32678bd45585a0d5d8e2258c9f1cabf20fb6ac9846b0b351ad66df3fcc6a": {
     "response": {
       "data": {
@@ -80,6 +96,29 @@
         "name": null,
         "response_metadata": {},
         "tool_calls": [],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
+  "ef3f817daf30c54c76603ec639ced0e05390090dafcdcd1692dabc5181c928d9": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [
+          {
+            "args": {},
+            "id": "call_list_services",
+            "name": "list_services",
+            "type": "tool_call"
+          }
+        ],
         "type": "ai",
         "usage_metadata": null
       },
