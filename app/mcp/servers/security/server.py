@@ -440,7 +440,7 @@ def scan_kubernetes(path: str = ".", manifest_pattern: str = "*.yaml") -> dict:
     scanned_files: list[str] = []
 
     k8s_dirs = ["k8s", "kubernetes", "manifests", "deploy", "deployments", "."]
-    manifest_files = []
+    manifest_files: list[Path] = []
 
     for k8s_dir in k8s_dirs:
         dir_path = target / k8s_dir if k8s_dir != "." else target

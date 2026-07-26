@@ -432,16 +432,18 @@ def _detect_language(repo_path: Path) -> dict:
         "java-spring": ["build.gradle", "pom.xml"],
     }
 
-    detected = {"language": "unknown", "framework": "unknown", "files": []}
+    detected: dict[str, object] = {"language": "unknown", "framework": "unknown", "files": []}
+    files_found: list[str] = []
 
     for template_key, files in indicators.items():
         for f in files:
             if (repo_path / f).exists():
-                detected["files"].append(f)
+                files_found.append(f)
                 lang, _, framework = template_key.partition("-")
                 detected["language"] = lang
                 detected["framework"] = framework or lang
                 detected["template"] = template_key
+                detected["files"] = files_found
                 break
         if detected["language"] != "unknown":
             break

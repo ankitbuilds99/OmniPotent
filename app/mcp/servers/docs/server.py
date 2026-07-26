@@ -44,7 +44,7 @@ def _safe_path(relative: str) -> Path:
 
 def _detect_project_info(repo_path: Path) -> dict:
     """Detect project information for documentation."""
-    info = {
+    info: dict[str, object] = {
         "name": repo_path.name,
         "description": "",
         "language": "unknown",
@@ -57,6 +57,9 @@ def _detect_project_info(repo_path: Path) -> dict:
         "dependencies": [],
         "entry_points": [],
     }
+    scripts: dict[str, str] = {}
+    dependencies: list[str] = []
+    entry_points: list[str] = []
 
     if (repo_path / "package.json").exists():
         try:
@@ -65,7 +68,8 @@ def _detect_project_info(repo_path: Path) -> dict:
             info["description"] = pkg.get("description", "")
             info["language"] = "JavaScript/TypeScript"
             info["package_manager"] = "npm"
-            info["scripts"] = pkg.get("scripts", {})
+            scripts = pkg.get("scripts", {})
+            info["scripts"] = scripts
             deps = pkg.get("dependencies", {})
             if "react" in deps:
                 info["framework"] = "React"
@@ -75,10 +79,12 @@ def _detect_project_info(repo_path: Path) -> dict:
                 info["framework"] = "Express"
             elif "vue" in deps:
                 info["framework"] = "Vue"
-            info["has_tests"] = "test" in info["scripts"]
-            info["dependencies"] = list(deps.keys())[:10]
+            info["has_tests"] = "test" in scripts
+            dependencies = list(deps.keys())[:10]
+            info["dependencies"] = dependencies
             if pkg.get("main"):
-                info["entry_points"].append(pkg["main"])
+                entry_points.append(pkg["main"])
+            info["entry_points"] = entry_points
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -730,13 +736,11 @@ def analyze_documentation(path: str = ".") -> dict:
     if not target.exists():
         return {"error": f"path '{path}' not found"}
 
-    analysis = {
-        "files_found": [],
-        "missing": [],
-        "issues": [],
-        "score": 100,
-        "recommendations": [],
-    }
+    files_found: list[str] = []
+    missing: list[dict[str, str]] = []
+    issues: list[dict[str, str]] = []
+    score = 100
+    recommendations: list[str] = []
 
     expected_files = [
         ("README.md", "Project overview and getting started"),
@@ -749,10 +753,10 @@ def analyze_documentation(path: str = ".") -> dict:
     for fname, desc in expected_files:
         fpath = target / fname
         if fpath.exists():
-            analysis["files_found"].append(fname)
+            files_found.append(fname)
         else:
-            analysis["missing"].append({"file": fname, "purpose": desc})
-            analysis["score"] -= 10
+            missing.append({"file": fname, "purpose": desc})
+            score -= 10
 
     readme_path = target / "README.md"
     if readme_path.exists():
@@ -760,28 +764,28 @@ def analyze_documentation(path: str = ".") -> dict:
             content = readme_path.read_text()
 
             if len(content) < 500:
-                analysis["issues"].append({
+                issues.append({
                     "file": "README.md",
                     "issue": "README is too short",
                     "suggestion": "Add more detailed documentation",
                 })
-                analysis["score"] -= 10
+                score -= 10
 
             if "## Installation" not in content and "# Installation" not in content:
-                analysis["issues"].append({
+                issues.append({
                     "file": "README.md",
                     "issue": "Missing installation instructions",
                     "suggestion": "Add installation section",
                 })
-                analysis["score"] -= 5
+                score -= 5
 
             if "## Usage" not in content and "# Usage" not in content:
-                analysis["issues"].append({
+                issues.append({
                     "file": "README.md",
                     "issue": "Missing usage instructions",
                     "suggestion": "Add usage examples",
                 })
-                analysis["score"] -= 5
+                score -= 5
 
         except OSError:
             pass
@@ -793,27 +797,34 @@ def analyze_documentation(path: str = ".") -> dict:
             for f in target.rglob("*")
         )
         if not has_api_docs:
-            analysis["recommendations"].append(
+            recommendations.append(
                 "Consider adding OpenAPI/Swagger documentation for API endpoints"
             )
 
     if not (target / "docs").is_dir():
-        analysis["recommendations"].append(
+        recommendations.append(
             "Create a docs/ directory for detailed documentation"
         )
 
-    analysis["score"] = max(0, analysis["score"])
+    score = max(0, score)
 
-    if analysis["score"] >= 80:
-        analysis["grade"] = "A"
-    elif analysis["score"] >= 60:
-        analysis["grade"] = "B"
-    elif analysis["score"] >= 40:
-        analysis["grade"] = "C"
+    if score >= 80:
+        grade = "A"
+    elif score >= 60:
+        grade = "B"
+    elif score >= 40:
+        grade = "C"
     else:
-        analysis["grade"] = "D"
+        grade = "D"
 
-    return analysis
+    return {
+        "files_found": files_found,
+        "missing": missing,
+        "issues": issues,
+        "score": score,
+        "recommendations": recommendations,
+        "grade": grade,
+    }
 
 
 @mcp.tool()
@@ -877,7 +888,7 @@ def generate_changelog(
     if not commits:
         return {"message": "No commits found", "commits": []}
 
-    categorized = {
+    categorized: dict[str, list[dict[str, str]]] = {
         "Added": [],
         "Changed": [],
         "Fixed": [],

@@ -69,7 +69,7 @@ AWS_PRICING: dict[str, dict[str, float]] = {
     },
 }
 
-DEMO_COSTS: dict[str, list[dict]] = {
+DEMO_COSTS: dict[str, object] = {
     "daily": [
         {"date": "2026-07-20", "cost": 245.67, "service": "EC2", "region": "us-east-1"},
         {"date": "2026-07-20", "cost": 89.42, "service": "RDS", "region": "us-east-1"},
@@ -230,9 +230,10 @@ def analyze_costs(
         Cost breakdown with trends and anomalies
     """
     if OFFLINE:
-        by_service = DEMO_COSTS["by_service"]
-        total_current = sum(s["current_month"] for s in by_service.values())
-        total_previous = sum(s["previous_month"] for s in by_service.values())
+        by_service_data = DEMO_COSTS["by_service"]
+        by_service: dict[str, dict[str, float]] = by_service_data if isinstance(by_service_data, dict) else {}
+        total_current = sum(float(s["current_month"]) for s in by_service.values())
+        total_previous = sum(float(s["previous_month"]) for s in by_service.values())
         change_pct = ((total_current - total_previous) / total_previous * 100
                       if total_previous > 0 else 0)
 
@@ -240,7 +241,7 @@ def analyze_costs(
             {"service": name, "change": f"+{data['change_pct']:.1f}%",
              "message": f"{name} costs increased significantly"}
             for name, data in by_service.items()
-            if data["change_pct"] > 15
+            if float(data["change_pct"]) > 15
         ]
 
         return {
@@ -257,7 +258,7 @@ def analyze_costs(
                 for name, data in by_service.items()
             },
             "top_services": sorted(
-                [(name, data["current_month"]) for name, data in by_service.items()],
+                [(name, float(data["current_month"])) for name, data in by_service.items()],
                 key=lambda x: x[1], reverse=True
             )[:5],
             "anomalies": anomalies,
@@ -465,10 +466,12 @@ def cost_forecast(
         months_ahead = 3
 
     if OFFLINE:
-        current_monthly = sum(s["current_month"] for s in DEMO_COSTS["by_service"].values())
+        by_service_data = DEMO_COSTS["by_service"]
+        by_service_typed: dict[str, dict[str, float]] = by_service_data if isinstance(by_service_data, dict) else {}
+        current_monthly = sum(float(s["current_month"]) for s in by_service_typed.values())
         growth_rate = 0.05
 
-        forecast = []
+        forecast: list[dict[str, object]] = []
         base_date = datetime(2026, 7, 1)
 
         for i in range(1, months_ahead + 1):
@@ -482,22 +485,23 @@ def cost_forecast(
                 "confidence": "medium",
             })
 
-        potential_savings = 0
+        potential_savings = 0.0
         if include_optimization:
             rightsizing = rightsizing_recommendations()
             unused = detect_unused()
             potential_savings = (
-                rightsizing.get("total_monthly_savings", 0) +
-                unused.get("total_monthly_waste", 0)
+                float(rightsizing.get("total_monthly_savings", 0)) +
+                float(unused.get("total_monthly_waste", 0))
             )
 
-        optimized_forecast = [
-            {
+        optimized_forecast: list[dict[str, object]] = []
+        for f in forecast:
+            projected_obj = f.get("projected_cost", 0)
+            projected_float: float = float(projected_obj) if isinstance(projected_obj, (int, float)) else 0.0
+            optimized_forecast.append({
                 **f,
-                "optimized_cost": round(f["projected_cost"] - potential_savings, 2),
-            }
-            for f in forecast
-        ]
+                "optimized_cost": round(projected_float - potential_savings, 2),
+            })
 
         return {
             "current_monthly_cost": round(current_monthly, 2),

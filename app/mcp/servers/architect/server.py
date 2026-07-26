@@ -376,7 +376,7 @@ def _detect_services(repo_path: Path) -> list[dict]:
 
 def _detect_databases(repo_path: Path) -> list[dict]:
     """Detect database usage in a repository."""
-    databases = []
+    databases: list[dict[str, str]] = []
 
     db_indicators = {
         "postgresql": ["psycopg2", "asyncpg", "pg", "postgres"],
