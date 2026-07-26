@@ -1,12 +1,10 @@
 """Cache module tests — backends, key generation, decorators, and stats."""
 
 import asyncio
-import json
 
 import pytest
 
 from app.cache import (
-    CacheBackend,
     MemoryCache,
     NullCache,
     RedisCache,
