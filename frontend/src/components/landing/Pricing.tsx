@@ -154,7 +154,7 @@ function PricingCard({
       {/* CTA */}
       <motion.button
         className={`
-          w-full py-4 rounded-xl font-display font-semibold transition-all duration-300
+          w-full py-4 rounded-xl font-display font-semibold transition-all duration-300 cursor-pointer
           ${plan.popular
             ? 'bg-gradient-to-r from-primary to-accent text-background shadow-glow-primary'
             : 'bg-glass border border-glass-border text-white hover:border-primary'
@@ -162,7 +162,7 @@ function PricingCard({
         `}
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
-        onClick={onLaunch}
+        onClick={() => onLaunch?.()}
       >
         {plan.cta}
       </motion.button>
