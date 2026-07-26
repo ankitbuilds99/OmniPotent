@@ -23,7 +23,8 @@ const BLOG_POSTS = [
     icon: Cpu,
     color: '#00E7FF',
     featured: true,
-    tags: ['AI', 'LangGraph', 'DevOps', 'Python']
+    tags: ['AI', 'LangGraph', 'DevOps', 'Python'],
+    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot#readme'
   },
   {
     id: 2,
@@ -36,7 +37,8 @@ const BLOG_POSTS = [
     icon: TrendingUp,
     color: '#00FFB3',
     featured: false,
-    tags: ['Incident Response', 'Automation', 'Metrics']
+    tags: ['Incident Response', 'Automation', 'Metrics'],
+    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot#features'
   },
   {
     id: 3,
@@ -49,7 +51,8 @@ const BLOG_POSTS = [
     icon: Lightbulb,
     color: '#FF9900',
     featured: false,
-    tags: ['AI Safety', 'Best Practices', 'Security']
+    tags: ['AI Safety', 'Best Practices', 'Security'],
+    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot#human-in-the-loop-approval'
   },
   {
     id: 4,
@@ -62,7 +65,8 @@ const BLOG_POSTS = [
     icon: GitMerge,
     color: '#7C3AED',
     featured: false,
-    tags: ['Integration', 'API', 'Tutorial']
+    tags: ['Integration', 'API', 'Tutorial'],
+    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot/tree/main/app/mcp'
   }
 ]
 
@@ -70,14 +74,20 @@ function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
   const Icon = post.icon
 
   return (
-    <motion.article
-      className="group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-white/5 to-transparent hover:border-primary/30 transition-all duration-300 cursor-pointer"
-      initial={{ opacity: 0, y: 40 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true }}
-      transition={{ duration: 0.5 }}
-      whileHover={{ y: -5 }}
+    <a
+      href={post.url}
+      target="_blank"
+      rel="noreferrer"
+      className="block"
     >
+      <motion.article
+        className="group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-white/5 to-transparent hover:border-primary/30 transition-all duration-300 cursor-pointer"
+        initial={{ opacity: 0, y: 40 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true }}
+        transition={{ duration: 0.5 }}
+        whileHover={{ y: -5 }}
+      >
       {/* Featured badge */}
       <div className="absolute top-4 left-4 z-10">
         <span className="px-3 py-1 bg-primary/20 text-primary text-xs font-semibold rounded-full border border-primary/30">
@@ -143,7 +153,8 @@ function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
           </div>
         </div>
       </div>
-    </motion.article>
+      </motion.article>
+    </a>
   )
 }
 
@@ -151,14 +162,20 @@ function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }
   const Icon = post.icon
 
   return (
-    <motion.article
-      className="group relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.02] hover:border-primary/30 hover:bg-white/[0.04] transition-all duration-300 cursor-pointer"
-      initial={{ opacity: 0, y: 30 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true }}
-      transition={{ duration: 0.4, delay: index * 0.1 }}
-      whileHover={{ y: -3 }}
+    <a
+      href={post.url}
+      target="_blank"
+      rel="noreferrer"
+      className="block"
     >
+      <motion.article
+        className="group relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.02] hover:border-primary/30 hover:bg-white/[0.04] transition-all duration-300 cursor-pointer h-full"
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true }}
+        transition={{ duration: 0.4, delay: index * 0.1 }}
+        whileHover={{ y: -3 }}
+      >
       {/* Header with icon */}
       <div
         className="h-32 flex items-center justify-center"
@@ -216,7 +233,8 @@ function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }
           </span>
         </div>
       </div>
-    </motion.article>
+      </motion.article>
+    </a>
   )
 }
 

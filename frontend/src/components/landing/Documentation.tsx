@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
   Book,
   Code,
@@ -11,9 +11,11 @@ import {
   Cloud,
   Shield,
   ChevronRight,
+  ChevronDown,
   Copy,
   Check,
-  ExternalLink
+  ExternalLink,
+  X
 } from 'lucide-react'
 
 const DOCS_SECTIONS = [
@@ -98,7 +100,7 @@ const FEATURES_DOCS = [
   { icon: Shield, title: 'Human-in-Loop', desc: 'Approval required for all write operations' }
 ]
 
-function CodeBlock({ code, language: _language = 'bash' }: { code: string; language?: string }) {
+function CodeBlock({ code }: { code: string }) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = () => {
@@ -234,6 +236,7 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
 }
 
 export function Documentation() {
+  const [isOpen, setIsOpen] = useState(false)
   const [activeSection, setActiveSection] = useState('quickstart')
 
   return (
@@ -242,7 +245,7 @@ export function Documentation() {
 
       <div className="container-wide relative z-10">
         {/* Header */}
-        <div className="text-center mb-16">
+        <div className="text-center mb-12">
           <motion.span
             className="inline-block text-primary text-sm font-semibold tracking-wider uppercase mb-4"
             initial={{ opacity: 0, y: 20 }}
@@ -261,7 +264,7 @@ export function Documentation() {
             Everything you need to <span className="gradient-text">get started</span>
           </motion.h2>
           <motion.p
-            className="text-white/50 text-lg max-w-2xl mx-auto"
+            className="text-white/50 text-lg max-w-2xl mx-auto mb-8"
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
@@ -269,11 +272,27 @@ export function Documentation() {
           >
             Comprehensive guides, API references, and examples
           </motion.p>
+
+          {/* Open Docs Button */}
+          <motion.button
+            onClick={() => setIsOpen(!isOpen)}
+            className="inline-flex items-center gap-3 px-8 py-4 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-xl text-primary font-semibold transition-all cursor-pointer"
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ delay: 0.3 }}
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <Book className="w-5 h-5" />
+            {isOpen ? 'Close Documentation' : 'Open Documentation'}
+            {isOpen ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+          </motion.button>
         </div>
 
-        {/* Features grid */}
+        {/* Features grid - always visible */}
         <motion.div
-          className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-16"
+          className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8"
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
@@ -284,7 +303,8 @@ export function Documentation() {
             return (
               <div
                 key={i}
-                className="p-4 bg-white/5 rounded-xl border border-white/10 hover:border-primary/30 transition-colors"
+                className="p-4 bg-white/5 rounded-xl border border-white/10 hover:border-primary/30 transition-colors cursor-pointer"
+                onClick={() => setIsOpen(true)}
               >
                 <Icon className="w-8 h-8 text-primary mb-3" />
                 <h4 className="font-semibold text-white mb-1">{feature.title}</h4>
@@ -294,67 +314,82 @@ export function Documentation() {
           })}
         </motion.div>
 
-        {/* Docs content */}
-        <motion.div
-          className="grid lg:grid-cols-4 gap-8"
-          initial={{ opacity: 0, y: 40 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ delay: 0.4 }}
-        >
-          {/* Sidebar */}
-          <div className="lg:col-span-1">
-            <nav className="space-y-2 sticky top-24">
-              {DOCS_SECTIONS.map((section) => {
-                const Icon = section.icon
-                const isActive = activeSection === section.id
-                return (
-                  <button
-                    key={section.id}
-                    onClick={() => setActiveSection(section.id)}
-                    className={`
-                      w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all cursor-pointer
-                      ${isActive
-                        ? 'bg-primary/10 border border-primary/30 text-white'
-                        : 'bg-white/5 border border-transparent text-white/60 hover:text-white hover:bg-white/10'
-                      }
-                    `}
-                  >
-                    <Icon
-                      className="w-5 h-5"
-                      style={{ color: isActive ? section.color : undefined }}
+        {/* Expandable Docs Content */}
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.4, ease: 'easeInOut' }}
+              className="overflow-hidden"
+            >
+              <div className="grid lg:grid-cols-4 gap-8 pt-8">
+                {/* Sidebar */}
+                <div className="lg:col-span-1">
+                  <nav className="space-y-2 sticky top-24">
+                    {DOCS_SECTIONS.map((section) => {
+                      const Icon = section.icon
+                      const isActive = activeSection === section.id
+                      return (
+                        <button
+                          key={section.id}
+                          onClick={() => setActiveSection(section.id)}
+                          className={`
+                            w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all cursor-pointer
+                            ${isActive
+                              ? 'bg-primary/10 border border-primary/30 text-white'
+                              : 'bg-white/5 border border-transparent text-white/60 hover:text-white hover:bg-white/10'
+                            }
+                          `}
+                        >
+                          <Icon
+                            className="w-5 h-5"
+                            style={{ color: isActive ? section.color : undefined }}
+                          />
+                          <span className="font-medium">{section.title}</span>
+                          {isActive && <ChevronRight className="w-4 h-4 ml-auto" />}
+                        </button>
+                      )
+                    })}
+
+                    {/* GitHub link */}
+                    <a
+                      href="https://github.com/ankit25bcs10610/DevOps-Copilot"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white hover:bg-white/10 transition-all mt-4"
+                    >
+                      <Book className="w-5 h-5" />
+                      <span className="font-medium">Full Docs on GitHub</span>
+                      <ExternalLink className="w-4 h-4 ml-auto" />
+                    </a>
+
+                    {/* Close button */}
+                    <button
+                      onClick={() => setIsOpen(false)}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white hover:bg-white/10 transition-all mt-4 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                      <span className="font-medium">Close</span>
+                    </button>
+                  </nav>
+                </div>
+
+                {/* Content */}
+                <div className="lg:col-span-3 bg-white/[0.02] rounded-2xl border border-white/10 p-6 md:p-8 min-h-[500px]">
+                  {DOCS_SECTIONS.map((section) => (
+                    <DocSection
+                      key={section.id}
+                      section={section}
+                      isActive={activeSection === section.id}
                     />
-                    <span className="font-medium">{section.title}</span>
-                    {isActive && <ChevronRight className="w-4 h-4 ml-auto" />}
-                  </button>
-                )
-              })}
-
-              {/* GitHub link */}
-              <a
-                href="https://github.com/ankit25bcs10610/DevOps-Copilot"
-                target="_blank"
-                rel="noreferrer"
-                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white hover:bg-white/10 transition-all mt-4"
-              >
-                <Book className="w-5 h-5" />
-                <span className="font-medium">Full Docs</span>
-                <ExternalLink className="w-4 h-4 ml-auto" />
-              </a>
-            </nav>
-          </div>
-
-          {/* Content */}
-          <div className="lg:col-span-3 bg-white/[0.02] rounded-2xl border border-white/10 p-6 md:p-8 min-h-[500px]">
-            {DOCS_SECTIONS.map((section) => (
-              <DocSection
-                key={section.id}
-                section={section}
-                isActive={activeSection === section.id}
-              />
-            ))}
-          </div>
-        </motion.div>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </section>
   )
