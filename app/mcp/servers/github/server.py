@@ -49,41 +49,15 @@ def _as_int(value, default: int) -> int:
         return default
 
 
-# --- Offline fixtures (used when no token is configured) -------------------
-_DEMO_COMMITS = [
-    {
-        "sha": "abc1234",
-        "author": "dana",
-        "date": "2026-06-23",
-        "message": "Add percentage discount support to checkout",
-    },
-    {
-        "sha": "9f8e7d6",
-        "author": "sam",
-        "date": "2026-06-22",
-        "message": "Refactor cart total calculation",
-    },
-    {
-        "sha": "1122334",
-        "author": "lee",
-        "date": "2026-06-21",
-        "message": "Bump dependencies",
-    },
-]
+# --- Offline fixtures (multi-scenario support) -----------------------------
+def _get_commits() -> list:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("github", "commits") or []
 
-_DEMO_DIFF = """\
-diff --git a/checkout.js b/checkout.js
-index 8a1f..b2c3 100644
---- a/checkout.js
-+++ b/checkout.js
-@@ -38,7 +38,9 @@ function applyDiscount(cart, coupon) {
--  const subtotal = cart.total;
-+  // BUG: `coupon` may be undefined when no coupon is supplied
-+  const subtotal = cart.total;
-+  const pct = coupon.total;          // <-- throws when coupon is undefined
-   return subtotal - subtotal * pct;
- }
-"""
+
+def _get_diff(sha: str) -> str:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("github", f"diff_{sha}") or ""
 
 
 @mcp.tool()
@@ -91,7 +65,7 @@ def list_recent_commits(branch: str = "main", max_count: int | str = 5) -> list[
     """List recent commits on a branch (sha, author, date, message)."""
     max_count = _as_int(max_count, 5)
     if OFFLINE:
-        return _DEMO_COMMITS[:max_count]
+        return _get_commits()[:max_count]
     repo, err = _repo_or_error()
     if err:
         return [err]
@@ -119,7 +93,7 @@ def list_recent_commits(branch: str = "main", max_count: int | str = 5) -> list[
 def get_commit_diff(sha: str) -> str:
     """Return the unified diff/patch introduced by a commit."""
     if OFFLINE:
-        return _DEMO_DIFF
+        return _get_diff(sha) or "(no diff available for this commit in offline mode)"
     repo, err = _repo_or_error()
     if err:
         return err["error"]
@@ -137,43 +111,26 @@ def get_commit_diff(sha: str) -> str:
     return resp.text
 
 
-_DEMO_WORKFLOW_RUNS = [
-    {
-        "id": 980001, "name": "CI", "event": "push", "branch": "main",
-        "status": "completed", "conclusion": "failure", "head_sha": "abc1234",
-        "created_at": "2026-06-23T09:50:00Z",
-        "html_url": "https://github.com/<owner>/<repo>/actions/runs/980001",
-        "title": "Add percentage discount support to checkout",
-    },
-    {
-        "id": 979544, "name": "CI", "event": "push", "branch": "main",
-        "status": "completed", "conclusion": "success", "head_sha": "9f8e7d6",
-        "created_at": "2026-06-22T16:10:00Z",
-        "html_url": "https://github.com/<owner>/<repo>/actions/runs/979544",
-        "title": "Refactor cart total calculation",
-    },
-]
+def _get_workflow_runs() -> list:
+    from app.mcp.fixtures import get_fixture
+    runs = get_fixture("github", "workflow_runs")
+    if runs:
+        return runs
+    commits = _get_commits()
+    if not commits:
+        return []
+    return [
+        {"id": 980001, "name": "CI", "event": "push", "branch": "main",
+         "status": "completed", "conclusion": "failure", "head_sha": commits[0].get("sha", ""),
+         "created_at": commits[0].get("date", "") + "T09:50:00Z",
+         "html_url": "https://github.com/acme/repo/actions/runs/980001",
+         "title": commits[0].get("message", "")},
+    ]
 
-_DEMO_FAILED_JOB_LOG = """\
-> checkout-svc@1.8.0 test
-> jest
 
- FAIL  test/checkout.test.js
-  ● applyDiscount › applies no discount when coupon is omitted
-
-    TypeError: Cannot read properties of undefined (reading 'total')
-
-      40 | function applyDiscount(cart, coupon) {
-      41 |   const subtotal = cart.total;
-    > 42 |   const pct = coupon.total;
-         |                      ^
-      43 |   return subtotal - subtotal * pct;
-
-      at applyDiscount (checkout.js:42:22)
-
-Tests: 1 failed, 7 passed, 8 total
-Error: Process completed with exit code 1.
-"""
+def _get_failed_job_log() -> str:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("github", "failed_job_log") or "(no failed job logs in offline mode)"
 
 
 # --- "What changed" correlation -------------------------------------------- #
@@ -277,7 +234,7 @@ def list_workflow_runs(branch: str = "main", max_count: int | str = 10) -> list[
     the 'did the last deploy/CI pass?' signal to correlate with an incident's onset."""
     max_count = _as_int(max_count, 10)
     if OFFLINE:
-        return _DEMO_WORKFLOW_RUNS[:max_count]
+        return _get_workflow_runs()[:max_count]
     repo, err = _repo_or_error()
     if err:
         return [err]
@@ -310,7 +267,7 @@ def get_failed_job_logs(run_id: int | str, max_chars: int | str = 4000) -> dict:
         return {
             "run_id": _as_int(run_id, 0),
             "failed_jobs": [{"name": "test", "conclusion": "failure",
-                             "log_tail": _DEMO_FAILED_JOB_LOG[:max_chars]}],
+                             "log_tail": _get_failed_job_log()[:max_chars]}],
         }
     repo, err = _repo_or_error()
     if err:

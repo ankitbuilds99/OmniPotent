@@ -61,29 +61,15 @@ def _headers() -> dict:
     }
 
 
-# --- Offline fixtures (tie into the bundled checkout-svc incident) ---------- #
-_DEMO_INCIDENT = {
-    "id": "PINC4242",
-    "number": 4242,
-    "title": "Elevated 5xx error rate on checkout-svc",
-    "status": "triggered",
-    "urgency": "high",
-    "service": "checkout-svc",
-    "created_at": "2026-06-23T14:05:00Z",
-    "html_url": "https://acme.pagerduty.com/incidents/PINC4242",
-    "description": "checkout-svc 5xx error rate crossed the alert threshold.",
-}
+# --- Offline fixtures (multi-scenario support) ------------------------------ #
+def _get_incident() -> dict:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("pagerduty", "incident") or {}
 
-_DEMO_ALERTS = [
-    {
-        "id": "PALERT1",
-        "status": "triggered",
-        "summary": "checkout-svc 5xx error rate > 5% (Datadog monitor)",
-        "created_at": "2026-06-23T14:05:00Z",
-        "body": "error_rate_5xx=0.71 exceeded threshold 0.05 for service:checkout-svc "
-        "over the last 5m. Source monitor: 'checkout-svc 5xx'.",
-    }
-]
+
+def _get_alerts() -> list:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("pagerduty", "alerts") or []
 
 
 @mcp.tool()
@@ -97,7 +83,8 @@ def list_incidents(statuses: str = "triggered,acknowledged", limit: int | str = 
     limit = _as_int(limit, 20)
     wanted = [s.strip() for s in statuses.split(",") if s.strip()]
     if OFFLINE:
-        items = [_DEMO_INCIDENT] if (not wanted or _DEMO_INCIDENT["status"] in wanted) else []
+        inc = _get_incident()
+        items = [inc] if inc and (not wanted or inc.get("status") in wanted) else []
         return items[:limit]
 
     import httpx
@@ -128,9 +115,10 @@ def list_incidents(statuses: str = "triggered,acknowledged", limit: int | str = 
 def get_incident(incident_id: str) -> dict:
     """Return one incident's details by id."""
     if OFFLINE:
-        return dict(_DEMO_INCIDENT) if incident_id in ("", _DEMO_INCIDENT["id"]) else {
-            "error": f"unknown incident '{incident_id}' (offline demo has {_DEMO_INCIDENT['id']})"
-        }
+        inc = _get_incident()
+        if incident_id in ("", inc.get("id", "")):
+            return dict(inc)
+        return {"error": f"unknown incident '{incident_id}' (offline demo has {inc.get('id', 'none')})"}
 
     import httpx
 
@@ -155,7 +143,8 @@ def get_incident_alerts(incident_id: str) -> list[dict]:
     """Return the alerts/signals that triggered an incident — the raw symptom the
     investigation should start from (service, metric, threshold, source monitor)."""
     if OFFLINE:
-        return _DEMO_ALERTS if incident_id in ("", _DEMO_INCIDENT["id"]) else []
+        inc = _get_incident()
+        return _get_alerts() if incident_id in ("", inc.get("id", "")) else []
 
     import httpx
 

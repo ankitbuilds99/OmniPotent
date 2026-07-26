@@ -48,52 +48,15 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {SENTRY_API_TOKEN}"}
 
 
-# --- Offline fixtures (the checkout-svc discount regression) --------------- #
-_DEMO_ISSUES = [
-    {
-        "id": "SENTRY-4011",
-        "title": "TypeError: Cannot read properties of undefined (reading 'total')",
-        "culprit": "applyDiscount(checkout.js)",
-        "level": "error",
-        "status": "unresolved",
-        "count": 142,
-        "user_count": 88,
-        "first_seen": "2026-06-23T10:01:10Z",
-        "last_seen": "2026-06-23T10:14:55Z",
-        "release": "checkout-svc@1.8.0",
-        "is_regression": True,
-    },
-    {
-        "id": "SENTRY-3920",
-        "title": "TimeoutError: upstream inventory-svc call exceeded 2000ms",
-        "culprit": "fetchStock(inventory.js)",
-        "level": "warning",
-        "status": "unresolved",
-        "count": 7,
-        "user_count": 6,
-        "first_seen": "2026-06-20T08:00:00Z",
-        "last_seen": "2026-06-23T09:40:00Z",
-        "release": "inventory-svc@2.3.1",
-        "is_regression": False,
-    },
-]
+# --- Offline fixtures (multi-scenario support) ----------------------------- #
+def _get_issues() -> list:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("sentry", "issues") or []
 
-_DEMO_EVENT = {
-    "issue_id": "SENTRY-4011",
-    "event_id": "e7c1a9d24f5b4e",
-    "release": "checkout-svc@1.8.0",
-    "environment": "production",
-    "message": "TypeError: Cannot read properties of undefined (reading 'total')",
-    "stacktrace": [
-        {"filename": "checkout.js", "function": "applyDiscount", "lineno": 42,
-         "context": "const pct = coupon.total;  // coupon is undefined when no coupon supplied"},
-        {"filename": "checkout.js", "function": "checkout", "lineno": 17,
-         "context": "const total = applyDiscount(cart, coupon);"},
-        {"filename": "server.js", "function": "handlePost", "lineno": 88,
-         "context": "const result = checkout(req.body.cart, req.body.coupon);"},
-    ],
-    "tags": {"service": "checkout-svc", "http.status": "500", "transaction": "POST /api/checkout"},
-}
+
+def _get_latest_event() -> dict | None:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("sentry", "latest_event")
 
 
 @mcp.tool()
@@ -107,9 +70,9 @@ def list_issues(query: str = "is:unresolved", limit: int | str = 10) -> list[dic
     """
     limit = _as_int(limit, 10)
     if OFFLINE:
-        items = _DEMO_ISSUES
+        items = _get_issues()
         if "level:error" in query:
-            items = [i for i in items if i["level"] == "error"]
+            items = [i for i in items if i.get("level") == "error"]
         return items[:limit]
 
     import httpx
@@ -139,9 +102,10 @@ def list_issues(query: str = "is:unresolved", limit: int | str = 10) -> list[dic
 def get_issue(issue_id: str) -> dict:
     """Return one issue's details by id."""
     if OFFLINE:
-        found = next((i for i in _DEMO_ISSUES if i["id"] == issue_id), None)
+        issues = _get_issues()
+        found = next((i for i in issues if i.get("id") == issue_id), None)
         return found or {"error": f"unknown issue '{issue_id}' (offline demo has "
-                         f"{[i['id'] for i in _DEMO_ISSUES]})"}
+                         f"{[i.get('id') for i in issues]})"}
 
     import httpx
 
@@ -161,10 +125,13 @@ def get_latest_event(issue_id: str) -> dict:
     """Return the latest event for an issue — the stack trace (file/function/line),
     release, environment, and tags. This is the exact code location to fix."""
     if OFFLINE:
-        if issue_id not in ("", _DEMO_EVENT["issue_id"]):
+        event = _get_latest_event()
+        if not event:
+            return {"error": "no offline event available for this scenario"}
+        if issue_id not in ("", event.get("issue_id", "")):
             return {"error": f"no offline event for issue '{issue_id}' "
-                    f"(demo has {_DEMO_EVENT['issue_id']})"}
-        return dict(_DEMO_EVENT)
+                    f"(demo has {event.get('issue_id')})"}
+        return dict(event)
 
     import httpx
 

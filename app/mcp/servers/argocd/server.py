@@ -46,9 +46,17 @@ def _headers() -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Offline fixtures — a checkout-svc ArgoCD app (ties to the bundled incident).
+# Offline fixtures — multi-scenario support via centralized fixture system
 # --------------------------------------------------------------------------- #
-_DEMO_APPLICATIONS = [
+def _get_apps() -> list:
+    from app.mcp.fixtures import get_fixture
+    apps = get_fixture("argocd", "apps")
+    if apps:
+        return apps
+    return _FALLBACK_APPS
+
+
+_FALLBACK_APPS = [
     {
         "name": "checkout-svc",
         "namespace": "argocd",
@@ -214,7 +222,7 @@ async def list_applications(project: str = "", health_status: str = "", sync_sta
         sync_status: filter by sync status (Synced, OutOfSync, Unknown).
     """
     if OFFLINE:
-        apps = list(_DEMO_APPLICATIONS)
+        apps = list(_get_apps())
         if project:
             apps = [a for a in apps if a.get("project") == project]
         if health_status:
@@ -269,11 +277,11 @@ async def get_application(name: str) -> dict:
     if OFFLINE:
         if name == "checkout-svc":
             return dict(_DEMO_APPLICATION_DETAIL)
-        matching = [a for a in _DEMO_APPLICATIONS if a.get("name") == name]
+        matching = [a for a in _get_apps() if a.get("name") == name]
         if matching:
             return matching[0]
         return {"error": f"application '{name}' not found (offline demo)",
-                "available": [a["name"] for a in _DEMO_APPLICATIONS]}
+                "available": [a["name"] for a in _get_apps()]}
 
     data = await _get(f"/api/v1/applications/{name}")
     metadata = data.get("metadata", {})
@@ -418,7 +426,7 @@ async def get_sync_status(name: str) -> dict:
                           "The current deployed revision (abc1234) differs from "
                           "the target (def5678 on main).",
             }
-        matching = [a for a in _DEMO_APPLICATIONS if a.get("name") == name]
+        matching = [a for a in _get_apps() if a.get("name") == name]
         if matching:
             app = matching[0]
             is_synced = app.get("sync_status") == "Synced"
@@ -430,7 +438,7 @@ async def get_sync_status(name: str) -> dict:
                 "message": "Application is in sync." if is_synced else "Application is out of sync.",
             }
         return {"error": f"application '{name}' not found (offline demo)",
-                "available": [a["name"] for a in _DEMO_APPLICATIONS]}
+                "available": [a.get("name") for a in _get_apps()]}
 
     data = await _get(f"/api/v1/applications/{name}")
     status = data.get("status", {})

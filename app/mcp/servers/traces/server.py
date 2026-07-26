@@ -41,9 +41,15 @@ def _as_int(value, default: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Offline fixtures — the checkout request flow, with one erroring trace.
+# Offline fixtures — multi-scenario support via centralized fixture system
 # --------------------------------------------------------------------------- #
-_DEMO_TRACES: list[dict[str, Any]] = [
+def _get_traces() -> list[dict[str, Any]]:
+    from app.mcp.fixtures import get_fixture
+    traces = get_fixture("traces", "traces")
+    return traces if traces else _FALLBACK_TRACES
+
+
+_FALLBACK_TRACES: list[dict[str, Any]] = [
     {
         "trace_id": "tr-checkout-err-001", "root_service": "api-gateway",
         "operation": "POST /api/checkout", "duration_ms": 512, "status": "error",
@@ -209,7 +215,7 @@ def search_traces(
     min_dur = _as_int(min_duration_ms, 0)
     if OFFLINE:
         out = []
-        for tr in _DEMO_TRACES:
+        for tr in _get_traces():
             if error_only and tr["status"] != "error":
                 continue
             if min_dur and tr["duration_ms"] < min_dur:
@@ -248,9 +254,9 @@ def get_trace(trace_id: str) -> dict:
     """Return the full span tree for a trace (service, operation, duration, status,
     parent, error) — to localize exactly which span failed or was slow."""
     if OFFLINE:
-        tr = next((t for t in _DEMO_TRACES if t["trace_id"] == trace_id), None)
+        tr = next((t for t in _get_traces() if t["trace_id"] == trace_id), None)
         return tr or {"error": f"unknown trace '{trace_id}' (offline demo has "
-                      f"{[t['trace_id'] for t in _DEMO_TRACES]})"}
+                      f"{[t['trace_id'] for t in _get_traces()]})"}
 
     import httpx
 
@@ -267,7 +273,7 @@ def service_dependencies() -> list[list[str]]:
     """Return the runtime service dependency graph as caller→callee edges, derived
     from observed spans (not static config)."""
     if OFFLINE:
-        return deps_from_traces(_DEMO_TRACES)
+        return deps_from_traces(_get_traces())
     return deps_from_traces([get_trace(t["trace_id"]) for t in search_traces(limit=100)])
 
 

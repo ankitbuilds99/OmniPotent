@@ -5,9 +5,7 @@ Tests the protocol, agents, and orchestration without making real LLM calls.
 
 from __future__ import annotations
 
-import pytest
-from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from app.agents.protocol import (
     AgentHandoff,
@@ -17,7 +15,6 @@ from app.agents.protocol import (
     SharedContext,
     TaskStatus,
 )
-from app.agents.base import BaseAgent
 from app.agents.investigator import InvestigatorAgent
 from app.agents.remediation import RemediationAgent
 from app.agents.reviewer import ReviewerAgent
@@ -279,7 +276,7 @@ class TestMessageRouting:
         ctx = SharedContext(session_id="test")
         inv = InvestigatorAgent(tools=None)
 
-        msg = inv.send_message(
+        inv.send_message(
             to_agent=AgentRole.ORCHESTRATOR,
             message_type=MessageType.RESULT,
             content={"root_cause": "found it"},
@@ -294,7 +291,7 @@ class TestMessageRouting:
         ctx = SharedContext(session_id="test")
         orch = OrchestratorAgent(tools=None)
 
-        handoff = orch.create_handoff(
+        orch.create_handoff(
             to_agent=AgentRole.INVESTIGATOR,
             task="Find root cause",
             context=ctx,
@@ -354,7 +351,6 @@ class TestBackwardsCompatibility:
 
     def test_single_agent_graph_builds(self):
         from app.graph.builder import build_graph, _build_single_agent_graph
-        from unittest.mock import MagicMock
 
         # Just verify the function is callable and doesn't error
         # (actual graph building needs tools and checkpointer)

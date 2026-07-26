@@ -8,10 +8,7 @@ These tests cover both the unit functionality and backwards compatibility:
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 # Test corpus (same structure as incident_memory's bundled corpus)
 TEST_CORPUS = [

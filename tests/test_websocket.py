@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-
-from fastapi.testclient import TestClient
-from starlette.testclient import TestClient as StarletteTestClient
-from starlette.websockets import WebSocketDisconnect
 
 
 @pytest.fixture
@@ -76,8 +71,7 @@ def test_parse_message_invalid():
 def test_connection_manager_connect_disconnect():
     """Test ConnectionManager connect/disconnect."""
     import asyncio
-    from app.api.websocket import ConnectionManager, ClientConnection
-    from unittest.mock import MagicMock
+    from app.api.websocket import ConnectionManager
 
     manager = ConnectionManager()
 
@@ -123,8 +117,8 @@ def test_connection_manager_broadcast():
 
     async def test():
         # Connect two clients to same thread
-        conn1 = await manager.connect(ws1, "thread-1")
-        conn2 = await manager.connect(ws2, "thread-1")
+        await manager.connect(ws1, "thread-1")
+        await manager.connect(ws2, "thread-1")
 
         # Broadcast
         sent = await manager.broadcast("thread-1", {"type": "trace", "line": "test"})

@@ -36,8 +36,14 @@ def _as_int(value, default: int) -> int:
         return default
 
 
-# --- Offline fixtures (the checkout-svc discount rollout that broke prod) --- #
-_DEMO_DEPLOYS: list[dict[str, Any]] = [
+# --- Offline fixtures (multi-scenario support) --- #
+def _get_deploys() -> list[dict[str, Any]]:
+    from app.mcp.fixtures import get_fixture
+    deploys = get_fixture("deploys", "deploys")
+    return deploys if deploys else _FALLBACK_DEPLOYS
+
+
+_FALLBACK_DEPLOYS: list[dict[str, Any]] = [
     {
         "id": "dep-9001", "service": "checkout-svc", "version": "1.8.0", "sha": "abc1234",
         "status": "succeeded", "env": "production", "deployer": "ci-bot",
@@ -69,7 +75,7 @@ def list_deploys(service: str | None = None, limit: int | str = 10) -> list[dict
     """List recent deploys (newest first), optionally filtered by service."""
     limit = _as_int(limit, 10)
     if OFFLINE:
-        rows = [d for d in _DEMO_DEPLOYS if not service or d["service"] == service]
+        rows = [d for d in _get_deploys() if not service or d["service"] == service]
         return sorted(rows, key=lambda d: d["deployed_at"], reverse=True)[:limit]
 
     import httpx
@@ -86,7 +92,7 @@ def list_deploys(service: str | None = None, limit: int | str = 10) -> list[dict
 def get_deploy(deploy_id: str) -> dict:
     """Return one deploy's details by id."""
     if OFFLINE:
-        found = next((d for d in _DEMO_DEPLOYS if d["id"] == deploy_id), None)
+        found = next((d for d in _get_deploys() if d["id"] == deploy_id), None)
         return found or {"error": f"unknown deploy '{deploy_id}'"}
 
     import httpx
@@ -102,7 +108,7 @@ def deploys_in_window(start: str, end: str, service: str | None = None) -> list[
     against an error onset to find the change that most likely caused an incident."""
     if OFFLINE:
         return sorted(
-            [d for d in _DEMO_DEPLOYS
+            [d for d in _get_deploys()
              if (not service or d["service"] == service) and start <= d["deployed_at"] <= end],
             key=lambda d: d["deployed_at"], reverse=True,
         )

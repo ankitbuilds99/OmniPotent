@@ -40,62 +40,26 @@ def _as_int(value, default: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Offline fixtures — a checkout-svc deploy gone wrong (ties to the discount bug).
+# Offline fixtures — multi-scenario support via centralized fixture system
 # --------------------------------------------------------------------------- #
-_DEMO_PODS = [
-    {
-        "name": "checkout-svc-7d9f4c8b6-q2m4x", "namespace": "default", "status": "CrashLoopBackOff",
-        "ready": "0/1", "restarts": 8, "age": "12m", "node": "ip-10-0-1-23",
-        "reason": "Back-off restarting failed container (exit code 1)",
-    },
-    {
-        "name": "checkout-svc-7d9f4c8b6-h7k9p", "namespace": "default", "status": "Running",
-        "ready": "1/1", "restarts": 5, "age": "12m", "node": "ip-10-0-1-44",
-        "reason": "",
-    },
-    {
-        "name": "checkout-svc-6b1a2c3d4-zz000", "namespace": "default", "status": "Running",
-        "ready": "1/1", "restarts": 0, "age": "6d", "node": "ip-10-0-1-7",
-        "reason": "previous stable revision",
-    },
-    {
-        "name": "inventory-svc-5c4b3a2-abc12", "namespace": "default", "status": "Running",
-        "ready": "1/1", "restarts": 0, "age": "9d", "node": "ip-10-0-1-9",
-        "reason": "",
-    },
-]
+def _get_pods() -> list:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("kubernetes", "pods") or []
 
-_DEMO_EVENTS = [
-    {"type": "Normal", "reason": "ScalingReplicaSet", "object": "deployment/checkout-svc",
-     "age": "13m", "message": "Scaled up replica set checkout-svc-7d9f4c8b6 to 3"},
-    {"type": "Normal", "reason": "Pulled", "object": "pod/checkout-svc-7d9f4c8b6-q2m4x",
-     "age": "12m", "message": "Successfully pulled image checkout-svc:1.8.0"},
-    {"type": "Warning", "reason": "BackOff", "object": "pod/checkout-svc-7d9f4c8b6-q2m4x",
-     "age": "11m", "message": "Back-off restarting failed container checkout in pod"},
-    {"type": "Warning", "reason": "Unhealthy", "object": "pod/checkout-svc-7d9f4c8b6-q2m4x",
-     "age": "11m", "message": "Readiness probe failed: HTTP probe returned 500"},
-    {"type": "Normal", "reason": "Pulled", "object": "pod/inventory-svc-5c4b3a2-abc12",
-     "age": "9d", "message": "Container image already present on machine"},
-]
 
-_DEMO_DEPLOYMENT = {
-    "name": "checkout-svc", "namespace": "default",
-    "desired": 3, "ready": 1, "available": 1, "unavailable": 2, "updated": 3,
-    "image": "checkout-svc:1.8.0",
-    "conditions": [
-        {"type": "Available", "status": "False", "reason": "MinimumReplicasUnavailable"},
-        {"type": "Progressing", "status": "False",
-         "reason": "ProgressDeadlineExceeded", "message": "ReplicaSet checkout-svc-7d9f4c8b6 has timed out progressing"},
-    ],
-    "rollout": "stuck — 2/3 replicas unavailable since the 1.8.0 rollout",
-}
+def _get_events() -> list:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("kubernetes", "events") or []
 
-_DEMO_ROLLOUT_HISTORY = [
-    {"revision": 1, "image": "checkout-svc:1.6.2", "change_cause": "Initial deploy"},
-    {"revision": 2, "image": "checkout-svc:1.7.0", "change_cause": "Refactor cart total calculation"},
-    {"revision": 3, "image": "checkout-svc:1.8.0",
-     "change_cause": "Add percentage discount support to checkout (commit abc1234)"},
-]
+
+def _get_deployment() -> dict:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("kubernetes", "deployment") or {}
+
+
+def _get_rollout_history() -> list:
+    from app.mcp.fixtures import get_fixture
+    return get_fixture("kubernetes", "rollout_history") or []
 
 
 def _client():
@@ -119,7 +83,7 @@ def list_pods(namespace: str = "", status: str | None = None) -> list[dict]:
     """
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        return [p for p in _DEMO_PODS if not status or str(p["status"]).lower() == status.lower()]
+        return [p for p in _get_pods() if not status or str(p["status"]).lower() == status.lower()]
     core, _ = _client()
     out = []
     for p in core.list_namespaced_pod(ns).items:
@@ -143,11 +107,11 @@ def describe_pod(name: str, namespace: str = "") -> dict:
     'pod is unhealthy' to *why*."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        pod = next((p for p in _DEMO_PODS if p["name"] == name), None)
+        pod = next((p for p in _get_pods() if p["name"] == name), None)
         if not pod:
             return {"error": f"pod '{name}' not found (offline demo)",
-                    "available": [p["name"] for p in _DEMO_PODS]}
-        events = [e for e in _DEMO_EVENTS if name in e["object"]]
+                    "available": [p["name"] for p in _get_pods()]}
+        events = [e for e in _get_events() if name in e["object"]]
         return {**pod, "events": events,
                 "containers": [{"name": "checkout", "state": pod["status"],
                                 "last_exit_code": 1 if pod["restarts"] else 0,
@@ -169,7 +133,7 @@ def get_events(namespace: str = "", only_warnings: bool = False) -> list[dict]:
     image pull errors, and rollout activity. Set only_warnings to focus on problems."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        return [e for e in _DEMO_EVENTS if not only_warnings or e["type"] == "Warning"]
+        return [e for e in _get_events() if not only_warnings or e["type"] == "Warning"]
     core, _ = _client()
     out = []
     for e in core.list_namespaced_event(ns).items:
@@ -187,9 +151,9 @@ def get_deployment_status(name: str, namespace: str = "") -> dict:
     conditions, and image — i.e. is the rollout healthy or stuck?"""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        if name != _DEMO_DEPLOYMENT["name"]:
-            return {"error": f"deployment '{name}' not found (offline demo has '{_DEMO_DEPLOYMENT['name']}')"}
-        return dict(_DEMO_DEPLOYMENT)
+        if name != _get_deployment()["name"]:
+            return {"error": f"deployment '{name}' not found (offline demo has '{_get_deployment()['name']}')"}
+        return dict(_get_deployment())
     _, apps = _client()
     d = apps.read_namespaced_deployment(name, ns)
     s = d.status
@@ -208,9 +172,9 @@ def rollout_history(deployment: str, namespace: str = "") -> list[dict]:
     """Revision history of a deployment with change-causes — the 'what changed'
     needed to correlate a bad rollout with the offending release/commit."""
     if OFFLINE:
-        if deployment != _DEMO_DEPLOYMENT["name"]:
+        if deployment != _get_deployment()["name"]:
             return [{"error": f"deployment '{deployment}' not found (offline demo)"}]
-        return list(_DEMO_ROLLOUT_HISTORY)
+        return list(_get_rollout_history())
     # Live revision history lives on the deployment's ReplicaSets; summarize them.
     _, apps = _client()
     ns = namespace or KUBE_NAMESPACE
@@ -249,7 +213,7 @@ def rollback_deployment(deployment: str, namespace: str = "") -> dict:
     remediation for a change-induced incident. Requires human approval."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        prev = _DEMO_ROLLOUT_HISTORY[-2] if len(_DEMO_ROLLOUT_HISTORY) >= 2 else None
+        prev = _get_rollout_history()[-2] if len(_get_rollout_history()) >= 2 else None
         return {"status": "rolled back (simulated — offline demo, no cluster touched)",
                 "deployment": deployment, "namespace": ns,
                 "to_revision": prev["revision"] if prev else None,
