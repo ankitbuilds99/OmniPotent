@@ -4,10 +4,7 @@ import { Stars, Sphere, Box, Float } from '@react-three/drei'
 import { motion } from 'framer-motion'
 import {
   Github,
-  Twitter,
-  Linkedin,
   Mail,
-  MapPin,
   ArrowUpRight,
   Sparkles
 } from 'lucide-react'
@@ -180,12 +177,12 @@ const FOOTER_LINKS = {
     { label: 'About', href: '#' },
     { label: 'Blog', href: '#' },
     { label: 'Careers', href: '#' },
-    { label: 'Contact', href: '#' }
+    { label: 'Contact', href: 'mailto:ankit25bcs10610@gmail.com' }
   ],
   Resources: [
-    { label: 'GitHub', href: 'https://github.com' },
+    { label: 'GitHub', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot' },
     { label: 'Community', href: '#' },
-    { label: 'Support', href: '#' },
+    { label: 'Support', href: 'mailto:ankit25bcs10610@gmail.com' },
     { label: 'Status', href: '#' }
   ],
   Legal: [
@@ -197,9 +194,7 @@ const FOOTER_LINKS = {
 
 const SOCIAL_LINKS = [
   { icon: Github, href: 'https://github.com/ankit25bcs10610', label: 'GitHub' },
-  { icon: Twitter, href: '#', label: 'Twitter' },
-  { icon: Linkedin, href: '#', label: 'LinkedIn' },
-  { icon: Mail, href: '#', label: 'Email' }
+  { icon: Mail, href: 'mailto:ankit25bcs10610@gmail.com', label: 'Email' }
 ]
 
 export function Footer({ onLaunch }: { onLaunch: () => void }) {
@@ -265,10 +260,13 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
               <p className="text-white/60 text-sm mb-4 max-w-xs">
                 AI-powered DevOps automation for modern engineering teams.
               </p>
-              <div className="flex items-center gap-2 text-white/50 text-sm">
-                <MapPin className="w-4 h-4" />
-                <span>San Francisco, CA</span>
-              </div>
+              <a
+                href="mailto:ankit25bcs10610@gmail.com"
+                className="flex items-center gap-2 text-white/50 text-sm hover:text-primary transition-colors"
+              >
+                <Mail className="w-4 h-4" />
+                <span>ankit25bcs10610@gmail.com</span>
+              </a>
             </div>
 
             {/* Links */}
