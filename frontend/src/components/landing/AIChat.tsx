@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Bot, User, Send, Sparkles, Copy, Check, RotateCcw } from 'lucide-react'
+import { Bot, User, Send, Sparkles, Copy, Check, RotateCcw, Play, Pause } from 'lucide-react'
 
 const DEMO_PROMPTS = [
   'Deploy Node.js App to production',
@@ -27,20 +27,6 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY . .
 EXPOSE 3000
 CMD ["node", "server.js"]`
-      },
-      {
-        name: 'docker-compose.yml',
-        language: 'yaml',
-        code: `version: '3.8'
-services:
-  app:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=production
-    deploy:
-      replicas: 3`
       },
       {
         name: 'deployment.yaml',
@@ -76,7 +62,7 @@ spec:
 **Impact:** 23% of transactions failing
 
 ### Timeline
-- 14:32 UTC - Deploy #847 pushed to production
+- 14:32 UTC - Deploy #847 pushed
 - 14:35 UTC - Error rate spike detected
 - 14:38 UTC - PagerDuty alert triggered
 
@@ -85,25 +71,7 @@ Null pointer exception in discount calculation
 when coupon code is empty string vs null.
 
 ### Fix
-\`\`\`javascript
-// Before (buggy)
-const discount = coupon.code.length > 0
-
-// After (fixed)
-const discount = coupon?.code?.length > 0
-\`\`\``
-      },
-      {
-        name: 'fix.patch',
-        language: 'diff',
-        code: `--- a/checkout.js
-+++ b/checkout.js
-@@ -42,7 +42,7 @@ async function applyDiscount(cart, coupon) {
--  if (coupon.code.length > 0) {
-+  if (coupon?.code?.length > 0) {
-     const discount = await validateCoupon(coupon.code);
-     return applyDiscountToCart(cart, discount);
-   }`
+const discount = coupon?.code?.length > 0`
       }
     ]
   },
@@ -223,7 +191,7 @@ function CodeBlock({ file, index }: { file: { name: string; language: string; co
         <span className="text-sm text-white/70 font-mono">{file.name}</span>
         <button
           onClick={handleCopy}
-          className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
+          className="p-1.5 rounded-md hover:bg-white/10 transition-colors cursor-pointer"
         >
           {copied ? (
             <Check className="w-4 h-4 text-green-400" />
@@ -243,13 +211,11 @@ function ChatMessage({
   role,
   content,
   files,
-  isTyping,
   showFiles
 }: {
   role: 'user' | 'assistant'
   content: string
   files?: Array<{ name: string; language: string; code: string }>
-  isTyping?: boolean
   showFiles?: boolean
 }) {
   const isUser = role === 'user'
@@ -261,7 +227,6 @@ function ChatMessage({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
     >
-      {/* Avatar */}
       <div
         className={`
           flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center
@@ -275,7 +240,6 @@ function ChatMessage({
         )}
       </div>
 
-      {/* Content */}
       <div className={`flex-1 max-w-[85%] ${isUser ? 'flex flex-col items-end' : ''}`}>
         <div
           className={`
@@ -287,10 +251,8 @@ function ChatMessage({
           `}
         >
           <p className="text-sm leading-relaxed">{content}</p>
-          {isTyping && <TypingIndicator />}
         </div>
 
-        {/* Code blocks */}
         {!isUser && files && showFiles && (
           <div className="w-full mt-2">
             {files.map((file, i) => (
@@ -313,59 +275,57 @@ export function AIChat() {
   const [showFiles, setShowFiles] = useState(false)
   const [inputValue, setInputValue] = useState('')
   const [currentPromptIndex, setCurrentPromptIndex] = useState(0)
+  const [isPlaying, setIsPlaying] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const hasStarted = useRef(false)
+  const hasAutoPlayed = useRef(false)
+  const demoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
+  }, [])
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, showFiles])
+  }, [messages, showFiles, scrollToBottom])
 
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting && !hasStarted.current) {
-          hasStarted.current = true
-          runDemo(DEMO_PROMPTS[0])
-        }
-      },
-      { threshold: 0.3 }
-    )
-
-    if (containerRef.current) {
-      observer.observe(containerRef.current)
+  const runDemo = useCallback(async (prompt: string) => {
+    // Clear any pending timeouts
+    if (demoTimeoutRef.current) {
+      clearTimeout(demoTimeoutRef.current)
     }
 
-    return () => observer.disconnect()
-  }, [])
-
-  const runDemo = async (prompt: string) => {
     setMessages([])
     setShowFiles(false)
     setInputValue('')
+    setIsPlaying(true)
 
-    // Type out the prompt
+    // Type out the prompt character by character
     for (let i = 0; i <= prompt.length; i++) {
+      await new Promise(r => {
+        demoTimeoutRef.current = setTimeout(r, 25)
+      })
       setInputValue(prompt.slice(0, i))
-      await new Promise(r => setTimeout(r, 30))
     }
 
-    await new Promise(r => setTimeout(r, 500))
+    await new Promise(r => {
+      demoTimeoutRef.current = setTimeout(r, 400)
+    })
 
     // Add user message
     setMessages([{ role: 'user', content: prompt }])
     setInputValue('')
 
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise(r => {
+      demoTimeoutRef.current = setTimeout(r, 300)
+    })
 
     // Show typing indicator
     setIsTyping(true)
 
-    await new Promise(r => setTimeout(r, 1500))
+    await new Promise(r => {
+      demoTimeoutRef.current = setTimeout(r, 1200)
+    })
 
     // Add AI response
     const response = DEMO_RESPONSES[prompt]
@@ -379,25 +339,65 @@ export function AIChat() {
 
     setIsTyping(false)
 
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise(r => {
+      demoTimeoutRef.current = setTimeout(r, 300)
+    })
 
-    // Show files
+    // Show files with animation
     setShowFiles(true)
-  }
+    setIsPlaying(false)
+  }, [])
 
-  const handleReplay = () => {
+  // Auto-play when scrolled into view
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !hasAutoPlayed.current) {
+          hasAutoPlayed.current = true
+          runDemo(DEMO_PROMPTS[0])
+        }
+      },
+      { threshold: 0.3 }
+    )
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current)
+    }
+
+    return () => {
+      observer.disconnect()
+      if (demoTimeoutRef.current) {
+        clearTimeout(demoTimeoutRef.current)
+      }
+    }
+  }, [runDemo])
+
+  const handlePromptClick = useCallback((prompt: string, index: number) => {
+    if (isPlaying) return
+    setCurrentPromptIndex(index)
+    runDemo(prompt)
+  }, [isPlaying, runDemo])
+
+  const handleReplay = useCallback(() => {
+    if (isPlaying) return
     const nextIndex = (currentPromptIndex + 1) % DEMO_PROMPTS.length
     setCurrentPromptIndex(nextIndex)
     runDemo(DEMO_PROMPTS[nextIndex])
-  }
+  }, [isPlaying, currentPromptIndex, runDemo])
 
-  const handlePromptClick = (prompt: string) => {
-    const index = DEMO_PROMPTS.indexOf(prompt)
-    if (index !== -1) {
-      setCurrentPromptIndex(index)
-      runDemo(prompt)
+  const handlePlayPause = useCallback(() => {
+    if (isPlaying) {
+      // Stop the demo
+      if (demoTimeoutRef.current) {
+        clearTimeout(demoTimeoutRef.current)
+      }
+      setIsPlaying(false)
+      setIsTyping(false)
+    } else {
+      // Restart current demo
+      runDemo(DEMO_PROMPTS[currentPromptIndex])
     }
-  }
+  }, [isPlaying, currentPromptIndex, runDemo])
 
   return (
     <section ref={containerRef} className="relative py-32 overflow-hidden">
@@ -451,13 +451,15 @@ export function AIChat() {
           {DEMO_PROMPTS.map((prompt, i) => (
             <button
               key={prompt}
-              onClick={() => handlePromptClick(prompt)}
+              onClick={() => handlePromptClick(prompt, i)}
+              disabled={isPlaying}
               className={`
-                px-4 py-2 rounded-full text-sm font-medium transition-all duration-200
+                px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 cursor-pointer
                 ${i === currentPromptIndex
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'bg-white/5 text-white/60 border border-white/10 hover:bg-white/10 hover:text-white/80'
                 }
+                ${isPlaying ? 'opacity-50 cursor-not-allowed' : ''}
               `}
             >
               {prompt}
@@ -488,13 +490,28 @@ export function AIChat() {
                   </div>
                 </div>
               </div>
-              <button
-                onClick={handleReplay}
-                className="p-2 rounded-lg hover:bg-white/5 text-white/40 hover:text-white/70 transition-colors"
-                title="Try another example"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handlePlayPause}
+                  className="p-2 rounded-lg hover:bg-white/5 text-white/40 hover:text-white/70 transition-colors cursor-pointer"
+                  title={isPlaying ? "Pause demo" : "Play demo"}
+                >
+                  {isPlaying ? (
+                    <Pause className="w-4 h-4" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                </button>
+                <button
+                  onClick={handleReplay}
+                  disabled={isPlaying}
+                  className={`p-2 rounded-lg hover:bg-white/5 text-white/40 hover:text-white/70 transition-colors cursor-pointer
+                    ${isPlaying ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title="Next example"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {/* Messages */}
@@ -548,12 +565,22 @@ export function AIChat() {
                   className="
                     p-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600
                     text-white transition-all hover:shadow-lg hover:shadow-cyan-500/25
-                    active:scale-95
+                    active:scale-95 cursor-pointer
                   "
                 >
                   <Send className="w-5 h-5" />
                 </button>
               </div>
+              <p className="text-center text-xs text-white/30 mt-3">
+                This is a demo. Click prompts above or{' '}
+                <button
+                  onClick={() => handlePromptClick(DEMO_PROMPTS[0], 0)}
+                  className="text-primary hover:underline cursor-pointer"
+                >
+                  Launch Console
+                </button>
+                {' '}for real AI assistance.
+              </p>
             </div>
           </div>
         </motion.div>

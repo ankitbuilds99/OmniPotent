@@ -1,6 +1,6 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useCallback } from 'react'
 import { motion, useInView, AnimatePresence } from 'framer-motion'
-import { CheckCircle, Play, Clock, Zap } from 'lucide-react'
+import { CheckCircle, Play, Clock, Zap, RotateCcw } from 'lucide-react'
 
 const PIPELINE_STAGES = [
   {
@@ -114,7 +114,8 @@ function PipelineStage({
   activeIndex,
   isHovered,
   onHover,
-  onLeave
+  onLeave,
+  onClick
 }: {
   stage: typeof PIPELINE_STAGES[0]
   index: number
@@ -122,6 +123,7 @@ function PipelineStage({
   isHovered: boolean
   onHover: () => void
   onLeave: () => void
+  onClick: () => void
 }) {
   const isActive = index <= activeIndex
   const isCurrent = index === activeIndex
@@ -132,9 +134,7 @@ function PipelineStage({
       {/* Connector line */}
       {index > 0 && (
         <div className="absolute right-1/2 top-10 w-full h-1 -translate-y-1/2 z-0">
-          {/* Background line */}
           <div className="absolute inset-0 bg-white/5 rounded-full" />
-          {/* Progress line */}
           <motion.div
             className="absolute inset-y-0 left-0 rounded-full"
             style={{
@@ -144,7 +144,6 @@ function PipelineStage({
             animate={{ width: isActive ? '100%' : '0%' }}
             transition={{ duration: 0.6, delay: 0.2 }}
           />
-          {/* Flowing particles */}
           <FlowingParticles isActive={isCurrent} color={stage.color} />
         </div>
       )}
@@ -182,8 +181,8 @@ function PipelineStage({
         transition={isCurrent ? { duration: 2, repeat: Infinity } : { duration: 0.2 }}
         onMouseEnter={onHover}
         onMouseLeave={onLeave}
+        onClick={onClick}
       >
-        {/* Icon */}
         <img
           src={`https://cdn.simpleicons.org/${stage.icon}/${stage.color.replace('#', '')}`}
           alt={stage.name}
@@ -193,7 +192,6 @@ function PipelineStage({
           }}
         />
 
-        {/* Status badge */}
         <motion.div
           className="absolute -top-2 -right-2"
           initial={{ scale: 0 }}
@@ -214,7 +212,6 @@ function PipelineStage({
           ) : null}
         </motion.div>
 
-        {/* Pulse ring for current */}
         {isCurrent && (
           <motion.div
             className="absolute inset-0 rounded-2xl border-2"
@@ -228,7 +225,6 @@ function PipelineStage({
         )}
       </motion.div>
 
-      {/* Stage name */}
       <motion.span
         className={`mt-4 text-sm font-semibold transition-colors duration-300 ${
           isActive ? 'text-white' : 'text-white/30'
@@ -238,12 +234,10 @@ function PipelineStage({
         {stage.name}
       </motion.span>
 
-      {/* Description */}
       <span className="text-xs text-white/40 text-center max-w-[100px] mt-1">
         {stage.description}
       </span>
 
-      {/* Duration */}
       {isActive && (
         <motion.div
           className="flex items-center gap-1 mt-2 text-xs"
@@ -284,9 +278,7 @@ function LogPanel({ stage, isCompleted }: { stage: typeof PIPELINE_STAGES[0]; is
       exit={{ opacity: 0, y: -20 }}
       transition={{ duration: 0.3 }}
     >
-      {/* Terminal window */}
       <div className="rounded-xl overflow-hidden border border-white/10 bg-[#0d1117] shadow-2xl">
-        {/* Header */}
         <div className="flex items-center gap-3 px-4 py-3 bg-[#161b22] border-b border-white/10">
           <div className="flex gap-2">
             <div className="w-3 h-3 rounded-full bg-[#ff5f57]" />
@@ -316,7 +308,6 @@ function LogPanel({ stage, isCompleted }: { stage: typeof PIPELINE_STAGES[0]; is
           </div>
         </div>
 
-        {/* Log content */}
         <div className="p-4 font-mono text-sm min-h-[160px] max-h-[200px] overflow-y-auto">
           <AnimatePresence mode="popLayout">
             {stage.logs.slice(0, visibleLogs).map((log, i) => (
@@ -341,7 +332,6 @@ function LogPanel({ stage, isCompleted }: { stage: typeof PIPELINE_STAGES[0]; is
             ))}
           </AnimatePresence>
 
-          {/* Cursor line */}
           {visibleLogs < stage.logs.length && (
             <div className="flex items-center gap-3 py-1.5">
               <span className="text-white/30 select-none w-6 text-right">{visibleLogs + 1}</span>
@@ -354,7 +344,6 @@ function LogPanel({ stage, isCompleted }: { stage: typeof PIPELINE_STAGES[0]; is
             </div>
           )}
 
-          {/* All done message */}
           {visibleLogs >= stage.logs.length && (
             <motion.div
               className="flex items-center gap-2 mt-4 pt-4 border-t border-white/10"
@@ -371,16 +360,32 @@ function LogPanel({ stage, isCompleted }: { stage: typeof PIPELINE_STAGES[0]; is
   )
 }
 
-function PipelineProgress({ activeIndex, total }: { activeIndex: number; total: number }) {
+function PipelineProgress({ activeIndex, total, onRestart, isComplete }: {
+  activeIndex: number;
+  total: number;
+  onRestart: () => void;
+  isComplete: boolean;
+}) {
   const progress = Math.max(0, ((activeIndex + 1) / total) * 100)
 
   return (
     <div className="max-w-3xl mx-auto mb-12">
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm text-white/60">Pipeline Progress</span>
-        <span className="text-sm font-medium text-white">
-          {activeIndex + 1} of {total} stages
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-medium text-white">
+            {Math.min(activeIndex + 1, total)} of {total} stages
+          </span>
+          {isComplete && (
+            <button
+              onClick={onRestart}
+              className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 transition-colors cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Replay
+            </button>
+          )}
+        </div>
       </div>
       <div className="h-2 bg-white/5 rounded-full overflow-hidden">
         <motion.div
@@ -396,19 +401,57 @@ function PipelineProgress({ activeIndex, total }: { activeIndex: number; total: 
 
 export function Pipeline() {
   const containerRef = useRef<HTMLDivElement>(null)
-  const isInView = useInView(containerRef, { once: true, amount: 0.3 })
+  const isInView = useInView(containerRef, { once: false, amount: 0.3 })
   const [activeIndex, setActiveIndex] = useState(-1)
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const [isRunning, setIsRunning] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => {
-    if (isInView && activeIndex < PIPELINE_STAGES.length - 1) {
-      const timer = setTimeout(() => {
-        setActiveIndex((prev) => Math.min(prev + 1, PIPELINE_STAGES.length - 1))
-      }, activeIndex === -1 ? 500 : 2000)
+  const startPipeline = useCallback(() => {
+    setActiveIndex(-1)
+    setIsRunning(true)
+  }, [])
 
-      return () => clearTimeout(timer)
+  const restartPipeline = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
     }
-  }, [isInView, activeIndex])
+    setActiveIndex(-1)
+    setIsRunning(true)
+  }, [])
+
+  // Auto-start when in view
+  useEffect(() => {
+    if (isInView && activeIndex === -1 && !isRunning) {
+      startPipeline()
+    }
+  }, [isInView, activeIndex, isRunning, startPipeline])
+
+  // Progress through stages
+  useEffect(() => {
+    if (!isRunning) return
+
+    if (activeIndex < PIPELINE_STAGES.length - 1) {
+      timerRef.current = setTimeout(() => {
+        setActiveIndex((prev) => prev + 1)
+      }, activeIndex === -1 ? 500 : 1500)
+    } else {
+      // Pipeline complete - auto restart after delay
+      timerRef.current = setTimeout(() => {
+        restartPipeline()
+      }, 5000)
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+      }
+    }
+  }, [isRunning, activeIndex, restartPipeline])
+
+  const handleStageClick = useCallback((index: number) => {
+    setActiveIndex(index)
+  }, [])
 
   const displayedStage = hoveredIndex !== null
     ? PIPELINE_STAGES[hoveredIndex]
@@ -416,14 +459,14 @@ export function Pipeline() {
 
   const isDisplayedCompleted = hoveredIndex !== null
     ? hoveredIndex < activeIndex
-    : true
+    : activeIndex === PIPELINE_STAGES.length - 1
+
+  const isComplete = activeIndex === PIPELINE_STAGES.length - 1
 
   return (
     <section ref={containerRef} className="relative py-32 overflow-hidden">
-      {/* Background */}
       <div className="absolute inset-0 bg-gradient-to-b from-[#030508] via-background to-[#030508]" />
 
-      {/* Subtle grid */}
       <div
         className="absolute inset-0 opacity-[0.03]"
         style={{
@@ -435,7 +478,6 @@ export function Pipeline() {
         }}
       />
 
-      {/* Glow effects */}
       <div
         className="absolute top-1/2 left-1/4 w-96 h-96 -translate-x-1/2 -translate-y-1/2 opacity-20 blur-3xl pointer-events-none"
         style={{ background: 'radial-gradient(circle, #00E7FF 0%, transparent 70%)' }}
@@ -446,7 +488,6 @@ export function Pipeline() {
       />
 
       <div className="container-wide relative z-10">
-        {/* Section header */}
         <div className="text-center mb-16">
           <motion.span
             className="inline-block text-primary text-sm font-semibold tracking-wider uppercase mb-4"
@@ -477,10 +518,13 @@ export function Pipeline() {
           </motion.p>
         </div>
 
-        {/* Progress bar */}
-        <PipelineProgress activeIndex={activeIndex} total={PIPELINE_STAGES.length} />
+        <PipelineProgress
+          activeIndex={activeIndex}
+          total={PIPELINE_STAGES.length}
+          onRestart={restartPipeline}
+          isComplete={isComplete}
+        />
 
-        {/* Pipeline stages */}
         <div className="overflow-x-auto pb-4 -mx-4 px-4">
           <div className="grid grid-cols-4 lg:grid-cols-8 gap-6 min-w-[900px]">
             {PIPELINE_STAGES.map((stage, index) => (
@@ -492,12 +536,12 @@ export function Pipeline() {
                 isHovered={hoveredIndex === index}
                 onHover={() => setHoveredIndex(index)}
                 onLeave={() => setHoveredIndex(null)}
+                onClick={() => handleStageClick(index)}
               />
             ))}
           </div>
         </div>
 
-        {/* Log panel */}
         <AnimatePresence mode="wait">
           <LogPanel
             key={displayedStage.id}
