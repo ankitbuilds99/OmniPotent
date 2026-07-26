@@ -961,7 +961,7 @@ _FALSE_ALARM = {
 # --------------------------------------------------------------------------- #
 # Master fixtures registry
 # --------------------------------------------------------------------------- #
-_FIXTURES: dict[str, dict[str, dict[str, Any]]] = {
+_FIXTURES: dict[str, dict[str, Any]] = {
     "checkout-discount": _CHECKOUT_DISCOUNT,
     "memory-leak": _MEMORY_LEAK,
     "cascading-failure": _CASCADING_FAILURE,
