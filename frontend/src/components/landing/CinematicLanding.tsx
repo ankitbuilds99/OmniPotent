@@ -97,7 +97,7 @@ export function CinematicLanding({ onLaunch }: { onLaunch: () => void }) {
 
         {/* Pricing */}
         <section id="pricing">
-          <Pricing />
+          <Pricing onLaunch={onLaunch} />
         </section>
       </main>
 

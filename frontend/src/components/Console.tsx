@@ -114,6 +114,10 @@ export function Console({ onHome }: { onHome: () => void }) {
                 <p className="empty__sub">
                   I'll analyze logs, metrics, traces, and code to find the root cause.
                 </p>
+                <p className="empty__tip">
+                  <strong>Tip:</strong> Click "Change model" in the sidebar to add your own API key
+                  (Groq, OpenAI, Anthropic, etc.) for unlimited usage.
+                </p>
 
                 <div className="prompts">
                   {SUGGESTIONS.map((text) => (

@@ -67,11 +67,13 @@ const PLANS = [
 function PricingCard({
   plan,
   index,
-  isYearly
+  isYearly,
+  onLaunch
 }: {
   plan: typeof PLANS[0]
   index: number
   isYearly: boolean
+  onLaunch?: () => void
 }) {
   const Icon = plan.icon
   const yearlyPrice = plan.price ? Math.round(plan.price * 10) : null
@@ -160,6 +162,7 @@ function PricingCard({
         `}
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
+        onClick={onLaunch}
       >
         {plan.cta}
       </motion.button>
@@ -175,7 +178,7 @@ function PricingCard({
   )
 }
 
-export function Pricing() {
+export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
   const [isYearly, setIsYearly] = useState(false)
 
   return (
@@ -257,6 +260,7 @@ export function Pricing() {
               plan={plan}
               index={i}
               isYearly={isYearly}
+              onLaunch={onLaunch}
             />
           ))}
         </div>

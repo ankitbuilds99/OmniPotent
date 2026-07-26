@@ -2680,10 +2680,22 @@ input:focus-visible {
 }
 
 .empty__sub {
-  margin: 0 0 32px;
+  margin: 0 0 16px;
   font-size: 15px;
   color: var(--text-dim);
   line-height: 1.5;
+}
+.empty__tip {
+  margin: 0 0 24px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--accent-dim);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+}
+.empty__tip strong {
+  color: var(--accent);
 }
 
 /* Prompt Suggestions */

@@ -64,12 +64,12 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
 
           {/* CTA */}
           <div className="flex items-center gap-3">
-            <a
-              href="#"
+            <button
+              onClick={onLaunch}
               className="hidden sm:block text-white/70 hover:text-white text-sm font-medium transition-colors"
             >
               Sign in
-            </a>
+            </button>
             <motion.button
               className="
                 flex items-center gap-2 px-5 py-2.5
