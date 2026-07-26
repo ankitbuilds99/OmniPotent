@@ -29,6 +29,7 @@ from urllib.parse import parse_qs
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -536,6 +537,9 @@ app = FastAPI(
 # headers and the browser can read it.
 app.add_middleware(LimitsMiddleware)
 
+# GZip compression for responses > 1KB (reduces bandwidth ~40%)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # Allow the React dev server plus any origins configured via CORS_ORIGINS.
 app.add_middleware(
     CORSMiddleware,
@@ -626,19 +630,26 @@ class ChatResponse(BaseModel):
 
 
 def _friendly_error(exc: Exception) -> str:
-    """Turn a raw exception into a message safe to show in the UI."""
-    text = str(exc)
+    """Turn a raw exception into a message safe to show in the UI.
+    Never expose raw exception text to avoid leaking internal details."""
+    text = str(exc).lower()
     if "rate_limit" in text or "429" in text:
         return (
             "The LLM provider's rate limit was reached. Please try again later "
             "or check your plan/quota."
         )
-    if "authentication" in text.lower() or "401" in text or "api_key" in text.lower():
+    if "authentication" in text or "401" in text or "api_key" in text:
         return (
             "The LLM provider rejected the API key. Check the key for the "
             "configured COPILOT_PROVIDER in your .env."
         )
-    return f"Something went wrong while running the agent: {text}"
+    if "timeout" in text or "timed out" in text:
+        return "The request timed out. Please try again."
+    if "connection" in text or "network" in text:
+        return "A network error occurred. Please check your connection and try again."
+    # Log the actual error for debugging, but don't expose it to the client
+    log.warning("Agent error (not exposed to client): %s", exc)
+    return "Something went wrong while running the agent. Please try again."
 
 
 def _check_message(message: str) -> None:

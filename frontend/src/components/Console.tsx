@@ -140,7 +140,9 @@ export function Console({ onHome }: { onHome: () => void }) {
           ) : (
             <>
               <div className="main__scroll">
-                <div className="thread">
+                <div className="thread" role="log" aria-live="polite" aria-label="Conversation">
+                  {busy && <span className="sr-only" aria-live="assertive">Investigation in progress</span>}
+                  {awaitingApproval && <span className="sr-only" aria-live="assertive">Awaiting your approval</span>}
                   {turns.map((turn, i) => (
                     <Message
                       key={turn.id}

@@ -25,6 +25,7 @@ Verdicts:
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -38,13 +39,15 @@ _MAX_OUT = 2000  # cap captured output so a chatty test can't bloat the report/c
 def _run(cmd: str | list[str], cwd: str | Path, timeout: int) -> tuple[int, str]:
     """Run a command, returning (returncode, combined-output). Never raises."""
     try:
+        # Always use shell=False for security; parse string commands with shlex
+        cmd_list = shlex.split(cmd) if isinstance(cmd, str) else cmd
         proc = subprocess.run(  # noqa: S603 — cmd is operator-configured, cwd is a temp copy
-            cmd,
+            cmd_list,
             cwd=str(cwd),
             capture_output=True,
             text=True,
             timeout=timeout,
-            shell=isinstance(cmd, str),
+            shell=False,
         )
         return proc.returncode, (proc.stdout + proc.stderr)[-_MAX_OUT:]
     except subprocess.TimeoutExpired:

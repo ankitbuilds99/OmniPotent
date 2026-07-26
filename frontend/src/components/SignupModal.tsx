@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 
 import * as api from "../api";
 import type { SignupResult } from "../api";
@@ -14,6 +14,22 @@ export function SignupModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const [result, setResult] = useState<SignupResult | null>(null);
   const [copied, setCopied] = useState(false);
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap and escape key handling
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    document.body.style.overflow = "hidden";
+    // Focus first input on mount
+    modalRef.current?.querySelector("input")?.focus();
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = "";
+    };
+  }, [onClose]);
 
   const submit = async () => {
     setError("");
@@ -42,7 +58,7 @@ export function SignupModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="admin__overlay" role="dialog" aria-modal="true" aria-label="Create an account">
-      <div className="admin signup">
+      <div className="admin signup" ref={modalRef}>
         <header className="admin__head">
           <h2>Create an account</h2>
           <button className="admin__close" onClick={onClose} aria-label="Close">

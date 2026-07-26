@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 import * as api from "../api";
 import type { AdminOrg, ApiKeyInfo, AuditEvent, UsageSummary } from "../types";
@@ -19,8 +19,21 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
   const [keyRole, setKeyRole] = useState("responder");
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [error, setError] = useState("");
-
   const [outdated, setOutdated] = useState(false);
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap and escape key handling
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = "";
+    };
+  }, [onClose]);
 
   const refresh = async () => {
     try {
@@ -85,7 +98,7 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="admin__overlay" role="dialog" aria-modal="true" aria-label="Admin console">
-      <div className="admin">
+      <div className="admin" ref={modalRef}>
         <header className="admin__head">
           <h2>Admin console</h2>
           <button className="admin__close" onClick={onClose} aria-label="Close admin console">
@@ -146,14 +159,23 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
             <section className="admin__card">
               <h3>API keys</h3>
               <div className="admin__keyform">
-                <input placeholder="key name" value={keyName} onChange={(e) => setKeyName(e.target.value)} />
-                <select value={keyRole} onChange={(e) => setKeyRole(e.target.value)}>
+                <input
+                  placeholder="key name"
+                  aria-label="API key name"
+                  value={keyName}
+                  onChange={(e) => setKeyName(e.target.value)}
+                />
+                <select
+                  value={keyRole}
+                  aria-label="API key role"
+                  onChange={(e) => setKeyRole(e.target.value)}
+                >
                   <option value="viewer">viewer</option>
                   <option value="responder">responder</option>
                   <option value="admin">admin</option>
                   <option value="owner">owner</option>
                 </select>
-                <button onClick={createKey}>Issue key</button>
+                <button onClick={createKey} aria-label="Issue new API key">Issue key</button>
               </div>
               {newKey && (
                 <div className="admin__newkey">
@@ -167,7 +189,11 @@ export function AdminPanel({ onClose }: { onClose: () => void }) {
                     <span>{k.name || "—"}</span>
                     <span className="admin__role">{k.role}</span>
                     {k.active ? (
-                      <button className="admin__revoke" onClick={() => revoke(k.id)}>Revoke</button>
+                      <button
+                        className="admin__revoke"
+                        onClick={() => revoke(k.id)}
+                        aria-label={`Revoke API key ${k.prefix}`}
+                      >Revoke</button>
                     ) : <span className="admin__muted">revoked</span>}
                   </li>
                 ))}

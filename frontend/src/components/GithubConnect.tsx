@@ -71,14 +71,17 @@ export function GithubConnect() {
           await githubConnect(saved.token, saved.repo);
           await refreshConfig();
         } catch {
-          // Silent fail for auto-reconnect - user can manually retry
+          // Clear invalid credentials so user knows to re-enter
+          clearCredentials();
+          setHasSaved(false);
         } finally {
           setBusy(false);
         }
       }
     };
     autoConnect();
-  }, []); // Only run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Intentionally run once on mount - connected changes shouldn't re-trigger
 
   const [owner, name] = repo.trim().split("/");
   const repoOk = !!owner && !!name;
