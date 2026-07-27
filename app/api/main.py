@@ -2890,6 +2890,216 @@ async def slack_interactions(request: Request):
 
 
 # --------------------------------------------------------------------------- #
+# GitHub Webhook — auto-triage issues, PRs, deployments, security alerts
+# --------------------------------------------------------------------------- #
+def _verify_github_signature(secret: str, payload: bytes, signature: str) -> bool:
+    """Verify GitHub webhook HMAC-SHA256 signature."""
+    if not secret or not signature:
+        return False
+    expected = "sha256=" + hmac.new(
+        secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@app.post(
+    "/webhooks/github",
+    tags=["Webhooks"],
+    summary="GitHub webhook receiver",
+    description="Receive GitHub webhook events. Handles push, pull_request, issues, "
+    "deployment_status, and security_advisory events for auto-triage.",
+    responses={
+        200: {"description": "Event processed"},
+        401: {"description": "Invalid webhook signature"},
+    },
+)
+async def github_webhook(request: Request) -> dict[str, object]:
+    """Receive GitHub webhook events for auto-triage.
+
+    Supported events:
+    - push: Track deployments
+    - pull_request: Auto-review security implications
+    - issues: Auto-triage bug reports
+    - deployment_status: Track deployment health
+    - security_advisory: Alert on vulnerabilities
+    """
+    raw = await request.body()
+    s = get_settings()
+    sig = request.headers.get("x-hub-signature-256", "")
+
+    if s.github_webhook_secret and not _verify_github_signature(
+        s.github_webhook_secret, raw, sig
+    ):
+        raise HTTPException(401, "invalid GitHub webhook signature")
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "invalid JSON payload") from exc
+
+    event_type = request.headers.get("x-github-event", "unknown")
+    delivery_id = request.headers.get("x-github-delivery", "")
+
+    log.info("GitHub webhook: event=%s delivery=%s", event_type, delivery_id)
+
+    result: dict[str, object] = {
+        "event": event_type,
+        "delivery_id": delivery_id,
+        "processed": True,
+    }
+
+    if event_type == "push":
+        result["action"] = "deployment_tracked"
+        result["ref"] = payload.get("ref", "")
+        result["commits"] = len(payload.get("commits", []))
+        result["repository"] = payload.get("repository", {}).get("full_name", "")
+
+    elif event_type == "pull_request":
+        action = payload.get("action", "")
+        pr = payload.get("pull_request", {})
+        result["action"] = action
+        result["pr_number"] = pr.get("number")
+        result["pr_title"] = pr.get("title", "")
+        result["pr_state"] = pr.get("state", "")
+
+        if action in ("opened", "synchronize") and active_api_key():
+            changes = pr.get("changed_files", 0)
+            if changes > 50:
+                result["auto_triage"] = "large_pr_flagged"
+
+    elif event_type == "issues":
+        action = payload.get("action", "")
+        issue = payload.get("issue", {})
+        result["action"] = action
+        result["issue_number"] = issue.get("number")
+        result["issue_title"] = issue.get("title", "")
+
+        if action == "opened" and active_api_key():
+            labels = [l.get("name", "").lower() for l in issue.get("labels", [])]
+            if "bug" in labels or "incident" in labels:
+                result["auto_triage"] = "incident_detected"
+
+    elif event_type == "deployment_status":
+        deployment = payload.get("deployment", {})
+        result["deployment_id"] = deployment.get("id")
+        result["environment"] = deployment.get("environment", "")
+        result["state"] = payload.get("deployment_status", {}).get("state", "")
+
+        if result["state"] == "failure" and active_api_key():
+            result["auto_triage"] = "deployment_failure_detected"
+
+    elif event_type == "security_advisory":
+        advisory = payload.get("security_advisory", {})
+        result["severity"] = advisory.get("severity", "")
+        result["summary"] = advisory.get("summary", "")
+        result["auto_triage"] = "security_alert"
+
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# GitLab Webhook — auto-triage merge requests, issues, pipelines
+# --------------------------------------------------------------------------- #
+def _verify_gitlab_token(secret: str, token: str) -> bool:
+    """Verify GitLab webhook secret token."""
+    if not secret:
+        return True  # No secret configured, allow
+    return hmac.compare_digest(secret, token)
+
+
+@app.post(
+    "/webhooks/gitlab",
+    tags=["Webhooks"],
+    summary="GitLab webhook receiver",
+    description="Receive GitLab webhook events. Handles push, merge_request, issue, "
+    "pipeline, and deployment events for auto-triage.",
+    responses={
+        200: {"description": "Event processed"},
+        401: {"description": "Invalid webhook token"},
+    },
+)
+async def gitlab_webhook(request: Request) -> dict[str, object]:
+    """Receive GitLab webhook events for auto-triage.
+
+    Supported events:
+    - Push Hook: Track deployments
+    - Merge Request Hook: Auto-review
+    - Issue Hook: Auto-triage bug reports
+    - Pipeline Hook: Track CI/CD status
+    - Deployment Hook: Track deployment health
+    """
+    raw = await request.body()
+    s = get_settings()
+    token = request.headers.get("x-gitlab-token", "")
+
+    if s.gitlab_webhook_secret and not _verify_gitlab_token(
+        s.gitlab_webhook_secret, token
+    ):
+        raise HTTPException(401, "invalid GitLab webhook token")
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "invalid JSON payload") from exc
+
+    event_type = payload.get("object_kind", request.headers.get("x-gitlab-event", "unknown"))
+
+    log.info("GitLab webhook: event=%s", event_type)
+
+    result: dict[str, object] = {
+        "event": event_type,
+        "processed": True,
+    }
+
+    if event_type == "push":
+        result["ref"] = payload.get("ref", "")
+        result["commits"] = len(payload.get("commits", []))
+        result["project"] = payload.get("project", {}).get("path_with_namespace", "")
+
+    elif event_type == "merge_request":
+        attrs = payload.get("object_attributes", {})
+        result["action"] = attrs.get("action", "")
+        result["mr_iid"] = attrs.get("iid")
+        result["mr_title"] = attrs.get("title", "")
+        result["mr_state"] = attrs.get("state", "")
+
+        if attrs.get("action") == "open" and active_api_key():
+            changes = payload.get("changes", {})
+            if changes:
+                result["auto_triage"] = "mr_opened"
+
+    elif event_type == "issue":
+        attrs = payload.get("object_attributes", {})
+        result["action"] = attrs.get("action", "")
+        result["issue_iid"] = attrs.get("iid")
+        result["issue_title"] = attrs.get("title", "")
+
+        if attrs.get("action") == "open" and active_api_key():
+            labels = [l.get("title", "").lower() for l in payload.get("labels", [])]
+            if "bug" in labels or "incident" in labels:
+                result["auto_triage"] = "incident_detected"
+
+    elif event_type == "pipeline":
+        attrs = payload.get("object_attributes", {})
+        result["pipeline_id"] = attrs.get("id")
+        result["status"] = attrs.get("status", "")
+        result["ref"] = attrs.get("ref", "")
+
+        if attrs.get("status") == "failed" and active_api_key():
+            result["auto_triage"] = "pipeline_failure_detected"
+
+    elif event_type == "deployment":
+        result["deployment_id"] = payload.get("deployment_id")
+        result["environment"] = payload.get("environment", "")
+        result["status"] = payload.get("status", "")
+
+        if payload.get("status") == "failed" and active_api_key():
+            result["auto_triage"] = "deployment_failure_detected"
+
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # Static SPA — serve the built frontend so the whole app is one deployable.
 # --------------------------------------------------------------------------- #
 # Mounted LAST: the explicit API routes above are matched first; everything else

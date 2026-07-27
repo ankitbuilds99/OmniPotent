@@ -24,11 +24,13 @@ function TopBar({
   onNew,
   onAdmin,
   onSignup,
+  onDashboard,
 }: {
   onHome: () => void;
   onNew: () => void;
   onAdmin: () => void;
   onSignup: () => void;
+  onDashboard?: () => void;
 }) {
   const { config: cfg } = useConfig();
   const me = useMe();
@@ -61,6 +63,7 @@ function TopBar({
           <span>New</span>
         </button>
         <button className="nav__btn" onClick={onSignup}>Sign up</button>
+        {onDashboard && <button className="nav__btn" onClick={onDashboard}>Dashboard</button>}
         <button className="nav__btn" onClick={onAdmin}>Admin</button>
         <div className="nav__sep" />
         {cfg && <span className="nav__tag">{modelShort(cfg.model)}</span>}
@@ -74,7 +77,7 @@ function TopBar({
   );
 }
 
-export function Console({ onHome }: { onHome: () => void }) {
+export function Console({ onHome, onDashboard }: { onHome: () => void; onDashboard?: () => void }) {
   const {
     turns,
     busy,
@@ -112,6 +115,7 @@ export function Console({ onHome }: { onHome: () => void }) {
         onNew={newConversation}
         onAdmin={() => setAdminOpen(true)}
         onSignup={() => setSignupOpen(true)}
+        onDashboard={onDashboard}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {signupOpen && <SignupModal onClose={() => setSignupOpen(false)} />}

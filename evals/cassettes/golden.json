@@ -38,6 +38,29 @@
       "type": "ai"
     }
   },
+  "1e1f8010655f43fe4641aa9b58090ccc41b57cb33c1520c46f87dbadcc2cb24a": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [
+          {
+            "args": {},
+            "id": "call_list_services",
+            "name": "list_services",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
   "293e1d05be3d2c952a44173b5ca9e8ffd324fa32d76467081544c4fb9e023702": {
     "response": {
       "data": {
@@ -130,6 +153,22 @@
       "data": {
         "additional_kwargs": {},
         "content": "1. List the services currently emitting logs.\n2. Summarize which services are active.",
+        "id": null,
+        "invalid_tool_calls": [],
+        "name": null,
+        "response_metadata": {},
+        "tool_calls": [],
+        "type": "ai",
+        "usage_metadata": null
+      },
+      "type": "ai"
+    }
+  },
+  "c3a87d6419cd72636eb36d73b96fcbd58ecd29dd1cbecd96fec5e93143b963ed": {
+    "response": {
+      "data": {
+        "additional_kwargs": {},
+        "content": "The services currently emitting logs are checkout-svc and inventory-svc.",
         "id": null,
         "invalid_tool_calls": [],
         "name": null,

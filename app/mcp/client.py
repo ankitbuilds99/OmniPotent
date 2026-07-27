@@ -22,7 +22,8 @@ from app.config import get_settings
 _SERVERS = (
     "datadog", "repo", "github", "pagerduty", "kubernetes", "sentry", "memory",
     "traces", "deploys", "argocd", "terraform", "docker", "cicd", "security",
-    "costopt", "architect", "docs", "multicloud", "marketplace",
+    "costopt", "architect", "docs", "multicloud", "marketplace", "slack", "alerting",
+    "runbooks",
 )
 
 
@@ -202,6 +203,27 @@ def _server_config() -> dict:
         "marketplace": {
             "command": py,
             "args": ["-m", "app.mcp.servers.marketplace.server"],
+            "transport": "stdio",
+            "env": {},
+        },
+        "slack": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.slack.server"],
+            "transport": "stdio",
+            "env": {
+                "SLACK_BOT_TOKEN": _isecret("SLACK_BOT_TOKEN", s.slack_bot_token),
+                "SLACK_DEFAULT_CHANNEL": _isecret("SLACK_CHANNEL", s.slack_channel),
+            },
+        },
+        "alerting": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.alerting.server"],
+            "transport": "stdio",
+            "env": {},
+        },
+        "runbooks": {
+            "command": py,
+            "args": ["-m", "app.mcp.servers.runbooks.server"],
             "transport": "stdio",
             "env": {},
         },

@@ -18,7 +18,7 @@ import { Blog } from './Blog'
 import { Footer } from './Footer'
 import { CursorGlow } from './CursorGlow'
 
-export function CinematicLanding({ onLaunch }: { onLaunch: () => void }) {
+export function CinematicLanding({ onLaunch, onDashboard: _onDashboard }: { onLaunch: () => void; onDashboard?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Smooth scrolling with Lenis

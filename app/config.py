@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     slack_signing_secret: str = ""
     slack_channel: str = ""  # channel id/name investigations post into
+    # GitHub webhook secret for HMAC-SHA256 signature verification.
+    github_webhook_secret: str = ""
+    # GitLab webhook secret token for verification.
+    gitlab_webhook_secret: str = ""
 
     # --- API ---
     # Deployment environment: "development" | "production". In production the app
