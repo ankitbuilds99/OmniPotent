@@ -313,6 +313,26 @@ class Settings(BaseSettings):
     # project root.
     copilot_vector_persist_dir: str = ""
 
+    # --- Database (production persistence) ---
+    # Database URL: postgresql://user:pass@host:5432/db or sqlite:///path.db
+    # Empty = SQLite at data/copilot.db (dev default).
+    copilot_database_url: str = ""
+    # Connection pool settings (PostgreSQL only).
+    copilot_db_pool_size: int = 10
+    copilot_db_pool_overflow: int = 20
+    copilot_db_pool_timeout: int = 30
+    copilot_db_pool_recycle: int = 3600
+    # Echo SQL statements to logs (debug only).
+    copilot_db_echo: bool = False
+
+    # --- Logging ---
+    # Log level: DEBUG | INFO | WARNING | ERROR | CRITICAL
+    copilot_log_level: str = "INFO"
+    # Log format: json (production) | human (dev)
+    copilot_log_format: str = "human"
+    # Log file path (optional, stdout by default)
+    copilot_log_file: str = ""
+
     @field_validator("copilot_provider")
     @classmethod
     def _normalize_provider(cls, v: str) -> str:

@@ -41,9 +41,20 @@ providers = [
     "langchain-google-genai>=2.0.0", # Google Gemini
 ]
 # Multi-tenant foundations (opt-in; base install stays single-instance/SQLite):
-postgres = ["langgraph-checkpoint-postgres>=2.0.0"]  # COPILOT_CHECKPOINT_DB=postgres://...
+postgres = [
+    "langgraph-checkpoint-postgres>=2.0.0",  # COPILOT_CHECKPOINT_DB=postgres://...
+    "asyncpg>=0.29.0",                       # Async PostgreSQL driver
+    "sqlalchemy[asyncio]>=2.0.0",            # Async SQLAlchemy
+]
 secrets = ["cryptography>=42.0"]                     # per-tenant secret vault
 apm = ["ddtrace>=4.0"]                               # Datadog APM (DD_TRACE_ENABLED=true)
+# Database migrations
+migrations = [
+    "alembic>=1.13.0",
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.19.0",
+]
 # Vector RAG (embeddings for semantic incident search):
 vectors = [
     "chromadb>=0.5.0",              # ChromaDB vector store (COPILOT_VECTOR_STORE=chromadb)
