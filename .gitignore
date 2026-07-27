@@ -1,24 +1,114 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 *.egg-info/
+*.egg
 .venv/
 venv/
+env/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+dist/
+build/
+*.whl
 
-# Env & secrets
+# Env & secrets (NEVER commit these)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets.yaml
+secrets.json
+credentials.json
+service-account*.json
+*-credentials.json
+*.keystore
+.htpasswd
+.netrc
+
+# API Keys & Tokens (patterns that might contain secrets)
+**/config/local.py
+**/config/local.yaml
+**/config/local.json
+**/secrets/
+**/private/
+
+# AWS
+.aws/
+aws-credentials
+*.aws
+
+# GCP
+gcloud/
+application_default_credentials.json
+
+# Azure
+.azure/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!*.tfvars.example
+
+# Kubernetes secrets
+*-secret.yaml
+*-secrets.yaml
+kubeconfig
+.kube/
 
 # Local state
 *.sqlite
 *.sqlite-journal
+*.sqlite3
 copilot_checkpoints.sqlite*
 feedback.jsonl
 audit.jsonl
 learned_incidents.json
+*.log
+logs/
 
 # OS / IDE
 .DS_Store
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Node (if frontend)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Test artifacts
+test-results/
+coverage/
+*.coverage
+
+# Docker
+.docker/
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Temporary files
+tmp/
+temp/
+*.tmp

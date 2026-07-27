@@ -5,7 +5,18 @@ Provides:
 - Compliance-ready audit trails
 - Search and filtering
 - Export capabilities
+
+This module combines the legacy audit functions (record, verify_chain, recent, clear)
+with the new advanced audit logging system (AuditLogger, log_action, etc.).
 """
+
+from app.audit_legacy import (
+    record,
+    verify_chain,
+    recent,
+    clear,
+    _BUFFER,
+)
 
 from app.audit.logger import (
     AuditLogger,
@@ -24,6 +35,13 @@ from app.audit.logger import (
 )
 
 __all__ = [
+    # Legacy functions (for backwards compatibility)
+    "record",
+    "verify_chain",
+    "recent",
+    "clear",
+    "_BUFFER",
+    # New advanced audit system
     "AuditLogger",
     "AuditEntry",
     "AuditAction",
