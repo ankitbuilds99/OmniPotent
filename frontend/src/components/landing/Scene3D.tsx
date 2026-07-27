@@ -1,4 +1,4 @@
-import { useRef, useMemo, Suspense } from 'react'
+import { useRef, useMemo, Suspense, Component, type ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import {
   Float,
@@ -425,23 +425,83 @@ function LoadingFallback() {
   )
 }
 
+// Detect reduced motion preference
+const REDUCED_MOTION =
+  typeof window !== "undefined" &&
+  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+// Static fallback for reduced motion or WebGL failures
+function StaticFallback() {
+  return (
+    <div className="absolute inset-0 z-0 flex items-center justify-center bg-gradient-to-br from-[#030508] via-[#0a1628] to-[#030508]">
+      <div className="relative">
+        <div className="w-32 h-32 rounded-full bg-gradient-to-br from-cyan-500/20 to-purple-500/20 blur-xl" />
+        <div className="absolute inset-4 rounded-full bg-gradient-to-br from-cyan-400/30 to-purple-400/30 animate-pulse" />
+        <div className="absolute inset-8 rounded-full bg-cyan-500/40" />
+      </div>
+    </div>
+  );
+}
+
+// Error boundary for WebGL failures
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+class CanvasErrorBoundary extends Component<
+  { children: ReactNode },
+  ErrorBoundaryState
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    console.warn("Scene3D WebGL error:", error.message);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <StaticFallback />;
+    }
+    return this.props.children;
+  }
+}
+
 // Main exported component
 export function Scene3D() {
+  // Skip 3D entirely for reduced motion preference
+  if (REDUCED_MOTION) {
+    return <StaticFallback />;
+  }
+
   return (
-    <div className="absolute inset-0 z-0">
-      <Canvas
-        camera={{ position: [0, 0, 8], fov: 60 }}
-        dpr={[1, 2]}
-        gl={{
-          antialias: true,
-          alpha: true,
-          powerPreference: 'high-performance'
-        }}
-      >
-        <Suspense fallback={<LoadingFallback />}>
-          <Scene />
-        </Suspense>
-      </Canvas>
-    </div>
+    <CanvasErrorBoundary>
+      <div className="absolute inset-0 z-0">
+        <Canvas
+          camera={{ position: [0, 0, 8], fov: 60 }}
+          dpr={[1, 1.5]}  // Reduced from [1, 2] for better performance
+          frameloop={REDUCED_MOTION ? "demand" : "always"}
+          gl={{
+            antialias: true,
+            alpha: true,
+            powerPreference: 'high-performance',
+            failIfMajorPerformanceCaveat: true,  // Fail gracefully on slow hardware
+          }}
+          onCreated={({ gl }) => {
+            gl.setClearColor(0x000000, 0);
+          }}
+        >
+          <Suspense fallback={<LoadingFallback />}>
+            <Scene />
+          </Suspense>
+        </Canvas>
+      </div>
+    </CanvasErrorBoundary>
   )
 }

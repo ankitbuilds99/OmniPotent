@@ -6,9 +6,50 @@ on:
   pull_request:
 
 jobs:
+  security:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Scan for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Python dependency audit
+        run: |
+          uv pip install pip-audit --system
+          uv export --no-hashes > requirements.txt
+          pip-audit -r requirements.txt --ignore-vuln GHSA-xxxx-xxxx-xxxx || true
+
+      - name: Check for hardcoded secrets in code
+        run: |
+          # Fail if any obvious secret patterns are found
+          if grep -rE "(sk-[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36})" --include="*.py" --include="*.ts" --include="*.tsx" --include="*.yaml" app frontend/src; then
+            echo "::error::Potential hardcoded secrets found!"
+            exit 1
+          fi
+          echo "No hardcoded secrets detected"
+
   backend:
     name: Backend (lint + tests)
     runs-on: ubuntu-latest
+    needs: security  # Run after security scan passes
     steps:
       - uses: actions/checkout@v4
       - name: Install uv

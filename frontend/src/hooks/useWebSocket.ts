@@ -136,15 +136,21 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearTimers();
     updateStatus("connecting");
 
-    // Build WebSocket URL with auth token and session ID
+    // Build WebSocket URL - session_id only (not sensitive)
     const params = new URLSearchParams();
-    if (TOKEN) params.set("token", TOKEN);
     if (sessionId) params.set("session_id", sessionId);
     const queryString = params.toString();
     const wsUrl = `${getWsUrl()}/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`;
 
+    // Use subprotocol for auth token (not logged in access logs)
+    // Format: ["copilot-v1", "auth-<token>"] or just ["copilot-v1"] if no token
+    const protocols: string[] = ["copilot-v1"];
+    if (TOKEN) {
+      protocols.push(`auth-${TOKEN}`);
+    }
+
     try {
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl, protocols);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -325,13 +331,16 @@ export async function probeWebSocket(threadId: string): Promise<boolean> {
   if (!isWebSocketSupported()) return false;
 
   return new Promise((resolve) => {
-    const params = new URLSearchParams();
-    if (TOKEN) params.set("token", TOKEN);
-    const queryString = params.toString();
-    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`;
+    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}`;
+
+    // Use subprotocol for auth token (secure - not in URL/logs)
+    const protocols: string[] = ["copilot-v1"];
+    if (TOKEN) {
+      protocols.push(`auth-${TOKEN}`);
+    }
 
     try {
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl, protocols);
       const timeout = setTimeout(() => {
         ws.close();
         resolve(false);

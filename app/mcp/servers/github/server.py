@@ -69,24 +69,28 @@ def list_recent_commits(branch: str = "main", max_count: int | str = 5) -> list[
     repo, err = _repo_or_error()
     if err:
         return [err]
-    import httpx  # local import so offline mode needs no extra deps
 
-    resp = httpx.get(
-        f"https://api.github.com/repos/{repo}/commits",
-        params={"sha": branch, "per_page": max_count},
-        headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    return [
-        {
-            "sha": c["sha"][:7],
-            "author": c["commit"]["author"]["name"],
-            "date": c["commit"]["author"]["date"][:10],
-            "message": c["commit"]["message"].splitlines()[0],
-        }
-        for c in resp.json()
-    ]
+    from app.mcp.http_client import http_get, MCPHTTPError
+
+    try:
+        resp = http_get(
+            f"https://api.github.com/repos/{repo}/commits",
+            params={"sha": branch, "per_page": max_count},
+            headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
+            timeout=15,
+            max_retries=3,
+        )
+        return [
+            {
+                "sha": c["sha"][:7],
+                "author": c["commit"]["author"]["name"],
+                "date": c["commit"]["author"]["date"][:10],
+                "message": c["commit"]["message"].splitlines()[0],
+            }
+            for c in resp.json()
+        ]
+    except MCPHTTPError as e:
+        return [{"error": str(e), "retries_attempted": e.retries_attempted}]
 
 
 @mcp.tool()
@@ -97,18 +101,22 @@ def get_commit_diff(sha: str) -> str:
     repo, err = _repo_or_error()
     if err:
         return err["error"]
-    import httpx
 
-    resp = httpx.get(
-        f"https://api.github.com/repos/{repo}/commits/{sha}",
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3.diff",
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
-    return resp.text
+    from app.mcp.http_client import http_get, MCPHTTPError
+
+    try:
+        resp = http_get(
+            f"https://api.github.com/repos/{repo}/commits/{sha}",
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3.diff",
+            },
+            timeout=15,
+            max_retries=3,
+        )
+        return resp.text
+    except MCPHTTPError as e:
+        return f"Error fetching diff: {e}"
 
 
 def _get_workflow_runs() -> list:

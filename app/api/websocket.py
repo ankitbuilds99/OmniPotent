@@ -187,9 +187,31 @@ manager = ConnectionManager()
 # --------------------------------------------------------------------------- #
 # WebSocket Endpoint
 # --------------------------------------------------------------------------- #
+def _extract_token_from_subprotocol(websocket: WebSocket) -> str | None:
+    """Extract auth token from WebSocket subprotocol.
+
+    Clients should connect with subprotocols: ["copilot-v1", "auth-<token>"]
+    The token is NOT in the URL query string (which would be logged).
+    """
+    # Get requested subprotocols from headers
+    subprotocol_header = websocket.headers.get("sec-websocket-protocol", "")
+    if not subprotocol_header:
+        return None
+
+    protocols = [p.strip() for p in subprotocol_header.split(",")]
+    for proto in protocols:
+        if proto.startswith("auth-"):
+            return proto[5:]  # Remove "auth-" prefix
+    return None
+
+
 @router.websocket("/ws/chat/{thread_id}")
 async def websocket_chat(websocket: WebSocket, thread_id: str):
     """WebSocket endpoint for real-time chat.
+
+    Authentication:
+        Token should be passed via subprotocol, NOT query string (security).
+        Client connects with: new WebSocket(url, ["copilot-v1", "auth-<token>"])
 
     Message protocol (JSON):
 
@@ -212,13 +234,20 @@ async def websocket_chat(websocket: WebSocket, thread_id: str):
         await websocket.close(code=4000, reason="WebSocket disabled")
         return
 
+    # Extract auth token from subprotocol (secure - not logged in access logs)
+    token = _extract_token_from_subprotocol(websocket)
+
+    # Validate token if required
+    if settings.copilot_require_auth and not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    # TODO: Validate token against tenant auth if multi-tenant
+    # For now, presence of token is sufficient (matches SSE behavior)
+
     # Extract session_id from query params for reconnection support
     query_params = dict(websocket.query_params)
     session_id = query_params.get("session_id", "")
-
-    # Authenticate (similar to HTTP auth, but via query param or first message)
-    # For simplicity, we trust the thread_id scoping; real auth should use a token
-    # in the query string or first message. This matches the SSE behavior.
 
     conn = await manager.connect(websocket, thread_id, session_id)
 
