@@ -154,6 +154,7 @@ class TestComponentHealthChecks:
     @pytest.mark.asyncio
     async def test_check_database_healthy(self):
         """Database check should return healthy when connected."""
+        pytest.importorskip("sqlalchemy", reason="sqlalchemy not installed")
         from datetime import datetime
         from app.database.engine import DatabaseHealth
 

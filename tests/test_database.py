@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from unittest.mock import patch, MagicMock
 
+pytest.importorskip("sqlalchemy", reason="sqlalchemy not installed")
+
 
 class TestDatabaseEngine:
     """Tests for database engine configuration."""
