@@ -598,7 +598,7 @@ def create_organization_setup(
     wizard = _get_wizard()
     progress = wizard.create_progress(user_id, org_id)
 
-    profile_step = wizard.update_step(user_id, "organization", {
+    wizard.update_step(user_id, "organization", {
         "org_name": org_name,
         "org_slug": org_slug,
         "org_id": org_id,

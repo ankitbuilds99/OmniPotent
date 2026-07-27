@@ -114,7 +114,7 @@ class AnalyticsTracker:
             self._events = self._events[-self.buffer_size :]
 
         self._counters[f"events.{event.event_type.value}"] += 1
-        self._counters[f"events.total"] += 1
+        self._counters["events.total"] += 1
 
         if event.user_id:
             self._counters[f"users.active.{event.user_id}"] = 1
