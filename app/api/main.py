@@ -2975,7 +2975,7 @@ async def github_webhook(request: Request) -> dict[str, object]:
         result["issue_title"] = issue.get("title", "")
 
         if action == "opened" and active_api_key():
-            labels = [l.get("name", "").lower() for l in issue.get("labels", [])]
+            labels = [lbl.get("name", "").lower() for lbl in issue.get("labels", [])]
             if "bug" in labels or "incident" in labels:
                 result["auto_triage"] = "incident_detected"
 
@@ -3075,7 +3075,7 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
         result["issue_title"] = attrs.get("title", "")
 
         if attrs.get("action") == "open" and active_api_key():
-            labels = [l.get("title", "").lower() for l in payload.get("labels", [])]
+            labels = [lbl.get("title", "").lower() for lbl in payload.get("labels", [])]
             if "bug" in labels or "incident" in labels:
                 result["auto_triage"] = "incident_detected"
 
