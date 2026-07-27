@@ -3100,6 +3100,326 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
 
 
 # --------------------------------------------------------------------------- #
+# Waitlist & Early Access — capture leads and track conversions
+# --------------------------------------------------------------------------- #
+class WaitlistSignupRequest(BaseModel):
+    """Waitlist signup request."""
+    email: str
+    company: str = ""
+    role: str = ""
+    team_size: str = ""
+    use_case: str = ""
+    source: str = "landing_page"
+    referral_code: str = ""
+    utm_source: str = ""
+    utm_medium: str = ""
+    utm_campaign: str = ""
+
+
+@app.post(
+    "/waitlist",
+    tags=["Waitlist"],
+    summary="Join the waitlist",
+    description="Sign up for early access to DevOps Copilot. "
+    "Returns your position and referral code.",
+    responses={
+        200: {
+            "description": "Signup successful",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "Successfully joined waitlist",
+                        "position": 42,
+                        "referral_code": "REF1A2B3C4D",
+                    }
+                }
+            },
+        },
+        400: {"description": "Invalid email or already registered"},
+    },
+)
+async def waitlist_signup(req: WaitlistSignupRequest, request: Request):
+    """Add email to the waitlist."""
+    from app.waitlist import add_to_waitlist, SignupSource
+
+    source_map = {
+        "landing_page": SignupSource.LANDING_PAGE,
+        "product_hunt": SignupSource.PRODUCT_HUNT,
+        "hacker_news": SignupSource.HACKER_NEWS,
+        "twitter": SignupSource.TWITTER,
+        "linkedin": SignupSource.LINKEDIN,
+        "github": SignupSource.GITHUB,
+        "referral": SignupSource.REFERRAL,
+        "direct": SignupSource.DIRECT,
+    }
+    source = source_map.get(req.source.lower(), SignupSource.OTHER)
+
+    client_ip = ""
+    if request.client:
+        client_ip = request.client.host
+
+    entry, message = add_to_waitlist(
+        email=req.email,
+        source=source,
+        company=req.company,
+        role=req.role,
+        team_size=req.team_size,
+        use_case=req.use_case,
+        referred_by=req.referral_code,
+        utm_source=req.utm_source,
+        utm_medium=req.utm_medium,
+        utm_campaign=req.utm_campaign,
+        ip_address=client_ip,
+        user_agent=request.headers.get("user-agent", ""),
+    )
+
+    if entry is None:
+        raise HTTPException(400, message)
+
+    audit.record(
+        "waitlist.signup",
+        source=source.value,
+        company=req.company or "(none)",
+    )
+
+    return {
+        "success": True,
+        "message": message,
+        "position": entry.position,
+        "referral_code": entry.referral_code,
+        "tier": entry.tier.value,
+    }
+
+
+@app.get(
+    "/waitlist/position",
+    tags=["Waitlist"],
+    summary="Check waitlist position",
+    description="Check your position on the waitlist using your email.",
+)
+async def waitlist_position(email: str):
+    """Get waitlist position for an email."""
+    from app.waitlist import WaitlistManager
+
+    manager = WaitlistManager()
+    result = manager.get_position(email)
+
+    if not result.get("found"):
+        raise HTTPException(404, "Email not found in waitlist")
+
+    return result
+
+
+@app.get(
+    "/waitlist/stats",
+    tags=["Waitlist"],
+    summary="Get waitlist statistics",
+    description="Get aggregated waitlist statistics (admin only).",
+    dependencies=[Depends(require_auth)],
+)
+async def waitlist_stats():
+    """Get waitlist statistics."""
+    from app.waitlist import get_waitlist_stats
+
+    return get_waitlist_stats()
+
+
+# --------------------------------------------------------------------------- #
+# Customer & Trial Management — track conversions and engagement
+# --------------------------------------------------------------------------- #
+class CustomerCreateRequest(BaseModel):
+    """Customer creation request."""
+    email: str
+    company: str
+    name: str = ""
+    role: str = ""
+    team_size: str = ""
+    industry: str = ""
+    use_case: str = ""
+    start_trial: bool = True
+    trial_days: int = 14
+
+
+@app.post(
+    "/customers",
+    tags=["Customers"],
+    summary="Create a customer",
+    description="Create a new customer and optionally start a trial.",
+    dependencies=[Depends(require_auth)],
+    responses={
+        200: {
+            "description": "Customer created",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "customer": {"id": "cust_abc123", "company": "Acme Inc"},
+                        "trial": {"id": "trial_xyz789", "days_remaining": 14},
+                    }
+                }
+            },
+        },
+    },
+)
+async def create_customer_endpoint(req: CustomerCreateRequest):
+    """Create a new customer."""
+    from app.customers import CustomerManager
+
+    manager = CustomerManager()
+    result = manager.create(
+        email=req.email,
+        company=req.company,
+        name=req.name,
+        role=req.role,
+        team_size=req.team_size,
+        industry=req.industry,
+        use_case=req.use_case,
+        start_trial=req.start_trial,
+        trial_days=req.trial_days,
+    )
+
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "Failed to create customer"))
+
+    audit.record(
+        "customer.created",
+        company=req.company,
+        trial=req.start_trial,
+    )
+
+    return result
+
+
+@app.get(
+    "/customers/stats",
+    tags=["Customers"],
+    summary="Get customer statistics",
+    description="Get customer and trial statistics for the dashboard.",
+    dependencies=[Depends(require_auth)],
+)
+async def customer_stats():
+    """Get customer statistics."""
+    from app.customers import get_customer_stats
+
+    return get_customer_stats()
+
+
+@app.get(
+    "/customers/dashboard",
+    tags=["Customers"],
+    summary="Get customer dashboard",
+    description="Get full customer dashboard including stats, trials, and recent customers.",
+    dependencies=[Depends(require_auth)],
+)
+async def customer_dashboard():
+    """Get customer dashboard data."""
+    from app.customers import CustomerManager
+
+    manager = CustomerManager()
+    return manager.get_dashboard()
+
+
+@app.get(
+    "/customers/trials/active",
+    tags=["Customers"],
+    summary="Get active trials",
+    description="Get list of all active trials.",
+    dependencies=[Depends(require_auth)],
+)
+async def active_trials():
+    """Get active trials."""
+    from app.customers import get_active_trials
+
+    trials = get_active_trials()
+    return {
+        "count": len(trials),
+        "trials": [t.to_dict() for t in trials],
+    }
+
+
+class RecordUsageRequest(BaseModel):
+    """Usage recording request."""
+    customer_id: str
+    event_type: str
+    investigation_id: str = ""
+    tokens_used: int = 0
+    duration_seconds: float = 0.0
+
+
+@app.post(
+    "/customers/usage",
+    tags=["Customers"],
+    summary="Record customer usage",
+    description="Record a usage event for a customer (investigation, etc).",
+    dependencies=[Depends(require_auth)],
+)
+async def record_customer_usage(req: RecordUsageRequest):
+    """Record customer usage."""
+    from app.customers import record_usage
+
+    success = record_usage(
+        customer_id=req.customer_id,
+        event_type=req.event_type,
+        investigation_id=req.investigation_id,
+        tokens_used=req.tokens_used,
+        duration_seconds=req.duration_seconds,
+    )
+
+    if not success:
+        raise HTTPException(404, "Customer not found")
+
+    return {"success": True}
+
+
+class ConvertTrialRequest(BaseModel):
+    """Trial conversion request."""
+    customer_id: str
+    tier: str = "starter"
+    mrr_cents: int = 0
+    stripe_customer_id: str = ""
+
+
+@app.post(
+    "/customers/convert",
+    tags=["Customers"],
+    summary="Convert trial to paid",
+    description="Convert a trial customer to a paid subscription.",
+    dependencies=[Depends(require_auth)],
+)
+async def convert_trial_endpoint(req: ConvertTrialRequest):
+    """Convert a trial to paid subscription."""
+    from app.customers import convert_trial, CustomerTier
+
+    tier_map = {
+        "free": CustomerTier.FREE,
+        "starter": CustomerTier.STARTER,
+        "pro": CustomerTier.PRO,
+        "enterprise": CustomerTier.ENTERPRISE,
+    }
+    tier = tier_map.get(req.tier.lower(), CustomerTier.STARTER)
+
+    success, message = convert_trial(
+        customer_id=req.customer_id,
+        tier=tier,
+        mrr_cents=req.mrr_cents,
+        stripe_customer_id=req.stripe_customer_id,
+    )
+
+    if not success:
+        raise HTTPException(400, message)
+
+    audit.record(
+        "customer.converted",
+        customer_id=req.customer_id,
+        tier=tier.value,
+        mrr_cents=req.mrr_cents,
+    )
+
+    return {"success": True, "message": message}
+
+
+# --------------------------------------------------------------------------- #
 # Static SPA — serve the built frontend so the whole app is one deployable.
 # --------------------------------------------------------------------------- #
 # Mounted LAST: the explicit API routes above are matched first; everything else
