@@ -200,7 +200,6 @@ class ReportGenerator:
                 Spacer,
                 Table,
                 TableStyle,
-                PageBreak,
             )
 
             buffer = io.BytesIO()
@@ -622,7 +621,7 @@ async def generate_postmortem_report(
         gen.add_table("Action Items", action_items)
 
     if lessons_learned:
-        lessons_text = "\n".join(f"• {l}" for l in lessons_learned)
+        lessons_text = "\n".join(f"• {lesson}" for lesson in lessons_learned)
         gen.add_text("Lessons Learned", lessons_text)
 
     return gen.generate(format)

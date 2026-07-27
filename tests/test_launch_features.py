@@ -171,7 +171,6 @@ class TestNotificationDispatcher:
         from app.notifications.dispatcher import (
             Notification,
             NotificationPriority,
-            NotificationChannel,
         )
 
         notif = Notification(
@@ -338,7 +337,7 @@ class TestPostmortemGenerator:
     @pytest.mark.asyncio
     async def test_postmortem_generation(self):
         """Test generating a postmortem document."""
-        from app.postmortem.generator import generate_postmortem, PostmortemGenerator
+        from app.postmortem.generator import generate_postmortem
 
         incident_data = {
             "title": "Database Outage",
@@ -433,7 +432,7 @@ class TestTimelineCollector:
 
     def test_event_aggregation(self):
         """Test event aggregation."""
-        from app.timeline.collector import TimelineEvent, aggregate_events, EventSeverity
+        from app.timeline.collector import TimelineEvent, aggregate_events
 
         now = datetime.now(timezone.utc)
         events = [
@@ -464,7 +463,7 @@ class TestRunbookBuilder:
 
     def test_runbook_creation(self):
         """Test building a runbook."""
-        from app.runbook_builder.builder import RunbookBuilder, StepType
+        from app.runbook_builder.builder import RunbookBuilder
 
         builder = RunbookBuilder("Test Runbook", "Test description")
         builder.add_variable("service", "Service name", required=True)
@@ -544,7 +543,7 @@ class TestOnboardingWizard:
         from app.onboarding.wizard import OnboardingWizard
 
         wizard = OnboardingWizard()
-        progress = wizard.create_progress("user_step_test", "org_test")
+        wizard.create_progress("user_step_test", "org_test")
 
         updated = wizard.complete_step("user_step_test", "welcome")
         assert updated is not None
