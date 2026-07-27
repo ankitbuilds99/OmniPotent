@@ -55,6 +55,15 @@ migrations = [
     "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.19.0",
 ]
+# Background task queue
+tasks = [
+    "dramatiq[redis]>=1.16.0",
+    "apscheduler>=3.10.0",
+]
+# Feature flags (LaunchDarkly)
+features = [
+    "launchdarkly-server-sdk>=9.0.0",
+]
 # Vector RAG (embeddings for semantic incident search):
 vectors = [
     "chromadb>=0.5.0",              # ChromaDB vector store (COPILOT_VECTOR_STORE=chromadb)
