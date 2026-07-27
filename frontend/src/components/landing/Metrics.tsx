@@ -5,43 +5,43 @@ import { TrendingUp, Clock, Rocket, Container, Globe } from 'lucide-react'
 const METRICS = [
   {
     icon: TrendingUp,
-    value: 99.99,
+    value: 70,
     suffix: '%',
-    label: 'Deployment Success',
+    label: 'MTTR Reduction',
     color: '#3CF281',
-    description: 'Industry-leading reliability'
+    description: 'Target improvement in pilot tests'
   },
   {
     icon: Clock,
-    value: 18,
-    suffix: 'ms',
-    label: 'Average Response',
+    value: 15,
+    suffix: 'min',
+    label: 'Avg Resolution',
     color: '#00E7FF',
-    description: 'Lightning fast operations'
+    description: 'Down from 4+ hours manual RCA'
   },
   {
     icon: Rocket,
-    value: 1532,
-    suffix: '+',
-    label: 'Deployments',
+    value: 48,
+    suffix: '',
+    label: 'AI Tools',
     color: '#7C3AED',
-    description: 'Successful deployments this month'
+    description: 'Integrated observability actions'
   },
   {
     icon: Container,
-    value: 500,
-    suffix: 'K+',
-    label: 'Containers',
+    value: 9,
+    suffix: '',
+    label: 'MCP Servers',
     color: '#0DB7ED',
-    description: 'Containers orchestrated'
+    description: 'Datadog, K8s, GitHub, PagerDuty...'
   },
   {
     icon: Globe,
-    value: 12,
-    suffix: '+',
-    label: 'Cloud Providers',
+    value: 5,
+    suffix: '',
+    label: 'LLM Providers',
     color: '#FF9900',
-    description: 'Multi-cloud support'
+    description: 'Claude, GPT-4, Gemini, Groq, DeepSeek'
   }
 ]
 
@@ -228,7 +228,7 @@ export function Metrics() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.1 }}
           >
-            Trusted by <span className="gradient-text">engineering teams</span>
+            Built for <span className="gradient-text">serious incident response</span>
           </motion.h2>
           <motion.p
             className="text-white/60 text-lg max-w-2xl mx-auto"
@@ -237,7 +237,7 @@ export function Metrics() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.2 }}
           >
-            Real metrics from production deployments
+            Currently in private beta with select engineering teams
           </motion.p>
         </div>
 

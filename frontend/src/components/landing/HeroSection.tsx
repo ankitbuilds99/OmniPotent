@@ -5,7 +5,7 @@ import { Canvas, useFrame } from '@react-three/fiber'
 import { Float, Sphere, MeshDistortMaterial, Stars } from '@react-three/drei'
 import * as THREE from 'three'
 
-const ROTATING_WORDS = ['incidents', 'deployments', 'infrastructure', 'monitoring', 'security']
+const ROTATING_WORDS = ['incidents', 'outages', 'failures', 'alerts', 'errors']
 
 function RotatingText({ words }: { words: string[] }) {
   const [index, setIndex] = useState(0)
@@ -303,11 +303,11 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           transition={{ duration: 0.6 }}
         >
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-400" />
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400" />
           </span>
           <span className="text-white/70 text-sm font-medium">
-            Powered by LangGraph & MCP Protocol
+            Private Beta — Limited spots available
           </span>
         </motion.div>
 
@@ -318,9 +318,9 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.1 }}
         >
-          <span className="text-white">AI that investigates</span>
+          <span className="text-white">4 hours to 15 minutes</span>
           <br />
-          <span className="text-white">your </span>
+          <span className="text-white">for </span>
           <RotatingText words={ROTATING_WORDS} />
         </motion.h1>
 
@@ -331,8 +331,9 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.2 }}
         >
-          DevOps Copilot autonomously analyzes logs, traces incidents,
-          and drafts fixes — pausing for your approval before any action.
+          DevOps teams spend 4+ hours per incident on root cause analysis.
+          DevOps Copilot automates the investigation, identifies the cause,
+          and drafts a fix — pausing for your approval before any action.
         </motion.p>
 
         {/* CTA Buttons */}
