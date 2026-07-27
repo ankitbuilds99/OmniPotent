@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
@@ -138,10 +138,10 @@ class VersionedRouter:
         self,
         version: APIVersion,
         prefix: str = "",
-        tags: list[str] | None = None,
+        tags: Sequence[str | Enum] | None = None,
     ):
         self.version = version
-        router_tags: list[str] = tags if tags else [version.value]
+        router_tags: list[str | Enum] = list(tags) if tags else [version.value]
         self.router = APIRouter(prefix=prefix, tags=router_tags)
         self._deprecated_endpoints: set[str] = set()
 

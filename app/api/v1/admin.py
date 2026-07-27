@@ -12,7 +12,6 @@ from app.api.main import (
     admin_org as main_admin_org,
     admin_list_api_keys as main_list_api_keys,
     admin_create_api_key as main_create_api_key,
-    admin_list_members as main_list_members,
     admin_add_member as main_add_member,
     usage as main_usage,
 )
@@ -36,12 +35,6 @@ async def list_api_keys() -> dict[str, Any]:
 async def create_api_key(req: CreateApiKeyRequest) -> dict[str, Any]:
     """Create a new API key."""
     return await main_create_api_key(req)
-
-
-@router.get("/members")
-async def list_members() -> dict[str, Any]:
-    """List organization members."""
-    return await main_list_members()
 
 
 @router.post("/members")
