@@ -610,14 +610,14 @@ class PostmortemGenerator:
 
         if doc.things_that_went_well:
             lines.append("## What Went Well")
-            for item in doc.things_that_went_well:
-                lines.append(f"- ✅ {item}")
+            for well_item in doc.things_that_went_well:
+                lines.append(f"- ✅ {well_item}")
             lines.append("")
 
         if doc.things_that_went_poorly:
             lines.append("## What Went Poorly")
-            for item in doc.things_that_went_poorly:
-                lines.append(f"- ❌ {item}")
+            for poor_item in doc.things_that_went_poorly:
+                lines.append(f"- ❌ {poor_item}")
             lines.append("")
 
         return "\n".join(lines)

@@ -115,13 +115,17 @@ class FCMProvider(PushProvider):
         try:
             import httpx
 
-            payload = {
+            notification_obj: dict[str, Any] = {
+                "title": message.title,
+                "body": message.body,
+            }
+            if message.image_url:
+                notification_obj["image"] = message.image_url
+
+            payload: dict[str, Any] = {
                 "message": {
                     "token": token,
-                    "notification": {
-                        "title": message.title,
-                        "body": message.body,
-                    },
+                    "notification": notification_obj,
                     "data": {k: str(v) for k, v in message.data.items()},
                     "android": {
                         "priority": message.priority,
@@ -137,9 +141,6 @@ class FCMProvider(PushProvider):
                     },
                 }
             }
-
-            if message.image_url:
-                payload["message"]["notification"]["image"] = message.image_url
 
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
@@ -245,7 +246,7 @@ class APNsProvider(PushProvider):
         try:
             import httpx
 
-            payload = {
+            apns_payload: dict[str, Any] = {
                 "aps": {
                     "alert": {
                         "title": message.title,
@@ -257,9 +258,9 @@ class APNsProvider(PushProvider):
             }
 
             if message.action_url:
-                payload["url"] = message.action_url
+                apns_payload["url"] = message.action_url
 
-            payload.update(message.data)
+            apns_payload.update(message.data)
 
             async with httpx.AsyncClient(http2=True) as client:
                 resp = await client.post(
@@ -270,7 +271,7 @@ class APNsProvider(PushProvider):
                         "apns-priority": "10" if message.priority == "high" else "5",
                         "apns-expiration": str(int(datetime.now(timezone.utc).timestamp()) + message.ttl),
                     },
-                    json=payload,
+                    json=apns_payload,
                     timeout=30,
                 )
 

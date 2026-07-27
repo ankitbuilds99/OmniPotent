@@ -124,18 +124,19 @@ class SendGridProvider(EmailProvider):
         try:
             import httpx
 
-            payload = {
+            content_list: list[dict[str, str]] = [{"type": "text/plain", "value": message.body_text}]
+            if message.body_html:
+                content_list.append({"type": "text/html", "value": message.body_html})
+
+            payload: dict[str, Any] = {
                 "personalizations": [{"to": [{"email": e} for e in message.to]}],
                 "from": {
                     "email": message.from_email or self.from_email,
                     "name": message.from_name,
                 },
                 "subject": message.subject,
-                "content": [{"type": "text/plain", "value": message.body_text}],
+                "content": content_list,
             }
-
-            if message.body_html:
-                payload["content"].append({"type": "text/html", "value": message.body_html})
 
             if message.reply_to:
                 payload["reply_to"] = {"email": message.reply_to}

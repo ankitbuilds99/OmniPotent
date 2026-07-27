@@ -346,20 +346,21 @@ class ReportGenerator:
 
     def _generate_json(self) -> bytes:
         """Generate JSON export."""
-        data = {
-            "title": self.config.title,
-            "subtitle": self.config.subtitle,
-            "author": self.config.author,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sections": [],
-        }
-
+        sections_list: list[dict[str, Any]] = []
         for section in self.sections:
-            data["sections"].append({
+            sections_list.append({
                 "title": section.title,
                 "type": section.section_type,
                 "content": section.content,
             })
+
+        data: dict[str, Any] = {
+            "title": self.config.title,
+            "subtitle": self.config.subtitle,
+            "author": self.config.author,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "sections": sections_list,
+        }
 
         return json.dumps(data, indent=2, default=str).encode("utf-8")
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -180,7 +181,7 @@ async def oauth_callback(
     existing = find_account_by_provider(provider, oauth_user.provider_id)
     if existing:
         user_id = existing.user_id
-        existing.last_login = oauth_user.raw_data.get("updated_at") if oauth_user.raw_data else None
+        existing.last_login = datetime.now(timezone.utc)
     else:
         email_account = find_account_by_email(oauth_user.email)
         if email_account:

@@ -69,9 +69,9 @@ class StepCondition:
         elif self.operator == "contains":
             return self.value in str(actual)
         elif self.operator == "greater_than":
-            return float(actual) > float(self.value)
+            return float(actual if actual is not None else 0) > float(self.value)
         elif self.operator == "less_than":
-            return float(actual) < float(self.value)
+            return float(actual if actual is not None else 0) < float(self.value)
         elif self.operator == "is_empty":
             return not actual
         elif self.operator == "is_not_empty":

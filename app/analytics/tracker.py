@@ -358,7 +358,7 @@ class AnalyticsTracker:
                 user_counts[event.user_id]["total"] += 1
                 user_counts[event.user_id][event.event_type.value] += 1
 
-        users = []
+        users: list[dict[str, Any]] = []
         for user_id, counts in user_counts.items():
             users.append({
                 "user_id": user_id,
@@ -368,7 +368,7 @@ class AnalyticsTracker:
                 "api_calls": counts.get("api_call", 0),
             })
 
-        users.sort(key=lambda x: x["total_events"], reverse=True)
+        users.sort(key=lambda x: x.get("total_events", 0), reverse=True)
         return users[:limit]
 
 
