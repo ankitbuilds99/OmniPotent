@@ -109,7 +109,7 @@ def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 def _redact_body(body: dict[str, Any]) -> dict[str, Any]:
     """Redact sensitive fields from request body."""
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in body.items():
         key_lower = key.lower()
         if any(s in key_lower for s in SENSITIVE_FIELDS):

@@ -172,9 +172,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         app = FastAPI()
         register_exception_handlers(app)
     """
-    app.add_exception_handler(CopilotError, copilot_error_handler)
-    app.add_exception_handler(RequestValidationError, validation_error_handler)
-    app.add_exception_handler(PydanticValidationError, pydantic_error_handler)
+    app.add_exception_handler(CopilotError, copilot_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(PydanticValidationError, pydantic_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, generic_error_handler)
 
 

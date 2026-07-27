@@ -177,7 +177,7 @@ class TrendAnalyzer:
         std_dev = math.sqrt(variance) if variance > 0 else 0
 
         if mean == 0:
-            cv = 0
+            cv = 0.0
         else:
             cv = std_dev / abs(mean)
 
