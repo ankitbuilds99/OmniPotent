@@ -394,6 +394,13 @@ class AdaptiveRateLimiter:
 class MultiTierRateLimiter:
     """Multi-tier rate limiting: per-user, per-tenant, global."""
 
+    _limiter: (
+        SlidingWindowLogLimiter
+        | SlidingWindowCounterLimiter
+        | TokenBucketLimiter
+        | LeakyBucketLimiter
+    )
+
     def __init__(
         self,
         client: Any,
@@ -470,6 +477,12 @@ def create_rate_limiter(
     """Factory function to create a rate limiter."""
     clock = time.time
 
+    limiter: (
+        SlidingWindowLogLimiter
+        | SlidingWindowCounterLimiter
+        | TokenBucketLimiter
+        | LeakyBucketLimiter
+    )
     if algorithm == RateLimitAlgorithm.SLIDING_WINDOW_LOG:
         limiter = SlidingWindowLogLimiter(client, clock)
     elif algorithm == RateLimitAlgorithm.TOKEN_BUCKET:
