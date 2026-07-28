@@ -1,4 +1,4 @@
-"""Onboarding wizard module.
+"""Onboarding wizard and activation tracking.
 
 Provides:
 - Step-by-step guided setup
@@ -6,6 +6,7 @@ Provides:
 - Team and organization setup
 - Progress tracking
 - Checklist management
+- Activation milestone tracking
 """
 
 from app.onboarding.wizard import (
@@ -20,6 +21,12 @@ from app.onboarding.wizard import (
     get_onboarding_checklist,
     create_organization_setup,
 )
+from app.onboarding.flow import (
+    ActivationMilestone,
+    ActivationState,
+    ActivationTracker,
+    MILESTONE_CONFIG,
+)
 
 __all__ = [
     "OnboardingWizard",
@@ -32,4 +39,8 @@ __all__ = [
     "complete_onboarding_step",
     "get_onboarding_checklist",
     "create_organization_setup",
+    "ActivationMilestone",
+    "ActivationState",
+    "ActivationTracker",
+    "MILESTONE_CONFIG",
 ]

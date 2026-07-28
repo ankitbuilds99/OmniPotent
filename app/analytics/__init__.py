@@ -1,4 +1,4 @@
-"""Usage analytics module.
+"""Usage and product analytics module.
 
 Provides:
 - Event tracking
@@ -6,6 +6,9 @@ Provides:
 - Dashboard data aggregation
 - Trend analysis
 - Reporting
+- MRR and revenue metrics
+- Cohort retention analysis
+- Customer lifetime value (LTV)
 """
 
 from app.analytics.tracker import (
@@ -21,6 +24,14 @@ from app.analytics.tracker import (
     get_top_users,
     get_investigation_metrics,
 )
+from app.analytics.product_metrics import (
+    RevenueMetrics,
+    CohortAnalysis,
+    CohortRetention,
+    UsageMetrics,
+    AnalyticsManager,
+    MetricPeriod,
+)
 
 __all__ = [
     "AnalyticsTracker",
@@ -34,4 +45,10 @@ __all__ = [
     "get_trend_data",
     "get_top_users",
     "get_investigation_metrics",
+    "RevenueMetrics",
+    "CohortAnalysis",
+    "CohortRetention",
+    "UsageMetrics",
+    "AnalyticsManager",
+    "MetricPeriod",
 ]
