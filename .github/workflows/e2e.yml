@@ -1,0 +1,129 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * *'
+
+jobs:
+  e2e-tests:
+    name: Playwright E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Start application
+        run: |
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/healthz; then
+              echo "Application is healthy"
+              break
+            fi
+            echo "Waiting for application... ($i/30)"
+            sleep 2
+          done
+        env:
+          REDIS_URL: redis://localhost:6379
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install E2E dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run E2E tests
+        working-directory: tests/e2e
+        run: npx playwright test
+        env:
+          BASE_URL: http://localhost:8000
+          TEST_API_TOKEN: ${{ secrets.TEST_API_TOKEN || 'test-token' }}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/e2e/playwright-report/
+          retention-days: 30
+
+      - name: Upload test screenshots
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-screenshots
+          path: tests/e2e/test-results/
+          retention-days: 7
+
+  e2e-visual-regression:
+    name: Visual Regression Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: e2e-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync and start app
+        run: |
+          uv sync --extra dev
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
+          sleep 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install Playwright
+        working-directory: tests/e2e
+        run: npx playwright install chromium
+
+      - name: Run visual regression tests
+        working-directory: tests/e2e
+        run: npx playwright test --project=chromium --grep @visual
+        env:
+          BASE_URL: http://localhost:8000
+
+      - name: Upload visual diff artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: visual-diff
+          path: tests/e2e/test-results/
+          retention-days: 7
