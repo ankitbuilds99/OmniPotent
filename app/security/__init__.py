@@ -54,6 +54,14 @@ from app.security.websocket_auth import (
     get_accepted_subprotocol,
     validate_websocket_message,
 )
+from app.security.session_binding import (
+    BindingStrength,
+    BindingVerificationResult,
+    BoundSession,
+    DeviceFingerprint,
+    SessionBindingManager,
+    get_session_binding_manager,
+)
 
 __all__ = [
     # API Auth
@@ -95,4 +103,11 @@ __all__ = [
     "extract_token_from_subprotocol",
     "validate_websocket_message",
     "get_accepted_subprotocol",
+    # Session Binding
+    "BindingStrength",
+    "BindingVerificationResult",
+    "BoundSession",
+    "DeviceFingerprint",
+    "SessionBindingManager",
+    "get_session_binding_manager",
 ]

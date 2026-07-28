@@ -32,6 +32,15 @@ from app.analytics.product_metrics import (
     AnalyticsManager,
     MetricPeriod,
 )
+from app.analytics.cost_attribution import (
+    BudgetStatus,
+    CostBudget,
+    CostCategory,
+    CostEntry,
+    CostSummary,
+    CostTracker,
+    get_cost_tracker,
+)
 
 __all__ = [
     "AnalyticsTracker",
@@ -51,4 +60,12 @@ __all__ = [
     "UsageMetrics",
     "AnalyticsManager",
     "MetricPeriod",
+    # Cost Attribution
+    "BudgetStatus",
+    "CostBudget",
+    "CostCategory",
+    "CostEntry",
+    "CostSummary",
+    "CostTracker",
+    "get_cost_tracker",
 ]

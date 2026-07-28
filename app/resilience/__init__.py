@@ -88,6 +88,15 @@ from app.resilience.timeout import (
     get_adaptive_timeout,
     reset_all_timeouts,
 )
+from app.resilience.graceful_degradation import (
+    DegradationLevel,
+    FeatureConfig,
+    FeaturePriority,
+    FeatureState,
+    GracefulDegradation,
+    SystemLoad,
+    get_graceful_degradation,
+)
 
 __all__ = [
     # Legacy (from app/resilience_core.py)
@@ -160,4 +169,12 @@ __all__ = [
     "create_load_shedder",
     "create_adaptive_shedder",
     "reset_all_shedders",
+    # Graceful Degradation
+    "DegradationLevel",
+    "FeatureConfig",
+    "FeaturePriority",
+    "FeatureState",
+    "GracefulDegradation",
+    "SystemLoad",
+    "get_graceful_degradation",
 ]
