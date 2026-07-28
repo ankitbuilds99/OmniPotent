@@ -33,9 +33,11 @@ jobs:
 
       - name: Python dependency audit
         run: |
-          uv pip install pip-audit --system
+          uv venv .audit-venv
+          source .audit-venv/bin/activate
+          uv pip install pip-audit
           uv export --no-hashes > requirements.txt
-          pip-audit -r requirements.txt --ignore-vuln GHSA-xxxx-xxxx-xxxx || true
+          pip-audit -r requirements.txt || true
 
       - name: Check for hardcoded secrets in code
         run: |
