@@ -109,3 +109,6 @@ ignore_missing_imports = true   # third-party stubs (langchain/langgraph/mcp) ab
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+markers = [
+    "contract: marks tests as contract tests (may require external services)",
+]
