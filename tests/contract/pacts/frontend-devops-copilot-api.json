@@ -1,0 +1,155 @@
+{
+  "consumer": {
+    "name": "frontend"
+  },
+  "provider": {
+    "name": "devops-copilot-api"
+  },
+  "interactions": [
+    {
+      "description": "a request for health status",
+      "providerState": "a healthy system",
+      "request": {
+        "method": "GET",
+        "path": "/healthz"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "status": "healthy"
+        },
+        "matchingRules": {
+          "body": {
+            "$.status": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "healthy|degraded|unhealthy"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "a request to start an investigation",
+      "providerState": "a user with valid credentials",
+      "request": {
+        "method": "POST",
+        "path": "/chat",
+        "headers": {
+          "Authorization": "Bearer valid-token",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "message": "Why is checkout failing?",
+          "thread_id": "test-thread-123"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "response": "string",
+          "thread_id": "test-thread-123",
+          "tokens_used": 1500
+        },
+        "matchingRules": {
+          "body": {
+            "$.response": {
+              "matchers": [{ "match": "type" }]
+            },
+            "$.tokens_used": {
+              "matchers": [{ "match": "integer" }]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "a request with rate limit exceeded",
+      "providerState": "rate limit exceeded",
+      "request": {
+        "method": "POST",
+        "path": "/chat",
+        "headers": {
+          "Authorization": "Bearer valid-token",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "message": "test",
+          "thread_id": "rate-limited-thread"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Content-Type": "application/json",
+          "Retry-After": "60"
+        },
+        "body": {
+          "detail": "Rate limit exceeded"
+        }
+      }
+    },
+    {
+      "description": "a request for configuration",
+      "providerState": "a healthy system",
+      "request": {
+        "method": "GET",
+        "path": "/config"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "provider": "anthropic"
+        },
+        "matchingRules": {
+          "body": {
+            "$.provider": {
+              "matchers": [{ "match": "type" }]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "a request for readiness status",
+      "providerState": "a healthy system",
+      "request": {
+        "method": "GET",
+        "path": "/readyz"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ready": true
+        },
+        "matchingRules": {
+          "body": {
+            "$.ready": {
+              "matchers": [{ "match": "type" }]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  }
+}

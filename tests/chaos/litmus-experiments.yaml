@@ -1,0 +1,238 @@
+# Litmus Chaos Experiments for DevOps Copilot
+# Validates resilience under failure conditions
+
+---
+# Experiment 1: Pod Kill - Tests self-healing
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: copilot-pod-kill
+  namespace: devops-copilot
+spec:
+  engineState: 'active'
+  appinfo:
+    appns: 'devops-copilot'
+    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appkind: 'deployment'
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '60'
+            - name: CHAOS_INTERVAL
+              value: '10'
+            - name: FORCE
+              value: 'false'
+            - name: PODS_AFFECTED_PERC
+              value: '50'
+        probe:
+          - name: healthcheck-probe
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5s
+              interval: 5s
+              retry: 3
+            httpProbe/inputs:
+              url: http://devops-copilot:8000/healthz
+              insecureSkipVerify: false
+              method:
+                get:
+                  criteria: ==
+                  responseCode: '200'
+
+---
+# Experiment 2: Network Latency - Tests timeout handling
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: copilot-network-latency
+  namespace: devops-copilot
+spec:
+  engineState: 'active'
+  appinfo:
+    appns: 'devops-copilot'
+    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appkind: 'deployment'
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-network-latency
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '120'
+            - name: NETWORK_LATENCY
+              value: '2000'  # 2s latency
+            - name: JITTER
+              value: '500'
+            - name: DESTINATION_HOSTS
+              value: 'api.anthropic.com,api.openai.com'
+            - name: CONTAINER_RUNTIME
+              value: 'containerd'
+        probe:
+          - name: investigation-probe
+            type: httpProbe
+            mode: OnChaos
+            runProperties:
+              probeTimeout: 120s
+              interval: 30s
+              retry: 2
+            httpProbe/inputs:
+              url: http://devops-copilot:8000/chat
+              insecureSkipVerify: false
+              method:
+                post:
+                  contentType: application/json
+                  body: '{"message":"health check","thread_id":"chaos-test"}'
+                  criteria: ==
+                  responseCode: '200'
+
+---
+# Experiment 3: Redis Failure - Tests cache fallback
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: copilot-redis-failure
+  namespace: devops-copilot
+spec:
+  engineState: 'active'
+  appinfo:
+    appns: 'devops-copilot'
+    applabel: 'app=redis'
+    appkind: 'statefulset'
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '120'
+            - name: CHAOS_INTERVAL
+              value: '30'
+            - name: FORCE
+              value: 'true'
+        probe:
+          - name: graceful-degradation-probe
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 10s
+              interval: 5s
+              retry: 5
+            httpProbe/inputs:
+              url: http://devops-copilot:8000/healthz
+              method:
+                get:
+                  criteria: ==
+                  responseCode: '200'
+
+---
+# Experiment 4: CPU Stress - Tests performance under load
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: copilot-cpu-stress
+  namespace: devops-copilot
+spec:
+  engineState: 'active'
+  appinfo:
+    appns: 'devops-copilot'
+    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appkind: 'deployment'
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-cpu-hog
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '180'
+            - name: CPU_CORES
+              value: '1'
+            - name: CPU_LOAD
+              value: '80'
+            - name: PODS_AFFECTED_PERC
+              value: '33'
+        probe:
+          - name: latency-slo-probe
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5s
+              interval: 10s
+              retry: 3
+            httpProbe/inputs:
+              url: http://devops-copilot:8000/metrics/slo
+              method:
+                get:
+                  criteria: contains
+                  responseBody: '"availability"'
+
+---
+# Experiment 5: Memory Pressure - Tests OOM handling
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: copilot-memory-stress
+  namespace: devops-copilot
+spec:
+  engineState: 'active'
+  appinfo:
+    appns: 'devops-copilot'
+    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appkind: 'deployment'
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-memory-hog
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '120'
+            - name: MEMORY_CONSUMPTION
+              value: '2000'  # 2GB
+            - name: PODS_AFFECTED_PERC
+              value: '25'
+
+---
+# Experiment 6: DNS Failure - Tests DNS resilience
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: copilot-dns-failure
+  namespace: devops-copilot
+spec:
+  engineState: 'active'
+  appinfo:
+    appns: 'devops-copilot'
+    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appkind: 'deployment'
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-dns-error
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '60'
+            - name: TARGET_HOSTNAMES
+              value: 'api.anthropic.com'
+        probe:
+          - name: fallback-probe
+            type: cmdProbe
+            mode: OnChaos
+            runProperties:
+              probeTimeout: 30s
+              interval: 10s
+              retry: 3
+            cmdProbe/inputs:
+              command: 'curl -s http://devops-copilot:8000/config | jq -e .fallback_provider'
+              comparator:
+                type: string
+                criteria: notEqual
+                value: ''
