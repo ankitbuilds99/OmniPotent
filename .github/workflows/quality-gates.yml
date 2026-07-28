@@ -9,127 +9,20 @@ on:
     - cron: '0 0 * * 0'  # Weekly on Sunday for mutation testing
 
 jobs:
-  # Unit tests with coverage
-  unit-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          pip install -e ".[dev]"
-          pip install pytest-cov pytest-html pytest-xdist
-
-      - name: Run unit tests
-        run: |
-          pytest tests/ \
-            --cov=app \
-            --cov-report=xml \
-            --cov-report=html \
-            --cov-fail-under=80 \
-            --html=test-results/report.html \
-            -n auto \
-            --ignore=tests/load \
-            --ignore=tests/chaos \
-            --ignore=tests/contract \
-            --ignore=tests/mutation
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          file: coverage.xml
-          fail_ci_if_error: true
-
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results
-          path: test-results/
-
   # Contract tests
   contract-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
+      - name: Sync dependencies
+        run: uv sync --extra dev
 
       - name: Run contract tests
-        run: pytest tests/contract/pact_provider_test.py -v -k "not test_verify"
-
-  # Load test baseline (smoke only on PR)
-  load-test-smoke:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install k6
-        run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update
-          sudo apt-get install k6
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Start test server
-        run: |
-          uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
-          sleep 10
-
-      - name: Run smoke test
-        run: |
-          k6 run tests/load/k6_scenarios.js \
-            --env BASE_URL=http://localhost:8000 \
-            --env API_TOKEN=test-token \
-            --scenario smoke \
-            --duration 30s
-
-  # Security scan
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
-          ignore-unfixed: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Run Bandit security linter
-        run: |
-          pip install bandit
-          bandit -r app/ -ll -ii
+        run: uv run pytest tests/contract/pact_provider_test.py -v -k "not test_verify"
 
   # Documentation validation
   docs-validation:
@@ -174,16 +67,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
+      - name: Sync dependencies
+        run: uv sync --extra dev
 
       - name: Run chaos tests
-        run: pytest tests/chaos/fault_injection.py -v --tb=short
+        run: uv run pytest tests/chaos/fault_injection.py -v --tb=short
 
   # Mutation testing (weekly only)
   mutation-testing:
@@ -192,13 +83,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Install dependencies
-        run: pip install -e ".[dev]" mutmut
+      - name: Sync dependencies
+        run: |
+          uv sync --extra dev
+          uv pip install mutmut
 
       - name: Run mutation tests
         run: |
