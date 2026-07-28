@@ -16,7 +16,7 @@ dependencies = [
     "langgraph>=0.2.50",
     "langgraph-checkpoint-sqlite>=2.0.0",
     # MCP: protocol SDK + LangChain adapter
-    "mcp>=1.1.0",
+    "mcp>=1.28.1",
     "langchain-mcp-adapters>=0.0.5",
     # API layer
     "fastapi>=0.115.0",
@@ -31,6 +31,8 @@ dependencies = [
     "rich>=13.9.0",
     "pyyaml>=6.0",
     "pyjwt[crypto]>=2.9.0",  # verify Supabase / OIDC JWTs against a JWKS
+    # Transitive deps pinned for security patches (CVE-2026-59885, CVE-2026-59886)
+    "pyasn1>=0.6.4",
 ]
 
 [project.optional-dependencies]
