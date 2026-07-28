@@ -158,12 +158,20 @@ def _build_fallback(provider: str, model_id: str, fast: bool, tools):
         return None
 
 
+LLM_REQUEST_TIMEOUT = 120.0
+
+
 def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         # No temperature: Opus 4.8 removed sampling params and 400s if they're sent.
-        params: dict = {"model": model, "api_key": key, "max_tokens": 4096}
+        params: dict = {
+            "model": model,
+            "api_key": key,
+            "max_tokens": 4096,
+            "timeout": LLM_REQUEST_TIMEOUT,
+        }
         if not fast:
             # Adaptive thinking on the MAIN reasoning model only — Claude decides
             # when and how much to reason (and interleaves it between tool calls).
@@ -179,11 +187,23 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
         from langchain_groq import ChatGroq
         from pydantic import SecretStr
 
-        return ChatGroq(model=model, api_key=SecretStr(key), temperature=0.0, max_tokens=4096)
+        return ChatGroq(
+            model=model,
+            api_key=SecretStr(key),
+            temperature=0.0,
+            max_tokens=4096,
+            timeout=LLM_REQUEST_TIMEOUT,
+        )
 
     if provider == "openai":
         mod = _require("langchain_openai", "OpenAI")
-        return mod.ChatOpenAI(model=model, api_key=key, temperature=0.0, max_tokens=4096)
+        return mod.ChatOpenAI(
+            model=model,
+            api_key=key,
+            temperature=0.0,
+            max_tokens=4096,
+            timeout=LLM_REQUEST_TIMEOUT,
+        )
 
     if provider == "deepseek":
         mod = _require("langchain_openai", "DeepSeek")
@@ -193,12 +213,17 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
             base_url=_DEEPSEEK_BASE_URL,
             temperature=0.0,
             max_tokens=4096,
+            timeout=LLM_REQUEST_TIMEOUT,
         )
 
     if provider == "gemini":
         mod = _require("langchain_google_genai", "Gemini")
         return mod.ChatGoogleGenerativeAI(
-            model=model, google_api_key=key, temperature=0.0, max_output_tokens=4096
+            model=model,
+            google_api_key=key,
+            temperature=0.0,
+            max_output_tokens=4096,
+            timeout=LLM_REQUEST_TIMEOUT,
         )
 
     raise ValueError(f"unknown provider '{provider}' (use {'|'.join(_DEFAULTS)})")

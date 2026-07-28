@@ -410,3 +410,65 @@ class APIKeyAuth:
                 )
 
         return api_key
+
+
+# --- Format validation utilities for tests ---
+
+_VALID_PREFIXES = ("sk_live_", "sk_test_", "cop_", "dcp_")
+_MIN_KEY_LENGTH = 20
+
+
+def validate_api_key_format(key: str) -> bool:
+    """Validate the format of an API key without checking if it exists.
+
+    Used for input validation before attempting database lookup.
+    """
+    if not key or not isinstance(key, str):
+        return False
+
+    if len(key) < _MIN_KEY_LENGTH:
+        return False
+
+    if not any(key.startswith(prefix) for prefix in _VALID_PREFIXES):
+        return False
+
+    if "<" in key or ">" in key:
+        return False
+
+    import re
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", key):
+        return False
+
+    return True
+
+
+def extract_api_key(auth_header: str) -> str | None:
+    """Extract API key from Authorization header.
+
+    Supports:
+    - Bearer token: "Bearer sk_live_xxx"
+    - Direct key: "sk_live_xxx"
+
+    Returns None if header is invalid or uses unsupported auth scheme.
+    """
+    if not auth_header or not isinstance(auth_header, str):
+        return None
+
+    header = auth_header.strip()
+
+    if header.lower().startswith("bearer "):
+        key = header[7:].strip()
+        if key and any(key.startswith(p) or key.upper().startswith(p.upper()) for p in _VALID_PREFIXES):
+            return key
+        return None
+
+    if header.lower().startswith("basic "):
+        return None
+
+    if " " in header:
+        return None
+
+    if any(header.startswith(p) for p in _VALID_PREFIXES):
+        return header
+
+    return None

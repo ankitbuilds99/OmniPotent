@@ -22,6 +22,98 @@ without a model; the graph wires it in via a guarded tool node (graph/builder.py
 from __future__ import annotations
 
 import re
+import unicodedata
+
+# Unicode normalization to prevent homoglyph attacks
+# (e.g., using Cyrillic 'а' instead of Latin 'a')
+
+
+def _normalize_unicode(text: str) -> str:
+    """Normalize Unicode to catch homoglyph attacks.
+
+    Steps:
+    1. NFKC normalization (compatibility decomposition + canonical composition)
+       - Converts fullwidth chars to ASCII (ｉｇｎｏｒｅ → ignore)
+       - Normalizes diacritics
+    2. Confusable detection via transliteration of common lookalikes
+    """
+    if not text:
+        return text
+
+    normalized = unicodedata.normalize("NFKC", text)
+
+    _CONFUSABLES = str.maketrans({
+        "а": "a",  # Cyrillic а
+        "е": "e",  # Cyrillic е
+        "о": "o",  # Cyrillic о
+        "р": "p",  # Cyrillic р
+        "с": "c",  # Cyrillic с
+        "у": "y",  # Cyrillic у
+        "х": "x",  # Cyrillic х
+        "і": "i",  # Cyrillic і
+        "ј": "j",  # Cyrillic ј
+        "һ": "h",  # Cyrillic һ
+        "ԁ": "d",  # Cyrillic ԁ
+        "ԛ": "q",  # Cyrillic ԛ
+        "ɡ": "g",  # Latin ɡ
+        "ɑ": "a",  # Latin ɑ
+        "ᴀ": "a",  # Small cap A
+        "ᴄ": "c",  # Small cap C
+        "ᴇ": "e",  # Small cap E
+        "ᴍ": "m",  # Small cap M
+        "ᴏ": "o",  # Small cap O
+        "ᴘ": "p",  # Small cap P
+        "ᴛ": "t",  # Small cap T
+        "ᴜ": "u",  # Small cap U
+        "ᴡ": "w",  # Small cap W
+        "⁰": "0",  # Superscript 0
+        "¹": "1",  # Superscript 1
+        "²": "2",  # Superscript 2
+        "³": "3",  # Superscript 3
+        "⁴": "4",  # Superscript 4
+        "⁵": "5",  # Superscript 5
+        "⁶": "6",  # Superscript 6
+        "⁷": "7",  # Superscript 7
+        "⁸": "8",  # Superscript 8
+        "⁹": "9",  # Superscript 9
+        "₀": "0",  # Subscript 0
+        "₁": "1",  # Subscript 1
+        "₂": "2",  # Subscript 2
+        "₃": "3",  # Subscript 3
+        "₄": "4",  # Subscript 4
+        "₅": "5",  # Subscript 5
+        "₆": "6",  # Subscript 6
+        "₇": "7",  # Subscript 7
+        "₈": "8",  # Subscript 8
+        "₉": "9",  # Subscript 9
+        "０": "0",  # Fullwidth 0
+        "１": "1",  # Fullwidth 1
+        "２": "2",  # Fullwidth 2
+        "３": "3",  # Fullwidth 3
+        "４": "4",  # Fullwidth 4
+        "５": "5",  # Fullwidth 5
+        "６": "6",  # Fullwidth 6
+        "７": "7",  # Fullwidth 7
+        "８": "8",  # Fullwidth 8
+        "９": "9",  # Fullwidth 9
+        "​": "",   # Zero-width space
+        "‌": "",   # Zero-width non-joiner
+        "‍": "",   # Zero-width joiner
+        "﻿": "",   # BOM/zero-width no-break space
+        "­": "",   # Soft hyphen
+    })
+
+    return normalized.translate(_CONFUSABLES)
+
+
+def _strip_invisible(text: str) -> str:
+    """Remove invisible Unicode characters that could hide injection payloads."""
+    return "".join(
+        c for c in text
+        if unicodedata.category(c) not in ("Cf", "Cc", "Co", "Cs")
+        or c in "\n\r\t"
+    )
+
 
 # Multi-word patterns chosen to fire on manipulation attempts while staying quiet
 # on ordinary logs (which contain words like "error"/"ignore" in benign contexts).
@@ -46,11 +138,21 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def scan_for_injection(text: str) -> list[str]:
-    """Return the labels of any prompt-injection patterns found in `text`."""
+def scan_for_injection(text: str, normalize: bool = True) -> list[str]:
+    """Return the labels of any prompt-injection patterns found in `text`.
+
+    Args:
+        text: The text to scan for injection patterns
+        normalize: If True, apply Unicode normalization to catch homoglyph attacks
+    """
     if not text:
         return []
-    return [label for label, pat in _PATTERNS if pat.search(text)]
+
+    scan_text = text
+    if normalize:
+        scan_text = _strip_invisible(_normalize_unicode(text))
+
+    return [label for label, pat in _PATTERNS if pat.search(scan_text)]
 
 
 def wrap_untrusted(name: str, content: str, flags: list[str] | None = None) -> str:

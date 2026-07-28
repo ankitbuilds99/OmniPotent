@@ -299,6 +299,9 @@ class Settings(BaseSettings):
     copilot_websocket_enabled: bool = True
     # Ping interval in seconds for WebSocket heartbeat (connection health).
     copilot_websocket_ping_interval: int = 30
+    # Require authentication for WebSocket connections. When true, clients must
+    # provide a valid token via the subprotocol.
+    copilot_require_auth: bool = False
 
     # --- Vector RAG (embeddings for semantic search) ---
     # Vector store backend: chromadb | faiss | none (default). When "none", the
