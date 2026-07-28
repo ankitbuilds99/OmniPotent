@@ -1,7 +1,5 @@
 """Tests for advanced observability infrastructure."""
 
-import time
-
 import pytest
 
 

@@ -11,7 +11,6 @@ import time
 import pytest
 
 from app.scaling_metrics import (
-    ScalingMetrics,
     expose_scaling_metrics,
     get_scaling_metrics,
     reset_scaling_metrics,
