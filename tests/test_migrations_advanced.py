@@ -1,10 +1,22 @@
 """Tests for advanced database migration utilities."""
+# ruff: noqa: E402
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+try:
+    import sqlalchemy  # noqa: F401
+
+    HAS_SQLALCHEMY = True
+except ImportError:
+    HAS_SQLALCHEMY = False
+
+pytestmark = pytest.mark.skipif(
+    not HAS_SQLALCHEMY, reason="SQLAlchemy not installed"
+)
 
 from app.database.migrations_advanced import (
     BatchDataMigrator,
