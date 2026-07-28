@@ -262,7 +262,7 @@ class CostTracker:
         return CostSummary(
             period_start=start,
             period_end=end,
-            total_amount=sum(e.amount for e in entries),
+            total_amount=sum((e.amount for e in entries), Decimal(0)),
             currency="USD",
             by_category=dict(by_category),
             by_model=dict(by_model),
@@ -311,8 +311,8 @@ class CostTracker:
             e for e in month_entries if e.timestamp >= day_start
         ]
 
-        month_spend = sum(e.amount for e in month_entries)
-        day_spend = sum(e.amount for e in day_entries)
+        month_spend = sum((e.amount for e in month_entries), Decimal(0))
+        day_spend = sum((e.amount for e in day_entries), Decimal(0))
 
         percent_used = float(month_spend / budget.monthly_limit) if budget.monthly_limit else 0
 

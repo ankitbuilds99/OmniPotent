@@ -165,7 +165,7 @@ class DebugSession:
         except Exception as e:
             span.status = "error"
             span.error = str(e)
-            if self.context.level >= DebugLevel.TRACE:
+            if self.context.level.value >= DebugLevel.TRACE.value:
                 span.attributes["traceback"] = traceback.format_exc()
             raise
         finally:
@@ -189,7 +189,7 @@ class DebugSession:
         **kwargs: Any,
     ) -> None:
         """Add a log entry."""
-        if self.context.level >= DebugLevel.DETAILED:
+        if self.context.level.value >= DebugLevel.DETAILED.value:
             self.context.logs.append(
                 {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -227,7 +227,7 @@ def debug_log(
 ) -> None:
     """Log a debug message if debug mode is enabled."""
     ctx = DebugSession.current()
-    if ctx and ctx.level >= min_level:
+    if ctx and ctx.level.value >= min_level.value:
         ctx.logs.append(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
