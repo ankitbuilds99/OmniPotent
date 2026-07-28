@@ -11,8 +11,7 @@ import pytest
 import time
 import hashlib
 import hmac
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 
 class TestOAuthStateValidation:

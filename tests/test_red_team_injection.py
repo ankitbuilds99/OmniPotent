@@ -7,8 +7,6 @@ Tests adversarial inputs that might trick the agent into:
 - Bypassing safety guardrails
 """
 
-import pytest
-
 from app.guardrails import scan_for_injection, wrap_untrusted, sanitize_tool_output
 
 

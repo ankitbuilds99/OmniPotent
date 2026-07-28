@@ -6,7 +6,6 @@ Uses mocked LLM responses for deterministic, offline testing.
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
 
 
 class TestFullInvestigation:
