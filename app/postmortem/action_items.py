@@ -290,14 +290,6 @@ class ActionItemPrioritizer:
         self._counter += 1
         template = self._action_templates[template_key]
 
-        effort_multipliers = {
-            ActionEffort.TRIVIAL: 0.5,
-            ActionEffort.SMALL: 1.0,
-            ActionEffort.MEDIUM: 4.0,
-            ActionEffort.LARGE: 16.0,
-            ActionEffort.EXTRA_LARGE: 40.0,
-        }
-
         effort_hours = template["effort_hours"]
 
         impact_base = 0.8 if template["prevents_similar"] else 0.5

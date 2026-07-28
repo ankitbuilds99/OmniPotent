@@ -6,8 +6,8 @@ Maps who knows what based on incident history.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger("devcopilot.learning.expertise")

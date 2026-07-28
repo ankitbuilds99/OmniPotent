@@ -8,14 +8,13 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from app.correlation.models import (
     Alert,
     AlertGroup,
     AlertSeverity,
-    AlertStatus,
     CorrelatedIncident,
     CorrelationConfidence,
     CorrelationExplanation,
@@ -402,7 +401,7 @@ class CorrelationEngine:
             explanations.append(CorrelationExplanation(
                 correlation_type=CorrelationType.SEMANTIC,
                 weight=0.25,
-                reason=f"All errors contain common keywords",
+                reason="All errors contain common keywords",
                 evidence=[f"Common terms: {', '.join(list(common_keywords)[:5])}"],
             ))
 

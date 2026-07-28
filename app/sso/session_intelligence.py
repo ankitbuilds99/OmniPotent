@@ -324,7 +324,7 @@ class SessionIntelligence:
             anomalies.append((
                 AnomalyType.FAILED_ATTEMPTS,
                 failed_score,
-                f"Recent failed login attempts detected",
+                "Recent failed login attempts detected",
             ))
 
         ip_score = self._assess_ip_reputation(location)
@@ -545,7 +545,7 @@ class SessionIntelligence:
             if len(history.known_devices) > 10:
                 history.known_devices = history.known_devices[-10:]
 
-        if location.city not in [l.city for l in history.known_locations]:
+        if location.city not in [loc.city for loc in history.known_locations]:
             history.known_locations.append(location)
             if len(history.known_locations) > 20:
                 history.known_locations = history.known_locations[-20:]

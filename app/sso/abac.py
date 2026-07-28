@@ -464,7 +464,6 @@ class ABACPermissionResolver:
         all_permissions: set[Permission] = set()
 
         for policy_id, policy in self._policies.items():
-            policy_permissions = set(policy.default_permissions)
             default_granted = list(policy.default_permissions)
             if default_granted:
                 explanations.append({

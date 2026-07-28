@@ -6,8 +6,7 @@ Matches codebase patterns to generate context-aware fixes.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger("devcopilot.ai_fix.patterns")

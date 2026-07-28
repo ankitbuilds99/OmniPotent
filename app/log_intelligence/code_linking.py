@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 from app.log_intelligence.models import LogEntry
@@ -195,7 +194,6 @@ class CodeLinker:
             for match in java_matches:
                 method, file_name, line_num = match
                 parts = method.rsplit(".", 1)
-                class_name = parts[0] if len(parts) > 1 else ""
                 func_name = parts[-1]
 
                 is_app = not any(
@@ -262,7 +260,7 @@ class CodeLinker:
         )
 
         evidence = [
-            f"Stack trace found in log message",
+            "Stack trace found in log message",
             f"Exception: {stack_trace.exception_type}",
             f"Root cause: {frame.file_path}:{frame.line_number}",
         ]

@@ -6,8 +6,7 @@ Tracks prediction outcomes to improve confidence scoring.
 from __future__ import annotations
 
 import logging
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -449,7 +448,6 @@ class ConfidenceCalibrator:
         if len(relevant) < 10:
             return raw_confidence
 
-        bucket = None
         for low, high in self._bucket_ranges:
             if low <= raw_confidence < high:
                 bucket_records = [

@@ -79,7 +79,7 @@ class LogQuery:
         return {
             "query": self.query,
             "services": self.services,
-            "levels": [l.value for l in self.levels],
+            "levels": [level.value for level in self.levels],
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "trace_id": self.trace_id,

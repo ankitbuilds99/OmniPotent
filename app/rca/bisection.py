@@ -296,7 +296,7 @@ class CommitBisector:
         known_bad: str | None = None,
     ) -> BisectionResult | None:
         """Automatically run bisection with a test function."""
-        bisection_id = self.start_bisection(commits, known_good, known_bad)
+        self.start_bisection(commits, known_good, known_bad)
 
         while True:
             next_commit = self.get_next_commit()

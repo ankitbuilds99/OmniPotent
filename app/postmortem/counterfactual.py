@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -230,7 +229,6 @@ class CounterfactualAnalyzer:
         counterfactuals: list[Counterfactual] = []
 
         root_cause_lower = root_cause.lower()
-        error_type = incident_data.get("error_type", "").lower()
 
         if any(word in root_cause_lower for word in ["null", "none", "undefined", "attributeerror"]):
             counterfactuals.append(
@@ -426,7 +424,7 @@ class CounterfactualAnalyzer:
             factor_id=f"factor_{self._factor_counter}",
             factor_type="trigger",
             title=trigger_title,
-            description=f"The event that initiated the incident",
+            description="The event that initiated the incident",
             category="trigger",
             is_root_cause=False,
         )

@@ -6,7 +6,7 @@ Recommends deployment strategies based on change risk.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -218,7 +218,7 @@ class StrategyRecommender:
                         traffic_percentage=pct,
                         duration_minutes=dur,
                         success_criteria=[
-                            f"Error rate < 0.1%",
+                            "Error rate < 0.1%",
                             f"p99 latency < {500 if pct < 25 else 1000}ms",
                         ],
                         rollback_triggers=[

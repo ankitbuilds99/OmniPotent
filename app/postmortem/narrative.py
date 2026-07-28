@@ -157,7 +157,6 @@ class NarrativeGenerator:
     ) -> ExecutiveSummary:
         """Generate executive summary for leadership."""
 
-        title = incident_data.get("title", "Service Incident")
         duration = incident_data.get("duration_minutes", 0)
         customers = incident_data.get("customers_affected", 0)
         revenue = incident_data.get("revenue_impact", 0)
@@ -223,7 +222,6 @@ class NarrativeGenerator:
         service = incident_data.get("affected_services", ["the service"])[0] if incident_data.get("affected_services") else "the service"
         trigger = incident_data.get("trigger", "an event")
         started_at = incident_data.get("started_at")
-        detected_at = incident_data.get("detected_at")
 
         if started_at:
             if isinstance(started_at, str):

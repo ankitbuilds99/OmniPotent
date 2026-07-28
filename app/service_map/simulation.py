@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timezone
 from typing import Any
 
 from app.service_map.graph import ServiceGraph

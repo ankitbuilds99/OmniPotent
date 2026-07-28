@@ -10,13 +10,12 @@ Routes authentication to the appropriate identity provider based on:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from app.sso.saml import SAMLConfig, SAMLProvider
+from app.sso.saml import SAMLConfig
 
 log = logging.getLogger("devcopilot.sso.multi_idp")
 

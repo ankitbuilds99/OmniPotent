@@ -6,14 +6,13 @@ Provides live health status updates for visualization.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.service_map.models import (
     HealthStatus,
     ServiceHealth,
-    ServiceNode,
 )
 
 log = logging.getLogger("devcopilot.service_map.health")
