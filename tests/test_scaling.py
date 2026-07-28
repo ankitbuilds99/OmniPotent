@@ -27,11 +27,20 @@ from app.session_store import (
     SessionData,
     reset_session_store,
 )
-from app.database.routing import (
-    DatabaseRouter,
-    ReplicaHealth,
-    reset_db_router,
-)
+
+# Database routing requires SQLAlchemy (optional dependency)
+try:
+    from app.database.routing import (
+        DatabaseRouter,
+        ReplicaHealth,
+        reset_db_router,
+    )
+    HAS_SQLALCHEMY = True
+except ImportError:
+    HAS_SQLALCHEMY = False
+    DatabaseRouter = None
+    ReplicaHealth = None
+    reset_db_router = None
 
 
 class TestScalingMetrics:
@@ -349,6 +358,7 @@ class TestSessionStore:
         assert "sess-123" not in store._local_cache
 
 
+@pytest.mark.skipif(not HAS_SQLALCHEMY, reason="SQLAlchemy not installed")
 class TestDatabaseRouter:
     """Test database routing."""
 
@@ -387,7 +397,8 @@ class TestIntegration:
         reset_scaling_metrics()
         reset_session_store()
         reset_redis_pools()
-        reset_db_router()
+        if HAS_SQLALCHEMY:
+            reset_db_router()
 
     @pytest.mark.asyncio
     async def test_metrics_with_session_operations(self):
