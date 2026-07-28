@@ -40,9 +40,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'cd ../.. && uvicorn app.api.main:app --host 0.0.0.0 --port 8000',
+    command: 'cd ../.. && uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000',
     url: 'http://localhost:8000/healthz',
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: true,
     timeout: 120000,
   },
 });
