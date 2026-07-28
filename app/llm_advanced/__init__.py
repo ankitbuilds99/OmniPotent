@@ -3,7 +3,7 @@
 Provides model routing, semantic caching, and cost optimization.
 """
 
-from app.llm.model_router import (
+from app.llm_advanced.model_router import (
     ComplexityAnalyzer,
     ModelConfig,
     ModelRouter,
@@ -13,7 +13,7 @@ from app.llm.model_router import (
     TaskComplexity,
     get_model_router,
 )
-from app.llm.semantic_cache import (
+from app.llm_advanced.semantic_cache import (
     CacheEntry,
     CacheStats,
     SemanticCache,

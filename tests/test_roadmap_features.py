@@ -24,7 +24,7 @@ from app.performance.request_coalescing import (
     RequestCoalescer,
     compute_request_key,
 )
-from app.llm.model_router import (
+from app.llm_advanced.model_router import (
     ComplexityAnalyzer,
     ModelRouter,
     RoutingContext,
@@ -39,7 +39,7 @@ from app.resilience.graceful_degradation import (
     GracefulDegradation,
     SystemLoad,
 )
-from app.llm.semantic_cache import (
+from app.llm_advanced.semantic_cache import (
     SemanticCache,
     cosine_similarity,
 )
@@ -443,7 +443,7 @@ class TestSlackBot:
     def test_verify_signature(self):
         bot = SlackBot(
             bot_token="xoxb-test",
-            signing_secret="8f742231b10e8888abcd99yyyzzz85a5",
+            signing_secret="test-signing-secret-for-unit-tests",  # noqa: S106
         )
 
         timestamp = str(int(datetime.now().timestamp()))
