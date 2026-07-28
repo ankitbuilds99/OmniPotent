@@ -1,14 +1,56 @@
-# Prometheus alert rules for DevOps Copilot agent SLOs.
-# Scrape target: GET /metrics/slo (Prometheus exposition).
+# Prometheus alert rules for DevOps Copilot observability.
+# Scrape target: GET /metrics (Prometheus exposition).
 groups:
   - name: devops-copilot-slo
     rules:
+      # Multi-window, multi-burn-rate alerts (Google SRE style)
+      - alert: CopilotSLOBurnRateCritical
+        expr: |
+          (
+            slo_burn_rate_1h{slo="investigation_success_rate"} > 14.4
+            AND
+            slo_burn_rate_6h{slo="investigation_success_rate"} > 6
+          )
+          OR
+          (
+            slo_burn_rate_6h{slo="investigation_success_rate"} > 6
+            AND
+            slo_burn_rate_24h{slo="investigation_success_rate"} > 3
+          )
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SLO burn rate critical - page immediately"
+          description: "Investigation success SLO is burning error budget at an unsustainable rate"
+          runbook_url: "https://docs.example.com/runbooks/copilot-slo-burn"
+
+      - alert: CopilotSLOBurnRateWarning
+        expr: |
+          slo_burn_rate_24h{slo="investigation_success_rate"} > 1
+          AND
+          slo_budget_remaining{slo="investigation_success_rate"} < 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SLO burn rate elevated - error budget at risk"
+
+      - alert: CopilotErrorBudgetExhausted
+        expr: slo_budget_remaining < 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error budget exhausted for {{ $labels.slo }}"
+
       - alert: CopilotHighFailureRate
         expr: |
           rate(copilot_investigations_failed_total[15m])
             / clamp_min(rate(copilot_investigations_total[15m]), 1e-9) > 0.1
         for: 10m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
           summary: "Copilot investigation failure rate > 10% (15m)"
 
@@ -17,24 +59,166 @@ groups:
           rate(copilot_investigations_abstained_total[30m])
             / clamp_min(rate(copilot_investigations_total[30m]), 1e-9) > 0.5
         for: 30m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
-          summary: "Copilot abstaining on >50% of investigations (30m) — evidence/tooling gap?"
+          summary: "Copilot abstaining on >50% of investigations (30m)"
 
       - alert: CopilotSlowInvestigations
-        # p90-ish via histogram: >20% of runs over 60s.
         expr: |
           (rate(copilot_investigation_latency_seconds_count[15m])
             - rate(copilot_investigation_latency_seconds_bucket{le="60"}[15m]))
             / clamp_min(rate(copilot_investigation_latency_seconds_count[15m]), 1e-9) > 0.2
         for: 15m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
           summary: "Copilot investigations slow: >20% take longer than 60s (15m)"
+
+  - name: devops-copilot-llm
+    rules:
+      - alert: CopilotLLMHighErrorRate
+        expr: |
+          sum(rate(copilot_llm_errors_total[5m]))
+          / clamp_min(sum(rate(copilot_llm_calls_total[5m])), 1e-9) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM error rate > 5%"
+
+      - alert: CopilotLLMHighLatency
+        expr: |
+          histogram_quantile(0.99, sum(rate(copilot_llm_latency_seconds_bucket[5m])) by (le)) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM p99 latency > 30s"
+
+      - alert: CopilotLLMCostSpike
+        expr: |
+          sum(rate(copilot_llm_cost_dollars[1h])) * 3600
+          > 2 * sum(rate(copilot_llm_cost_dollars[1h] offset 1d)) * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM cost > 2x same hour yesterday"
+
+      - alert: CopilotLLMProviderDown
+        expr: |
+          sum(rate(copilot_llm_calls_total[5m])) by (provider) == 0
+          AND
+          sum(rate(copilot_llm_calls_total[5m] offset 1h)) by (provider) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM provider {{ $labels.provider }} appears down"
 
       - alert: CopilotTokenSpendSpike
         expr: rate(copilot_tokens_total[1h]) > 2 * (rate(copilot_tokens_total[1h] offset 1d))
         for: 1h
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
           summary: "Copilot token spend > 2x same-hour-yesterday baseline"
+
+  - name: devops-copilot-mcp
+    rules:
+      - alert: CopilotMCPToolHighErrorRate
+        expr: |
+          sum(rate(copilot_mcp_tool_errors_total[5m])) by (server, tool)
+          / clamp_min(sum(rate(copilot_mcp_tool_calls_total[5m])) by (server, tool), 1e-9) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP tool {{ $labels.server }}/{{ $labels.tool }} error rate > 10%"
+
+      - alert: CopilotMCPToolSlow
+        expr: |
+          histogram_quantile(0.95, sum(rate(copilot_mcp_tool_latency_seconds_bucket[5m])) by (le, server, tool)) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP tool {{ $labels.tool }} p95 latency > 10s"
+
+  - name: devops-copilot-circuit-breaker
+    rules:
+      - alert: CopilotCircuitBreakerOpen
+        expr: copilot_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.provider }}"
+          description: "Provider is being blocked due to repeated failures"
+
+      - alert: CopilotCircuitBreakerFlapping
+        expr: |
+          changes(copilot_circuit_breaker_state[30m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker flapping for {{ $labels.provider }}"
+
+  - name: devops-copilot-security
+    rules:
+      - alert: CopilotHighAuthFailures
+        expr: |
+          sum(rate(copilot_auth_failures_total[5m])) * 300 > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High authentication failure rate (>50/5min)"
+
+      - alert: CopilotInjectionAttempts
+        expr: |
+          sum(rate(copilot_injection_attempts_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prompt injection attempts detected"
+
+      - alert: CopilotRateLimitExceeded
+        expr: |
+          sum(rate(copilot_rate_limit_hits_total[5m])) * 300 > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High rate limit rejections (>100/5min)"
+
+  - name: devops-copilot-capacity
+    rules:
+      - alert: CopilotHighActiveInvestigations
+        expr: copilot_investigations_active > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of concurrent investigations ({{ $value }})"
+
+      - alert: CopilotJobQueueBacklog
+        expr: copilot_job_queue_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Job queue backlog > 100"
+
+      - alert: CopilotWebSocketConnectionSpike
+        expr: |
+          copilot_websocket_connections_active
+          > 2 * avg_over_time(copilot_websocket_connections_active[1h])
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "WebSocket connections > 2x hourly average"

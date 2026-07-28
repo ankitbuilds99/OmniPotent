@@ -95,7 +95,7 @@ class _ResilientLLM:
 
     def __init__(self, inner: BaseChatModel, model_id: str, fast: bool,
                  breaker: "object | None" = None):
-        from app.resilience import CircuitBreaker
+        from app.resilience import LegacyCircuitBreaker as CircuitBreaker
 
         self._inner = inner
         self._model_id = model_id

@@ -5,6 +5,7 @@ Production-grade database setup with:
 - Alembic migrations for schema versioning
 - Health checks for readiness probes
 - Automatic retry and circuit breaker patterns
+- Read replica routing for horizontal scaling
 """
 
 from app.database.engine import (
@@ -16,6 +17,12 @@ from app.database.engine import (
     DatabaseHealth,
 )
 from app.database.models import Base
+from app.database.routing import (
+    DatabaseRouter,
+    ReplicaHealth,
+    get_db_router,
+    reset_db_router,
+)
 
 __all__ = [
     "get_engine",
@@ -25,4 +32,8 @@ __all__ = [
     "check_db_health",
     "DatabaseHealth",
     "Base",
+    "DatabaseRouter",
+    "ReplicaHealth",
+    "get_db_router",
+    "reset_db_router",
 ]

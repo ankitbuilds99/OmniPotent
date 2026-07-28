@@ -1,45 +1,216 @@
 {
-  "title": "DevOps Copilot — Agent SLOs",
-  "uid": "devops-copilot-slo",
+  "title": "DevOps Copilot — Complete Observability",
+  "uid": "devops-copilot-complete",
   "schemaVersion": 39,
-  "tags": ["devops-copilot", "slo"],
+  "tags": ["devops-copilot", "slo", "llm", "mcp"],
   "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "provider",
+        "type": "query",
+        "query": "label_values(copilot_llm_calls_total, provider)",
+        "refresh": 2
+      },
+      {
+        "name": "org_id",
+        "type": "query",
+        "query": "label_values(copilot_tenant_investigations_total, org_id)",
+        "refresh": 2
+      }
+    ]
+  },
   "panels": [
     {
       "id": 1,
-      "title": "Investigations / min",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-      "targets": [{"expr": "rate(copilot_investigations_total[5m]) * 60", "legendFormat": "total"}]
+      "title": "SLO Overview",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "slo_budget_remaining{slo='investigation_success_rate'} * 100", "legendFormat": "Success Rate Budget"},
+        {"expr": "slo_budget_remaining{slo='investigation_latency_p99'} * 100", "legendFormat": "Latency Budget"},
+        {"expr": "slo_burn_rate_1h{slo='investigation_success_rate'}", "legendFormat": "1h Burn Rate"}
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {"color": "red", "value": 0},
+              {"color": "yellow", "value": 25},
+              {"color": "green", "value": 50}
+            ]
+          }
+        }
+      }
     },
     {
       "id": 2,
-      "title": "Success vs abstention vs failure rate",
+      "title": "Investigations / min",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 4},
       "targets": [
-        {"expr": "rate(copilot_investigations_success_total[15m]) / clamp_min(rate(copilot_investigations_total[15m]),1e-9)", "legendFormat": "success"},
-        {"expr": "rate(copilot_investigations_abstained_total[15m]) / clamp_min(rate(copilot_investigations_total[15m]),1e-9)", "legendFormat": "abstained"},
-        {"expr": "rate(copilot_investigations_failed_total[15m]) / clamp_min(rate(copilot_investigations_total[15m]),1e-9)", "legendFormat": "failed"}
+        {"expr": "rate(copilot_investigations_completed_total[5m]) * 60", "legendFormat": "{{status}}"}
       ]
     },
     {
       "id": 3,
-      "title": "Investigation latency (p50 / p90 / p99)",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "title": "Investigation Latency Distribution",
+      "type": "heatmap",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 4},
       "targets": [
-        {"expr": "histogram_quantile(0.5, rate(copilot_investigation_latency_seconds_bucket[15m]))", "legendFormat": "p50"},
-        {"expr": "histogram_quantile(0.9, rate(copilot_investigation_latency_seconds_bucket[15m]))", "legendFormat": "p90"},
-        {"expr": "histogram_quantile(0.99, rate(copilot_investigation_latency_seconds_bucket[15m]))", "legendFormat": "p99"}
+        {"expr": "sum(rate(copilot_investigations_duration_seconds_bucket[5m])) by (le)", "legendFormat": "{{le}}", "format": "heatmap"}
       ]
     },
     {
       "id": 4,
-      "title": "Token spend / hour",
+      "title": "Error Budget Burn Rate",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-      "targets": [{"expr": "rate(copilot_tokens_total[1h]) * 3600", "legendFormat": "tokens/hr"}]
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 4},
+      "targets": [
+        {"expr": "slo_burn_rate_1h{slo='investigation_success_rate'}", "legendFormat": "1h"},
+        {"expr": "slo_burn_rate_6h{slo='investigation_success_rate'}", "legendFormat": "6h"},
+        {"expr": "slo_burn_rate_24h{slo='investigation_success_rate'}", "legendFormat": "24h"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {"mode": "line"}
+          },
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 14.4}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "LLM Calls by Provider",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {"expr": "sum(rate(copilot_llm_calls_total[5m])) by (provider, model) * 60", "legendFormat": "{{provider}}/{{model}}"}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "LLM Cost ($/hour)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        {"expr": "sum(rate(copilot_llm_cost_dollars[1h])) by (provider) * 3600", "legendFormat": "{{provider}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "currencyUSD"}
+      }
+    },
+    {
+      "id": 7,
+      "title": "LLM Token Usage",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [
+        {"expr": "sum(rate(copilot_llm_tokens_input_total[5m])) by (provider) * 60", "legendFormat": "Input {{provider}}"},
+        {"expr": "sum(rate(copilot_llm_tokens_output_total[5m])) by (provider) * 60", "legendFormat": "Output {{provider}}"}
+      ]
+    },
+    {
+      "id": 8,
+      "title": "LLM Latency (p50/p90/p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum(rate(copilot_llm_latency_seconds_bucket[5m])) by (le, provider))", "legendFormat": "p50 {{provider}}"},
+        {"expr": "histogram_quantile(0.9, sum(rate(copilot_llm_latency_seconds_bucket[5m])) by (le, provider))", "legendFormat": "p90 {{provider}}"},
+        {"expr": "histogram_quantile(0.99, sum(rate(copilot_llm_latency_seconds_bucket[5m])) by (le, provider))", "legendFormat": "p99 {{provider}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 9,
+      "title": "MCP Tool Calls by Server",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "targets": [
+        {"expr": "sum(rate(copilot_mcp_tool_calls_total{status='success'}[5m])) by (server) * 60", "legendFormat": "{{server}}"}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "MCP Tool Latency by Tool",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(copilot_mcp_tool_latency_seconds_bucket[5m])) by (le, tool))", "legendFormat": "{{tool}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 11,
+      "title": "Tenant Usage (Top 10)",
+      "type": "bargauge",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 36},
+      "targets": [
+        {"expr": "topk(10, sum(increase(copilot_tenant_investigations_total[24h])) by (org_id))", "legendFormat": "{{org_id}}"}
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Tenant Token Consumption",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 36},
+      "targets": [
+        {"expr": "sum(rate(copilot_tenant_tokens_total[1h])) by (org_id) * 3600", "legendFormat": "{{org_id}}"}
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Circuit Breaker State",
+      "type": "state-timeline",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 36},
+      "targets": [
+        {"expr": "copilot_circuit_breaker_state", "legendFormat": "{{provider}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "Closed", "color": "green"}}},
+            {"type": "value", "options": {"1": {"text": "Half-Open", "color": "yellow"}}},
+            {"type": "value", "options": {"2": {"text": "Open", "color": "red"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Security Events",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
+      "targets": [
+        {"expr": "sum(rate(copilot_injection_attempts_total[5m])) by (pattern) * 60", "legendFormat": "Injection: {{pattern}}"},
+        {"expr": "sum(rate(copilot_auth_failures_total[5m])) * 60", "legendFormat": "Auth Failures"},
+        {"expr": "sum(rate(copilot_rate_limit_hits_total[5m])) * 60", "legendFormat": "Rate Limited"}
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Active Connections",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
+      "targets": [
+        {"expr": "copilot_investigations_active", "legendFormat": "Active Investigations"},
+        {"expr": "copilot_websocket_connections_active", "legendFormat": "WebSocket Connections"},
+        {"expr": "copilot_approvals_pending", "legendFormat": "Pending Approvals"}
+      ]
     }
   ]
 }

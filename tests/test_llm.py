@@ -108,7 +108,7 @@ def test_resilient_llm_retries_then_succeeds(monkeypatch):
             return "recovered"
 
     # no-op sleep so the test is instant
-    monkeypatch.setattr("app.resilience.time.sleep", lambda _s: None)
+    monkeypatch.setattr("app.resilience_core.time.sleep", lambda _s: None)
     monkeypatch.setattr(cfg.get_settings(), "copilot_llm_retries", 3)
     monkeypatch.setattr(cfg.get_settings(), "copilot_fallback_provider", "")
     assert _ResilientLLM(_Flaky(), "m", False).invoke(["hi"]) == "recovered"

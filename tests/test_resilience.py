@@ -3,8 +3,8 @@
 import pytest
 
 from app.resilience import (
-    CircuitBreaker,
-    CircuitOpenError,
+    LegacyCircuitBreaker as CircuitBreaker,
+    LegacyCircuitOpenError as CircuitOpenError,
     backoff_delays,
     is_retryable,
     retry_call,

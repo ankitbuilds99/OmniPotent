@@ -108,3 +108,4 @@ ignore_missing_imports = true   # third-party stubs (langchain/langgraph/mcp) ab
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]

@@ -1,0 +1,90 @@
+# PgBouncer sidecar configuration for database connection pooling
+# Add this container to your main deployment's pod spec
+#
+# Usage: Include as additional container in deploy/kubernetes/deployment.yaml
+#        under spec.template.spec.containers
+
+# Sidecar container definition
+containers:
+  - name: pgbouncer
+    image: bitnami/pgbouncer:1.22.0
+    ports:
+      - name: pgbouncer
+        containerPort: 6432
+    env:
+      - name: POSTGRESQL_HOST
+        valueFrom:
+          secretKeyRef:
+            name: copilot-secrets
+            key: POSTGRES_HOST
+      - name: POSTGRESQL_PORT
+        value: "5432"
+      - name: POSTGRESQL_DATABASE
+        valueFrom:
+          secretKeyRef:
+            name: copilot-secrets
+            key: POSTGRES_DB
+      - name: POSTGRESQL_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: copilot-secrets
+            key: POSTGRES_USER
+      - name: POSTGRESQL_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: copilot-secrets
+            key: POSTGRES_PASSWORD
+      # Transaction pooling for async applications (critical for SQLAlchemy async)
+      - name: PGBOUNCER_POOL_MODE
+        value: "transaction"
+      # Client connection limits
+      - name: PGBOUNCER_MAX_CLIENT_CONN
+        value: "1000"
+      # Pool sizes
+      - name: PGBOUNCER_DEFAULT_POOL_SIZE
+        value: "25"
+      - name: PGBOUNCER_MIN_POOL_SIZE
+        value: "10"
+      - name: PGBOUNCER_RESERVE_POOL_SIZE
+        value: "5"
+      - name: PGBOUNCER_RESERVE_POOL_TIMEOUT
+        value: "3"
+      # Per-database limits
+      - name: PGBOUNCER_MAX_DB_CONNECTIONS
+        value: "50"
+      # Connection lifecycle
+      - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
+        value: "600"
+      - name: PGBOUNCER_SERVER_LIFETIME
+        value: "3600"
+      # Stats for monitoring
+      - name: PGBOUNCER_STATS_PERIOD
+        value: "60"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+    readinessProbe:
+      tcpSocket:
+        port: 6432
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    livenessProbe:
+      tcpSocket:
+        port: 6432
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    securityContext:
+      runAsNonRoot: true
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+
+---
+# When using PgBouncer sidecar, update your app's database URL to connect locally:
+# COPILOT_DATABASE_URL=postgresql://user:pass@localhost:6432/dbname
+#
+# The sidecar handles connection pooling and multiplexing to the actual database,
+# so your application can use a large pool_size without overwhelming PostgreSQL.
