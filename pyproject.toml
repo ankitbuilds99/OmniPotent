@@ -35,6 +35,9 @@ dependencies = [
     "pyasn1>=0.6.4",
     # Timezone handling for on-call scheduling
     "pytz>=2024.1",
+    # Database ORM for on-call management (async support)
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiohttp>=3.9.0",  # HTTP client for escalation webhooks
 ]
 
 [project.optional-dependencies]

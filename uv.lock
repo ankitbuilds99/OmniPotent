@@ -858,6 +858,7 @@ name = "devops-copilot"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "langchain" },
@@ -878,6 +879,7 @@ dependencies = [
     { name = "pytz" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -932,6 +934,7 @@ vectors-local = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "aiosqlite", marker = "extra == 'migrations'", specifier = ">=0.19.0" },
     { name = "alembic", marker = "extra == 'migrations'", specifier = ">=1.13.0" },
     { name = "apscheduler", marker = "extra == 'tasks'", specifier = ">=3.10.0" },
@@ -974,6 +977,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.9.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7.0" },
     { name = "sentence-transformers", marker = "extra == 'vectors-local'", specifier = ">=2.2.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'migrations'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'postgres'", specifier = ">=2.0.0" },
     { name = "sse-starlette", specifier = ">=2.1.0" },
