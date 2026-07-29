@@ -1,7 +1,6 @@
 // Billing and subscription types - mirrors backend app/billing/models.py
 
 export type PlanTier =
-  | 'community'
   | 'starter'
   | 'team'
   | 'growth'

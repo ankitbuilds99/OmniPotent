@@ -172,15 +172,11 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
     billingApi
       .listPlans(true)
       .then((data) => {
-        // Show only first 4 plans on landing page for cleaner UI
-        const displayPlans = data.filter(
-          (p) => ['community', 'starter', 'team', 'growth', 'enterprise'].includes(p.tier)
-        );
-        // Mark growth as popular
+        // Mark team as popular (most popular for growing teams)
         setPlans(
-          displayPlans.map((p) => ({
+          data.map((p) => ({
             ...p,
-            is_popular: p.tier === 'growth',
+            is_popular: p.tier === 'team',
           }))
         );
       })
@@ -286,7 +282,7 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
               onClick={() => setIsYearly(true)}
             >
               Yearly
-              <span className="ml-1 text-success">(Save 17%)</span>
+              <span className="ml-1 text-success">(Save 15%)</span>
             </span>
           </motion.div>
         </div>
@@ -306,7 +302,7 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 max-w-7xl mx-auto">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
             {plans.map((plan, i) => (
               <PricingCard
                 key={plan.name}

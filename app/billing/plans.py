@@ -15,8 +15,8 @@ from app.billing.models import (
 log = logging.getLogger("devcopilot.billing.plans")
 
 
-def _create_community_features() -> PlanFeatures:
-    """Create Community tier features."""
+def _create_starter_features() -> PlanFeatures:
+    """Create Starter tier features (free plan)."""
     return PlanFeatures(
         ai_investigation=True,
         slack_integration=True,
@@ -31,27 +31,7 @@ def _create_community_features() -> PlanFeatures:
         api_access=False,
         limit_history_days=14,
         limit_llm_providers=1,
-        limit_integrations=2,
-    )
-
-
-def _create_starter_features() -> PlanFeatures:
-    """Create Starter tier features."""
-    return PlanFeatures(
-        ai_investigation=True,
-        slack_integration=True,
-        basic_deduplication=True,
-        github_integration=True,
-        multi_llm=False,
-        auto_fix_pr=False,
-        ai_postmortem=False,
-        similar_incident_search=False,
-        advanced_deduplication=False,
-        mtta_mttr_dashboard=False,
-        api_access=False,
-        limit_history_days=30,
-        limit_llm_providers=1,
-        limit_integrations=5,
+        limit_integrations=1,
     )
 
 
@@ -210,49 +190,34 @@ def _create_enterprise_features() -> PlanFeatures:
 
 
 PRICING_PLANS: dict[str, PricingPlan] = {
-    "community": PricingPlan(
-        plan_id=uuid4(),
-        name="community",
-        display_name="Community",
-        description="Perfect for trying out AI-powered incident response",
-        tier=PlanTier.COMMUNITY,
-        monthly_price_cents=0,
-        annual_price_cents=0,
-        max_users=2,
-        max_ai_investigations_monthly=25,
-        max_alerts_monthly=250,
-        features=_create_community_features(),
-        sort_order=0,
-        trial_days=0,
-    ),
     "starter": PricingPlan(
         plan_id=uuid4(),
         name="starter",
         display_name="Starter",
-        description="For small teams getting started with AI SRE",
+        description="Perfect for individual developers and small projects",
         tier=PlanTier.STARTER,
-        monthly_price_cents=9900,
-        annual_price_cents=100800,
-        max_users=3,
-        max_ai_investigations_monthly=100,
-        max_alerts_monthly=1000,
+        monthly_price_cents=0,
+        annual_price_cents=0,
+        max_users=1,
+        max_ai_investigations_monthly=25,
+        max_alerts_monthly=100,
         features=_create_starter_features(),
-        sort_order=1,
-        trial_days=14,
+        sort_order=0,
+        trial_days=0,
     ),
     "team": PricingPlan(
         plan_id=uuid4(),
         name="team",
         display_name="Team",
-        description="For growing teams that need full AI capabilities",
+        description="For growing teams that need more power",
         tier=PlanTier.TEAM,
-        monthly_price_cents=49900,
-        annual_price_cents=508800,
+        monthly_price_cents=29900,
+        annual_price_cents=304800,
         max_users=10,
-        max_ai_investigations_monthly=None,
-        max_alerts_monthly=None,
+        max_ai_investigations_monthly=500,
+        max_alerts_monthly=5000,
         features=_create_team_features(),
-        sort_order=2,
+        sort_order=1,
         trial_days=14,
     ),
     "growth": PricingPlan(
@@ -261,13 +226,13 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         display_name="Growth",
         description="For scaling organizations with advanced needs",
         tier=PlanTier.GROWTH,
-        monthly_price_cents=99900,
-        annual_price_cents=1018800,
+        monthly_price_cents=69900,
+        annual_price_cents=712800,
         max_users=25,
         max_ai_investigations_monthly=None,
         max_alerts_monthly=None,
         features=_create_growth_features(),
-        sort_order=3,
+        sort_order=2,
         trial_days=14,
     ),
     "business": PricingPlan(
@@ -282,7 +247,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         max_ai_investigations_monthly=None,
         max_alerts_monthly=None,
         features=_create_business_features(),
-        sort_order=4,
+        sort_order=3,
         trial_days=14,
     ),
     "scale": PricingPlan(
@@ -297,7 +262,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         max_ai_investigations_monthly=None,
         max_alerts_monthly=None,
         features=_create_scale_features(),
-        sort_order=5,
+        sort_order=4,
         trial_days=14,
     ),
     "enterprise": PricingPlan(
@@ -313,14 +278,13 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         max_alerts_monthly=None,
         features=_create_enterprise_features(),
         is_public=False,
-        sort_order=6,
+        sort_order=5,
         trial_days=30,
     ),
 }
 
 
 PLAN_TIER_HIERARCHY = [
-    PlanTier.COMMUNITY,
     PlanTier.STARTER,
     PlanTier.TEAM,
     PlanTier.GROWTH,
@@ -331,9 +295,9 @@ PLAN_TIER_HIERARCHY = [
 
 
 FEATURE_TO_MIN_TIER: dict[str, PlanTier] = {
-    "ai_investigation": PlanTier.COMMUNITY,
-    "slack_integration": PlanTier.COMMUNITY,
-    "basic_deduplication": PlanTier.COMMUNITY,
+    "ai_investigation": PlanTier.STARTER,
+    "slack_integration": PlanTier.STARTER,
+    "basic_deduplication": PlanTier.STARTER,
     "github_integration": PlanTier.STARTER,
     "multi_llm": PlanTier.TEAM,
     "auto_fix_pr": PlanTier.TEAM,
@@ -437,11 +401,15 @@ class PlanManager:
         ]
 
     def get_community_plan(self) -> PricingPlan:
-        """Get the free community plan."""
-        plan = self._plans.get("community")
+        """Get the free starter plan (default for unsubscribed users)."""
+        plan = self._plans.get("starter")
         if not plan:
-            raise ValueError("Community plan not found")
+            raise ValueError("Starter plan not found")
         return plan
+
+    def get_free_plan(self) -> PricingPlan:
+        """Alias for get_community_plan - returns the free starter plan."""
+        return self.get_community_plan()
 
     def compare_tiers(self, tier1: PlanTier, tier2: PlanTier) -> int:
         """Compare two tiers. Returns -1 if tier1 < tier2, 0 if equal, 1 if tier1 > tier2."""
