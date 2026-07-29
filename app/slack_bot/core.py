@@ -568,10 +568,11 @@ def get_slack_bot() -> SlackBot:
     """Get the default Slack bot instance."""
     global _bot
     if _bot is None:
+        import os
         config = SlackBotConfig(
-            bot_token="xoxb-placeholder",
-            app_token="xapp-placeholder",
-            signing_secret="placeholder",
+            bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            app_token=os.getenv("SLACK_APP_TOKEN", ""),
+            signing_secret=os.getenv("SLACK_SIGNING_SECRET", ""),
         )
         _bot = SlackBot(config)
     return _bot
