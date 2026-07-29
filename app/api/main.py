@@ -696,6 +696,10 @@ app.include_router(ws_module.router)
 from app.api import billing_router  # noqa: E402
 app.include_router(billing_router.router)
 
+# Include on-call management router for schedules, alerts, and escalations.
+from app.oncall import oncall_router  # noqa: E402
+app.include_router(oncall_router)
+
 
 class ChatRequest(BaseModel):
     thread_id: str
