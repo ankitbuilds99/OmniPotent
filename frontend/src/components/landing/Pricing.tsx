@@ -1,28 +1,241 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Check, Sparkles, Zap, Building2, Rocket, Crown, Star, Shield, Loader2 } from 'lucide-react';
+import { Check, Sparkles, Zap, Rocket, Crown, Star, Shield, Loader2 } from 'lucide-react';
 import * as billingApi from '../../api/billing';
 import type { PricingPlan, BillingCycle } from '../../types/billing';
 
 const TIER_ICONS: Record<string, typeof Sparkles> = {
-  community: Sparkles,
-  starter: Zap,
-  team: Rocket,
-  growth: Star,
-  business: Building2,
+  starter: Sparkles,
+  team: Zap,
+  growth: Rocket,
+  business: Star,
   scale: Crown,
   enterprise: Shield,
 };
 
 const TIER_COLORS: Record<string, string> = {
-  community: '#00E7FF',
-  starter: '#7C3AED',
-  team: '#00FFB3',
-  growth: '#FF6B6B',
-  business: '#FFD93D',
-  scale: '#FF8C00',
+  starter: '#00E7FF',
+  team: '#7C3AED',
+  growth: '#00FFB3',
+  business: '#FF6B6B',
+  scale: '#FFD93D',
   enterprise: '#E91E63',
 };
+
+const FALLBACK_PLANS: PricingPlan[] = [
+  {
+    name: 'starter',
+    display_name: 'Starter',
+    description: 'Perfect for individual developers and small projects',
+    tier: 'starter',
+    monthly_price: 0,
+    annual_price: 0,
+    annual_monthly_price: 0,
+    annual_savings_percent: 0,
+    max_users: 1,
+    max_ai_investigations_monthly: 25,
+    max_alerts_monthly: 100,
+    features: {
+      ai_investigation: true,
+      slack_integration: true,
+      basic_deduplication: true,
+      github_integration: false,
+      multi_llm: false,
+      auto_fix_pr: false,
+      ai_postmortem: false,
+      similar_incident_search: false,
+      advanced_deduplication: false,
+      mtta_mttr_dashboard: false,
+      api_access: false,
+      limit_history_days: 14,
+      limit_llm_providers: 1,
+      limit_integrations: 1,
+    },
+    is_popular: false,
+  },
+  {
+    name: 'team',
+    display_name: 'Team',
+    description: 'For growing teams that need more power',
+    tier: 'team',
+    monthly_price: 299,
+    annual_price: 3048,
+    annual_monthly_price: 254,
+    annual_savings_percent: 15,
+    max_users: 10,
+    max_ai_investigations_monthly: 500,
+    max_alerts_monthly: 5000,
+    features: {
+      ai_investigation: true,
+      slack_integration: true,
+      basic_deduplication: true,
+      github_integration: true,
+      multi_llm: true,
+      auto_fix_pr: true,
+      ai_postmortem: true,
+      similar_incident_search: true,
+      advanced_deduplication: false,
+      mtta_mttr_dashboard: false,
+      api_access: false,
+      limit_history_days: 365,
+      limit_llm_providers: 5,
+      limit_integrations: 15,
+    },
+    is_popular: true,
+  },
+  {
+    name: 'growth',
+    display_name: 'Growth',
+    description: 'For scaling organizations with advanced needs',
+    tier: 'growth',
+    monthly_price: 699,
+    annual_price: 7128,
+    annual_monthly_price: 594,
+    annual_savings_percent: 15,
+    max_users: 25,
+    max_ai_investigations_monthly: null,
+    max_alerts_monthly: null,
+    features: {
+      ai_investigation: true,
+      slack_integration: true,
+      basic_deduplication: true,
+      github_integration: true,
+      multi_llm: true,
+      auto_fix_pr: true,
+      ai_postmortem: true,
+      similar_incident_search: true,
+      advanced_deduplication: true,
+      mtta_mttr_dashboard: true,
+      api_access: true,
+      cascade_detection: true,
+      service_dependency_map: true,
+      pattern_detection: true,
+      limit_history_days: 730,
+      limit_llm_providers: 5,
+      limit_integrations: null,
+    },
+    is_popular: false,
+  },
+  {
+    name: 'business',
+    display_name: 'Business',
+    description: 'For mid-size organizations with compliance needs',
+    tier: 'business',
+    monthly_price: 1499,
+    annual_price: 15288,
+    annual_monthly_price: 1274,
+    annual_savings_percent: 15,
+    max_users: 50,
+    max_ai_investigations_monthly: null,
+    max_alerts_monthly: null,
+    features: {
+      ai_investigation: true,
+      slack_integration: true,
+      basic_deduplication: true,
+      github_integration: true,
+      multi_llm: true,
+      auto_fix_pr: true,
+      ai_postmortem: true,
+      similar_incident_search: true,
+      advanced_deduplication: true,
+      mtta_mttr_dashboard: true,
+      api_access: true,
+      cascade_detection: true,
+      service_dependency_map: true,
+      pattern_detection: true,
+      sso_saml: true,
+      rbac: true,
+      audit_logs: true,
+      priority_support: true,
+      limit_history_days: null,
+      limit_llm_providers: 5,
+      limit_integrations: null,
+    },
+    is_popular: false,
+  },
+  {
+    name: 'scale',
+    display_name: 'Scale',
+    description: 'For larger organizations scaling their AI operations',
+    tier: 'scale',
+    monthly_price: 2499,
+    annual_price: 25488,
+    annual_monthly_price: 2124,
+    annual_savings_percent: 15,
+    max_users: 100,
+    max_ai_investigations_monthly: null,
+    max_alerts_monthly: null,
+    features: {
+      ai_investigation: true,
+      slack_integration: true,
+      basic_deduplication: true,
+      github_integration: true,
+      multi_llm: true,
+      auto_fix_pr: true,
+      ai_postmortem: true,
+      similar_incident_search: true,
+      advanced_deduplication: true,
+      mtta_mttr_dashboard: true,
+      api_access: true,
+      cascade_detection: true,
+      service_dependency_map: true,
+      pattern_detection: true,
+      sso_saml: true,
+      rbac: true,
+      audit_logs: true,
+      priority_support: true,
+      self_hosted: true,
+      dedicated_support_manager: true,
+      limit_history_days: null,
+      limit_llm_providers: null,
+      limit_integrations: null,
+    },
+    is_popular: false,
+  },
+  {
+    name: 'enterprise',
+    display_name: 'Enterprise',
+    description: 'Custom solutions for large organizations',
+    tier: 'enterprise',
+    monthly_price: 0,
+    annual_price: 0,
+    annual_monthly_price: 0,
+    annual_savings_percent: 0,
+    max_users: 999999,
+    max_ai_investigations_monthly: null,
+    max_alerts_monthly: null,
+    features: {
+      ai_investigation: true,
+      slack_integration: true,
+      basic_deduplication: true,
+      github_integration: true,
+      multi_llm: true,
+      auto_fix_pr: true,
+      ai_postmortem: true,
+      similar_incident_search: true,
+      advanced_deduplication: true,
+      mtta_mttr_dashboard: true,
+      api_access: true,
+      cascade_detection: true,
+      service_dependency_map: true,
+      pattern_detection: true,
+      sso_saml: true,
+      rbac: true,
+      audit_logs: true,
+      priority_support: true,
+      self_hosted: true,
+      dedicated_support_manager: true,
+      dedicated_infrastructure: true,
+      hipaa_compliance: true,
+      custom_sla: true,
+      phone_support_24_7: true,
+      limit_history_days: null,
+      limit_llm_providers: null,
+      limit_integrations: null,
+    },
+    is_popular: false,
+  },
+];
 
 function PricingCard({
   plan,
@@ -165,22 +378,27 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
   const [isYearly, setIsYearly] = useState(false);
   const [plans, setPlans] = useState<PricingPlan[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
   useEffect(() => {
     billingApi
       .listPlans(true)
       .then((data) => {
-        // Mark team as popular (most popular for growing teams)
-        setPlans(
-          data.map((p) => ({
-            ...p,
-            is_popular: p.tier === 'team',
-          }))
-        );
+        if (data && data.length > 0) {
+          setPlans(
+            data.map((p) => ({
+              ...p,
+              is_popular: p.tier === 'team',
+            }))
+          );
+        } else {
+          setPlans(FALLBACK_PLANS);
+        }
       })
-      .catch((err) => setError(err.message))
+      .catch(() => {
+        // Use fallback plans when API is unavailable
+        setPlans(FALLBACK_PLANS);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -290,16 +508,6 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
         {loading ? (
           <div className="flex items-center justify-center py-20">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
-          </div>
-        ) : error ? (
-          <div className="text-center py-20">
-            <p className="text-red-400 mb-4">{error}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="px-6 py-2 bg-primary text-background rounded-lg font-medium cursor-pointer"
-            >
-              Retry
-            </button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
