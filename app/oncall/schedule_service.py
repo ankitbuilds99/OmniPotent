@@ -19,7 +19,7 @@ from collections import defaultdict
 from uuid import UUID
 
 import pytz
-from sqlalchemy import select, delete, and_, or_
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -112,7 +112,7 @@ class ScheduleService:
             .options(selectinload(OncallSchedule.participants))
             .where(
                 OncallSchedule.team_id == team_id,
-                OncallSchedule.is_active == True,
+                OncallSchedule.is_active.is_(True),
             )
             .order_by(OncallSchedule.layer)
         )
@@ -664,7 +664,7 @@ class ScheduleService:
             select(OncallHolidayCalendar)
             .where(
                 OncallHolidayCalendar.org_id == team.org_id,
-                OncallHolidayCalendar.is_default == True,
+                OncallHolidayCalendar.is_default.is_(True),
             )
         )
         calendar = cal_result.scalar_one_or_none()

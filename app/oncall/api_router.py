@@ -18,21 +18,19 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.database.engine import get_session as get_async_session
-from app.oncall.schedule_service import ScheduleService, get_schedule_service
-from app.oncall.escalation_service import EscalationService, get_escalation_service
-from app.oncall.ai_oncall_service import AIOncallService, get_ai_oncall_service
+from app.oncall.schedule_service import get_schedule_service
+from app.oncall.escalation_service import get_escalation_service
+from app.oncall.ai_oncall_service import get_ai_oncall_service
 from app.oncall.models import (
     OncallTeam,
     OncallTeamMember,
-    OncallSchedule,
     OncallShift,
     OncallOverride,
     OncallSwapRequest,
     OncallAlert,
-    OncallEscalationPolicy,
 )
 
 log = logging.getLogger("devcopilot.oncall.api")
@@ -219,7 +217,7 @@ async def list_teams(
     from sqlalchemy import select
 
     result = await db.execute(
-        select(OncallTeam).where(OncallTeam.is_active == True)
+        select(OncallTeam).where(OncallTeam.is_active.is_(True))
     )
     teams = result.scalars().all()
     return [TeamResponse.model_validate(t) for t in teams]

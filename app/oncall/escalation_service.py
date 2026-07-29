@@ -12,7 +12,7 @@ Enterprise-grade alert escalation with:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -23,13 +23,10 @@ from sqlalchemy.orm import selectinload
 
 from app.oncall.models import (
     OncallTeam,
-    OncallSchedule,
     OncallEscalationPolicy,
     OncallEscalationStep,
     OncallAlert,
     OncallNotification,
-    OncallShift,
-    OncallOverride,
 )
 from app.oncall.schedule_service import ScheduleService
 
@@ -91,7 +88,7 @@ class EscalationService:
                 update(OncallEscalationPolicy)
                 .where(
                     OncallEscalationPolicy.team_id == team_id,
-                    OncallEscalationPolicy.is_default == True,
+                    OncallEscalationPolicy.is_default.is_(True),
                 )
                 .values(is_default=False)
             )
@@ -144,7 +141,7 @@ class EscalationService:
             .options(selectinload(OncallEscalationPolicy.steps))
             .where(
                 OncallEscalationPolicy.team_id == team_id,
-                OncallEscalationPolicy.is_active == True,
+                OncallEscalationPolicy.is_active.is_(True),
             )
             .order_by(OncallEscalationPolicy.is_default.desc())
         )
@@ -157,8 +154,8 @@ class EscalationService:
             .options(selectinload(OncallEscalationPolicy.steps))
             .where(
                 OncallEscalationPolicy.team_id == team_id,
-                OncallEscalationPolicy.is_default == True,
-                OncallEscalationPolicy.is_active == True,
+                OncallEscalationPolicy.is_default.is_(True),
+                OncallEscalationPolicy.is_active.is_(True),
             )
         )
         return result.scalar_one_or_none()

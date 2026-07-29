@@ -18,18 +18,16 @@ from collections import defaultdict
 from uuid import UUID
 
 import pytz
-from sqlalchemy import select, and_, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.oncall.models import (
-    OncallTeam,
     OncallTeamMember,
     OncallSchedule,
     OncallShift,
     OncallAlert,
     OncallTimeOff,
-    OncallMetrics,
 )
 from app.oncall.schedule_service import ScheduleService
 
@@ -508,7 +506,7 @@ class AIOncallService:
             select(OncallTeamMember)
             .where(
                 OncallTeamMember.team_id == team_id,
-                OncallTeamMember.is_active == True,
+                OncallTeamMember.is_active.is_(True),
             )
         )
         return list(result.scalars().all())

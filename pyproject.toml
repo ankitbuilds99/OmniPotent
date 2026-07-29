@@ -33,6 +33,8 @@ dependencies = [
     "pyjwt[crypto]>=2.9.0",  # verify Supabase / OIDC JWTs against a JWKS
     # Transitive deps pinned for security patches (CVE-2026-59885, CVE-2026-59886)
     "pyasn1>=0.6.4",
+    # Timezone handling for on-call scheduling
+    "pytz>=2024.1",
 ]
 
 [project.optional-dependencies]
