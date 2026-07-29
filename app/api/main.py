@@ -692,6 +692,10 @@ app.add_middleware(
 from app.api import websocket as ws_module  # noqa: E402
 app.include_router(ws_module.router)
 
+# Include billing router for subscription and payment management.
+from app.api import billing_router  # noqa: E402
+app.include_router(billing_router.router)
+
 
 class ChatRequest(BaseModel):
     thread_id: str

@@ -163,6 +163,8 @@ class Settings(BaseSettings):
     # Stripe webhook signing secret — verifies inbound subscription events at
     # /webhooks/stripe (event → store.set_plan). Empty = the endpoint rejects (fails closed).
     stripe_webhook_secret: str = ""
+    # Frontend URL for Stripe checkout success/cancel redirects.
+    frontend_url: str = "http://localhost:3000"
     # Supabase Auth SSO (optional). When SUPABASE_JWKS_URL is set, a Supabase-issued
     # JWT (Bearer) authenticates to the multi-tenant API, mapped to the user's org/
     # role membership. Verification uses only the PUBLIC JWKS — no Supabase secret.

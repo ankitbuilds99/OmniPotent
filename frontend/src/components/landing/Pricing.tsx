@@ -1,89 +1,68 @@
-import { useState } from 'react'
-import { motion } from 'framer-motion'
-import { Check, Sparkles, Zap, Building } from 'lucide-react'
+import { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
+import { Check, Sparkles, Zap, Building2, Rocket, Crown, Star, Shield, Loader2 } from 'lucide-react';
+import * as billingApi from '../../api/billing';
+import type { PricingPlan, BillingCycle } from '../../types/billing';
 
-const PLANS = [
-  {
-    id: 'starter',
-    name: 'Starter',
-    icon: Sparkles,
-    price: 0,
-    period: 'forever',
-    description: 'Perfect for individual developers and small projects',
-    color: '#00E7FF',
-    features: [
-      '5 deployments per month',
-      '1 cloud provider',
-      'Basic AI assistance',
-      'Community support',
-      '1 team member',
-      'Standard monitoring'
-    ],
-    cta: 'Get Started Free'
-  },
-  {
-    id: 'professional',
-    name: 'Professional',
-    icon: Zap,
-    price: 49,
-    period: '/month',
-    description: 'For growing teams that need more power',
-    color: '#7C3AED',
-    popular: true,
-    features: [
-      'Unlimited deployments',
-      'All cloud providers',
-      'Advanced AI automation',
-      'Priority support',
-      'Up to 10 team members',
-      'Advanced monitoring & alerts',
-      'Custom integrations',
-      'API access'
-    ],
-    cta: 'Start 14-day Trial'
-  },
-  {
-    id: 'enterprise',
-    name: 'Enterprise',
-    icon: Building,
-    price: null,
-    period: '',
-    description: 'Custom solutions for large organizations',
-    color: '#00FFB3',
-    features: [
-      'Everything in Professional',
-      'Unlimited team members',
-      'Dedicated infrastructure',
-      'Custom SLAs',
-      '24/7 premium support',
-      'Advanced security controls',
-      'Custom AI training',
-      'On-premise deployment'
-    ],
-    cta: 'Contact Sales'
-  }
-]
+const TIER_ICONS: Record<string, typeof Sparkles> = {
+  community: Sparkles,
+  starter: Zap,
+  team: Rocket,
+  growth: Star,
+  business: Building2,
+  scale: Crown,
+  enterprise: Shield,
+};
+
+const TIER_COLORS: Record<string, string> = {
+  community: '#00E7FF',
+  starter: '#7C3AED',
+  team: '#00FFB3',
+  growth: '#FF6B6B',
+  business: '#FFD93D',
+  scale: '#FF8C00',
+  enterprise: '#E91E63',
+};
 
 function PricingCard({
   plan,
   index,
   isYearly,
-  onLaunch
+  onLaunch,
+  loading,
 }: {
-  plan: typeof PLANS[0]
-  index: number
-  isYearly: boolean
-  onLaunch?: () => void
+  plan: PricingPlan;
+  index: number;
+  isYearly: boolean;
+  onLaunch?: (plan: PricingPlan) => void;
+  loading?: boolean;
 }) {
-  const Icon = plan.icon
-  const yearlyPrice = plan.price ? Math.round(plan.price * 10) : null
-  const displayPrice = isYearly ? yearlyPrice : plan.price
+  const Icon = TIER_ICONS[plan.tier] || Sparkles;
+  const color = TIER_COLORS[plan.tier] || '#00E7FF';
+  const isEnterprise = plan.tier === 'enterprise';
+  const displayPrice = isYearly ? plan.annual_monthly_price : plan.monthly_price;
+
+  const featureList = [
+    plan.max_users === -1 ? 'Unlimited users' : `${plan.max_users} users`,
+    plan.max_ai_investigations_monthly === null
+      ? 'Unlimited AI investigations'
+      : `${plan.max_ai_investigations_monthly} AI investigations/mo`,
+    plan.features.github_integration && 'GitHub integration',
+    plan.features.slack_integration && 'Slack integration',
+    plan.features.multi_llm && 'Multi-LLM support',
+    plan.features.auto_fix_pr && 'Auto-fix PRs',
+    plan.features.ai_postmortem && 'AI postmortems',
+    plan.features.similar_incident_search && 'Similar incident search',
+    plan.features.api_access && 'API access',
+    plan.features.sso_saml && 'SSO/SAML',
+    plan.features.priority_support && 'Priority support',
+  ].filter(Boolean) as string[];
 
   return (
     <motion.div
       className={`
         relative floating-card p-8 flex flex-col
-        ${plan.popular ? 'border-primary/50' : ''}
+        ${plan.is_popular ? 'border-primary/50' : ''}
       `}
       initial={{ opacity: 0, y: 50 }}
       whileInView={{ opacity: 1, y: 0 }}
@@ -91,8 +70,7 @@ function PricingCard({
       transition={{ duration: 0.5, delay: index * 0.1 }}
       whileHover={{ y: -10 }}
     >
-      {/* Popular badge */}
-      {plan.popular && (
+      {plan.is_popular && (
         <div className="absolute -top-4 left-1/2 -translate-x-1/2">
           <span className="px-4 py-1 bg-gradient-to-r from-primary to-accent text-background text-sm font-semibold rounded-full">
             Most Popular
@@ -100,98 +78,154 @@ function PricingCard({
         </div>
       )}
 
-      {/* Icon */}
       <div
         className="w-14 h-14 rounded-2xl flex items-center justify-center mb-6"
-        style={{ backgroundColor: `${plan.color}15` }}
+        style={{ backgroundColor: `${color}15` }}
       >
-        <Icon className="w-7 h-7" style={{ color: plan.color }} />
+        <Icon className="w-7 h-7" style={{ color }} />
       </div>
 
-      {/* Plan name */}
       <h3 className="font-display text-2xl font-bold text-white mb-2">
-        {plan.name}
+        {plan.display_name}
       </h3>
 
-      {/* Description */}
       <p className="text-white/60 text-sm mb-6">
         {plan.description}
       </p>
 
-      {/* Price */}
       <div className="mb-8">
-        {displayPrice !== null ? (
-          <div className="flex items-baseline gap-1">
-            <span className="font-display text-5xl font-bold text-white">
-              ${displayPrice}
-            </span>
-            <span className="text-white/60">
-              {isYearly ? '/year' : plan.period}
-            </span>
-          </div>
-        ) : (
+        {isEnterprise ? (
           <div className="font-display text-3xl font-bold text-white">
             Custom
           </div>
+        ) : (
+          <div className="flex items-baseline gap-1">
+            <span className="font-display text-5xl font-bold text-white">
+              ${displayPrice.toFixed(0)}
+            </span>
+            <span className="text-white/60">/mo</span>
+          </div>
         )}
-        {isYearly && plan.price && (
+        {isYearly && !isEnterprise && plan.annual_savings_percent > 0 && (
           <p className="text-success text-sm mt-1">
-            Save ${plan.price * 12 - (yearlyPrice ?? 0)}/year
+            Save {plan.annual_savings_percent.toFixed(0)}% with annual billing
           </p>
         )}
       </div>
 
-      {/* Features */}
       <ul className="space-y-3 mb-8 flex-grow">
-        {plan.features.map((feature) => (
+        {featureList.slice(0, 8).map((feature) => (
           <li key={feature} className="flex items-start gap-3">
             <Check className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
             <span className="text-white/80 text-sm">{feature}</span>
           </li>
         ))}
+        {featureList.length > 8 && (
+          <li className="text-white/50 text-sm pl-8">
+            +{featureList.length - 8} more features
+          </li>
+        )}
       </ul>
 
-      {/* CTA */}
       <motion.button
         className={`
           w-full py-4 rounded-xl font-display font-semibold transition-all duration-300 cursor-pointer
-          ${plan.popular
+          ${plan.is_popular
             ? 'bg-gradient-to-r from-primary to-accent text-background shadow-glow-primary'
             : 'bg-glass border border-glass-border text-white hover:border-primary'
           }
         `}
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
-        onClick={() => onLaunch?.()}
+        onClick={() => onLaunch?.(plan)}
+        disabled={loading}
       >
-        {plan.cta}
+        {loading ? (
+          <Loader2 className="w-5 h-5 animate-spin mx-auto" />
+        ) : isEnterprise ? (
+          'Contact Sales'
+        ) : plan.monthly_price === 0 ? (
+          'Get Started Free'
+        ) : (
+          'Start Free Trial'
+        )}
       </motion.button>
 
-      {/* Hover glow */}
       <div
         className="absolute inset-0 rounded-[20px] opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"
         style={{
-          background: `radial-gradient(circle at 50% 50%, ${plan.color}10, transparent 70%)`
+          background: `radial-gradient(circle at 50% 50%, ${color}10, transparent 70%)`,
         }}
       />
     </motion.div>
-  )
+  );
 }
 
 export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
-  const [isYearly, setIsYearly] = useState(false)
+  const [isYearly, setIsYearly] = useState(false);
+  const [plans, setPlans] = useState<PricingPlan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+
+  useEffect(() => {
+    billingApi
+      .listPlans(true)
+      .then((data) => {
+        // Show only first 4 plans on landing page for cleaner UI
+        const displayPlans = data.filter(
+          (p) => ['community', 'starter', 'team', 'growth', 'enterprise'].includes(p.tier)
+        );
+        // Mark growth as popular
+        setPlans(
+          displayPlans.map((p) => ({
+            ...p,
+            is_popular: p.tier === 'growth',
+          }))
+        );
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handlePlanSelect = async (plan: PricingPlan) => {
+    if (plan.tier === 'enterprise') {
+      window.open('mailto:sales@devcopilot.ai?subject=Enterprise%20Inquiry', '_blank');
+      return;
+    }
+
+    if (plan.monthly_price === 0) {
+      onLaunch?.();
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      const billingCycle: BillingCycle = isYearly ? 'annual' : 'monthly';
+      const result = await billingApi.createCheckout(
+        plan.name,
+        billingCycle,
+        undefined,
+        window.location.origin + '/billing?success=true',
+        window.location.origin + '/billing?canceled=true'
+      );
+      window.location.href = result.checkout_url;
+    } catch (err) {
+      console.error('Checkout failed:', err);
+      onLaunch?.();
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   return (
-    <section className="relative py-32 overflow-hidden">
-      {/* Background */}
+    <section id="pricing" className="relative py-32 overflow-hidden">
       <div className="absolute inset-0 bg-gradient-to-b from-background to-background-secondary" />
 
-      {/* Decorative elements */}
       <div className="absolute top-1/3 -left-40 w-80 h-80 bg-primary/5 rounded-full blur-3xl" />
       <div className="absolute bottom-1/3 -right-40 w-80 h-80 bg-secondary/5 rounded-full blur-3xl" />
 
       <div className="container-wide relative z-10">
-        {/* Section header */}
         <div className="text-center mb-12">
           <motion.span
             className="inline-block text-primary text-sm font-semibold tracking-wider uppercase mb-4"
@@ -221,7 +255,6 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
             Start free and scale as you grow. No hidden fees.
           </motion.p>
 
-          {/* Billing toggle */}
           <motion.div
             className="flex items-center justify-center gap-4"
             initial={{ opacity: 0, y: 20 }}
@@ -229,13 +262,16 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.3 }}
           >
-            <span className={`text-sm ${!isYearly ? 'text-white' : 'text-white/50'}`}>
+            <span
+              className={`text-sm cursor-pointer ${!isYearly ? 'text-white' : 'text-white/50'}`}
+              onClick={() => setIsYearly(false)}
+            >
               Monthly
             </span>
             <button
               onClick={() => setIsYearly(!isYearly)}
               className={`
-                relative w-14 h-7 rounded-full transition-colors duration-300
+                relative w-14 h-7 rounded-full transition-colors duration-300 cursor-pointer
                 ${isYearly ? 'bg-primary' : 'bg-glass-border'}
               `}
             >
@@ -245,27 +281,45 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
                 transition={{ type: 'spring', stiffness: 500, damping: 30 }}
               />
             </button>
-            <span className={`text-sm ${isYearly ? 'text-white' : 'text-white/50'}`}>
+            <span
+              className={`text-sm cursor-pointer ${isYearly ? 'text-white' : 'text-white/50'}`}
+              onClick={() => setIsYearly(true)}
+            >
               Yearly
               <span className="ml-1 text-success">(Save 17%)</span>
             </span>
           </motion.div>
         </div>
 
-        {/* Pricing cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl mx-auto">
-          {PLANS.map((plan, i) => (
-            <PricingCard
-              key={plan.id}
-              plan={plan}
-              index={i}
-              isYearly={isYearly}
-              onLaunch={onLaunch}
-            />
-          ))}
-        </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="w-8 h-8 text-primary animate-spin" />
+          </div>
+        ) : error ? (
+          <div className="text-center py-20">
+            <p className="text-red-400 mb-4">{error}</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-6 py-2 bg-primary text-background rounded-lg font-medium cursor-pointer"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 max-w-7xl mx-auto">
+            {plans.map((plan, i) => (
+              <PricingCard
+                key={plan.name}
+                plan={plan}
+                index={i}
+                isYearly={isYearly}
+                onLaunch={handlePlanSelect}
+                loading={actionLoading}
+              />
+            ))}
+          </div>
+        )}
 
-        {/* FAQ teaser */}
         <motion.div
           className="text-center mt-12"
           initial={{ opacity: 0, y: 20 }}
@@ -279,12 +333,12 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
               Check our docs
             </a>{' '}
             or{' '}
-            <a href="mailto:ankit25bcs10610@gmail.com" className="text-primary hover:underline">
+            <a href="mailto:support@devcopilot.ai" className="text-primary hover:underline">
               contact us
             </a>
           </p>
         </motion.div>
       </div>
     </section>
-  )
+  );
 }

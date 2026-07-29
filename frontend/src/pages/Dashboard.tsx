@@ -348,7 +348,7 @@ function MetricsTab() {
   );
 }
 
-export function Dashboard({ onBack }: { onBack: () => void }) {
+export function Dashboard({ onBack, onBilling: _onBilling }: { onBack: () => void; onBilling?: () => void }) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
