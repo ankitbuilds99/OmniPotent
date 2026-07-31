@@ -115,6 +115,14 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""
     # GitLab webhook secret token for verification.
     gitlab_webhook_secret: str = ""
+    # Microsoft Teams incoming webhook URL for notifications.
+    teams_webhook_url: str = ""
+    # Jira Cloud/Server integration for issue management.
+    jira_base_url: str = ""  # e.g., https://yourcompany.atlassian.net
+    jira_email: str = ""     # Jira account email
+    jira_api_token: str = "" # Jira API token
+    # PagerDuty API key for incident management (different from webhook token).
+    pagerduty_api_key: str = ""
 
     # --- API ---
     # Deployment environment: "development" | "staging" | "production".

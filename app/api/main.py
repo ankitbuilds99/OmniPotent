@@ -709,6 +709,10 @@ app.include_router(oncall_router)
 from app.auth.endpoints import router as auth_router  # noqa: E402
 app.include_router(auth_router)
 
+# Include teams/workspaces router for multi-user collaboration.
+from app.teams.router import router as teams_router  # noqa: E402
+app.include_router(teams_router, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")

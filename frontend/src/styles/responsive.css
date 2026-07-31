@@ -1,0 +1,314 @@
+/* Mobile-first responsive styles for DevOps Copilot */
+
+/* Base mobile styles (< 640px) */
+@media (max-width: 639px) {
+  /* Navigation */
+  .nav {
+    flex-wrap: wrap;
+    padding: 0.5rem;
+    gap: 0.5rem;
+  }
+
+  .nav__brand {
+    order: 1;
+    flex: 0 0 auto;
+  }
+
+  .nav__right {
+    order: 2;
+    flex: 1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .nav__btn {
+    padding: 0.375rem 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .nav__btn span {
+    display: none;
+  }
+
+  .nav__btn svg {
+    margin: 0;
+  }
+
+  .nav__tag {
+    font-size: 0.625rem;
+    padding: 0.125rem 0.375rem;
+  }
+
+  /* Sidebar - hide on mobile */
+  .sidebar {
+    display: none;
+  }
+
+  /* Main content */
+  .main {
+    padding: 0.5rem;
+  }
+
+  .main__dock {
+    padding: 0.5rem;
+  }
+
+  /* Empty state */
+  .empty {
+    padding: 1rem;
+  }
+
+  .empty__title {
+    font-size: 1.25rem;
+  }
+
+  .empty__sub {
+    font-size: 0.875rem;
+  }
+
+  /* Suggestion prompts - stack vertically */
+  .prompts {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .prompt {
+    width: 100%;
+    text-align: left;
+    font-size: 0.875rem;
+    padding: 0.75rem;
+  }
+
+  /* Composer */
+  .composer {
+    padding: 0.5rem;
+  }
+
+  .composer__input {
+    font-size: 0.875rem;
+    min-height: 2.5rem;
+  }
+
+  /* Messages */
+  .message {
+    padding: 0.75rem;
+    margin: 0.5rem 0;
+  }
+
+  .message__content {
+    font-size: 0.875rem;
+  }
+
+  /* Thread */
+  .thread {
+    padding: 0.5rem;
+  }
+
+  /* Cards and panels */
+  .rounded-xl {
+    border-radius: 0.75rem;
+  }
+
+  /* Modal adjustments */
+  .modal__content {
+    margin: 0.5rem;
+    max-height: 90vh;
+  }
+
+  /* Grid layouts */
+  .grid-cols-2,
+  .grid-cols-3,
+  .grid-cols-4 {
+    grid-template-columns: 1fr;
+  }
+
+  /* Text sizes */
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.25rem;
+  }
+
+  h3 {
+    font-size: 1rem;
+  }
+
+  /* Buttons */
+  .btn, button {
+    min-height: 2.5rem;
+    padding: 0.5rem 1rem;
+  }
+
+  /* Forms */
+  input, textarea, select {
+    font-size: 16px; /* Prevents zoom on iOS */
+  }
+}
+
+/* Tablet (640px - 1023px) */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .nav {
+    padding: 0.5rem 1rem;
+  }
+
+  .nav__btn span {
+    display: inline;
+  }
+
+  .sidebar {
+    width: 200px;
+    min-width: 200px;
+  }
+
+  .main {
+    padding: 1rem;
+  }
+
+  .prompts {
+    flex-wrap: wrap;
+  }
+
+  .prompt {
+    flex: 1 1 calc(50% - 0.5rem);
+  }
+
+  .grid-cols-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Desktop (1024px+) */
+@media (min-width: 1024px) {
+  .nav {
+    padding: 0.5rem 1.5rem;
+  }
+
+  .sidebar {
+    width: 260px;
+    min-width: 260px;
+  }
+
+  .main {
+    padding: 1.5rem;
+  }
+
+  .prompts {
+    flex-wrap: nowrap;
+  }
+
+  .prompt {
+    flex: 1;
+  }
+}
+
+/* Large desktop (1440px+) */
+@media (min-width: 1440px) {
+  .max-w-3xl {
+    max-width: 56rem;
+  }
+
+  .sidebar {
+    width: 300px;
+    min-width: 300px;
+  }
+}
+
+/* Touch device optimizations */
+@media (hover: none) and (pointer: coarse) {
+  /* Larger touch targets */
+  .nav__btn,
+  .prompt,
+  button,
+  .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Remove hover effects that don't work well on touch */
+  .nav__btn:hover,
+  .prompt:hover,
+  button:hover {
+    transform: none;
+  }
+
+  /* Scroll improvements */
+  .main__scroll {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* High contrast mode */
+@media (prefers-contrast: high) {
+  :root {
+    --border: #000;
+  }
+
+  .nav__btn,
+  .prompt,
+  button {
+    border: 2px solid currentColor;
+  }
+}
+
+/* Print styles */
+@media print {
+  .nav,
+  .sidebar,
+  .composer,
+  .main__dock {
+    display: none;
+  }
+
+  .main {
+    padding: 0;
+  }
+
+  .thread {
+    max-width: none;
+  }
+
+  .message {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+
+/* Landscape mobile */
+@media (max-height: 500px) and (orientation: landscape) {
+  .nav {
+    padding: 0.25rem 0.5rem;
+  }
+
+  .empty {
+    padding: 0.5rem;
+  }
+
+  .empty__icon {
+    display: none;
+  }
+
+  .prompts {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .prompt {
+    flex: 1 1 calc(50% - 0.25rem);
+    padding: 0.5rem;
+    font-size: 0.75rem;
+  }
+}

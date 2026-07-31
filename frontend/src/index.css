@@ -653,3 +653,4 @@ body {
 .to-\[\#00FFB3\] {
   --tw-gradient-to: var(--ok) !important;
 }
+@import "./styles/responsive.css";
