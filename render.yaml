@@ -64,6 +64,16 @@ services:
       - key: VITE_SUPABASE_ANON_KEY
         sync: false  # Same as SUPABASE_ANON_KEY
 
+      # OAuth Providers (alternative to Supabase Auth)
+      - key: GOOGLE_CLIENT_ID
+        sync: false  # Google OAuth Client ID
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false  # Google OAuth Client Secret
+      - key: GITHUB_OAUTH_CLIENT_ID
+        sync: false  # GitHub OAuth Client ID
+      - key: GITHUB_OAUTH_CLIENT_SECRET
+        sync: false  # GitHub OAuth Client Secret
+
       # Defaults
       - key: TARGET_REPO_PATH
         value: ./sample_repo

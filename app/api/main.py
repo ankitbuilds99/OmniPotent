@@ -227,7 +227,9 @@ class _ConfigGate:
 _gate = _ConfigGate()
 
 # Paths that bypass auth AND the limits middleware (probes + CORS preflight).
-_OPEN_PATHS = frozenset({"/healthz", "/readyz", "/metrics/slo"})
+_OPEN_PATHS = frozenset({"/healthz", "/readyz", "/metrics/slo", "/frontend-config", "/auth/providers"})
+# Auth callback paths need to be open for OAuth redirects
+_AUTH_PATH_PREFIXES = ("/auth/",)
 
 # --- In-memory per-IP fixed-window rate limiter (single-instance only) ---
 # {ip: (window_start_epoch, count)}. Good enough for one process; a multi-instance
@@ -420,6 +422,9 @@ async def require_auth(request: Request) -> None:
     (The static SPA mount is a sub-app, so it bypasses this dependency entirely.)
     """
     if request.method == "OPTIONS" or request.url.path in _OPEN_PATHS:
+        return
+    # Auth routes need to be open for OAuth login/callback flows.
+    if any(request.url.path.startswith(p) for p in _AUTH_PATH_PREFIXES):
         return
     # Webhooks authenticate via their own provider signatures (HMAC), not the
     # shared bearer token — PagerDuty/Slack don't send it.
@@ -699,6 +704,10 @@ app.include_router(billing_router.router)
 # Include on-call management router for schedules, alerts, and escalations.
 from app.oncall import oncall_router  # noqa: E402
 app.include_router(oncall_router)
+
+# Include OAuth authentication router.
+from app.auth.endpoints import router as auth_router  # noqa: E402
+app.include_router(auth_router)
 
 
 class ChatRequest(BaseModel):
