@@ -62,8 +62,9 @@ class TestRedactionEngine:
 
     def test_redact_jwt(self):
         engine = RedactionEngine()
-        # Test JWT without Bearer prefix (bearer_token rule matches first otherwise)
-        text = "Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        # Test JWT pattern matching with a clearly fake test token
+        # Using base64-encoded {"alg":"HS256","typ":"JWT"}.{"sub":"test"}.fakesig
+        text = "Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0In0.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         redacted, rules = engine.redact(text)
         assert "[JWT]" in redacted
 
