@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.config import get_settings
 from app.database.supabase_client import (
     get_supabase_admin_client,
     is_supabase_configured,
