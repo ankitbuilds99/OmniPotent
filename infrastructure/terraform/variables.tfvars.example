@@ -1,0 +1,11 @@
+# Example Terraform variables
+# Copy to terraform.tfvars and fill in values
+
+aws_region        = "us-east-1"
+environment       = "prod"
+domain_name       = "devops-copilot.com"
+
+# Sensitive - set via TF_VAR_* environment variables or secrets manager
+# db_password       = ""
+# anthropic_api_key = ""
+# stripe_secret_key = ""

@@ -1,0 +1,322 @@
+# Prometheus Alerting Rules for DevOps-Copilot
+# Place in /etc/prometheus/rules/ and reload Prometheus
+
+groups:
+  # ============================================================================
+  # HTTP / API ALERTS
+  # ============================================================================
+  - name: devops-copilot-http
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(devcopilot_http_requests_total{status=~"5.."}[5m])) /
+          sum(rate(devcopilot_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          runbook_url: "https://docs.devops-copilot.com/runbooks/high-error-rate"
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            rate(devcopilot_http_request_duration_seconds_bucket[5m])
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High P95 latency"
+          description: "P95 latency is {{ $value | humanizeDuration }} (threshold: 2s)"
+
+      - alert: HighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            rate(devcopilot_http_request_duration_seconds_bucket[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "Critical P99 latency"
+          description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 5s)"
+
+      - alert: TooManyActiveRequests
+        expr: devcopilot_http_active_requests > 100
+        for: 2m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High number of active requests"
+          description: "{{ $value }} active requests (potential bottleneck)"
+
+  # ============================================================================
+  # INVESTIGATION ALERTS
+  # ============================================================================
+  - name: devops-copilot-investigations
+    rules:
+      - alert: InvestigationFailureRate
+        expr: |
+          sum(rate(copilot_investigations_completed_total{status="failed"}[10m])) /
+          sum(rate(copilot_investigations_completed_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High investigation failure rate"
+          description: "{{ $value | humanizePercentage }} of investigations failing"
+
+      - alert: InvestigationTimeout
+        expr: |
+          sum(rate(copilot_investigations_completed_total{status="timeout"}[10m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Investigation timeouts increasing"
+          description: "{{ $value }} timeouts in the last 10 minutes"
+
+      - alert: SlowInvestigations
+        expr: |
+          histogram_quantile(0.95,
+            rate(copilot_investigations_duration_seconds_bucket[10m])
+          ) > 120
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Investigations taking too long"
+          description: "P95 investigation duration is {{ $value | humanizeDuration }}"
+
+      - alert: TooManyActiveInvestigations
+        expr: copilot_investigations_active > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High number of concurrent investigations"
+          description: "{{ $value }} active investigations (may impact performance)"
+
+  # ============================================================================
+  # LLM / AI ALERTS
+  # ============================================================================
+  - name: devops-copilot-llm
+    rules:
+      - alert: LLMErrorRate
+        expr: |
+          sum(rate(copilot_llm_errors_total[5m])) /
+          sum(rate(copilot_llm_calls_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "High LLM API error rate"
+          description: "{{ $value | humanizePercentage }} of LLM calls failing"
+          runbook_url: "https://docs.devops-copilot.com/runbooks/llm-errors"
+
+      - alert: LLMHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(copilot_llm_latency_seconds_bucket[5m])
+          ) > 30
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "LLM API latency is high"
+          description: "P95 LLM latency is {{ $value | humanizeDuration }}"
+
+      - alert: LLMCostSpike
+        expr: |
+          sum(increase(copilot_llm_cost_dollars[1h])) > 100
+        for: 1h
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High LLM cost spike"
+          description: "${{ $value | humanize }} spent on LLM in the last hour"
+
+      - alert: CircuitBreakerOpen
+        expr: copilot_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "Circuit breaker is open"
+          description: "Circuit breaker for {{ $labels.provider }} is open"
+
+  # ============================================================================
+  # SAFETY GATE ALERTS
+  # ============================================================================
+  - name: devops-copilot-safety
+    rules:
+      - alert: SafetyGateRejectionsHigh
+        expr: |
+          sum(rate(copilot_safety_evaluations_total{result="blocked"}[10m])) > 10
+        for: 5m
+        labels:
+          severity: info
+          service: devops-copilot
+        annotations:
+          summary: "Elevated safety gate rejections"
+          description: "{{ $value }} actions blocked in the last 10 minutes"
+
+      - alert: InjectionAttemptsDetected
+        expr: |
+          sum(increase(copilot_injection_attempts_total[5m])) > 0
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Prompt injection attempts detected"
+          description: "{{ $value }} injection attempts in the last 5 minutes"
+
+  # ============================================================================
+  # INFRASTRUCTURE ALERTS
+  # ============================================================================
+  - name: devops-copilot-infrastructure
+    rules:
+      - alert: DatabaseConnectionsLow
+        expr: copilot_db_connections{state="available"} < 5
+        for: 2m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "Only {{ $value }} connections available"
+
+      - alert: DatabaseQuerySlow
+        expr: |
+          histogram_quantile(0.95,
+            rate(copilot_db_query_duration_seconds_bucket[5m])
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Slow database queries"
+          description: "P95 query duration is {{ $value | humanizeDuration }}"
+
+      - alert: CacheHitRateLow
+        expr: |
+          sum(rate(copilot_cache_hits_total[10m])) /
+          (sum(rate(copilot_cache_hits_total[10m])) + sum(rate(copilot_cache_misses_total[10m]))) < 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Low cache hit rate"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}"
+
+      - alert: QueueBacklogHigh
+        expr: copilot_job_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Job queue backlog building up"
+          description: "{{ $value }} jobs waiting in queue"
+
+      - alert: WebSocketConnectionsHigh
+        expr: copilot_websocket_connections_active > 500
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High number of WebSocket connections"
+          description: "{{ $value }} active WebSocket connections"
+
+  # ============================================================================
+  # AUTHENTICATION ALERTS
+  # ============================================================================
+  - name: devops-copilot-auth
+    rules:
+      - alert: AuthFailuresHigh
+        expr: |
+          sum(rate(copilot_auth_failures_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High authentication failure rate"
+          description: "{{ $value }} auth failures per second"
+
+      - alert: RateLimitHitsHigh
+        expr: |
+          sum(rate(copilot_rate_limit_hits_total[5m])) > 50
+        for: 5m
+        labels:
+          severity: info
+          service: devops-copilot
+        annotations:
+          summary: "High rate limit hits"
+          description: "{{ $value }} rate limit hits per second"
+
+  # ============================================================================
+  # SLO ALERTS
+  # ============================================================================
+  - name: devops-copilot-slo
+    rules:
+      - alert: SLOAvailabilityBreach
+        expr: |
+          1 - (
+            sum(rate(devcopilot_http_requests_total{status=~"5.."}[30m])) /
+            sum(rate(devcopilot_http_requests_total[30m]))
+          ) < 0.999
+        for: 15m
+        labels:
+          severity: critical
+          service: devops-copilot
+          slo: availability
+        annotations:
+          summary: "SLO Availability breach"
+          description: "Availability is {{ $value | humanizePercentage }} (target: 99.9%)"
+
+      - alert: SLOLatencyBreach
+        expr: |
+          histogram_quantile(0.95,
+            rate(devcopilot_http_request_duration_seconds_bucket[30m])
+          ) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          service: devops-copilot
+          slo: latency
+        annotations:
+          summary: "SLO Latency breach"
+          description: "P95 latency is {{ $value | humanizeDuration }} (target: 500ms)"
+
+      - alert: ErrorBudgetExhausted
+        expr: |
+          (1 - (
+            sum(rate(devcopilot_http_requests_total{status=~"5.."}[24h])) /
+            sum(rate(devcopilot_http_requests_total[24h]))
+          )) < 0.99
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+          slo: error_budget
+        annotations:
+          summary: "Error budget nearly exhausted"
+          description: "Daily error budget at {{ $value | humanizePercentage }}"

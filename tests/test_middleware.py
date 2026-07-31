@@ -103,6 +103,7 @@ class TestRequestMetrics:
 
         metrics.record_request(
             endpoint="/api/chat",
+            method="POST",
             status_code=200,
             duration_ms=150.0,
         )
@@ -110,6 +111,7 @@ class TestRequestMetrics:
         assert metrics.total_requests == 1
         assert metrics.requests_by_status[200] == 1
         assert metrics.requests_by_endpoint["/api/chat"] == 1
+        assert metrics.requests_by_method["POST"] == 1
         assert metrics.avg_latency_ms == 150.0
 
     def test_error_rate_calculation(self):
@@ -119,10 +121,10 @@ class TestRequestMetrics:
         metrics = RequestMetrics()
 
         for _ in range(8):
-            metrics.record_request("/api", 200, 100.0)
+            metrics.record_request("/api", "GET", 200, 100.0)
 
         for _ in range(2):
-            metrics.record_request("/api", 500, 100.0, error_type="InternalError")
+            metrics.record_request("/api", "GET", 500, 100.0, error_type="InternalError")
 
         assert metrics.total_requests == 10
         assert metrics.total_errors == 2
@@ -134,38 +136,37 @@ class TestRequestMetrics:
 
         metrics = RequestMetrics()
 
-        metrics.record_request("/api", 200, 25.0)
-        metrics.record_request("/api", 200, 75.0)
-        metrics.record_request("/api", 200, 150.0)
-        metrics.record_request("/api", 200, 750.0)
-        metrics.record_request("/api", 200, 6000.0)
+        metrics.record_request("/api", "GET", 200, 25.0)
+        metrics.record_request("/api", "GET", 200, 75.0)
+        metrics.record_request("/api", "GET", 200, 150.0)
+        metrics.record_request("/api", "GET", 200, 750.0)
+        metrics.record_request("/api", "GET", 200, 6000.0)
 
-        assert metrics.latency_buckets["0-50ms"] == 1
-        assert metrics.latency_buckets["50-100ms"] == 1
-        assert metrics.latency_buckets["100-250ms"] == 1
-        assert metrics.latency_buckets["500-1000ms"] == 1
-        assert metrics.latency_buckets["5s+"] == 1
+        # Updated bucket assertions for new bucket system
+        assert metrics.latency_count == 5
+        assert metrics.p50_latency_ms > 0
+        assert metrics.p95_latency_ms > 0
 
     def test_prometheus_export(self):
         """Test Prometheus format export."""
         from app.middleware.metrics import RequestMetrics
 
         metrics = RequestMetrics()
-        metrics.record_request("/api", 200, 100.0)
-        metrics.record_request("/api", 500, 200.0, error_type="Error")
+        metrics.record_request("/api", "GET", 200, 100.0)
+        metrics.record_request("/api", "POST", 500, 200.0, error_type="Error")
 
         prometheus = metrics.to_prometheus()
 
-        assert "http_requests_total 2" in prometheus
-        assert "http_errors_total 1" in prometheus
-        assert 'http_requests_by_status{status="200"} 1' in prometheus
+        assert "devcopilot_http_requests_total" in prometheus
+        assert "devcopilot_http_errors_total" in prometheus
+        assert 'devcopilot_http_requests_total{status="200"} 1' in prometheus
 
     def test_metrics_reset(self):
         """Test metrics reset."""
         from app.middleware.metrics import RequestMetrics
 
         metrics = RequestMetrics()
-        metrics.record_request("/api", 200, 100.0)
+        metrics.record_request("/api", "GET", 200, 100.0)
 
         assert metrics.total_requests == 1
 

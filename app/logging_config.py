@@ -6,18 +6,29 @@ Features:
 - Automatic context enrichment (tenant, actor, trace_id)
 - Log levels configurable via environment
 - Human-readable format for development
+- Service metadata for distributed tracing
+- Error fingerprinting for aggregation
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import socket
 import sys
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.observability import request_id_var
+
+# Service metadata for all logs
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "devops-copilot")
+SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "1.0.0")
+SERVICE_ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+HOSTNAME = socket.gethostname()
 
 
 class JSONFormatter(logging.Formatter):
@@ -46,6 +57,17 @@ class JSONFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "service": {
+                "name": SERVICE_NAME,
+                "version": SERVICE_VERSION,
+                "environment": SERVICE_ENVIRONMENT,
+                "hostname": HOSTNAME,
+            },
+            "source": {
+                "file": record.pathname,
+                "line": record.lineno,
+                "function": record.funcName,
+            },
         }
 
         request_id = request_id_var.get()
@@ -74,10 +96,19 @@ class JSONFormatter(logging.Formatter):
             pass
 
         if record.exc_info:
+            exc_type = record.exc_info[0].__name__ if record.exc_info[0] else "Unknown"
+            exc_msg = str(record.exc_info[1]) if record.exc_info[1] else ""
+            tb_lines = traceback.format_exception(*record.exc_info)
+
+            # Create error fingerprint for grouping similar errors
+            fingerprint_source = f"{exc_type}:{record.pathname}:{record.lineno}"
+            fingerprint = hashlib.md5(fingerprint_source.encode()).hexdigest()[:12]
+
             log_obj["exception"] = {
-                "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
-                "traceback": traceback.format_exception(*record.exc_info),
+                "type": exc_type,
+                "message": exc_msg,
+                "traceback": tb_lines,
+                "fingerprint": fingerprint,
             }
 
         for key, value in record.__dict__.items():
