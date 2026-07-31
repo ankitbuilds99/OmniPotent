@@ -1,4 +1,5 @@
 """GraphQL Schema - Main schema definition with queries, mutations, and subscriptions."""
+# mypy: disable-error-code="call-arg"
 
 from __future__ import annotations
 

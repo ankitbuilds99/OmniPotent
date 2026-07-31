@@ -211,7 +211,7 @@ class AdaptiveRouter:
         scores = self._score_models(classification, max_cost, max_latency)
 
         # Select best model
-        best_model = max(scores, key=scores.get)
+        best_model = max(scores, key=lambda m: scores[m])
         profile = self._profiles[best_model]
 
         # Get alternatives
@@ -273,7 +273,7 @@ class AdaptiveRouter:
 
             # Historical performance bonus
             perf = self._metrics.get_model_performance(name)
-            history_bonus = 0
+            history_bonus: float = 0.0
             if perf and perf.total_requests >= self.config.min_samples_for_learning:
                 history_bonus = (perf.success_rate - 0.9) * 0.5  # Bonus for >90% success
 

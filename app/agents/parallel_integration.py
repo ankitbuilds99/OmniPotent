@@ -20,6 +20,7 @@ from app.agents.parallel_coordinator import (
 )
 from app.agents.protocol import SharedContext
 from app.safety_gates.orchestrator import SafetyGateOrchestrator
+from app.safety_gates.confidence_gate import ConfidenceGate
 from app.safety_gates.models import SafetyDecision, SafetyEvaluationResult
 
 log = logging.getLogger("devcopilot.agents.parallel_integration")
@@ -108,9 +109,8 @@ class Architecture3Coordinator:
         )
 
         self._safety = SafetyGateOrchestrator(
-            confidence_threshold=self.config.min_confidence_threshold,
+            confidence_gate=ConfidenceGate(default_threshold=self.config.min_confidence_threshold),
             sandbox_enabled=self.config.enable_sandbox_gate,
-            sandbox_environment=self.config.sandbox_environment,
         )
 
         log.info(
@@ -142,18 +142,20 @@ class Architecture3Coordinator:
 
         # Phase 1: Parallel Investigation
         investigation = await self._parallel.investigate(
-            incident=incident,
-            timeout_seconds=self.config.parallel_timeout_seconds,
+            incident_id=result_id,
+            organization_id=uuid4(),  # TODO: Get from context
+            context=incident,
+            timeout_seconds=int(self.config.parallel_timeout_seconds),
         )
 
         # Estimate time saved vs sequential execution
         sequential_time_ms = sum(
-            sr.duration_ms for sr in investigation.specialists
+            sr.duration_ms for sr in investigation.specialist_results.values()
         )
         parallel_savings_ms = max(0, sequential_time_ms - investigation.total_duration_ms)
 
         # Build consensus assessment
-        consensus_reached = investigation.consensus_confidence >= self.config.min_confidence_threshold
+        consensus_reached = investigation.confidence_score >= self.config.min_confidence_threshold
 
         # Phase 2: Safety Evaluation (if action proposed)
         safety_evaluation = None
@@ -180,11 +182,11 @@ class Architecture3Coordinator:
         return Arch3Result(
             result_id=result_id,
             incident_summary=incident.get("title", incident.get("summary", "Unknown incident")),
-            root_cause=investigation.root_cause,
-            confidence=investigation.confidence,
-            severity=investigation.severity,
+            root_cause=investigation.root_cause_hypothesis,
+            confidence=investigation.confidence_score,
+            severity="high",  # Derived from findings
             investigation=investigation,
-            specialist_count=len(investigation.specialists),
+            specialist_count=len(investigation.specialist_results),
             consensus_reached=consensus_reached,
             safety_evaluation=safety_evaluation,
             action_approved=action_approved,
@@ -201,10 +203,10 @@ class Architecture3Coordinator:
 
         Looks for high-confidence fix recommendations.
         """
-        if not investigation.recommended_actions:
+        if not investigation.suggested_actions:
             return None
 
-        for action in investigation.recommended_actions:
+        for action in investigation.suggested_actions:
             # Only propose actions with sufficient confidence
             if action.get("confidence", 0) >= self.config.min_confidence_threshold:
                 return action
@@ -218,14 +220,15 @@ class Architecture3Coordinator:
     ) -> SafetyEvaluationResult:
         """Evaluate an action through the 3-layer safety gate system."""
         return await self._safety.evaluate(
+            incident_id=investigation.session_id,
+            organization_id=uuid4(),  # TODO: Get from context
             action_type=action.get("type", "unknown"),
             action_details=action,
-            investigation_context={
-                "root_cause": investigation.root_cause,
-                "confidence": investigation.confidence,
-                "evidence_count": len(investigation.evidence),
-                "specialist_count": len(investigation.specialists),
-                "consensus_confidence": investigation.consensus_confidence,
+            investigation_result={
+                "root_cause": investigation.root_cause_hypothesis,
+                "confidence": investigation.confidence_score,
+                "evidence_count": len(investigation.all_findings),
+                "specialist_count": len(investigation.specialist_results),
             },
         )
 

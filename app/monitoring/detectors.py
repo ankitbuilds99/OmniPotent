@@ -182,17 +182,17 @@ class StatisticalDetector(AnomalyDetector):
 class ThresholdDetector(AnomalyDetector):
     """Detects threshold breaches based on fixed or dynamic thresholds."""
 
-    def __init__(self, thresholds: dict[str, dict[str, float]] | None = None):
+    def __init__(self, thresholds: dict[str, dict[str, Any]] | None = None):
         """Initialize with metric thresholds.
 
         Args:
             thresholds: Dict of metric_name -> {warning, critical, direction}
                        direction: "above" or "below"
         """
-        self.thresholds = thresholds or {}
+        self.thresholds: dict[str, dict[str, Any]] = thresholds or {}
 
         # Default thresholds for common metrics
-        self.default_thresholds = {
+        self.default_thresholds: dict[str, dict[str, Any]] = {
             "error_rate": {"warning": 0.01, "critical": 0.05, "direction": "above"},
             "latency_p99": {"warning": 500, "critical": 2000, "direction": "above"},
             "latency_p95": {"warning": 200, "critical": 1000, "direction": "above"},
@@ -255,7 +255,7 @@ class ThresholdDetector(AnomalyDetector):
                 breach_type = "warning"
                 severity = "medium"
 
-        if breach_type:
+        if breach_type and severity:
             threshold = critical if breach_type == "critical" else warning
             anomalies.append(Anomaly(
                 anomaly_type=AnomalyType.THRESHOLD_BREACH,

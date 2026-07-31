@@ -181,6 +181,7 @@ class HealthChecker:
         Returns:
             Tuple of (success, latency_ms, details)
         """
+        details: dict[str, Any] = {}
         for attempt in range(self.config.retries):
             try:
                 start = datetime.now(timezone.utc)
@@ -281,7 +282,7 @@ class HealthChecker:
         completed = await asyncio.gather(*tasks, return_exceptions=True)
 
         for item in completed:
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
                 continue
             name, result = item
             results[name] = result

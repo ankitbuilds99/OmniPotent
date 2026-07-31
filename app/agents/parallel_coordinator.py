@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -84,6 +84,28 @@ class ParallelInvestigationResult:
     total_duration_ms: int
     total_cost_usd: Decimal
     alternative_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "session_id": str(self.session_id),
+            "status": self.status,
+            "root_cause_hypothesis": self.root_cause_hypothesis,
+            "confidence_score": self.confidence_score,
+            "confidence_factors": [
+                {"name": f.name, "weight": f.weight, "score": f.score, "explanation": f.explanation}
+                for f in self.confidence_factors
+            ],
+            "summary": self.summary,
+            "all_findings": [asdict(f) for f in self.all_findings],
+            "suggested_actions": self.suggested_actions,
+            "specialist_results": {
+                k: asdict(v) for k, v in self.specialist_results.items()
+            },
+            "total_duration_ms": self.total_duration_ms,
+            "total_cost_usd": float(self.total_cost_usd),
+            "alternative_hypotheses": self.alternative_hypotheses,
+        }
 
 
 # Specialist agent prompts
@@ -383,7 +405,7 @@ class ParallelInvestigationCoordinator:
         # Process results (handle exceptions)
         specialist_results: dict[str, SpecialistResult] = {}
         for specialist_type, result in zip(SpecialistType, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 specialist_results[specialist_type.value] = SpecialistResult(
                     specialist_type=specialist_type,
                     status="failed",
@@ -463,7 +485,7 @@ class ParallelInvestigationCoordinator:
             )
 
             # Parse response
-            content = response.content[0].text
+            content = getattr(response.content[0], "text", str(response.content[0]))
             parsed = self._parse_json_response(content)
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -603,7 +625,8 @@ class ParallelInvestigationCoordinator:
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            return self._parse_json_response(response.content[0].text)
+            content = getattr(response.content[0], "text", str(response.content[0]))
+            return self._parse_json_response(content)
 
         except Exception as e:
             log.exception("Synthesis failed")

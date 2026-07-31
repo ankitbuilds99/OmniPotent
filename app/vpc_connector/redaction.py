@@ -255,25 +255,25 @@ class RedactionEngine:
             current_path = f"{path}.{key}" if path else key
 
             if isinstance(value, str):
-                redacted, rules = self.redact(value)
-                result[key] = redacted
+                redacted_str, rules = self.redact(value)
+                result[key] = redacted_str
                 all_rules.extend(rules)
 
             elif isinstance(value, dict):
-                redacted, rules = self.redact_dict(value, current_path)
-                result[key] = redacted
+                redacted_dict, rules = self.redact_dict(value, current_path)
+                result[key] = redacted_dict
                 all_rules.extend(rules)
 
             elif isinstance(value, list):
-                redacted_list = []
+                redacted_list: list[Any] = []
                 for i, item in enumerate(value):
                     if isinstance(item, str):
-                        redacted, rules = self.redact(item)
-                        redacted_list.append(redacted)
+                        item_redacted, rules = self.redact(item)
+                        redacted_list.append(item_redacted)
                         all_rules.extend(rules)
                     elif isinstance(item, dict):
-                        redacted, rules = self.redact_dict(item, f"{current_path}[{i}]")
-                        redacted_list.append(redacted)
+                        item_dict, rules = self.redact_dict(item, f"{current_path}[{i}]")
+                        redacted_list.append(item_dict)
                         all_rules.extend(rules)
                     else:
                         redacted_list.append(item)

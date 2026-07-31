@@ -239,7 +239,7 @@ class PolicyGate:
         action_type: str,
     ) -> list[dict[str, Any]]:
         """Check if service has protection rules."""
-        violations = []
+        violations: list[dict[str, Any]] = []
 
         if not target_service:
             return violations

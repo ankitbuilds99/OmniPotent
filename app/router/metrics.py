@@ -247,7 +247,7 @@ class RouterMetrics:
         if not scores:
             return None
 
-        return max(scores, key=scores.get)
+        return max(scores, key=lambda m: scores[m])
 
     def get_summary(self) -> dict[str, Any]:
         """Get a summary of routing metrics."""

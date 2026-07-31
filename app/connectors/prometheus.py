@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
@@ -60,21 +61,22 @@ class PrometheusConnector(Connector):
         except ConnectorError:
             return False
 
-    async def query(self, promql: str, time: datetime | None = None) -> QueryResult:
+    async def query(self, promql: str, query_time: datetime | None = None) -> QueryResult:
         """Execute an instant query.
 
         Args:
             promql: PromQL query string
-            time: Optional timestamp (defaults to now)
+            query_time: Optional timestamp (defaults to now)
 
         Returns:
             QueryResult with metric values
         """
-        start = time.time() if hasattr(time, 'time') else __import__('time').time()
+        import time as time_module
+        start = time_module.time()
 
-        params = {"query": promql}
-        if time:
-            params["time"] = time.timestamp()
+        params: dict[str, Any] = {"query": promql}
+        if query_time:
+            params["time"] = str(query_time.timestamp())
 
         try:
             response = await self._get("/api/v1/query", params=params)

@@ -229,9 +229,9 @@ class EvalPipeline:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Handle exceptions
-        processed = []
+        processed: list[EvalScenario] = []
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 processed.append(EvalScenario(
                     scenario_id=scenarios[i].id,
                     scenario_name=scenarios[i].name,

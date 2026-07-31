@@ -188,7 +188,7 @@ class TaskClassifier:
             scores[TaskComplexity.MODERATE] += 0.3
 
         # Find best match
-        best_level = max(scores, key=scores.get)
+        best_level = max(scores, key=lambda k: scores[k])
         total = sum(scores.values()) or 1
         confidence = scores[best_level] / total
 
@@ -222,7 +222,7 @@ class TaskClassifier:
             scores[TaskType.REMEDIATION] += 0.3
 
         # Find best match
-        best_type = max(scores, key=scores.get)
+        best_type = max(scores, key=lambda k: scores[k])
         total = sum(scores.values()) or 1
         confidence = scores[best_type] / total
 
