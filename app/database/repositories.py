@@ -153,7 +153,7 @@ class IncidentRepository:
             }
 
         client = get_supabase_admin_client()
-        data = {
+        data: dict[str, Any] = {
             "title": title,
             "severity": severity,
             "status": "triggered",
