@@ -137,7 +137,7 @@ async def update_team(
 
     _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
 
-    updates = {}
+    updates: dict[str, Any] = {}
     if request.name:
         updates["name"] = request.name
     if request.settings:
