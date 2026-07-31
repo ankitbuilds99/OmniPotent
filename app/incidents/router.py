@@ -15,8 +15,6 @@ from app.incidents.models import (
     UpdateIncidentRequest,
     IncidentResponse,
     IncidentDetailResponse,
-    AgentStatus,
-    AgentFinding,
 )
 from app.incidents.store import get_incident_store
 
