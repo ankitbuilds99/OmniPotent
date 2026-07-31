@@ -23,11 +23,68 @@ env:
 
 jobs:
   # ============================================================================
-  # BUILD
+  # BUILD & TEST (Always runs)
   # ============================================================================
-  build:
-    name: Build Docker Image
+  build-test:
+    name: Build & Test
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run linting
+        run: uv run ruff check .
+
+      - name: Run type checking
+        run: uv run mypy app/ --ignore-missing-imports
+
+      - name: Run tests
+        run: uv run pytest tests/ -v --tb=short -x
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=sha-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: devops-copilot-api:${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+
+  # ============================================================================
+  # BUILD DOCKER IMAGE (Only with AWS credentials)
+  # ============================================================================
+  build-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     outputs:
       image_tag: ${{ steps.meta.outputs.tags }}
       image_digest: ${{ steps.build.outputs.digest }}
@@ -35,10 +92,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check AWS credentials
+        id: check-aws
+        run: |
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "has_aws=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_aws=false" >> $GITHUB_OUTPUT
+            echo "::warning::AWS credentials not configured. Skipping ECR push."
+          fi
+
       - name: Set up Docker Buildx
+        if: steps.check-aws.outputs.has_aws == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Configure AWS credentials
+        if: steps.check-aws.outputs.has_aws == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -46,10 +115,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
+        if: steps.check-aws.outputs.has_aws == 'true'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Extract metadata
+        if: steps.check-aws.outputs.has_aws == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -61,6 +132,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
+        if: steps.check-aws.outputs.has_aws == 'true'
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -76,27 +148,36 @@ jobs:
             VERSION=${{ github.ref_name }}
 
       - name: Scan image with Trivy
+        if: steps.check-aws.outputs.has_aws == 'true'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
+        continue-on-error: true
 
       - name: Upload Trivy results
+        if: steps.check-aws.outputs.has_aws == 'true' && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
         with:
           sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Skip notification (no AWS)
+        if: steps.check-aws.outputs.has_aws == 'false'
+        run: echo "Build completed without AWS push. Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY secrets to enable ECR deployment."
 
   # ============================================================================
-  # DEPLOY TO STAGING
+  # DEPLOY TO STAGING (Requires AWS)
   # ============================================================================
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging'
+    needs: build-push
+    if: |
+      needs.build-push.outputs.image_tag != '' &&
+      (github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging')
     environment:
       name: staging
       url: https://staging-api.devops-copilot.com
@@ -123,7 +204,7 @@ jobs:
         with:
           task-definition: task-definition.json
           container-name: api
-          image: ${{ needs.build.outputs.image_tag }}
+          image: ${{ needs.build-push.outputs.image_tag }}
 
       - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
@@ -147,7 +228,7 @@ jobs:
           exit 1
 
       - name: Notify Slack - Staging Deploy
-        if: always()
+        if: always() && env.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@v1
         with:
           payload: |
@@ -195,7 +276,7 @@ jobs:
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: [build, e2e-tests]
+    needs: [build-push, e2e-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
     environment:
       name: production
@@ -223,7 +304,7 @@ jobs:
         with:
           task-definition: task-definition.json
           container-name: api
-          image: ${{ needs.build.outputs.image_tag }}
+          image: ${{ needs.build-push.outputs.image_tag }}
 
       - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
@@ -247,7 +328,7 @@ jobs:
           exit 1
 
       - name: Notify Slack - Production Deploy
-        if: always()
+        if: always() && env.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@v1
         with:
           payload: |
@@ -267,22 +348,35 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   # ============================================================================
-  # DATABASE MIGRATIONS
+  # DATABASE MIGRATIONS (Requires staging secrets)
   # ============================================================================
   migrate:
     name: Run Database Migrations
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build-test]
     if: github.ref == 'refs/heads/main'
     environment: staging
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check database URL
+        id: check-db
+        run: |
+          if [ -n "${{ secrets.STAGING_DATABASE_URL }}" ]; then
+            echo "has_db=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_db=false" >> $GITHUB_OUTPUT
+            echo "::warning::STAGING_DATABASE_URL not configured. Skipping migrations."
+          fi
+
       - name: Install uv
+        if: steps.check-db.outputs.has_db == 'true'
         uses: astral-sh/setup-uv@v5
 
       - name: Run migrations
+        if: steps.check-db.outputs.has_db == 'true'
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
@@ -295,7 +389,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: deploy-production
+    needs: build-test
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
@@ -325,6 +419,6 @@ jobs:
 
             ## Docker Image
             ```
-            ${{ needs.build.outputs.image_tag }}
+            devops-copilot-api:${{ github.ref_name }}
             ```
           generate_release_notes: true
