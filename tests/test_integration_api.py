@@ -8,7 +8,6 @@ For tests that would hit real LLM APIs, we use COPILOT_REPLAY_MODE=replay
 with pre-recorded cassettes, or skip if no cassette exists.
 """
 
-import os
 import pytest
 from fastapi.testclient import TestClient
 
