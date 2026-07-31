@@ -40,13 +40,12 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<AuthError | null>(null)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic Supabase client
   const [client, setClient] = useState<any>(null)
   const [isConfigured, setIsConfigured] = useState(false)
 
   useEffect(() => {
     let mounted = true
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let unsubscribe: (() => void) | null = null
 
     // Check config asynchronously (may need to fetch from API)

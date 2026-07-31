@@ -114,7 +114,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
       ])
 
       setLastUpdated(new Date())
-    } catch (err) {
+    } catch {
       // Fallback to demo data
       setServices([
         { name: 'API Server', status: 'operational', latency: 45, uptime: 99.95 },

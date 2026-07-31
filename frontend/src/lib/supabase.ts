@@ -11,7 +11,8 @@
 let supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
 let supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// Supabase client type - dynamic import means we can't statically type it
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic Supabase client
 type AnyClient = any
 
 let supabaseInstance: AnyClient | null = null

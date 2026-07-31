@@ -76,7 +76,7 @@ export function Team({ onBack }: TeamProps) {
         }
       ])
       setInvitations([])
-    } catch (err) {
+    } catch {
       setError('Failed to load team members')
     } finally {
       setLoading(false)
@@ -101,7 +101,7 @@ export function Team({ onBack }: TeamProps) {
       setInvitations([...invitations, newInvitation])
       setInviteEmail('')
       setShowInviteModal(false)
-    } catch (err) {
+    } catch {
       setError('Failed to send invitation')
     } finally {
       setInviting(false)
@@ -113,7 +113,7 @@ export function Team({ onBack }: TeamProps) {
 
     try {
       setMembers(members.filter(m => m.id !== memberId))
-    } catch (err) {
+    } catch {
       setError('Failed to remove member')
     }
   }
@@ -121,7 +121,7 @@ export function Team({ onBack }: TeamProps) {
   const handleCancelInvitation = async (invitationId: string) => {
     try {
       setInvitations(invitations.filter(i => i.id !== invitationId))
-    } catch (err) {
+    } catch {
       setError('Failed to cancel invitation')
     }
   }
