@@ -24,9 +24,10 @@ WORKDIR /app
 
 # Install deps first for better layer caching. Editable install keeps the package
 # rooted at /app so config.ROOT resolves sample_repo/ and frontend/dist/ correctly.
+# Include postgres extra for production Postgres checkpoint storage.
 COPY pyproject.toml README.md ./
 COPY app ./app
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[postgres]"
 
 # Sample fixtures so the container is runnable out of the box.
 COPY sample_repo ./sample_repo
@@ -41,6 +42,7 @@ RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app /data
 USER appuser
 
+# Default to SQLite for local dev; Render sets COPILOT_CHECKPOINT_DB to Postgres URL
 ENV COPILOT_CHECKPOINT_DB=/data/copilot_checkpoints.sqlite
 
 EXPOSE 8000
