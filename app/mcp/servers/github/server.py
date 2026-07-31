@@ -22,6 +22,11 @@ import re
 
 from mcp.server.fastmcp import FastMCP
 
+from app.config import get_settings
+
+_settings = get_settings()
+_GITHUB_TIMEOUT = _settings.http_timeout_github
+
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # "owner/repo" the real-API calls target. Required only in real (token) mode.
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()
@@ -77,7 +82,7 @@ def list_recent_commits(branch: str = "main", max_count: int | str = 5) -> list[
             f"https://api.github.com/repos/{repo}/commits",
             params={"sha": branch, "per_page": max_count},
             headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
-            timeout=15,
+            timeout=_GITHUB_TIMEOUT,
             max_retries=3,
         )
         return [
@@ -111,7 +116,7 @@ def get_commit_diff(sha: str) -> str:
                 "Authorization": f"Bearer {GITHUB_TOKEN}",
                 "Accept": "application/vnd.github.v3.diff",
             },
-            timeout=15,
+            timeout=_GITHUB_TIMEOUT,
             max_retries=3,
         )
         return resp.text
@@ -252,7 +257,7 @@ def list_workflow_runs(branch: str = "main", max_count: int | str = 10) -> list[
         f"https://api.github.com/repos/{repo}/actions/runs",
         params={"branch": branch, "per_page": max_count},
         headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
-        timeout=15,
+        timeout=_GITHUB_TIMEOUT,
     )
     resp.raise_for_status()
     return [
@@ -285,7 +290,7 @@ def get_failed_job_logs(run_id: int | str, max_chars: int | str = 4000) -> dict:
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     jobs = httpx.get(
         f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs",
-        headers=headers, timeout=15,
+        headers=headers, timeout=_GITHUB_TIMEOUT,
     )
     jobs.raise_for_status()
     failed = []
@@ -333,7 +338,7 @@ def create_pull_request(
         f"https://api.github.com/repos/{repo}/pulls",
         json={"title": title, "body": body, "head": head, "base": base},
         headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
-        timeout=15,
+        timeout=_GITHUB_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 from uuid import uuid4
 
+from app.config import get_settings
 from app.monitoring.detectors import (
     AnomalyDetector,
     StatisticalDetector,
@@ -23,6 +24,7 @@ from app.monitoring.detectors import (
 )
 
 log = logging.getLogger("devcopilot.monitoring.ambient")
+_settings = get_settings()
 
 
 @dataclass
@@ -110,9 +112,9 @@ class AmbientMonitor:
         self._metrics_fetcher = metrics_fetcher
         self._investigation_trigger = investigation_trigger
 
-        # Initialize detectors
+        # Initialize detectors with configurable thresholds
         self._detectors: list[AnomalyDetector] = [
-            StatisticalDetector(z_threshold=3.0),
+            StatisticalDetector(z_threshold=_settings.anomaly_z_threshold),
             ThresholdDetector(),
             TrendDetector(),
             PatternDetector(),

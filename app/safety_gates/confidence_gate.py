@@ -14,13 +14,20 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.config import get_settings
 from app.safety_gates.models import GateResult
 
 log = logging.getLogger("devcopilot.safety_gates.confidence")
 
 
-# Default threshold for Architecture 3
-DEFAULT_CONFIDENCE_THRESHOLD = 0.80
+def _get_default_threshold() -> float:
+    """Get the default confidence threshold from config."""
+    return get_settings().safety_confidence_threshold
+
+
+def _get_action_thresholds() -> dict[str, float]:
+    """Get action-specific thresholds from config."""
+    return get_settings().get_action_confidence_thresholds()
 
 
 @dataclass
@@ -39,30 +46,22 @@ class ConfidenceGate:
     Shows user exactly why confidence is what it is.
     """
 
-    # Action-specific thresholds (higher risk = higher threshold)
-    ACTION_THRESHOLDS = {
-        "rollback": 0.75,  # Rollbacks are usually safe
-        "scale_up": 0.70,  # Scaling up is low risk
-        "scale_down": 0.85,  # Scaling down needs more confidence
-        "restart": 0.80,  # Restarts need medium confidence
-        "deploy_fix": 0.90,  # Code changes need high confidence
-        "run_command": 0.85,  # Commands need high confidence
-        "create_pr": 0.70,  # PRs are reviewable, lower threshold
-    }
-
     def __init__(
         self,
-        default_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        default_threshold: float | None = None,
         org_thresholds: dict[str, float] | None = None,
+        action_thresholds: dict[str, float] | None = None,
     ):
         """Initialize the confidence gate.
 
         Args:
             default_threshold: Default threshold (0.8 for Architecture 3)
             org_thresholds: Organization-specific threshold overrides
+            action_thresholds: Action-specific thresholds
         """
-        self.default_threshold = default_threshold
+        self.default_threshold = default_threshold or _get_default_threshold()
         self.org_thresholds = org_thresholds or {}
+        self.action_thresholds = action_thresholds or _get_action_thresholds()
 
     def evaluate(
         self,
@@ -137,7 +136,7 @@ class ConfidenceGate:
             return self.org_thresholds[organization_id]
 
         # Then action-specific threshold
-        return self.ACTION_THRESHOLDS.get(action_type, self.default_threshold)
+        return self.action_thresholds.get(action_type, self.default_threshold)
 
     def _calculate_confidence(
         self,

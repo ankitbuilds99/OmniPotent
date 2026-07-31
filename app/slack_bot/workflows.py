@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from app.config import get_settings
+
 log = logging.getLogger("devcopilot.slack_bot.workflows")
+_DEFAULT_ORG_ID = get_settings().default_org_id
 
 
 class StepType(str, Enum):
@@ -170,7 +173,7 @@ class WorkflowEngine:
         """Register default/built-in workflows."""
         restart_safely = Workflow(
             workflow_id="wf_restart_safely",
-            org_id="default",
+            org_id=_DEFAULT_ORG_ID,
             name="restart-safely",
             description="Safe rolling restart with traffic checks",
             parameters=[{"name": "service", "type": "string", "required": True}],
@@ -219,7 +222,7 @@ class WorkflowEngine:
 
         scale_up_emergency = Workflow(
             workflow_id="wf_scale_up_emergency",
-            org_id="default",
+            org_id=_DEFAULT_ORG_ID,
             name="scale-up-emergency",
             description="Emergency scale up with notifications",
             parameters=[
@@ -264,7 +267,7 @@ class WorkflowEngine:
 
         db_failover = Workflow(
             workflow_id="wf_db_failover",
-            org_id="default",
+            org_id=_DEFAULT_ORG_ID,
             name="db-failover",
             description="Database failover with connection draining",
             parameters=[{"name": "cluster", "type": "string", "required": True}],
@@ -320,7 +323,7 @@ class WorkflowEngine:
 
         handle_high_latency = Workflow(
             workflow_id="wf_handle_high_latency",
-            org_id="default",
+            org_id=_DEFAULT_ORG_ID,
             name="handle-high-latency",
             description="Conditional response to high latency",
             parameters=[

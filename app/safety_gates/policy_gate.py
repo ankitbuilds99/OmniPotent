@@ -16,9 +16,25 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import get_settings
 from app.safety_gates.models import GateResult
 
 log = logging.getLogger("devcopilot.safety_gates.policy")
+
+
+def _get_max_blast_radius() -> dict[str, int]:
+    """Get max blast radius from config."""
+    return get_settings().get_max_blast_radius()
+
+
+def _get_default_protected_services() -> dict[str, list[str]]:
+    """Get default protected services from config."""
+    protected = get_settings().get_protected_services()
+    return {
+        "payments": ["scale_down", "restart"],
+        "auth": ["scale_down", "run_command"],
+        "database": ["restart", "run_command", "deploy_fix"],
+    } if not protected else {s: ["scale_down", "restart", "run_command"] for s in protected}
 
 
 class PolicyGate:
@@ -28,7 +44,7 @@ class PolicyGate:
     injection patterns, and custom rules.
     """
 
-    # Injection patterns to detect
+    # Injection patterns to detect (security - not configurable)
     INJECTION_PATTERNS = [
         (r';\s*rm\s+-rf', "rm -rf injection"),
         (r'\|\s*bash', "pipe to bash"),
@@ -44,21 +60,12 @@ class PolicyGate:
         (r'chmod\s+777', "insecure permissions"),
     ]
 
-    # Max blast radius by action type
-    MAX_BLAST_RADIUS = {
-        "scale_down": 3,
-        "rollback": 5,
-        "restart": 2,
-        "deploy_fix": 10,
-        "run_command": 1,
-        "scale_up": 10,  # Scaling up affects less
-    }
-
     def __init__(
         self,
         protected_services: dict[str, list[str]] | None = None,
         change_freeze_windows: list[dict[str, Any]] | None = None,
         custom_rules: list[dict[str, Any]] | None = None,
+        max_blast_radius: dict[str, int] | None = None,
     ):
         """Initialize the policy gate.
 
@@ -66,14 +73,12 @@ class PolicyGate:
             protected_services: Map of service -> blocked action types
             change_freeze_windows: Time windows when changes are restricted
             custom_rules: Custom policy rules
+            max_blast_radius: Max affected services per action type
         """
-        self.protected_services = protected_services or {
-            "payments": ["scale_down", "restart"],
-            "auth": ["scale_down", "run_command"],
-            "database": ["restart", "run_command", "deploy_fix"],
-        }
+        self.protected_services = protected_services or _get_default_protected_services()
         self.change_freeze_windows = change_freeze_windows or []
         self.custom_rules = custom_rules or []
+        self.max_blast_radius = max_blast_radius or _get_max_blast_radius()
 
     def evaluate(
         self,
@@ -164,7 +169,7 @@ class PolicyGate:
         if estimated_blast == 1 and affected_services:
             estimated_blast = len(affected_services)
 
-        max_allowed = self.MAX_BLAST_RADIUS.get(action_type, 5)
+        max_allowed = self.max_blast_radius.get(action_type, 5)
 
         if estimated_blast > max_allowed:
             violations.append({

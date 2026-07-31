@@ -18,9 +18,11 @@ from typing import Any
 
 import dramatiq
 
+from app.config import get_settings
 from app.tasks.broker import get_broker
 
 log = logging.getLogger("devcopilot.tasks")
+_settings = get_settings()
 
 get_broker()
 
@@ -206,7 +208,7 @@ async def _send_slack_notification(
                 "text": message,
                 "thread_ts": metadata.get("thread_ts"),
             },
-            timeout=30,
+            timeout=_settings.http_timeout_default,
         )
         data = resp.json()
         return {"status": "sent" if data.get("ok") else "failed", "ts": data.get("ts")}
@@ -237,7 +239,7 @@ async def _send_pagerduty_notification(
                     "source": "devops-copilot",
                 },
             },
-            timeout=30,
+            timeout=_settings.http_timeout_default,
         )
         return {"status": "sent" if resp.status_code == 202 else "failed"}
 
@@ -288,7 +290,7 @@ def sync_usage_to_stripe(
                     "payload[value]": str(investigations),
                     "timestamp": datetime.now().isoformat(),
                 },
-                timeout=30,
+                timeout=_settings.http_timeout_default,
             )
             return {
                 "status": "synced" if resp.status_code == 200 else "failed",

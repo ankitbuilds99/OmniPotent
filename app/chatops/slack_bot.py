@@ -12,7 +12,10 @@ from enum import Enum
 
 import httpx
 
+from app.config import get_settings
+
 log = logging.getLogger("devcopilot.chatops.slack")
+_settings = get_settings()
 
 
 class SlackMessageType(str, Enum):
@@ -98,7 +101,7 @@ class SlackBot:
                 "Authorization": f"Bearer {config.bot_token}",
                 "Content-Type": "application/json",
             },
-            timeout=30.0,
+            timeout=_settings.http_timeout_default,
         )
         self._command_handlers: dict[str, Callable] = {}
         self._action_handlers: dict[str, Callable] = {}

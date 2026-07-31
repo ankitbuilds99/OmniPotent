@@ -101,7 +101,11 @@ class _ResilientLLM:
         self._model_id = model_id
         self._fast = fast
         # One breaker per (model) wrapper instance; shared across bind_tools children.
-        self._breaker = breaker or CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
+        settings = get_settings()
+        self._breaker = breaker or CircuitBreaker(
+            failure_threshold=settings.llm_circuit_failure_threshold,
+            reset_timeout=settings.llm_circuit_reset_timeout,
+        )
 
     def bind_tools(self, tools, **kwargs):
         return _ResilientLLM(self._inner.bind_tools(tools, **kwargs), self._model_id,
@@ -158,10 +162,11 @@ def _build_fallback(provider: str, model_id: str, fast: bool, tools):
         return None
 
 
-LLM_REQUEST_TIMEOUT = 120.0
-
-
 def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
+    settings = get_settings()
+    timeout = settings.llm_request_timeout
+    max_tokens = settings.llm_max_tokens
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
@@ -169,8 +174,8 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
         params: dict = {
             "model": model,
             "api_key": key,
-            "max_tokens": 4096,
-            "timeout": LLM_REQUEST_TIMEOUT,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
         }
         if not fast:
             # Adaptive thinking on the MAIN reasoning model only — Claude decides
@@ -191,8 +196,8 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
             model=model,
             api_key=SecretStr(key),
             temperature=0.0,
-            max_tokens=4096,
-            timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     if provider == "openai":
@@ -201,8 +206,8 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
             model=model,
             api_key=key,
             temperature=0.0,
-            max_tokens=4096,
-            timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     if provider == "deepseek":
@@ -212,8 +217,8 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
             api_key=key,
             base_url=_DEEPSEEK_BASE_URL,
             temperature=0.0,
-            max_tokens=4096,
-            timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     if provider == "gemini":
@@ -222,8 +227,8 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
             model=model,
             google_api_key=key,
             temperature=0.0,
-            max_output_tokens=4096,
-            timeout=LLM_REQUEST_TIMEOUT,
+            max_output_tokens=max_tokens,
+            timeout=timeout,
         )
 
     raise ValueError(f"unknown provider '{provider}' (use {'|'.join(_DEFAULTS)})")

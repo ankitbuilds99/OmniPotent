@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     copilot_model: str = ""       # main reasoning / tool-calling model
     copilot_fast_model: str = ""  # cheaper model for lightweight nodes (plan, reflect)
 
+    # --- LLM Request Settings ---
+    # Request timeout for LLM API calls (seconds)
+    llm_request_timeout: float = 120.0
+    # Default max tokens for LLM responses
+    llm_max_tokens: int = 4096
+    # Circuit breaker settings
+    llm_circuit_failure_threshold: int = 5
+    llm_circuit_reset_timeout: float = 30.0
+
     # --- MCP servers ---
     target_repo_path: str = "./sample_repo"
     logs_data_path: str = "./app/mcp/servers/logs_metrics/sample_data"
@@ -86,11 +95,13 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     # GCP credentials for multi-cloud connector. Project ID + service account key.
     gcp_project_id: str = ""
+    gcp_region: str = "us-central1"
     # Azure credentials for multi-cloud connector.
     azure_subscription_id: str = ""
     azure_client_id: str = ""
     azure_client_secret: str = ""
     azure_tenant_id: str = ""
+    azure_region: str = "eastus"
 
     # --- Trigger / delivery (webhooks → investigate → Slack) ---
     # PagerDuty webhook → auto-start an investigation (HMAC-verified).
@@ -105,8 +116,7 @@ class Settings(BaseSettings):
     gitlab_webhook_secret: str = ""
 
     # --- API ---
-    # Deployment environment: "development" | "production". In production the app
-    # fails closed at startup unless COPILOT_API_TOKEN is set (see validator below).
+    # Deployment environment: "development" | "staging" | "production".
     copilot_env: str = "development"
     # Comma-separated browser origins allowed by CORS (the dev server is always
     # allowed). Set this to your deployed frontend origin in production.
@@ -118,6 +128,16 @@ class Settings(BaseSettings):
     # Empty = the project root, which keeps the bundled sample data working while
     # preventing the agent from being aimed at arbitrary host paths.
     copilot_sources_root: str = ""
+
+    # --- URLs (configurable for different environments) ---
+    # Frontend URL for redirects (Stripe, OAuth, etc.)
+    frontend_url: str = "http://localhost:3000"
+    # Backend API URL (for internal references)
+    backend_url: str = "http://localhost:8000"
+    # Status page base URL
+    status_page_url: str = ""
+    # Documentation URL
+    docs_url: str = ""
 
     # --- Production safety limits (enforced by the API layer) ---
     # Per-client (IP) POST cap per minute; 0 disables rate limiting.
@@ -139,6 +159,55 @@ class Settings(BaseSettings):
     # Empty = an ephemeral key (encrypted secrets won't survive a restart).
     copilot_secret_key: str = ""
 
+    # --- HTTP Client Settings ---
+    # Default timeout for external HTTP requests (seconds)
+    http_timeout_default: float = 30.0
+    # Timeout for health checks
+    http_timeout_health: float = 5.0
+    # Timeout for GitHub API calls
+    http_timeout_github: float = 15.0
+    # Timeout for MCP server calls
+    http_timeout_mcp: float = 20.0
+
+    # --- Redis Connection Pool ---
+    redis_min_connections: int = 5
+    redis_max_connections: int = 50
+    redis_connection_timeout: float = 2.0
+    redis_socket_timeout: float = 1.0
+
+    # --- Safety Gates Thresholds ---
+    # Confidence gate threshold (0.0 - 1.0)
+    safety_confidence_threshold: float = 0.80
+    # Action-specific confidence thresholds (JSON string)
+    safety_action_thresholds: str = '{"rollback": 0.75, "scale_up": 0.70, "scale_down": 0.85, "restart": 0.80, "deploy_fix": 0.90, "run_command": 0.85, "create_pr": 0.70}'
+    # Max blast radius per action type (JSON string)
+    safety_max_blast_radius: str = '{"scale_down": 3, "rollback": 5, "restart": 2, "deploy_fix": 10, "run_command": 1, "scale_up": 10}'
+    # Protected services (comma-separated)
+    safety_protected_services: str = "payments,auth,database"
+
+    # --- Cost Optimization Thresholds ---
+    cost_underutilized_threshold: float = 20.0  # percentage
+    cost_idle_threshold: float = 5.0  # percentage
+    cost_anomaly_threshold: float = 1.5  # multiplier (50% increase)
+    cost_budget_alert_threshold: float = 0.8  # percentage of budget
+
+    # --- Anomaly Detection ---
+    anomaly_z_threshold: float = 3.0
+    anomaly_trend_threshold: float = 0.1
+    anomaly_pattern_threshold: float = 0.8
+
+    # --- Semantic Cache ---
+    cache_similarity_threshold_high: float = 0.95
+    cache_similarity_threshold_medium: float = 0.92
+    cache_similarity_threshold_low: float = 0.90
+    cache_max_entries_small: int = 1000
+    cache_max_entries_medium: int = 5000
+    cache_max_entries_large: int = 20000
+
+    # --- Log Clustering ---
+    log_similarity_threshold: float = 0.6
+    similar_incident_threshold: float = 0.7
+
     # --- Observability ---
     langchain_tracing_v2: bool = False
     langchain_api_key: str = ""
@@ -156,6 +225,8 @@ class Settings(BaseSettings):
     copilot_multi_tenant: bool = False
     # Tenant store DB: SQLite path (default) or a postgres://… URL in production.
     copilot_tenant_db: str = "./copilot_tenants.sqlite"
+    # Default org ID for single-tenant mode
+    default_org_id: str = "default"
     # Stripe metered billing (optional). With a key set, the usage ledger syncs to
     # Stripe meter events; otherwise billing is local-ledger-only.
     stripe_api_key: str = ""
@@ -163,8 +234,6 @@ class Settings(BaseSettings):
     # Stripe webhook signing secret — verifies inbound subscription events at
     # /webhooks/stripe (event → store.set_plan). Empty = the endpoint rejects (fails closed).
     stripe_webhook_secret: str = ""
-    # Frontend URL for Stripe checkout success/cancel redirects.
-    frontend_url: str = "http://localhost:3000"
     # Supabase Auth SSO (optional). When SUPABASE_JWKS_URL is set, a Supabase-issued
     # JWT (Bearer) authenticates to the multi-tenant API, mapped to the user's org/
     # role membership. Verification uses only the PUBLIC JWKS — no Supabase secret.
@@ -338,6 +407,18 @@ class Settings(BaseSettings):
     # Log file path (optional, stdout by default)
     copilot_log_file: str = ""
 
+    # --- Service Metadata ---
+    service_name: str = "devops-copilot"
+    service_version: str = "1.0.0"
+
+    # --- Deployment Strategy Defaults ---
+    deployment_canary_steps: str = "10,25,50,75,100"  # percentage steps
+    deployment_max_error_rate: float = 0.05
+    deployment_max_latency_p99_ms: float = 2000.0
+    deployment_min_success_rate: float = 0.95
+    deployment_health_check_interval_s: int = 10
+    deployment_rollback_on_failure: bool = True
+
     @field_validator("copilot_provider")
     @classmethod
     def _normalize_provider(cls, v: str) -> str:
@@ -350,7 +431,12 @@ class Settings(BaseSettings):
     @field_validator("copilot_env")
     @classmethod
     def _normalize_env(cls, v: str) -> str:
-        return "production" if (v or "").strip().lower().startswith("prod") else "development"
+        v = (v or "").strip().lower()
+        if v.startswith("prod"):
+            return "production"
+        elif v.startswith("stag"):
+            return "staging"
+        return "development"
 
     @model_validator(mode="after")
     def _fail_closed_in_production(self) -> "Settings":
@@ -380,8 +466,23 @@ class Settings(BaseSettings):
         return self.copilot_env == "production"
 
     @property
+    def is_staging(self) -> bool:
+        return self.copilot_env == "staging"
+
+    @property
+    def is_development(self) -> bool:
+        return self.copilot_env == "development"
+
+    @property
     def allowed_origins(self) -> list[str]:
-        base = ["http://localhost:5173", "http://127.0.0.1:5173"]
+        if self.is_production:
+            # In production, only allow explicitly configured origins
+            origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+            if self.frontend_url:
+                origins.append(self.frontend_url)
+            return origins
+        # In development, allow localhost
+        base = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
         extra = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
         return base + extra
 
@@ -404,6 +505,48 @@ class Settings(BaseSettings):
         """True when no GitHub token is set — the GitHub MCP server runs against
         local demo fixtures instead of the real API."""
         return not self.github_token
+
+    def get_action_confidence_thresholds(self) -> dict[str, float]:
+        """Parse action-specific confidence thresholds from JSON string."""
+        import json
+        try:
+            return json.loads(self.safety_action_thresholds)
+        except (json.JSONDecodeError, TypeError):
+            return {
+                "rollback": 0.75,
+                "scale_up": 0.70,
+                "scale_down": 0.85,
+                "restart": 0.80,
+                "deploy_fix": 0.90,
+                "run_command": 0.85,
+                "create_pr": 0.70,
+            }
+
+    def get_max_blast_radius(self) -> dict[str, int]:
+        """Parse max blast radius per action from JSON string."""
+        import json
+        try:
+            return json.loads(self.safety_max_blast_radius)
+        except (json.JSONDecodeError, TypeError):
+            return {
+                "scale_down": 3,
+                "rollback": 5,
+                "restart": 2,
+                "deploy_fix": 10,
+                "run_command": 1,
+                "scale_up": 10,
+            }
+
+    def get_protected_services(self) -> list[str]:
+        """Parse protected services from comma-separated string."""
+        return [s.strip() for s in self.safety_protected_services.split(",") if s.strip()]
+
+    def get_canary_steps(self) -> list[int]:
+        """Parse canary deployment steps from comma-separated string."""
+        try:
+            return [int(s.strip()) for s in self.deployment_canary_steps.split(",") if s.strip()]
+        except ValueError:
+            return [10, 25, 50, 75, 100]
 
 
 @lru_cache

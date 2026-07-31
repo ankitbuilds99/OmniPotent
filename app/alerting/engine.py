@@ -19,8 +19,11 @@ from app.alerting.rules import (
     AlertSeverity,
     DEFAULT_RULES,
 )
+from app.config import get_settings
 
 log = logging.getLogger("devcopilot.alerting")
+
+_settings = get_settings()
 
 
 class AlertEngine:
@@ -357,7 +360,7 @@ class AlertEngine:
                 "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {s.slack_bot_token}"},
                 json={"channel": s.slack_channel, "text": text},
-                timeout=30,
+                timeout=_settings.http_timeout_default,
             )
             return resp.json().get("ok", False)
 
@@ -402,7 +405,7 @@ class AlertEngine:
             resp = await client.post(
                 "https://events.pagerduty.com/v2/enqueue",
                 json=payload,
-                timeout=30,
+                timeout=_settings.http_timeout_default,
             )
             return resp.status_code == 202
 

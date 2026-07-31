@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from app.config import get_settings
+
 log = logging.getLogger("devcopilot.status_page.widgets")
+_settings = get_settings()
 
 
 class WidgetTheme(Enum):
@@ -86,9 +89,9 @@ class WidgetGenerator:
 
     def __init__(
         self,
-        base_url: str = "https://status.devopscopilot.com",
+        base_url: str | None = None,
     ) -> None:
-        self.base_url = base_url
+        self.base_url = base_url or _settings.status_page_url or _settings.backend_url
         self._widgets: dict[str, WidgetConfig] = {}
         self._widget_counter = 0
 

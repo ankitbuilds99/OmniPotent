@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 from enum import Enum
 
+from app.config import get_settings
+
 log = logging.getLogger("devcopilot.cost_optimization.analyzer")
 
 
@@ -140,17 +142,17 @@ class CostOptimizer:
     - Budget alerts
     """
 
-    # Utilization thresholds for rightsizing
-    UNDERUTILIZED_THRESHOLD = 20.0  # %
-    IDLE_THRESHOLD = 5.0  # %
-
-    # Cost anomaly threshold
-    ANOMALY_THRESHOLD = 1.5  # 50% increase
-
     def __init__(self):
         """Initialize the cost optimizer."""
+        settings = get_settings()
         self._metrics: list[CostMetric] = []
         self._budgets: dict[str, float] = {}
+        # Load thresholds from config
+        self.underutilized_threshold = settings.cost_underutilized_threshold
+        self.idle_threshold = settings.cost_idle_threshold
+        self.anomaly_threshold = settings.cost_anomaly_threshold
+        self.budget_alert_threshold = settings.cost_budget_alert_threshold
+        self.default_region = settings.aws_region
         log.info("CostOptimizer initialized")
 
     async def analyze_costs(
@@ -224,7 +226,7 @@ class CostOptimizer:
                 resource_name="web-server-prod-1",
                 category=ResourceCategory.COMPUTE,
                 provider="aws",
-                region="us-east-1",
+                region=self.default_region,
                 current_cost_daily=2.50,
                 current_cost_monthly=75.0,
                 trend_percent=5.2,
@@ -236,7 +238,7 @@ class CostOptimizer:
                 resource_name="web-server-prod-2",
                 category=ResourceCategory.COMPUTE,
                 provider="aws",
-                region="us-east-1",
+                region=self.default_region,
                 current_cost_daily=2.50,
                 current_cost_monthly=75.0,
                 trend_percent=3.1,
@@ -248,7 +250,7 @@ class CostOptimizer:
                 resource_name="postgres-primary",
                 category=ResourceCategory.DATABASE,
                 provider="aws",
-                region="us-east-1",
+                region=self.default_region,
                 current_cost_daily=15.0,
                 current_cost_monthly=450.0,
                 trend_percent=0.0,
@@ -260,7 +262,7 @@ class CostOptimizer:
                 resource_name="logs-archive",
                 category=ResourceCategory.STORAGE,
                 provider="aws",
-                region="us-east-1",
+                region=self.default_region,
                 current_cost_daily=5.0,
                 current_cost_monthly=150.0,
                 trend_percent=15.0,
@@ -294,7 +296,7 @@ class CostOptimizer:
         for metric in metrics:
             # Check for underutilized compute
             if metric.category == ResourceCategory.COMPUTE:
-                if metric.utilization_percent <= self.IDLE_THRESHOLD:
+                if metric.utilization_percent <= self.idle_threshold:
                     recommendations.append(Recommendation(
                         id=f"rec-idle-{metric.resource_id}",
                         optimization_type=OptimizationType.IDLE_RESOURCES,
@@ -315,7 +317,7 @@ class CostOptimizer:
                         auto_applicable=False,
                     ))
 
-                elif metric.utilization_percent <= self.UNDERUTILIZED_THRESHOLD:
+                elif metric.utilization_percent <= self.underutilized_threshold:
                     savings = metric.current_cost_monthly * 0.5
                     recommendations.append(Recommendation(
                         id=f"rec-rightsize-{metric.resource_id}",
@@ -453,7 +455,7 @@ class CostOptimizer:
 
         for metric in self._metrics:
             # Check for sudden cost increases
-            if metric.trend_percent >= (self.ANOMALY_THRESHOLD - 1) * 100:
+            if metric.trend_percent >= (self.anomaly_threshold - 1) * 100:
                 anomalies.append({
                     "resource_id": metric.resource_id,
                     "resource_name": metric.resource_name,

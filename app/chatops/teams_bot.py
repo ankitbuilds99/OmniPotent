@@ -9,7 +9,10 @@ from typing import Any, Callable, Awaitable
 
 import httpx
 
+from app.config import get_settings
+
 log = logging.getLogger("devcopilot.chatops.teams")
+_settings = get_settings()
 
 
 @dataclass
@@ -74,7 +77,7 @@ class TeamsBot:
             config: Teams configuration
         """
         self.config = config
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(timeout=_settings.http_timeout_default)
         self._access_token: str | None = None
         self._token_expires: datetime | None = None
         self._command_handlers: dict[str, Callable] = {}

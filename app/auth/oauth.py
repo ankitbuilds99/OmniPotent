@@ -183,7 +183,7 @@ async def exchange_code_for_token(
                 config.token_url,
                 data=data,
                 headers=headers,
-                timeout=30,
+                timeout=get_settings().http_timeout_default,
             )
             if resp.status_code != 200:
                 log.error("Token exchange failed: %s", resp.text)
@@ -210,7 +210,7 @@ async def get_user_info(provider: str, access_token: str) -> OAuthUser | None:
             resp = await client.get(
                 config.userinfo_url,
                 headers=headers,
-                timeout=30,
+                timeout=get_settings().http_timeout_default,
             )
             if resp.status_code != 200:
                 log.error("Userinfo request failed: %s", resp.text)
@@ -234,7 +234,7 @@ async def get_user_info(provider: str, access_token: str) -> OAuthUser | None:
                     email_resp = await client.get(
                         "https://api.github.com/user/emails",
                         headers=headers,
-                        timeout=30,
+                        timeout=get_settings().http_timeout_default,
                     )
                     if email_resp.status_code == 200:
                         emails = email_resp.json()
