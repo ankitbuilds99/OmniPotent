@@ -710,6 +710,23 @@ from app.auth.endpoints import router as auth_router  # noqa: E402
 app.include_router(auth_router)
 
 
+# Supabase OAuth callback handler - serves the SPA for client-side token handling
+@app.get("/auth/callback")
+async def supabase_auth_callback():
+    """Handle Supabase OAuth callback.
+
+    Supabase redirects here with tokens in the URL hash fragment (#access_token=...).
+    The hash is only visible client-side, so we serve the SPA which extracts the token.
+    """
+    from fastapi.responses import FileResponse
+
+    index_path = ROOT / "frontend" / "dist" / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    # Fallback for dev mode without build
+    return {"error": "Frontend not built. Run: cd frontend && npm run build"}
+
+
 class ChatRequest(BaseModel):
     thread_id: str
     message: str
