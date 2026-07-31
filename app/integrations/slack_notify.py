@@ -21,9 +21,9 @@ def is_slack_configured() -> bool:
     return bool(s.slack_bot_token or s.slack_webhook_url)
 
 
-def _format_report_blocks(report: dict[str, Any], query: str) -> list[dict]:
+def _format_report_blocks(report: dict[str, Any], query: str) -> list[dict[str, Any]]:
     """Format an investigation report as Slack blocks."""
-    blocks = []
+    blocks: list[dict[str, Any]] = []
 
     # Header
     blocks.append({
