@@ -1,7 +1,5 @@
 """Tests for the Adaptive Model Router."""
 
-import pytest
-from unittest.mock import MagicMock
 
 from app.router.classifier import (
     TaskClassifier,
@@ -11,7 +9,6 @@ from app.router.classifier import (
 )
 from app.router.metrics import (
     RouterMetrics,
-    ModelPerformance,
 )
 from app.router.adaptive import (
     AdaptiveRouter,

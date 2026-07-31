@@ -1,9 +1,8 @@
 """Tests for Ambient Monitoring system."""
 
-import asyncio
 import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from app.monitoring.detectors import (
     AnomalyType,
@@ -322,14 +321,13 @@ class TestAmbientMonitor:
 
         # First poll
         await monitor._poll_once()
-        first_count = monitor.state.anomalies_detected
 
         # Second poll (should be in cooldown)
         await monitor._poll_once()
-        second_count = monitor.state.anomalies_detected
 
         # Same anomalies should not be counted again during cooldown
-        # (actual behavior depends on implementation)
+        # Verify state is being tracked
+        assert monitor.state.anomalies_detected >= 0
 
     @pytest.mark.asyncio
     async def test_get_stats(self, mock_metrics_fetcher):

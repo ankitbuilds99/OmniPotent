@@ -7,11 +7,11 @@ BEFORE alerts fire, catching issues early.
 from app.monitoring.ambient import (
     AmbientMonitor,
     MonitorConfig,
+)
+from app.monitoring.detectors import (
     AnomalyDetector,
     Anomaly,
     AnomalyType,
-)
-from app.monitoring.detectors import (
     StatisticalDetector,
     ThresholdDetector,
     TrendDetector,

@@ -1,8 +1,6 @@
 """Tests for VPC Connector system."""
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.vpc_connector.redaction import RedactionEngine, RedactionRule
 from app.vpc_connector.collectors import (
