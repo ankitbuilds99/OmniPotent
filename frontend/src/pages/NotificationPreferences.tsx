@@ -14,13 +14,14 @@ import {
   Save,
   Check,
   AlertTriangle,
-  Loader2
+  Loader2,
+  type LucideIcon
 } from "lucide-react";
 
 interface ChannelConfig {
   id: string;
   name: string;
-  icon: React.ComponentType<{ size?: number }>;
+  icon: LucideIcon;
   description: string;
   enabled: boolean;
   configured: boolean;
@@ -380,7 +381,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
                       return (
                         <th key={channel.id} className="py-3 px-2 text-center">
                           <div className="flex flex-col items-center gap-1">
-                            <Icon size={16} style={{ color: "var(--text-2)" }} />
+                            <Icon size={16} color="var(--text-2)" />
                             <span className="text-xs font-medium" style={{ color: "var(--text-2)" }}>
                               {channel.name}
                             </span>
