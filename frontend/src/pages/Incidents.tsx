@@ -575,27 +575,46 @@ export function Incidents({ onBack }: { onBack: () => void }) {
   const [incidents, setIncidents] = useState<Incident[]>(DEMO_INCIDENTS);
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("active");
+  const [_loading, setLoading] = useState(true);
 
-  // Simulate real-time updates
+  // Fetch incidents from API
   useEffect(() => {
-    const interval = setInterval(() => {
-      setIncidents(prev => prev.map(inc => {
-        if (inc.investigation?.status === "running") {
-          const updated = { ...inc, investigation: { ...inc.investigation! } };
-          updated.investigation.agent_results = inc.investigation!.agent_results.map(agent => {
-            if (agent.status === "running") {
-              return { ...agent, status: "completed" as const, confidence_score: 0.85, findings_count: 2, duration_ms: 3500 };
-            }
-            if (agent.status === "pending" && Math.random() > 0.5) {
-              return { ...agent, status: "running" as const };
-            }
-            return agent;
-          });
-          return updated;
+    const fetchIncidents = async () => {
+      try {
+        const { listIncidents } = await import("../api");
+        const data = await listIncidents();
+        // Transform API response to local format
+        const transformed: Incident[] = data.map(inc => ({
+          id: inc.id,
+          title: inc.title,
+          severity: inc.severity,
+          status: inc.status,
+          affected_services: [inc.service],
+          created_at: inc.triggered_at,
+          updated_at: inc.acknowledged_at || inc.triggered_at,
+          assigned_to: inc.assignee || undefined,
+          investigation: inc.has_investigation ? {
+            id: `inv-${inc.id}`,
+            status: "running" as const,
+            confidence_score: inc.investigation_confidence || 0,
+            root_cause_hypothesis: "Investigation in progress...",
+            agent_results: [],
+            duration_ms: 0,
+          } : undefined,
+        }));
+        if (transformed.length > 0) {
+          setIncidents(transformed);
         }
-        return inc;
-      }));
-    }, 2000);
+      } catch (err) {
+        console.warn("Failed to fetch incidents, using demo data:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchIncidents();
+
+    // Poll for updates every 10 seconds
+    const interval = setInterval(fetchIncidents, 10000);
     return () => clearInterval(interval);
   }, []);
 

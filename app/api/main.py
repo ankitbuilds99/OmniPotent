@@ -713,6 +713,10 @@ app.include_router(auth_router)
 from app.teams.router import router as teams_router  # noqa: E402
 app.include_router(teams_router, prefix="/api")
 
+# Include incidents management router.
+from app.incidents import incidents_router  # noqa: E402
+app.include_router(incidents_router, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")

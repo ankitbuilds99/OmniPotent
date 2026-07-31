@@ -301,3 +301,184 @@ export async function shareToSlack(
 ): Promise<{ success: boolean; message?: string }> {
   return post("/share/slack", { query, report, channel: channel || "" });
 }
+
+// --------------------------------------------------------------------------- //
+// Incidents API
+// --------------------------------------------------------------------------- //
+
+export interface IncidentSummary {
+  id: string;
+  title: string;
+  description: string | null;
+  severity: "critical" | "high" | "medium" | "low";
+  status: "triggered" | "investigating" | "identified" | "monitoring" | "resolved";
+  service: string;
+  triggered_at: string;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+  assignee: string | null;
+  tags: string[];
+  has_investigation: boolean;
+  investigation_confidence: number | null;
+}
+
+export interface AgentState {
+  status: "idle" | "running" | "complete" | "error";
+  progress: number;
+  current_action: string | null;
+  findings: Array<{
+    finding: string;
+    confidence: number;
+    timestamp: string;
+  }>;
+}
+
+export interface SafetyGate {
+  gate_type: string;
+  status: "pending" | "passed" | "failed" | "bypassed";
+  threshold: number | null;
+  current_value: number | null;
+  message: string | null;
+}
+
+export interface Investigation {
+  id: string;
+  incident_id: string;
+  started_at: string;
+  completed_at: string | null;
+  overall_confidence: number;
+  root_cause: string | null;
+  recommended_actions: string[];
+  agents: Record<string, AgentState>;
+  safety_gates: SafetyGate[];
+}
+
+export interface TimelineEntry {
+  timestamp: string;
+  type: string;
+  message: string;
+  user: string | null;
+}
+
+export interface IncidentDetail {
+  incident: IncidentSummary & {
+    timeline: TimelineEntry[];
+    impact: string | null;
+    customer_impact: boolean;
+  };
+  investigation: Investigation | null;
+}
+
+export function listIncidents(params?: {
+  status?: string;
+  severity?: string;
+  service?: string;
+  limit?: number;
+}): Promise<IncidentSummary[]> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.severity) query.set("severity", params.severity);
+  if (params?.service) query.set("service", params.service);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  return get<IncidentSummary[]>(`/api/incidents${qs ? `?${qs}` : ""}`);
+}
+
+export function getIncident(id: string): Promise<IncidentDetail> {
+  return get<IncidentDetail>(`/api/incidents/${id}`);
+}
+
+export function createIncident(data: {
+  title: string;
+  severity: string;
+  service: string;
+  description?: string;
+  tags?: string[];
+}): Promise<IncidentSummary> {
+  return post<IncidentSummary>("/api/incidents", data);
+}
+
+export function acknowledgeIncident(id: string, user: string): Promise<{ id: string; status: string }> {
+  return post<{ id: string; status: string }>(`/api/incidents/${id}/acknowledge?user=${encodeURIComponent(user)}`, {});
+}
+
+export function resolveIncident(id: string, user: string, notes?: string): Promise<{ id: string; status: string }> {
+  const query = `user=${encodeURIComponent(user)}${notes ? `&notes=${encodeURIComponent(notes)}` : ""}`;
+  return post<{ id: string; status: string }>(`/api/incidents/${id}/resolve?${query}`, {});
+}
+
+export function startInvestigation(id: string): Promise<{ investigation_id: string }> {
+  return post<{ investigation_id: string }>(`/api/incidents/${id}/investigate`, {});
+}
+
+export function getInvestigation(incidentId: string): Promise<Investigation> {
+  return get<Investigation>(`/api/incidents/${incidentId}/investigation`);
+}
+
+export function getIncidentTimeline(id: string): Promise<TimelineEntry[]> {
+  return get<TimelineEntry[]>(`/api/incidents/${id}/timeline`);
+}
+
+// --------------------------------------------------------------------------- //
+// On-Call API
+// --------------------------------------------------------------------------- //
+
+export interface OncallTeam {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  timezone: string;
+  is_active: boolean;
+}
+
+export interface OncallShift {
+  id: string;
+  schedule_id: string;
+  user_id: string;
+  start_time: string;
+  end_time: string;
+  shift_type: string;
+  status: string;
+}
+
+export interface OncallAlert {
+  id: string;
+  title: string;
+  description: string | null;
+  severity: string;
+  status: string;
+  triggered_at: string;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+}
+
+export function listOncallTeams(): Promise<OncallTeam[]> {
+  return get<OncallTeam[]>("/oncall/teams");
+}
+
+export function getCurrentOncall(teamId: string): Promise<unknown> {
+  return get(`/oncall/teams/${teamId}/current-oncall`);
+}
+
+export function listOncallAlerts(params?: {
+  team_id?: string;
+  status?: string;
+  severity?: string;
+}): Promise<OncallAlert[]> {
+  const query = new URLSearchParams();
+  if (params?.team_id) query.set("team_id", params.team_id);
+  if (params?.status) query.set("status", params.status);
+  if (params?.severity) query.set("severity", params.severity);
+  const qs = query.toString();
+  return get<OncallAlert[]>(`/oncall/alerts${qs ? `?${qs}` : ""}`);
+}
+
+export function acknowledgeOncallAlert(alertId: string, userId: string): Promise<{ id: string; status: string }> {
+  return post<{ id: string; status: string }>(`/oncall/alerts/${alertId}/acknowledge?user_id=${userId}`, {});
+}
+
+export function resolveOncallAlert(alertId: string, userId: string, notes?: string): Promise<{ id: string; status: string }> {
+  const query = `user_id=${userId}${notes ? `&notes=${encodeURIComponent(notes)}` : ""}`;
+  return post<{ id: string; status: string }>(`/oncall/alerts/${alertId}/resolve?${query}`, {});
+}
