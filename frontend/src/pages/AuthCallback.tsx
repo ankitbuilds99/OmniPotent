@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Sparkles, Loader2, CheckCircle, XCircle } from 'lucide-react'
-import { initSupabase, isSupabaseConfigured } from '../lib/supabase'
+import { initSupabase, checkSupabaseConfigured } from '../lib/supabase'
 
 interface AuthCallbackProps {
   onSuccess: () => void
@@ -14,7 +14,8 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
 
   useEffect(() => {
     const handleCallback = async () => {
-      if (!isSupabaseConfigured()) {
+      const configured = await checkSupabaseConfigured()
+      if (!configured) {
         setStatus('error')
         setMessage('Supabase is not configured')
         setTimeout(onError, 2000)
