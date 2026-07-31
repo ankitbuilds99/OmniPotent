@@ -215,7 +215,7 @@ class TeamsBot:
 
         if invoke_name == "adaptiveCard/action":
             action_data = activity.value or {}
-            action_id = action_data.get("action")
+            action_id = str(action_data.get("action", ""))
 
             handler = self._action_handlers.get(action_id)
             if handler:
@@ -242,7 +242,7 @@ class TeamsBot:
         """Send a reply to an activity."""
         token = await self._get_access_token()
 
-        reply = {
+        reply: dict[str, Any] = {
             "type": "message",
             "from": {"id": self.config.app_id},
             "conversation": {"id": activity.conversation_id},
@@ -287,7 +287,7 @@ class TeamsBot:
         """
         token = await self._get_access_token()
 
-        message = {
+        message: dict[str, Any] = {
             "type": "message",
             "text": text,
         }

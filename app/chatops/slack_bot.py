@@ -288,7 +288,7 @@ class SlackBot:
         Returns:
             Slack API response
         """
-        payload = {"channel": channel, "ts": ts, "text": text}
+        payload: dict[str, Any] = {"channel": channel, "ts": ts, "text": text}
         if blocks:
             payload["blocks"] = blocks
 
@@ -364,7 +364,7 @@ class SlackBot:
             "low": ":large_blue_circle:",
         }.get(severity.lower(), ":white_circle:")
 
-        blocks = [
+        blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {"type": "plain_text", "text": f"{severity_emoji} {alert_name}"}
@@ -437,7 +437,7 @@ class SlackBot:
         """
         thread_ts = self._incident_threads.get(incident_id)
 
-        fields = [
+        fields: list[dict[str, Any]] = [
             {"type": "mrkdwn", "text": f"*Status:*\n{status}"},
         ]
         if confidence is not None:
@@ -446,7 +446,7 @@ class SlackBot:
                 "text": f"*Confidence:*\n{confidence:.0%}"
             })
 
-        blocks = [
+        blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {"type": "plain_text", "text": "🔍 Investigation Update"}
@@ -510,7 +510,7 @@ class SlackBot:
             "high": ":red_circle:",
         }.get(risk_level.lower(), ":white_circle:")
 
-        blocks = [
+        blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {"type": "plain_text", "text": "⚠️ Approval Required"}
@@ -590,7 +590,7 @@ class SlackBot:
         """
         thread_ts = self._incident_threads.get(incident_id)
 
-        blocks = [
+        blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {"type": "plain_text", "text": "✅ Incident Resolved"}
