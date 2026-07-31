@@ -22,10 +22,9 @@ import re
 
 from mcp.server.fastmcp import FastMCP
 
-from app.config import get_settings
-
-_settings = get_settings()
-_GITHUB_TIMEOUT = _settings.http_timeout_github
+# MCP servers run as subprocesses - use env vars directly, not app.config
+# (which may fail to load in the subprocess context)
+_GITHUB_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT_GITHUB", "15.0"))
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # "owner/repo" the real-API calls target. Required only in real (token) mode.
