@@ -9,6 +9,8 @@ COPY frontend/ ./
 # Empty base URL => the SPA calls the API with relative (same-origin) URLs,
 # which FastAPI serves itself — so no CORS or separate host is needed.
 ENV VITE_API_URL=""
+# Note: Supabase config is injected at runtime via window.__ENV__ pattern
+# since Docker build args aren't available during Render builds.
 RUN npm run build   # -> /web/dist
 
 # Stage 2: Python backend that also serves the built SPA.

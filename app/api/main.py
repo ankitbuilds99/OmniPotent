@@ -1071,6 +1071,46 @@ async def config() -> dict:
 
 
 @app.get(
+    "/frontend-config",
+    tags=["Config"],
+    summary="Get frontend configuration",
+    description="Returns configuration needed by the frontend SPA, including Supabase auth settings. "
+    "This allows runtime injection of environment variables that weren't available at Docker build time.",
+    response_description="Frontend configuration for runtime injection",
+    responses={
+        200: {
+            "description": "Frontend config",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "supabase_url": "https://xxx.supabase.co",
+                        "supabase_anon_key": "eyJ...",
+                        "api_url": "",
+                    }
+                }
+            },
+        }
+    },
+)
+async def frontend_config() -> dict:
+    """Get frontend configuration for runtime injection.
+
+    Returns Supabase and other settings that the frontend needs but weren't
+    available during the Docker build (since Render doesn't pass env vars
+    to Docker build args).
+
+    Returns:
+        dict: Configuration for the frontend SPA.
+    """
+    s = get_settings()
+    return {
+        "supabase_url": s.supabase_url or "",
+        "supabase_anon_key": s.supabase_anon_key or "",
+        "api_url": "",  # Empty = same-origin
+    }
+
+
+@app.get(
     "/github/status",
     tags=["Config"],
     summary="Get GitHub connection status",

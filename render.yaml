@@ -46,6 +46,24 @@ services:
       - key: GITHUB_REPO
         sync: false  # Repository as 'owner/repo' (e.g., 'facebook/react')
 
+      # Supabase Database & Auth
+      - key: SUPABASE_URL
+        sync: false  # Your Supabase project URL
+      - key: SUPABASE_ANON_KEY
+        sync: false  # Supabase anon/public key
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false  # Supabase service role key (for admin operations)
+      - key: SUPABASE_JWKS_URL
+        sync: false  # https://your-project.supabase.co/auth/v1/.well-known/jwks.json
+      - key: SUPABASE_DATABASE_URL
+        sync: false  # Direct PostgreSQL connection string
+
+      # Frontend Supabase (passed to Vite build)
+      - key: VITE_SUPABASE_URL
+        sync: false  # Same as SUPABASE_URL
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false  # Same as SUPABASE_ANON_KEY
+
       # Defaults
       - key: TARGET_REPO_PATH
         value: ./sample_repo

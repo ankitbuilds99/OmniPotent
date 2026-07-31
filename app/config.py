@@ -239,6 +239,13 @@ class Settings(BaseSettings):
     # role membership. Verification uses only the PUBLIC JWKS — no Supabase secret.
     supabase_jwks_url: str = ""
     supabase_jwt_aud: str = "authenticated"
+    # Supabase Database (optional). When SUPABASE_URL is set, persistent storage via
+    # Supabase is enabled for incidents, investigations, and user data.
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
+    # Direct PostgreSQL connection string for migrations and raw SQL queries.
+    supabase_database_url: str = ""
     # Self-serve onboarding: when true (and multi-tenant is on), POST /signup lets a
     # new user create an org + owner API key without an existing credential. Always
     # provisions the free plan (upgrades go through billing). Disable in locked-down

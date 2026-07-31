@@ -5,18 +5,28 @@ import { CinematicLanding } from "./components/landing/CinematicLanding";
 import { ApiDocs } from "./pages/ApiDocs";
 import { Dashboard } from "./pages/Dashboard";
 import { Billing } from "./pages/Billing";
+import { Login } from "./pages/Login";
+import { AuthCallback } from "./pages/AuthCallback";
 
-type View = "landing" | "console" | "api-docs" | "dashboard" | "billing";
+type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
 
-  // Handle URL params for billing success/cancel redirects
+  // Handle URL routing for auth callbacks and billing redirects
   useEffect(() => {
+    const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
+
+    // Handle OAuth callback
+    if (path === '/auth/callback' || path.includes('auth/callback')) {
+      setView('auth-callback');
+      return;
+    }
+
+    // Handle billing success/cancel redirects
     if (params.has('success') || params.has('canceled')) {
       setView('billing');
-      // Clean up URL
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
@@ -25,9 +35,27 @@ export default function App() {
     <>
       {view === "landing" && (
         <CinematicLanding
-          onLaunch={() => setView("console")}
+          onLaunch={() => setView("login")}
           onDashboard={() => setView("dashboard")}
           onBilling={() => setView("billing")}
+        />
+      )}
+      {view === "login" && (
+        <Login
+          onBack={() => setView("landing")}
+          onSuccess={() => setView("console")}
+        />
+      )}
+      {view === "auth-callback" && (
+        <AuthCallback
+          onSuccess={() => {
+            window.history.replaceState({}, '', '/');
+            setView("console");
+          }}
+          onError={() => {
+            window.history.replaceState({}, '', '/');
+            setView("login");
+          }}
         />
       )}
       {view === "console" && (
