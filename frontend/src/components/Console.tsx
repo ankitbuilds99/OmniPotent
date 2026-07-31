@@ -28,7 +28,10 @@ function TopBar({
   onDashboard,
   onBilling,
   onLogout,
+  onProfile,
+  onHistory,
   isLoggedIn,
+  userAvatar,
 }: {
   onHome: () => void;
   onNew: () => void;
@@ -37,7 +40,10 @@ function TopBar({
   onDashboard?: () => void;
   onBilling?: () => void;
   onLogout?: () => void;
+  onProfile?: () => void;
+  onHistory?: () => void;
   isLoggedIn?: boolean;
+  userAvatar?: string | null;
 }) {
   const { config: cfg } = useConfig();
   const me = useMe();
@@ -70,6 +76,7 @@ function TopBar({
           <span>New</span>
         </button>
         {!isLoggedIn && <button className="nav__btn" onClick={onSignup}>Sign up</button>}
+        {onHistory && <button className="nav__btn" onClick={onHistory}>History</button>}
         {onDashboard && <button className="nav__btn" onClick={onDashboard}>Dashboard</button>}
         {onBilling && <button className="nav__btn" onClick={onBilling}>Billing</button>}
         <button className="nav__btn" onClick={onAdmin}>Admin</button>
@@ -85,13 +92,38 @@ function TopBar({
           <span className="nav__dot" />
         </span>
         <ThemePicker />
-        <span className="nav__avatar">{me.label.charAt(0).toUpperCase()}</span>
+        {isLoggedIn && onProfile ? (
+          <button
+            className="nav__avatar-btn"
+            onClick={onProfile}
+            title="View Profile"
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              padding: 0
+            }}
+          >
+            {userAvatar ? (
+              <img
+                src={userAvatar}
+                alt="Profile"
+                className="nav__avatar"
+                style={{ width: 32, height: 32, borderRadius: '50%' }}
+              />
+            ) : (
+              <span className="nav__avatar">{me.label.charAt(0).toUpperCase()}</span>
+            )}
+          </button>
+        ) : (
+          <span className="nav__avatar">{me.label.charAt(0).toUpperCase()}</span>
+        )}
       </div>
     </header>
   );
 }
 
-export function Console({ onHome, onDashboard, onBilling, onLogout }: { onHome: () => void; onDashboard?: () => void; onBilling?: () => void; onLogout?: () => void }) {
+export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, onHistory }: { onHome: () => void; onDashboard?: () => void; onBilling?: () => void; onLogout?: () => void; onProfile?: () => void; onHistory?: () => void }) {
   const {
     turns,
     busy,
@@ -138,7 +170,10 @@ export function Console({ onHome, onDashboard, onBilling, onLogout }: { onHome: 
         onDashboard={onDashboard}
         onBilling={onBilling}
         onLogout={handleLogout}
+        onProfile={onProfile}
+        onHistory={onHistory}
         isLoggedIn={!!user}
+        userAvatar={user?.user_metadata?.avatar_url || user?.user_metadata?.picture}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {signupOpen && <SignupModal onClose={() => setSignupOpen(false)} />}

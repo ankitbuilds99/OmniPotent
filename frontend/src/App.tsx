@@ -7,8 +7,10 @@ import { Dashboard } from "./pages/Dashboard";
 import { Billing } from "./pages/Billing";
 import { Login } from "./pages/Login";
 import { AuthCallback } from "./pages/AuthCallback";
+import { Profile } from "./pages/Profile";
+import { History } from "./pages/History";
 
-type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing";
+type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
@@ -64,6 +66,8 @@ export default function App() {
           onDashboard={() => setView("dashboard")}
           onBilling={() => setView("billing")}
           onLogout={() => setView("landing")}
+          onProfile={() => setView("profile")}
+          onHistory={() => setView("history")}
         />
       )}
       {view === "api-docs" && (
@@ -77,6 +81,21 @@ export default function App() {
       )}
       {view === "billing" && (
         <Billing onBack={() => setView("console")} />
+      )}
+      {view === "profile" && (
+        <Profile
+          onBack={() => setView("console")}
+          onLogout={() => setView("landing")}
+        />
+      )}
+      {view === "history" && (
+        <History
+          onBack={() => setView("console")}
+          onViewInvestigation={(threadId) => {
+            console.log('Continue investigation:', threadId)
+            setView("console")
+          }}
+        />
       )}
     </>
   );

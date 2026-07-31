@@ -159,6 +159,18 @@ const ICONS: Record<string, JSX.Element> = {
       <line x1="21" x2="9" y1="12" y2="12" />
     </>
   ),
+  history: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </>
+  ),
+  user: (
+    <>
+      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </>
+  ),
 };
 
 interface Props {
