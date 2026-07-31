@@ -348,7 +348,16 @@ function MetricsTab() {
   );
 }
 
-export function Dashboard({ onBack, onBilling: _onBilling }: { onBack: () => void; onBilling?: () => void }) {
+interface DashboardProps {
+  onBack: () => void;
+  onBilling?: () => void;
+  onIncidents?: () => void;
+  onOnCall?: () => void;
+  onServiceMap?: () => void;
+  onNotifications?: () => void;
+}
+
+export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall, onServiceMap, onNotifications }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
@@ -380,6 +389,46 @@ export function Dashboard({ onBack, onBilling: _onBilling }: { onBack: () => voi
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Quick Navigation */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          {onIncidents && (
+            <button
+              onClick={onIncidents}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-colors"
+            >
+              <Icon name="warning" size={18} />
+              <span className="font-medium">Incidents</span>
+            </button>
+          )}
+          {onOnCall && (
+            <button
+              onClick={onOnCall}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-colors"
+            >
+              <Icon name="user" size={18} />
+              <span className="font-medium">On-Call</span>
+            </button>
+          )}
+          {onServiceMap && (
+            <button
+              onClick={onServiceMap}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-colors"
+            >
+              <Icon name="server" size={18} />
+              <span className="font-medium">Service Map</span>
+            </button>
+          )}
+          {onNotifications && (
+            <button
+              onClick={onNotifications}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-colors"
+            >
+              <Icon name="bell" size={18} />
+              <span className="font-medium">Notifications</span>
+            </button>
+          )}
+        </div>
+
         <div className="flex gap-2 mb-6 border-b border-gray-200 dark:border-gray-700">
           {tabs.map((tab) => (
             <button

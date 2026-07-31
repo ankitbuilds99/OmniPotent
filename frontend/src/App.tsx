@@ -11,8 +11,12 @@ import { Profile } from "./pages/Profile";
 import { History } from "./pages/History";
 import { StatusPage } from "./pages/StatusPage";
 import { Team } from "./pages/Team";
+import { Incidents } from "./pages/Incidents";
+import { OnCall } from "./pages/OnCall";
+import { ServiceMap } from "./pages/ServiceMap";
+import { NotificationPreferences } from "./pages/NotificationPreferences";
 
-type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team";
+type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team" | "incidents" | "oncall" | "servicemap" | "notifications";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
@@ -81,6 +85,10 @@ export default function App() {
         <Dashboard
           onBack={() => setView("console")}
           onBilling={() => setView("billing")}
+          onIncidents={() => setView("incidents")}
+          onOnCall={() => setView("oncall")}
+          onServiceMap={() => setView("servicemap")}
+          onNotifications={() => setView("notifications")}
         />
       )}
       {view === "billing" && (
@@ -106,6 +114,18 @@ export default function App() {
       )}
       {view === "team" && (
         <Team onBack={() => setView("console")} />
+      )}
+      {view === "incidents" && (
+        <Incidents onBack={() => setView("dashboard")} />
+      )}
+      {view === "oncall" && (
+        <OnCall onBack={() => setView("dashboard")} />
+      )}
+      {view === "servicemap" && (
+        <ServiceMap onBack={() => setView("dashboard")} />
+      )}
+      {view === "notifications" && (
+        <NotificationPreferences onBack={() => setView("dashboard")} />
       )}
     </>
   );
