@@ -575,7 +575,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
   const [incidents, setIncidents] = useState<Incident[]>(DEMO_INCIDENTS);
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("active");
-  const [_loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
 
   // Fetch incidents from API
   useEffect(() => {
