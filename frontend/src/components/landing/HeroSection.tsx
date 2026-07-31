@@ -5,7 +5,7 @@ import { Canvas, useFrame } from '@react-three/fiber'
 import { Float, Sphere, MeshDistortMaterial, Stars } from '@react-three/drei'
 import * as THREE from 'three'
 
-const ROTATING_WORDS = ['incidents', 'outages', 'failures', 'alerts', 'errors']
+const ROTATING_WORDS = ['incidents', 'outages', 'alerts', 'failures', 'pages']
 
 function RotatingText({ words }: { words: string[] }) {
   const [index, setIndex] = useState(0)
@@ -303,24 +303,24 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           transition={{ duration: 0.6 }}
         >
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400" />
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00FFB3] opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#00FFB3]" />
           </span>
           <span className="text-white/70 text-sm font-medium">
-            Private Beta — Limited spots available
+            Now Generally Available
           </span>
         </motion.div>
 
         {/* Main headline */}
         <motion.h1
-          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight mb-6 leading-[1.1]"
+          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight mb-6 leading-[1.05]"
           initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.1 }}
         >
-          <span className="text-white">4 hours to 15 minutes</span>
+          <span className="text-white">AI agents that</span>
           <br />
-          <span className="text-white">for </span>
+          <span className="text-white">resolve </span>
           <RotatingText words={ROTATING_WORDS} />
         </motion.h1>
 
@@ -331,9 +331,9 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.2 }}
         >
-          DevOps teams spend 4+ hours per incident on root cause analysis.
-          DevOps Copilot automates the investigation, identifies the cause,
-          and drafts a fix — pausing for your approval before any action.
+          Your on-call engineers get back to building. AI investigates incidents,
+          identifies root causes, and proposes fixes — with human approval before
+          any production change.
         </motion.p>
 
         {/* CTA Buttons */}
@@ -345,17 +345,17 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
         >
           <button
             onClick={onLaunch}
-            className="group relative inline-flex items-center gap-2 px-8 py-4 bg-white text-black font-semibold rounded-xl hover:bg-white/90 transition-all duration-200 shadow-[0_0_30px_rgba(255,255,255,0.1)]"
+            className="group relative inline-flex items-center gap-2 px-8 py-4 bg-white text-black font-semibold rounded-xl hover:bg-white/90 transition-all duration-200 shadow-[0_0_40px_rgba(255,255,255,0.15)]"
           >
             <Sparkles className="w-5 h-5" />
-            Get Started Free
+            Start Free Trial
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
           </button>
           <button
             onClick={onLaunch}
             className="inline-flex items-center gap-2 px-8 py-4 text-white font-semibold rounded-xl border border-white/20 bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.08] hover:border-white/30 transition-all duration-200"
           >
-            View Live Demo
+            Request Demo
           </button>
         </motion.div>
 

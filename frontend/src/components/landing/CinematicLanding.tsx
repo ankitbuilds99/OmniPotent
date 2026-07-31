@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react'
 import Lenis from 'lenis'
 import { Navbar } from './Navbar'
 import { HeroSection } from './HeroSection'
+import { LogoCarousel } from './LogoCarousel'
+import { WhySection } from './WhySection'
 import { HowItWorks } from './HowItWorks'
 import { Terminal } from './Terminal'
 import { FeatureCards } from './FeatureCards'
@@ -9,6 +11,7 @@ import { Pipeline } from './Pipeline'
 import { GlobalMap } from './GlobalMap'
 import { Dashboard } from './Dashboard'
 import { AIChat } from './AIChat'
+import { SecuritySection } from './SecuritySection'
 import { TechStack } from './TechStack'
 import { Metrics } from './Metrics'
 import { Testimonials } from './Testimonials'
@@ -63,6 +66,12 @@ export function CinematicLanding({ onLaunch, onDashboard: _onDashboard, onBillin
         {/* Hero with 3D scene */}
         <HeroSection onLaunch={onLaunch} />
 
+        {/* Logo carousel - Trusted by companies */}
+        <LogoCarousel />
+
+        {/* Why DevOps Copilot - Value proposition */}
+        <WhySection />
+
         {/* How It Works - Interactive Tutorial */}
         <HowItWorks onLaunch={onLaunch} />
 
@@ -89,6 +98,9 @@ export function CinematicLanding({ onLaunch, onDashboard: _onDashboard, onBillin
 
         {/* AI Chat interface */}
         <AIChat />
+
+        {/* Security Section - Enterprise grade */}
+        <SecuritySection />
 
         {/* Tech stack */}
         <TechStack />
