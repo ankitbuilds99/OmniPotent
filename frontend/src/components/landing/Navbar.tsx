@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Sparkles, Menu, X, ArrowRight, Code } from 'lucide-react'
+import { Sparkles, Menu, X, ArrowRight, Code, Palette } from 'lucide-react'
+import { THEMES, DEFAULT_THEME } from '../../themes'
 
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
@@ -15,6 +16,13 @@ const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 export function Navbar({ onLaunch }: { onLaunch: () => void }) {
   const [isScrolled, setIsScrolled] = useState(false)
   const [isMobileOpen, setIsMobileOpen] = useState(false)
+  const [isThemeOpen, setIsThemeOpen] = useState(false)
+  const [currentTheme, setCurrentTheme] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('theme') || DEFAULT_THEME
+    }
+    return DEFAULT_THEME
+  })
 
   useEffect(() => {
     const handleScroll = () => {
@@ -24,6 +32,16 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
     window.addEventListener('scroll', handleScroll)
     return () => window.removeEventListener('scroll', handleScroll)
   }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = currentTheme
+    localStorage.setItem('theme', currentTheme)
+  }, [currentTheme])
+
+  const handleThemeChange = (themeId: string) => {
+    setCurrentTheme(themeId)
+    setIsThemeOpen(false)
+  }
 
   return (
     <>
@@ -77,6 +95,65 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
 
           {/* CTA */}
           <div className="flex items-center gap-3">
+            {/* Theme Switcher */}
+            <div className="relative">
+              <button
+                onClick={() => setIsThemeOpen(!isThemeOpen)}
+                className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+                aria-label="Change theme"
+              >
+                <Palette className="w-5 h-5 text-white/70 hover:text-white" />
+              </button>
+
+              <AnimatePresence>
+                {isThemeOpen && (
+                  <>
+                    <motion.div
+                      className="fixed inset-0 z-40"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      onClick={() => setIsThemeOpen(false)}
+                    />
+                    <motion.div
+                      className="absolute right-0 top-12 z-50 w-64 p-3 rounded-xl bg-[#0a0f1a]/95 backdrop-blur-xl border border-white/10 shadow-2xl"
+                      initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                      transition={{ duration: 0.15 }}
+                    >
+                      <p className="text-white/50 text-xs uppercase tracking-wider mb-3 px-2">
+                        Choose Theme
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {THEMES.map((theme) => (
+                          <button
+                            key={theme.id}
+                            onClick={() => handleThemeChange(theme.id)}
+                            className={`flex items-center gap-2 p-2 rounded-lg transition-all text-left ${
+                              currentTheme === theme.id
+                                ? 'bg-white/10 border border-white/20'
+                                : 'hover:bg-white/5 border border-transparent'
+                            }`}
+                          >
+                            <div
+                              className="w-5 h-5 rounded-md flex-shrink-0"
+                              style={{
+                                background: `linear-gradient(135deg, ${theme.swatch[0]}, ${theme.swatch[1]})`,
+                              }}
+                            />
+                            <span className="text-white/80 text-xs font-medium truncate">
+                              {theme.name}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
+
             <button
               onClick={onLaunch}
               className="hidden sm:block text-white/70 hover:text-white text-sm font-medium transition-colors"
