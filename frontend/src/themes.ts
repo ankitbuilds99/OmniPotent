@@ -32,6 +32,36 @@ export const THEMES: Theme[] = [
     swatch: ["#f0653e", "#ff8a4c"],
   },
   {
+    id: "ocean",
+    name: "Ocean",
+    description: "Deep sea vibes, cyan & teal",
+    swatch: ["#06b6d4", "#22d3ee"],
+  },
+  {
+    id: "rose",
+    name: "Rose",
+    description: "Elegant pink & magenta tones",
+    swatch: ["#ec4899", "#f472b6"],
+  },
+  {
+    id: "aurora",
+    name: "Aurora",
+    description: "Northern lights — green & purple",
+    swatch: ["#8b5cf6", "#22c55e"],
+  },
+  {
+    id: "noir",
+    name: "Noir",
+    description: "Pure black with white accents",
+    swatch: ["#ffffff", "#a1a1aa"],
+  },
+  {
+    id: "cyberpunk",
+    name: "Cyberpunk",
+    description: "Neon yellow & hot pink",
+    swatch: ["#facc15", "#f43f5e"],
+  },
+  {
     id: "light",
     name: "Light",
     description: "Clean & minimal light theme",
