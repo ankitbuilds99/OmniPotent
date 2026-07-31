@@ -10,12 +10,14 @@ import {
   Sparkles
 } from 'lucide-react'
 import * as THREE from 'three'
+import { useThemeColors, type ThemeColors } from '../../hooks/useThemeColors'
 
 // Cyber city buildings
-function CityBuilding({ position, height, width }: {
+function CityBuilding({ position, height, width, colors }: {
   position: [number, number, number]
   height: number
   width: number
+  colors: ThemeColors
 }) {
   const ref = useRef<THREE.Mesh>(null)
 
@@ -29,8 +31,8 @@ function CityBuilding({ position, height, width }: {
   return (
     <Box ref={ref} args={[width, height, width]} position={position}>
       <meshStandardMaterial
-        color="#0a1628"
-        emissive="#00E7FF"
+        color={colors.shell}
+        emissive={colors.accent}
         emissiveIntensity={0.2}
         metalness={0.8}
         roughness={0.2}
@@ -40,7 +42,7 @@ function CityBuilding({ position, height, width }: {
 }
 
 // Data center
-function DataCenter() {
+function DataCenter({ colors }: { colors: ThemeColors }) {
   const buildings: Array<{ pos: [number, number, number]; h: number; w: number }> = [
     { pos: [-4, 0.5, -2], h: 1, w: 0.8 },
     { pos: [-3, 0.75, -1], h: 1.5, w: 0.6 },
@@ -56,18 +58,18 @@ function DataCenter() {
   return (
     <group position={[0, -2, -5]}>
       {buildings.map((b, i) => (
-        <CityBuilding key={i} position={b.pos} height={b.h} width={b.w} />
+        <CityBuilding key={i} position={b.pos} height={b.h} width={b.w} colors={colors} />
       ))}
       {/* Ground plane */}
       <Box args={[15, 0.1, 10]} position={[0, -0.05, 0]}>
-        <meshStandardMaterial color="#040814" metalness={0.5} roughness={0.8} />
+        <meshStandardMaterial color={colors.bg} metalness={0.5} roughness={0.8} />
       </Box>
     </group>
   )
 }
 
 // Floating drone
-function Drone({ position, delay = 0 }: { position: [number, number, number]; delay?: number }) {
+function Drone({ position, delay = 0, colors }: { position: [number, number, number]; delay?: number; colors: ThemeColors }) {
   const ref = useRef<THREE.Group>(null)
 
   useFrame((state) => {
@@ -83,8 +85,8 @@ function Drone({ position, delay = 0 }: { position: [number, number, number]; de
       <group ref={ref} position={position}>
         <Box args={[0.3, 0.1, 0.3]}>
           <meshStandardMaterial
-            color="#00E7FF"
-            emissive="#00E7FF"
+            color={colors.accent}
+            emissive={colors.accent}
             emissiveIntensity={0.5}
           />
         </Box>
@@ -94,7 +96,7 @@ function Drone({ position, delay = 0 }: { position: [number, number, number]; de
 }
 
 // Satellite
-function Satellite({ position }: { position: [number, number, number] }) {
+function Satellite({ position, colors }: { position: [number, number, number]; colors: ThemeColors }) {
   const ref = useRef<THREE.Group>(null)
 
   useFrame((state) => {
@@ -107,10 +109,10 @@ function Satellite({ position }: { position: [number, number, number] }) {
     <Float speed={2} rotationIntensity={0.3} floatIntensity={0.4}>
       <group ref={ref} position={position}>
         <Box args={[0.2, 0.1, 0.2]}>
-          <meshStandardMaterial color="#7C3AED" emissive="#7C3AED" emissiveIntensity={0.3} />
+          <meshStandardMaterial color={colors.accent2} emissive={colors.accent2} emissiveIntensity={0.3} />
         </Box>
         <Box args={[0.8, 0.02, 0.2]} position={[0, 0, 0]}>
-          <meshStandardMaterial color="#00FFB3" emissive="#00FFB3" emissiveIntensity={0.3} />
+          <meshStandardMaterial color={colors.ok} emissive={colors.ok} emissiveIntensity={0.3} />
         </Box>
       </group>
     </Float>
@@ -118,7 +120,7 @@ function Satellite({ position }: { position: [number, number, number] }) {
 }
 
 // AI Robot looking over servers
-function AIRobotSilhouette() {
+function AIRobotSilhouette({ colors }: { colors: ThemeColors }) {
   const ref = useRef<THREE.Group>(null)
 
   useFrame((state) => {
@@ -131,38 +133,38 @@ function AIRobotSilhouette() {
     <group ref={ref} position={[0, -1, -3]}>
       {/* Head */}
       <Sphere args={[0.4, 32, 32]} position={[0, 1.2, 0]}>
-        <meshStandardMaterial color="#00E7FF" emissive="#00E7FF" emissiveIntensity={0.3} />
+        <meshStandardMaterial color={colors.accent} emissive={colors.accent} emissiveIntensity={0.3} />
       </Sphere>
       {/* Body */}
       <Box args={[0.6, 0.8, 0.4]} position={[0, 0.5, 0]}>
-        <meshStandardMaterial color="#0a1628" emissive="#00E7FF" emissiveIntensity={0.1} />
+        <meshStandardMaterial color={colors.shell} emissive={colors.accent} emissiveIntensity={0.1} />
       </Box>
       {/* Eyes glow */}
       <Sphere args={[0.05, 16, 16]} position={[-0.12, 1.25, 0.35]}>
-        <meshBasicMaterial color="#00E7FF" />
+        <meshBasicMaterial color={colors.accent} />
       </Sphere>
       <Sphere args={[0.05, 16, 16]} position={[0.12, 1.25, 0.35]}>
-        <meshBasicMaterial color="#00E7FF" />
+        <meshBasicMaterial color={colors.accent} />
       </Sphere>
     </group>
   )
 }
 
-function FooterScene() {
+function FooterScene({ colors }: { colors: ThemeColors }) {
   return (
     <>
       <ambientLight intensity={0.1} />
-      <pointLight position={[0, 5, 5]} intensity={1} color="#00E7FF" />
-      <pointLight position={[-5, 3, -5]} intensity={0.5} color="#7C3AED" />
+      <pointLight position={[0, 5, 5]} intensity={1} color={colors.accent} />
+      <pointLight position={[-5, 3, -5]} intensity={0.5} color={colors.accent2} />
 
       <Stars radius={50} depth={30} count={2000} factor={3} saturation={0} fade speed={1} />
 
-      <DataCenter />
-      <AIRobotSilhouette />
-      <Drone position={[-3, 1, -2]} delay={0} />
-      <Drone position={[3, 1.5, -3]} delay={2} />
-      <Satellite position={[4, 3, -4]} />
-      <Satellite position={[-4, 2.5, -5]} />
+      <DataCenter colors={colors} />
+      <AIRobotSilhouette colors={colors} />
+      <Drone position={[-3, 1, -2]} delay={0} colors={colors} />
+      <Drone position={[3, 1.5, -3]} delay={2} colors={colors} />
+      <Satellite position={[4, 3, -4]} colors={colors} />
+      <Satellite position={[-4, 2.5, -5]} colors={colors} />
     </>
   )
 }
@@ -195,13 +197,15 @@ const SOCIAL_LINKS = [
 ]
 
 export function Footer({ onLaunch }: { onLaunch: () => void }) {
+  const colors = useThemeColors()
+
   return (
-    <footer className="relative overflow-hidden">
+    <footer className="relative overflow-hidden" style={{ backgroundColor: colors.bg }}>
       {/* 3D Scene Background */}
       <div className="absolute inset-0 h-[400px]">
         <Canvas camera={{ position: [0, 0, 5], fov: 60 }}>
           <Suspense fallback={null}>
-            <FooterScene />
+            <FooterScene colors={colors} />
           </Suspense>
         </Canvas>
         {/* Gradient overlay */}

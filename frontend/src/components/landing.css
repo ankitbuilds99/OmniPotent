@@ -1,26 +1,61 @@
 /* ===== DevOps Copilot — 3D landing / command center ===== */
 .landing {
-  --bg: #050816;
-  --bg2: #081226;
-  /* Accent colors now follow the app theme — switch themes (top-right of the
-     console) and the landing + 3D recolor together. Text/glass stay dark so the
-     command-center identity holds on every theme. */
+  /* Theme-aware background - inherits from :root/data-theme */
+  --landing-bg: var(--bg, #050816);
+  --landing-bg2: var(--shell, #081226);
+  /* Accent colors follow the app theme */
   --purple: var(--accent-2, #7c5cff);
   --cyan: var(--accent, #00d4ff);
   --mint: var(--ok, #00ffb3);
   --line: color-mix(in srgb, var(--accent, #7c5cff) 18%, transparent);
-  --glass: rgba(9, 15, 32, 0.74);
-  --txt: #e8edff;
-  --dim: #8ea0c8;
-  --faint: #7d8cb2; /* WCAG AA: ~5.8:1 on the glass cards (was #5d6c91, ~3.7:1) */
+  /* Glass opacity adapts for light theme */
+  --glass: color-mix(in srgb, var(--shell, #0a0f1a) 74%, transparent);
+  --txt: var(--text, #e8edff);
+  --dim: var(--text-dim, #8ea0c8);
+  --faint: var(--text-faint, #7d8cb2);
 
   position: relative;
   z-index: 1;
-  background: transparent;
+  background: var(--landing-bg);
   color: var(--txt);
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+}
+
+/* Light theme overrides for landing page */
+[data-theme="light"] .landing {
+  --glass: rgba(255, 255, 255, 0.85);
+  --line: color-mix(in srgb, var(--accent, #3b6fed) 25%, transparent);
+}
+
+[data-theme="light"] .landing .hero__overlay {
+  background: radial-gradient(70% 60% at 50% 50%, transparent 40%, rgba(238, 241, 246, 0.5) 100%);
+}
+
+[data-theme="light"] .landing .hero__overlay::before {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(238, 241, 246, 0.85) 0%,
+    rgba(238, 241, 246, 0.6) 46%,
+    transparent 74%
+  );
+}
+
+[data-theme="light"] .landing .btn3d--primary {
+  box-shadow:
+    0 10px 34px -8px rgba(59, 111, 237, 0.5),
+    0 0 0 4px rgba(59, 111, 237, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+[data-theme="light"] .landing .card,
+[data-theme="light"] .landing .pillar,
+[data-theme="light"] .landing .tech,
+[data-theme="light"] .landing .lstat,
+[data-theme="light"] .landing .how__step {
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 4px 20px -8px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .grad-text {

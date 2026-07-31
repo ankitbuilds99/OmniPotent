@@ -4,6 +4,10 @@ Supports:
 - Email (SMTP, SendGrid, AWS SES)
 - Push notifications (FCM, APNs)
 - SMS (Twilio)
+- Voice Calls (Twilio)
+- WhatsApp (Twilio)
+- Discord (Webhooks)
+- Telegram (Bot API)
 - Webhook callbacks
 """
 
@@ -28,6 +32,32 @@ from app.notifications.push import (
     register_device,
     unregister_device,
 )
+from app.notifications.sms import (
+    TwilioProvider,
+    SMSMessage,
+    VoiceCall,
+    WhatsAppMessage,
+    get_twilio_provider,
+    send_sms,
+    make_voice_call,
+    send_whatsapp,
+)
+from app.notifications.discord import (
+    DiscordWebhook,
+    DiscordEmbed,
+    DiscordMessage,
+    DiscordColor,
+    get_discord_webhook,
+    send_discord_alert,
+)
+from app.notifications.telegram import (
+    TelegramBot,
+    TelegramMessage,
+    InlineButton,
+    InlineKeyboard,
+    get_telegram_bot,
+    send_telegram_alert,
+)
 from app.notifications.dispatcher import (
     NotificationDispatcher,
     NotificationChannel,
@@ -37,6 +67,7 @@ from app.notifications.dispatcher import (
 )
 
 __all__ = [
+    # Email
     "EmailProvider",
     "SMTPProvider",
     "SendGridProvider",
@@ -47,6 +78,7 @@ __all__ = [
     "send_alert_notification",
     "send_approval_request",
     "send_welcome_email",
+    # Push
     "PushProvider",
     "FCMProvider",
     "APNsProvider",
@@ -54,6 +86,30 @@ __all__ = [
     "send_push_notification",
     "register_device",
     "unregister_device",
+    # SMS/Voice/WhatsApp
+    "TwilioProvider",
+    "SMSMessage",
+    "VoiceCall",
+    "WhatsAppMessage",
+    "get_twilio_provider",
+    "send_sms",
+    "make_voice_call",
+    "send_whatsapp",
+    # Discord
+    "DiscordWebhook",
+    "DiscordEmbed",
+    "DiscordMessage",
+    "DiscordColor",
+    "get_discord_webhook",
+    "send_discord_alert",
+    # Telegram
+    "TelegramBot",
+    "TelegramMessage",
+    "InlineButton",
+    "InlineKeyboard",
+    "get_telegram_bot",
+    "send_telegram_alert",
+    # Dispatcher
     "NotificationDispatcher",
     "NotificationChannel",
     "NotificationPriority",

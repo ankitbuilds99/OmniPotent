@@ -1,7 +1,7 @@
-"""ParallelInvestigationCoordinator — runs 4 specialist agents concurrently.
+"""ParallelInvestigationCoordinator — runs 6 specialist agents concurrently.
 
 Architecture 3 (Omnipotent) implementation:
-- Spawns 4 agents in parallel: Telemetry, Code, Dependencies, Historical
+- Spawns 6 agents in parallel: Telemetry, Code, Dependencies, Historical, Knowledge, Collaboration
 - Collects findings concurrently with timeout
 - Synthesizes into unified root cause hypothesis
 - Returns confidence score with transparent factors
@@ -27,11 +27,13 @@ log = logging.getLogger("devcopilot.agents.parallel_coordinator")
 
 
 class SpecialistType(str, Enum):
-    """The 4 parallel specialists for investigation."""
+    """The 6 parallel specialists for investigation."""
     TELEMETRY = "telemetry"
     CODE = "code"
     DEPENDENCIES = "dependencies"
     HISTORICAL = "historical"
+    KNOWLEDGE = "knowledge"
+    COLLABORATION = "collaboration"
 
 
 @dataclass
@@ -253,7 +255,82 @@ Your job: Find similar past incidents and relevant runbooks.
 Rank past incidents by similarity. Include what remediation worked."""
 
 
-SYNTHESIS_PROMPT = """You are the Investigation Coordinator synthesizing findings from 4 specialists.
+KNOWLEDGE_PROMPT = """You are a Knowledge Base Specialist for incident investigation.
+
+Your job: Search documentation, wikis, architecture docs, and internal knowledge bases for relevant context.
+
+## What to Look For:
+1. **Architecture Docs**: System design, service dependencies, data flow diagrams
+2. **Service Documentation**: API contracts, SLOs, known limitations
+3. **Change Documentation**: Recent architecture changes, migrations, deprecations
+4. **Operational Knowledge**: Known gotchas, anti-patterns, tribal knowledge
+
+## Incident Context:
+{context}
+
+## Output Format (JSON):
+{{
+    "findings": [
+        {{
+            "finding_type": "context|evidence|hypothesis",
+            "title": "Brief title",
+            "description": "Detailed description with specific references",
+            "confidence_score": 0.0-1.0,
+            "evidence": [
+                {{"type": "doc|wiki|architecture|confluence", "title": "...", "url": "...", "excerpt": "...", "relevance": "high|medium|low"}}
+            ],
+            "affected_services": ["service1"],
+            "severity": "critical|high|medium|low"
+        }}
+    ],
+    "summary": "1-2 sentence summary",
+    "confidence_score": 0.0-1.0,
+    "reasoning": "Why this confidence level"
+}}
+
+Include specific document references and excerpts. Highlight any documented known issues."""
+
+
+COLLABORATION_PROMPT = """You are a Collaboration Specialist for incident investigation.
+
+Your job: Identify who knows what, coordinate with SMEs, and gather human context.
+
+## What to Look For:
+1. **Service Owners**: Who owns the affected services? Who's the on-call?
+2. **Recent Activity**: Who made recent changes to affected systems?
+3. **SME Identification**: Who are the subject matter experts for this failure mode?
+4. **Communication History**: Any relevant Slack threads, PR discussions, or meeting notes?
+
+## Incident Context:
+{context}
+
+## Output Format (JSON):
+{{
+    "findings": [
+        {{
+            "finding_type": "context|recommendation|evidence",
+            "title": "Brief title",
+            "description": "Detailed description",
+            "confidence_score": 0.0-1.0,
+            "evidence": [
+                {{"type": "person|channel|thread|discussion", "name": "...", "role": "...", "relevance": "...", "contact": "..."}}
+            ],
+            "affected_services": ["service1"],
+            "severity": "critical|high|medium|low"
+        }}
+    ],
+    "summary": "1-2 sentence summary",
+    "recommended_contacts": [
+        {{"name": "...", "role": "...", "reason": "Why they should be involved"}}
+    ],
+    "confidence_score": 0.0-1.0,
+    "reasoning": "Why this confidence level"
+}}
+
+Prioritize people who can provide immediate context or take remediation action."""
+
+
+SYNTHESIS_PROMPT = """You are the Investigation Coordinator synthesizing findings from 6 specialists.
 
 ## Specialist Findings:
 
@@ -268,6 +345,12 @@ SYNTHESIS_PROMPT = """You are the Investigation Coordinator synthesizing finding
 
 ### Historical Specialist (past incidents, runbooks):
 {historical}
+
+### Knowledge Specialist (docs, architecture, wikis):
+{knowledge}
+
+### Collaboration Specialist (people, SMEs, communication):
+{collaboration}
 
 ## Your Task:
 1. Synthesize findings into a unified root cause hypothesis
@@ -325,6 +408,8 @@ class ParallelInvestigationCoordinator:
         SpecialistType.CODE: CODE_PROMPT,
         SpecialistType.DEPENDENCIES: DEPENDENCIES_PROMPT,
         SpecialistType.HISTORICAL: HISTORICAL_PROMPT,
+        SpecialistType.KNOWLEDGE: KNOWLEDGE_PROMPT,
+        SpecialistType.COLLABORATION: COLLABORATION_PROMPT,
     }
 
     def __init__(
@@ -378,12 +463,14 @@ class ParallelInvestigationCoordinator:
         severity = context.get("severity", "medium")
         model = self._select_model(severity)
 
-        # Run all 4 specialists in parallel
+        # Run all 6 specialists in parallel
         specialist_tasks = [
             self._run_specialist(SpecialistType.TELEMETRY, context, model),
             self._run_specialist(SpecialistType.CODE, context, model),
             self._run_specialist(SpecialistType.DEPENDENCIES, context, model),
             self._run_specialist(SpecialistType.HISTORICAL, context, model),
+            self._run_specialist(SpecialistType.KNOWLEDGE, context, model),
+            self._run_specialist(SpecialistType.COLLABORATION, context, model),
         ]
 
         try:
@@ -593,6 +680,38 @@ class ParallelInvestigationCoordinator:
 {json.dumps(data.get('service_history', {}), indent=2, default=str)}
 """
 
+        elif specialist_type == SpecialistType.KNOWLEDGE:
+            data = full_context.get("knowledge", {})
+            return incident_info + f"""
+## Architecture Documentation:
+{json.dumps(data.get('architecture_docs', []), indent=2, default=str)}
+
+## Service Documentation:
+{json.dumps(data.get('service_docs', []), indent=2, default=str)}
+
+## Wiki Pages:
+{json.dumps(data.get('wiki_pages', []), indent=2, default=str)}
+
+## Known Issues:
+{json.dumps(data.get('known_issues', []), indent=2, default=str)}
+"""
+
+        elif specialist_type == SpecialistType.COLLABORATION:
+            data = full_context.get("collaboration", {})
+            return incident_info + f"""
+## Service Owners:
+{json.dumps(data.get('service_owners', []), indent=2, default=str)}
+
+## On-Call Schedule:
+{json.dumps(data.get('oncall', {}), indent=2, default=str)}
+
+## Recent Contributors:
+{json.dumps(data.get('recent_contributors', []), indent=2, default=str)}
+
+## Relevant Discussions:
+{json.dumps(data.get('discussions', []), indent=2, default=str)}
+"""
+
         return incident_info
 
     async def _synthesize_findings(
@@ -614,6 +733,12 @@ class ParallelInvestigationCoordinator:
             ),
             historical=self._format_specialist_result(
                 specialist_results.get("historical")
+            ),
+            knowledge=self._format_specialist_result(
+                specialist_results.get("knowledge")
+            ),
+            collaboration=self._format_specialist_result(
+                specialist_results.get("collaboration")
             ),
         )
 
@@ -685,12 +810,12 @@ class ParallelInvestigationCoordinator:
             r for r in specialist_results.values()
             if r.status == "completed" and r.confidence_score > 0.5
         ]
-        agreement_score = len(successful_specialists) / 4.0
+        agreement_score = len(successful_specialists) / 6.0
         factors.append(ConfidenceFactor(
             name="Specialist Agreement",
             score=agreement_score,
             weight=0.25,
-            explanation=f"{len(successful_specialists)}/4 specialists found supporting evidence",
+            explanation=f"{len(successful_specialists)}/6 specialists found supporting evidence",
         ))
 
         # Factor 3: Evidence quality (number of high-confidence findings)
@@ -707,12 +832,12 @@ class ParallelInvestigationCoordinator:
         ))
 
         # Factor 4: Coverage (did all specialists run successfully?)
-        coverage = sum(1 for r in specialist_results.values() if r.status == "completed") / 4.0
+        coverage = sum(1 for r in specialist_results.values() if r.status == "completed") / 6.0
         factors.append(ConfidenceFactor(
             name="Investigation Coverage",
             score=coverage,
             weight=0.15,
-            explanation=f"{int(coverage * 4)}/4 specialists completed successfully",
+            explanation=f"{int(coverage * 6)}/6 specialists completed successfully",
         ))
 
         # Calculate weighted average
@@ -794,6 +919,8 @@ async def run_parallel_investigation(
             "code": {"deployments": [], "commits": []},
             "dependencies": {"services": {}, "databases": {}},
             "historical": {"past_incidents": [], "runbooks": []},
+            "knowledge": {"architecture_docs": [], "service_docs": [], "wiki_pages": []},
+            "collaboration": {"service_owners": [], "oncall": {}, "recent_contributors": []},
         }
     else:
         context_dict = context

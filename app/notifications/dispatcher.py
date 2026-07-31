@@ -29,6 +29,11 @@ class NotificationChannel(Enum):
     SLACK = "slack"
     WEBHOOK = "webhook"
     SMS = "sms"
+    VOICE = "voice"
+    WHATSAPP = "whatsapp"
+    DISCORD = "discord"
+    TELEGRAM = "telegram"
+    TEAMS = "teams"
 
 
 class NotificationPriority(Enum):
@@ -48,6 +53,9 @@ class NotificationPreferences:
     email: str | None = None
     phone: str | None = None
     slack_user_id: str | None = None
+    discord_webhook_url: str | None = None
+    telegram_chat_id: str | None = None
+    teams_webhook_url: str | None = None
     enabled_channels: set[NotificationChannel] = field(
         default_factory=lambda: {NotificationChannel.EMAIL, NotificationChannel.PUSH}
     )
@@ -95,6 +103,11 @@ class NotificationDispatcher:
         self.webhook_handler: Any | None = None
         self.slack_handler: Any | None = None
         self.sms_handler: Any | None = None
+        self.voice_handler: Any | None = None
+        self.whatsapp_handler: Any | None = None
+        self.discord_handler: Any | None = None
+        self.telegram_handler: Any | None = None
+        self.teams_handler: Any | None = None
 
     def set_webhook_handler(self, handler: Any) -> None:
         """Set custom webhook handler."""
@@ -107,6 +120,26 @@ class NotificationDispatcher:
     def set_sms_handler(self, handler: Any) -> None:
         """Set SMS notification handler."""
         self.sms_handler = handler
+
+    def set_voice_handler(self, handler: Any) -> None:
+        """Set Voice call handler."""
+        self.voice_handler = handler
+
+    def set_whatsapp_handler(self, handler: Any) -> None:
+        """Set WhatsApp handler."""
+        self.whatsapp_handler = handler
+
+    def set_discord_handler(self, handler: Any) -> None:
+        """Set Discord handler."""
+        self.discord_handler = handler
+
+    def set_telegram_handler(self, handler: Any) -> None:
+        """Set Telegram handler."""
+        self.telegram_handler = handler
+
+    def set_teams_handler(self, handler: Any) -> None:
+        """Set Microsoft Teams handler."""
+        self.teams_handler = handler
 
     async def dispatch(
         self,
@@ -261,6 +294,116 @@ class NotificationDispatcher:
                     notification_id=notification.id,
                     channel=channel,
                     success=success,
+                )
+
+            elif channel == NotificationChannel.VOICE:
+                if not self.voice_handler or not prefs.phone:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="Voice not configured",
+                    )
+                result = await self.voice_handler(
+                    phone=prefs.phone,
+                    message=f"{notification.title}. {notification.body}",
+                )
+                return DeliveryResult(
+                    notification_id=notification.id,
+                    channel=channel,
+                    success=result.get("success", False),
+                    error=result.get("error"),
+                )
+
+            elif channel == NotificationChannel.WHATSAPP:
+                if not self.whatsapp_handler or not prefs.phone:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="WhatsApp not configured",
+                    )
+                result = await self.whatsapp_handler(
+                    phone=prefs.phone,
+                    message=f"*{notification.title}*\n\n{notification.body}",
+                )
+                return DeliveryResult(
+                    notification_id=notification.id,
+                    channel=channel,
+                    success=result.get("success", False),
+                    error=result.get("error"),
+                )
+
+            elif channel == NotificationChannel.DISCORD:
+                if not self.discord_handler and not prefs.discord_webhook_url:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="Discord not configured",
+                    )
+                from app.notifications.discord import send_discord_alert
+                result = await send_discord_alert(
+                    title=notification.title,
+                    severity=notification.priority.value,
+                    incident_id=notification.id,
+                    description=notification.body,
+                )
+                return DeliveryResult(
+                    notification_id=notification.id,
+                    channel=channel,
+                    success=result.get("success", False),
+                    error=result.get("error"),
+                )
+
+            elif channel == NotificationChannel.TELEGRAM:
+                if not self.telegram_handler and not prefs.telegram_chat_id:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="Telegram not configured",
+                    )
+                from app.notifications.telegram import send_telegram_alert
+                result = await send_telegram_alert(
+                    title=notification.title,
+                    severity=notification.priority.value,
+                    incident_id=notification.id,
+                    description=notification.body,
+                    chat_id=prefs.telegram_chat_id,
+                )
+                return DeliveryResult(
+                    notification_id=notification.id,
+                    channel=channel,
+                    success=result.get("success", False),
+                    error=result.get("error"),
+                )
+
+            elif channel == NotificationChannel.TEAMS:
+                if not self.teams_handler and not prefs.teams_webhook_url:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="Teams not configured",
+                    )
+                if self.teams_handler:
+                    result = await self.teams_handler(
+                        webhook_url=prefs.teams_webhook_url,
+                        title=notification.title,
+                        body=notification.body,
+                    )
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=result.get("success", False),
+                        error=result.get("error"),
+                    )
+                return DeliveryResult(
+                    notification_id=notification.id,
+                    channel=channel,
+                    success=False,
+                    error="Teams handler not set",
                 )
 
             return DeliveryResult(

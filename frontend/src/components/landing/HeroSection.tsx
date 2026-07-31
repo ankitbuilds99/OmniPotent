@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, Suspense } from 'react'
+import { useRef, useState, useEffect, Suspense } from 'react'
 import { motion, useScroll, useTransform } from 'framer-motion'
 import { ArrowRight, Sparkles, ChevronDown } from 'lucide-react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Float, Sphere, MeshDistortMaterial, Stars } from '@react-three/drei'
 import * as THREE from 'three'
+import { useThemeColors } from '../../hooks/useThemeColors'
 
 const ROTATING_WORDS = ['incidents', 'outages', 'alerts', 'failures', 'pages']
 
@@ -22,13 +23,7 @@ function RotatingText({ words }: { words: string[] }) {
       {words.map((word, i) => (
         <motion.span
           key={word}
-          className="absolute left-0 whitespace-nowrap"
-          style={{
-            background: 'linear-gradient(135deg, #00E7FF 0%, #7C3AED 50%, #00FFB3 100%)',
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
-            backgroundClip: 'text'
-          }}
+          className="absolute left-0 whitespace-nowrap gradient-text"
           initial={{ y: 40, opacity: 0, filter: 'blur(8px)' }}
           animate={{
             y: i === index ? 0 : i === (index - 1 + words.length) % words.length ? -40 : 40,
@@ -72,7 +67,7 @@ function FloatingOrb({ position, color, size = 1, speed = 1 }: {
 }
 
 // Central AI core visualization
-function AICore() {
+function AICore({ colors }: { colors: { accent: string; accent2: string; ok: string } }) {
   const coreRef = useRef<THREE.Group>(null)
   const innerRef = useRef<THREE.Mesh>(null)
   const ring1Ref = useRef<THREE.Mesh>(null)
@@ -108,8 +103,8 @@ function AICore() {
       <Float speed={1.5} rotationIntensity={0.3} floatIntensity={0.3}>
         <Sphere ref={innerRef} args={[1.2, 64, 64]}>
           <MeshDistortMaterial
-            color="#00E7FF"
-            emissive="#00E7FF"
+            color={colors.accent}
+            emissive={colors.accent}
             emissiveIntensity={0.4}
             roughness={0.2}
             metalness={0.8}
@@ -124,19 +119,19 @@ function AICore() {
       {/* Orbital ring 1 */}
       <mesh ref={ring1Ref} rotation={[Math.PI / 2, 0, 0]}>
         <torusGeometry args={[2, 0.02, 16, 100]} />
-        <meshBasicMaterial color="#00E7FF" transparent opacity={0.4} />
+        <meshBasicMaterial color={colors.accent} transparent opacity={0.4} />
       </mesh>
 
       {/* Orbital ring 2 */}
       <mesh ref={ring2Ref}>
         <torusGeometry args={[2.5, 0.015, 16, 100]} />
-        <meshBasicMaterial color="#7C3AED" transparent opacity={0.3} />
+        <meshBasicMaterial color={colors.accent2} transparent opacity={0.3} />
       </mesh>
 
       {/* Orbital ring 3 */}
       <mesh ref={ring3Ref}>
         <torusGeometry args={[3, 0.01, 16, 100]} />
-        <meshBasicMaterial color="#00FFB3" transparent opacity={0.2} />
+        <meshBasicMaterial color={colors.ok} transparent opacity={0.2} />
       </mesh>
 
       {/* Orbiting particles */}
@@ -149,13 +144,13 @@ function AICore() {
             radius={radius}
             angle={angle}
             speed={0.3 + (i % 3) * 0.1}
-            color={i % 2 === 0 ? '#00E7FF' : '#7C3AED'}
+            color={i % 2 === 0 ? colors.accent : colors.accent2}
           />
         )
       })}
 
       {/* Central glow */}
-      <pointLight color="#00E7FF" intensity={3} distance={15} />
+      <pointLight color={colors.accent} intensity={3} distance={15} />
     </group>
   )
 }
@@ -186,7 +181,7 @@ function OrbitingParticle({ radius, angle, speed, color }: {
 }
 
 // Connection lines between points
-function ConnectionLines() {
+function ConnectionLines({ colors }: { colors: { accent: string; accent2: string; ok: string } }) {
   const linesRef = useRef<THREE.Group>(null)
 
   useFrame((state) => {
@@ -200,13 +195,15 @@ function ConnectionLines() {
     [-4, 0, 0], [4, 0.5, -1], [0, 3, 1], [0, -3, -1]
   ]
 
+  const colorArray = [colors.accent, colors.accent2, colors.ok]
+
   return (
     <group ref={linesRef}>
       {points.map((point, i) => (
         <FloatingOrb
           key={i}
           position={point as [number, number, number]}
-          color={['#00E7FF', '#7C3AED', '#00FFB3'][i % 3]}
+          color={colorArray[i % 3]}
           size={0.08 + (i % 3) * 0.03}
           speed={0.5 + (i % 4) * 0.2}
         />
@@ -215,7 +212,7 @@ function ConnectionLines() {
   )
 }
 
-function Scene3D() {
+function Scene3D({ colors }: { colors: { accent: string; accent2: string; ok: string } }) {
   return (
     <>
       <ambientLight intensity={0.2} />
@@ -231,8 +228,8 @@ function Scene3D() {
         speed={0.3}
       />
 
-      <AICore />
-      <ConnectionLines />
+      <AICore colors={colors} />
+      <ConnectionLines colors={colors} />
     </>
   )
 }
@@ -250,6 +247,7 @@ const INTEGRATIONS = [
 
 export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const colors = useThemeColors()
   const { scrollYProgress } = useScroll({
     target: containerRef,
     offset: ['start start', 'end start']
@@ -261,7 +259,8 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
   return (
     <section
       ref={containerRef}
-      className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[#030508]"
+      className="relative min-h-screen flex items-center justify-center overflow-hidden"
+      style={{ backgroundColor: colors.bg }}
     >
       {/* 3D Canvas Background */}
       <div className="absolute inset-0 z-0">
@@ -270,7 +269,7 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           dpr={[1, 2]}
         >
           <Suspense fallback={null}>
-            <Scene3D />
+            <Scene3D colors={colors} />
           </Suspense>
         </Canvas>
       </div>
@@ -278,14 +277,20 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
       {/* Gradient overlays for depth */}
       <div className="absolute inset-0 z-[1] pointer-events-none">
         {/* Top fade */}
-        <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-[#030508] to-transparent" />
+        <div
+          className="absolute top-0 left-0 right-0 h-32"
+          style={{ background: `linear-gradient(to bottom, ${colors.bg}, transparent)` }}
+        />
         {/* Bottom fade */}
-        <div className="absolute bottom-0 left-0 right-0 h-48 bg-gradient-to-t from-[#030508] to-transparent" />
+        <div
+          className="absolute bottom-0 left-0 right-0 h-48"
+          style={{ background: `linear-gradient(to top, ${colors.bg}, transparent)` }}
+        />
         {/* Center radial for text readability */}
         <div
           className="absolute inset-0"
           style={{
-            background: 'radial-gradient(ellipse at center, rgba(3,5,8,0.4) 0%, transparent 60%)'
+            background: `radial-gradient(ellipse at center, ${colors.bg}66 0%, transparent 60%)`
           }}
         />
       </div>
@@ -303,8 +308,14 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
           transition={{ duration: 0.6 }}
         >
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00FFB3] opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#00FFB3]" />
+            <span
+              className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+              style={{ backgroundColor: colors.ok }}
+            />
+            <span
+              className="relative inline-flex rounded-full h-2 w-2"
+              style={{ backgroundColor: colors.ok }}
+            />
           </span>
           <span className="text-white/70 text-sm font-medium">
             Now Generally Available

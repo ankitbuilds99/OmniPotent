@@ -7,17 +7,23 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Custom DevOps Copilot palette
-        background: '#040814',
-        'background-secondary': '#07111F',
-        primary: '#00E7FF',
-        secondary: '#7C3AED',
-        accent: '#00FFB3',
-        success: '#3CF281',
-        warning: '#FFC247',
-        danger: '#FF4D6D',
-        glass: 'rgba(255,255,255,0.08)',
-        'glass-border': 'rgba(255,255,255,0.1)',
+        // Theme-aware colors using CSS variables
+        background: 'var(--bg, #040814)',
+        'background-secondary': 'var(--shell, #07111F)',
+        primary: 'var(--accent, #00E7FF)',
+        secondary: 'var(--accent-2, #7C3AED)',
+        accent: 'var(--ok, #00FFB3)',
+        success: 'var(--ok, #3CF281)',
+        warning: 'var(--warn, #FFC247)',
+        danger: 'var(--bad, #FF4D6D)',
+        glass: 'var(--glass-bg, rgba(255,255,255,0.08))',
+        'glass-border': 'var(--glass-border, rgba(255,255,255,0.1))',
+        'surface': 'var(--panel, #0e131c)',
+        'surface-2': 'var(--panel-2, #1b2433)',
+        'border': 'var(--border, #232e40)',
+        'text': 'var(--text, #eaf0f8)',
+        'text-dim': 'var(--text-dim, #94a3b8)',
+        'text-faint': 'var(--text-faint, #8893ac)',
       },
       fontFamily: {
         sans: ['Inter', 'SF Pro Display', 'system-ui', 'sans-serif'],
@@ -91,9 +97,9 @@ export default {
         'grid': '50px 50px',
       },
       boxShadow: {
-        'glow-primary': '0 0 30px rgba(0, 231, 255, 0.4)',
-        'glow-secondary': '0 0 30px rgba(124, 58, 237, 0.4)',
-        'glow-accent': '0 0 30px rgba(0, 255, 179, 0.4)',
+        'glow-primary': '0 0 30px var(--glow-1, rgba(0, 231, 255, 0.4))',
+        'glow-secondary': '0 0 30px var(--glow-2, rgba(124, 58, 237, 0.4))',
+        'glow-accent': '0 0 30px var(--accent-soft, rgba(0, 255, 179, 0.4))',
         'glass': '0 8px 32px rgba(0, 0, 0, 0.3)',
       },
       backdropBlur: {

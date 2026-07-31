@@ -19,7 +19,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
   const [isThemeOpen, setIsThemeOpen] = useState(false)
   const [currentTheme, setCurrentTheme] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('theme') || DEFAULT_THEME
+      return localStorage.getItem('copilot-theme') || DEFAULT_THEME
     }
     return DEFAULT_THEME
   })
@@ -35,7 +35,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
 
   useEffect(() => {
     document.documentElement.dataset.theme = currentTheme
-    localStorage.setItem('theme', currentTheme)
+    localStorage.setItem('copilot-theme', currentTheme)
   }, [currentTheme])
 
   const handleThemeChange = (themeId: string) => {

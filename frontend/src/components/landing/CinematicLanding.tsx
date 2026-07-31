@@ -46,7 +46,8 @@ export function CinematicLanding({ onLaunch, onDashboard: _onDashboard, onBillin
   return (
     <div
       ref={containerRef}
-      className="relative min-h-screen bg-background overflow-hidden"
+      className="relative min-h-screen overflow-hidden"
+      style={{ backgroundColor: 'var(--bg)' }}
     >
       {/* Cursor glow effect */}
       <CursorGlow />
