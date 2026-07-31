@@ -16,8 +16,14 @@ import {
   FileText,
   Zap,
   Filter,
-  RefreshCw
+  RefreshCw,
+  Download,
+  FileJson,
+  FileCode,
+  MessageSquare
 } from 'lucide-react'
+import { downloadInvestigation } from '../utils/exportReport'
+import { shareToSlack } from '../api'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
 import { initSupabase } from '../lib/supabase'
 
@@ -387,21 +393,97 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
                         {JSON.stringify(inv.report, null, 2)}
                       </pre>
 
-                      {onViewInvestigation && (
+                      {/* Export & Share Buttons */}
+                      <div className="flex flex-wrap items-center gap-2 mt-3">
+                        {/* Share to Slack */}
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            try {
+                              const result = await shareToSlack(inv.query, inv.report || {})
+                              if (result.success) {
+                                alert('Report shared to Slack!')
+                              }
+                            } catch (err) {
+                              alert(err instanceof Error ? err.message : 'Failed to share')
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors"
+                          style={{
+                            backgroundColor: '#4A154B',
+                            color: 'white'
+                          }}
+                          title="Share to Slack"
+                        >
+                          <MessageSquare size={14} />
+                          Slack
+                        </button>
+
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            onViewInvestigation(inv.thread_id)
+                            downloadInvestigation(inv, 'markdown')
                           }}
-                          className="mt-3 px-4 py-2 rounded-lg font-medium"
+                          className="px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors"
                           style={{
-                            backgroundColor: 'var(--accent)',
-                            color: 'var(--bg)'
+                            backgroundColor: 'var(--bg)',
+                            border: '1px solid var(--border)',
+                            color: 'var(--text)'
                           }}
+                          title="Export as Markdown"
                         >
-                          Continue Investigation
+                          <Download size={14} />
+                          Markdown
                         </button>
-                      )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            downloadInvestigation(inv, 'html')
+                          }}
+                          className="px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors"
+                          style={{
+                            backgroundColor: 'var(--bg)',
+                            border: '1px solid var(--border)',
+                            color: 'var(--text)'
+                          }}
+                          title="Export as HTML"
+                        >
+                          <FileCode size={14} />
+                          HTML
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            downloadInvestigation(inv, 'json')
+                          }}
+                          className="px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors"
+                          style={{
+                            backgroundColor: 'var(--bg)',
+                            border: '1px solid var(--border)',
+                            color: 'var(--text)'
+                          }}
+                          title="Export as JSON"
+                        >
+                          <FileJson size={14} />
+                          JSON
+                        </button>
+
+                        {onViewInvestigation && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onViewInvestigation(inv.thread_id)
+                            }}
+                            className="px-4 py-1.5 rounded-lg text-sm font-medium"
+                            style={{
+                              backgroundColor: 'var(--accent)',
+                              color: 'var(--bg)'
+                            }}
+                          >
+                            Continue
+                          </button>
+                        )}
+                      </div>
                     </motion.div>
                   )}
                 </motion.div>

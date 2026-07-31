@@ -274,3 +274,30 @@ export async function isWebSocketEnabled(): Promise<boolean> {
   const health = await healthExtended();
   return health?.websocket?.enabled ?? false;
 }
+
+// --------------------------------------------------------------------------- //
+// Integrations
+// --------------------------------------------------------------------------- //
+
+export interface IntegrationStatus {
+  slack: boolean;
+  github: boolean;
+  pagerduty: boolean;
+  datadog: boolean;
+  sentry: boolean;
+  kubernetes: boolean;
+}
+
+/** Get status of configured integrations. */
+export function getIntegrationStatus(): Promise<IntegrationStatus> {
+  return get<IntegrationStatus>("/integrations/status");
+}
+
+/** Share an investigation report to Slack. */
+export async function shareToSlack(
+  query: string,
+  report: Record<string, unknown>,
+  channel?: string
+): Promise<{ success: boolean; message?: string }> {
+  return post("/share/slack", { query, report, channel: channel || "" });
+}

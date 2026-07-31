@@ -9,8 +9,10 @@ import { Login } from "./pages/Login";
 import { AuthCallback } from "./pages/AuthCallback";
 import { Profile } from "./pages/Profile";
 import { History } from "./pages/History";
+import { StatusPage } from "./pages/StatusPage";
+import { Team } from "./pages/Team";
 
-type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history";
+type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
@@ -68,6 +70,8 @@ export default function App() {
           onLogout={() => setView("landing")}
           onProfile={() => setView("profile")}
           onHistory={() => setView("history")}
+          onStatus={() => setView("status")}
+          onTeam={() => setView("team")}
         />
       )}
       {view === "api-docs" && (
@@ -96,6 +100,12 @@ export default function App() {
             setView("console")
           }}
         />
+      )}
+      {view === "status" && (
+        <StatusPage onBack={() => setView("console")} />
+      )}
+      {view === "team" && (
+        <Team onBack={() => setView("console")} />
       )}
     </>
   );

@@ -2023,6 +2023,62 @@ async def submit_feedback(req: FeedbackRequest) -> dict:
     return {"status": "recorded", "feedback": entry}
 
 
+# --- Slack Integration --- #
+class SlackShareRequest(BaseModel):
+    query: str
+    report: dict
+    channel: str = ""
+
+
+@app.post(
+    "/share/slack",
+    tags=["Feedback"],
+    summary="Share report to Slack",
+    description="Post an investigation report to a Slack channel via webhook or bot token.",
+    responses={
+        200: {"description": "Report shared successfully"},
+        400: {"description": "Slack not configured"},
+    },
+)
+async def share_to_slack(req: SlackShareRequest) -> dict:
+    """Share an investigation report to Slack."""
+    from app.integrations.slack_notify import is_slack_configured, post_to_slack
+
+    if not is_slack_configured():
+        raise HTTPException(400, "Slack is not configured. Set SLACK_WEBHOOK_URL or SLACK_BOT_TOKEN.")
+
+    result = await post_to_slack(
+        report=req.report,
+        query=req.query,
+        channel=req.channel or None
+    )
+
+    if not result.get("success"):
+        raise HTTPException(400, result.get("message", "Failed to post to Slack"))
+
+    return result
+
+
+@app.get(
+    "/integrations/status",
+    tags=["Config"],
+    summary="Get integration status",
+    description="Check which integrations are configured and available.",
+)
+async def integration_status() -> dict:
+    """Get status of configured integrations."""
+    from app.integrations.slack_notify import is_slack_configured
+
+    return {
+        "slack": is_slack_configured(),
+        "github": runtime.github_connected(),
+        "pagerduty": bool(get_settings().pagerduty_api_token),
+        "datadog": bool(get_settings().dd_api_key and get_settings().dd_app_key),
+        "sentry": bool(get_settings().sentry_api_token),
+        "kubernetes": bool(get_settings().kube_config_path),
+    }
+
+
 @app.get(
     "/audit",
     tags=["Audit"],

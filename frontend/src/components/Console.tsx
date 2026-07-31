@@ -30,6 +30,8 @@ function TopBar({
   onLogout,
   onProfile,
   onHistory,
+  onStatus,
+  onTeam,
   isLoggedIn,
   userAvatar,
 }: {
@@ -42,6 +44,8 @@ function TopBar({
   onLogout?: () => void;
   onProfile?: () => void;
   onHistory?: () => void;
+  onStatus?: () => void;
+  onTeam?: () => void;
   isLoggedIn?: boolean;
   userAvatar?: string | null;
 }) {
@@ -77,6 +81,8 @@ function TopBar({
         </button>
         {!isLoggedIn && <button className="nav__btn" onClick={onSignup}>Sign up</button>}
         {onHistory && <button className="nav__btn" onClick={onHistory}>History</button>}
+        {onTeam && <button className="nav__btn" onClick={onTeam}>Team</button>}
+        {onStatus && <button className="nav__btn" onClick={onStatus}>Status</button>}
         {onDashboard && <button className="nav__btn" onClick={onDashboard}>Dashboard</button>}
         {onBilling && <button className="nav__btn" onClick={onBilling}>Billing</button>}
         <button className="nav__btn" onClick={onAdmin}>Admin</button>
@@ -123,7 +129,7 @@ function TopBar({
   );
 }
 
-export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, onHistory }: { onHome: () => void; onDashboard?: () => void; onBilling?: () => void; onLogout?: () => void; onProfile?: () => void; onHistory?: () => void }) {
+export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, onHistory, onStatus, onTeam }: { onHome: () => void; onDashboard?: () => void; onBilling?: () => void; onLogout?: () => void; onProfile?: () => void; onHistory?: () => void; onStatus?: () => void; onTeam?: () => void }) {
   const {
     turns,
     busy,
@@ -172,6 +178,8 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
         onLogout={handleLogout}
         onProfile={onProfile}
         onHistory={onHistory}
+        onStatus={onStatus}
+        onTeam={onTeam}
         isLoggedIn={!!user}
         userAvatar={(() => {
           const avatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
