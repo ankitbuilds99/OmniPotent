@@ -717,6 +717,10 @@ app.include_router(teams_router, prefix="/api")
 from app.incidents import incidents_router  # noqa: E402
 app.include_router(incidents_router, prefix="/api")
 
+# Include webhooks router for auto-triggering investigations.
+from app.webhooks import webhooks_router  # noqa: E402
+app.include_router(webhooks_router, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")

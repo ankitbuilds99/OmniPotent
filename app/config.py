@@ -435,6 +435,25 @@ class Settings(BaseSettings):
     deployment_health_check_interval_s: int = 10
     deployment_rollback_on_failure: bool = True
 
+    # --- Email Notifications ---
+    # Email provider: smtp | ses | sendgrid | resend
+    email_provider: str = "smtp"
+    email_from: str = "noreply@devops-copilot.io"
+    smtp_host: str = "localhost"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""
+    sendgrid_api_key: str = ""
+    resend_api_key: str = ""
+
+    # --- Webhook Configuration ---
+    # Auto-trigger investigation when webhook creates an incident
+    copilot_auto_investigate: bool = True
+    # Generic webhook shared secret for HMAC verification
+    copilot_webhook_secret: str = ""
+    # HSTS enabled (Strict-Transport-Security header)
+    copilot_hsts_enabled: bool = True
+
     @field_validator("copilot_provider")
     @classmethod
     def _normalize_provider(cls, v: str) -> str:

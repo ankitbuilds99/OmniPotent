@@ -1,0 +1,187 @@
+groups:
+  - name: devops-copilot-alerts
+    rules:
+      # API Health
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="devops-copilot", status=~"5.."}[5m]))
+          / sum(rate(http_requests_total{job="devops-copilot"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "High error rate on DevOps Copilot API"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="devops-copilot"}[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High P99 latency on DevOps Copilot API"
+          description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 2s)"
+
+      - alert: ServiceDown
+        expr: up{job="devops-copilot"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "DevOps Copilot service is down"
+          description: "Instance {{ $labels.instance }} is not responding"
+
+      # Investigation Performance
+      - alert: InvestigationSlowdown
+        expr: |
+          histogram_quantile(0.95, sum(rate(devops_copilot_investigation_duration_seconds_bucket[5m])) by (le)) > 300
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Investigations are taking too long"
+          description: "P95 investigation duration is {{ $value | humanizeDuration }}"
+
+      - alert: InvestigationFailureRate
+        expr: |
+          sum(rate(devops_copilot_investigations_total{status="failed"}[10m]))
+          / sum(rate(devops_copilot_investigations_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High investigation failure rate"
+          description: "{{ $value | humanizePercentage }} of investigations are failing"
+
+      - alert: LowAgentConfidence
+        expr: avg(devops_copilot_agent_confidence_score) < 0.6
+        for: 15m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "AI agent confidence scores are low"
+          description: "Average confidence is {{ $value | printf \"%.2f\" }}"
+
+      # Resource Alerts
+      - alert: HighMemoryUsage
+        expr: |
+          sum(container_memory_working_set_bytes{pod=~"devops-copilot.*"})
+          / sum(kube_pod_container_resource_limits{pod=~"devops-copilot.*", resource="memory"}) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High memory usage on DevOps Copilot pods"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: HighCPUUsage
+        expr: |
+          sum(rate(container_cpu_usage_seconds_total{pod=~"devops-copilot.*"}[5m]))
+          / sum(kube_pod_container_resource_limits{pod=~"devops-copilot.*", resource="cpu"}) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High CPU usage on DevOps Copilot pods"
+          description: "CPU usage is {{ $value | humanizePercentage }}"
+
+      - alert: PodNotReady
+        expr: |
+          kube_pod_status_ready{pod=~"devops-copilot.*", condition="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "DevOps Copilot pod is not ready"
+          description: "Pod {{ $labels.pod }} is not ready"
+
+      - alert: TooFewReplicas
+        expr: |
+          kube_deployment_status_replicas_available{deployment=~"devops-copilot.*"}
+          < kube_deployment_spec_replicas{deployment=~"devops-copilot.*"}
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "DevOps Copilot has fewer replicas than desired"
+          description: "{{ $value }} replicas available, expected {{ $labels.replicas }}"
+
+      # Database Alerts
+      - alert: DatabaseConnectionPoolExhausted
+        expr: |
+          sum(devops_copilot_db_connections_active) / sum(devops_copilot_db_connections_max) > 0.9
+        for: 5m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "{{ $value | humanizePercentage }} of connections in use"
+
+      - alert: DatabaseSlowQueries
+        expr: |
+          histogram_quantile(0.95, sum(rate(devops_copilot_db_query_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Database queries are slow"
+          description: "P95 query duration is {{ $value | humanizeDuration }}"
+
+      # Redis Alerts
+      - alert: RedisDown
+        expr: redis_up{job="devops-copilot-redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: devops-copilot
+        annotations:
+          summary: "Redis is down"
+          description: "Redis instance is not responding"
+
+      - alert: RedisHighMemory
+        expr: |
+          redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Redis memory usage is high"
+          description: "Redis memory usage is {{ $value | humanizePercentage }}"
+
+      # Rate Limiting
+      - alert: HighRateLimitRejections
+        expr: |
+          sum(rate(devops_copilot_rate_limit_rejected_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "High rate of rate-limited requests"
+          description: "{{ $value | printf \"%.1f\" }} requests/sec being rate limited"
+
+      # Webhook Alerts
+      - alert: WebhookProcessingFailures
+        expr: |
+          sum(rate(devops_copilot_webhook_errors_total[10m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: devops-copilot
+        annotations:
+          summary: "Webhook processing failures"
+          description: "{{ $value | printf \"%.1f\" }} webhook errors per second"
