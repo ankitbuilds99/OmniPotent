@@ -355,9 +355,13 @@ interface DashboardProps {
   onOnCall?: () => void;
   onServiceMap?: () => void;
   onNotifications?: () => void;
+  onPostmortem?: () => void;
+  onAnalytics?: () => void;
+  onSLO?: () => void;
+  onRunbooks?: () => void;
 }
 
-export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall, onServiceMap, onNotifications }: DashboardProps) {
+export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall, onServiceMap, onNotifications, onPostmortem, onAnalytics, onSLO, onRunbooks }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
@@ -425,6 +429,42 @@ export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall
             >
               <Icon name="bell" size={18} />
               <span className="font-medium">Notifications</span>
+            </button>
+          )}
+          {onAnalytics && (
+            <button
+              onClick={onAnalytics}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-green-500 transition-colors"
+            >
+              <Icon name="chart" size={18} />
+              <span className="font-medium">Analytics</span>
+            </button>
+          )}
+          {onSLO && (
+            <button
+              onClick={onSLO}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-orange-500 transition-colors"
+            >
+              <Icon name="target" size={18} />
+              <span className="font-medium">SLOs</span>
+            </button>
+          )}
+          {onRunbooks && (
+            <button
+              onClick={onRunbooks}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-purple-500 transition-colors"
+            >
+              <Icon name="book" size={18} />
+              <span className="font-medium">Runbooks</span>
+            </button>
+          )}
+          {onPostmortem && (
+            <button
+              onClick={onPostmortem}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-gray-500 transition-colors"
+            >
+              <Icon name="file-text" size={18} />
+              <span className="font-medium">Postmortems</span>
             </button>
           )}
         </div>

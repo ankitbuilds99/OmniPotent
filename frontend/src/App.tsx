@@ -15,8 +15,12 @@ import { Incidents } from "./pages/Incidents";
 import { OnCall } from "./pages/OnCall";
 import { ServiceMap } from "./pages/ServiceMap";
 import { NotificationPreferences } from "./pages/NotificationPreferences";
+import { Postmortem } from "./pages/Postmortem";
+import { Analytics } from "./pages/Analytics";
+import { SLOTracker } from "./pages/SLOTracker";
+import { RunbookBuilder } from "./pages/RunbookBuilder";
 
-type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team" | "incidents" | "oncall" | "servicemap" | "notifications";
+type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team" | "incidents" | "oncall" | "servicemap" | "notifications" | "postmortem" | "analytics" | "slo" | "runbooks";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
@@ -89,6 +93,10 @@ export default function App() {
           onOnCall={() => setView("oncall")}
           onServiceMap={() => setView("servicemap")}
           onNotifications={() => setView("notifications")}
+          onPostmortem={() => setView("postmortem")}
+          onAnalytics={() => setView("analytics")}
+          onSLO={() => setView("slo")}
+          onRunbooks={() => setView("runbooks")}
         />
       )}
       {view === "billing" && (
@@ -126,6 +134,18 @@ export default function App() {
       )}
       {view === "notifications" && (
         <NotificationPreferences onBack={() => setView("dashboard")} />
+      )}
+      {view === "postmortem" && (
+        <Postmortem onBack={() => setView("dashboard")} />
+      )}
+      {view === "analytics" && (
+        <Analytics onBack={() => setView("dashboard")} />
+      )}
+      {view === "slo" && (
+        <SLOTracker onBack={() => setView("dashboard")} />
+      )}
+      {view === "runbooks" && (
+        <RunbookBuilder onBack={() => setView("dashboard")} />
       )}
     </>
   );

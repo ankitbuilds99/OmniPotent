@@ -1,25 +1,27 @@
-# DevOps Copilot — single-service compose (frontend + backend in one image).
+# DevOps Copilot — full local development stack
 #
-# The image builds the SPA and serves it from FastAPI, so http://localhost:8000
-# gives you the full app. MCP servers run as stdio subprocesses inside the
-# container (launched by the agent), so no extra services are required.
+# Run: docker compose up -d
+# Access: http://localhost:8000 (API) | http://localhost:5173 (Frontend)
 #
-# For a real multi-instance deployment, swap the SQLite checkpointer for Postgres
-# and front this with a shared rate limiter — see DEPLOY.md.
+# Optional services for production-like setup:
+#   docker compose --profile monitoring up -d
 
 services:
+  # Main API service (frontend + backend in one image)
   copilot:
     build: .
     ports:
       - "8000:8000"
     environment:
       # --- environment / security ---
-      # Set to "production" to fail closed unless COPILOT_API_TOKEN is set.
       COPILOT_ENV: ${COPILOT_ENV:-development}
       COPILOT_API_TOKEN: ${COPILOT_API_TOKEN:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       COPILOT_RATE_LIMIT_PER_MIN: ${COPILOT_RATE_LIMIT_PER_MIN:-120}
       COPILOT_MAX_SESSIONS: ${COPILOT_MAX_SESSIONS:-50}
+      # --- database ---
+      DATABASE_URL: ${DATABASE_URL:-postgresql://devcopilot:devcopilot@postgres:5432/devcopilot}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # --- LLM provider + keys ---
       COPILOT_PROVIDER: ${COPILOT_PROVIDER:-anthropic}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -35,9 +37,108 @@ services:
       # --- agent + state ---
       COPILOT_MAX_ITERATIONS: ${COPILOT_MAX_ITERATIONS:-8}
       COPILOT_CHECKPOINT_DB: /data/copilot_checkpoints.sqlite
+      COPILOT_AUTO_INVESTIGATE: ${COPILOT_AUTO_INVESTIGATE:-true}
+      # --- auth ---
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
     volumes:
       - copilot_state:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: devcopilot
+      POSTGRES_PASSWORD: devcopilot
+      POSTGRES_DB: devcopilot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devcopilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for caching, sessions, and rate limiting
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Prometheus for metrics (optional, use --profile monitoring)
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yaml:/etc/prometheus/alerts.yaml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  # Grafana for dashboards (optional, use --profile monitoring)
+  grafana:
+    image: grafana/grafana:10.2.0
+    profiles: ["monitoring"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Jaeger for distributed tracing (optional, use --profile monitoring)
+  jaeger:
+    image: jaegertracing/all-in-one:1.50
+    profiles: ["monitoring"]
+    ports:
+      - "16686:16686"  # UI
+      - "6831:6831/udp"  # Thrift compact
+      - "14268:14268"  # HTTP collector
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
     restart: unless-stopped
 
 volumes:
   copilot_state:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: devcopilot-network
