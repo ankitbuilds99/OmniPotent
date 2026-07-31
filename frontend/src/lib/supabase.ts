@@ -16,25 +16,32 @@ type AnyClient = any
 
 let supabaseInstance: AnyClient | null = null
 let initPromise: Promise<AnyClient | null> | null = null
-let configFetched = false
+let configPromise: Promise<void> | null = null
 
 async function fetchRuntimeConfig(): Promise<void> {
-  if (configFetched) return
-  configFetched = true
-
   // If we already have config from build-time, skip runtime fetch
-  if (supabaseUrl && supabaseAnonKey) return
-
-  try {
-    const res = await fetch('/frontend-config')
-    if (res.ok) {
-      const config = await res.json()
-      if (config.supabase_url) supabaseUrl = config.supabase_url
-      if (config.supabase_anon_key) supabaseAnonKey = config.supabase_anon_key
-    }
-  } catch {
-    // API not available (dev mode without backend), use build-time config
+  if (supabaseUrl && supabaseAnonKey) {
+    return
   }
+
+  // Only fetch once, but wait for the same promise if called multiple times
+  if (configPromise) return configPromise
+
+  configPromise = (async () => {
+    try {
+      const res = await fetch('/frontend-config')
+      if (res.ok) {
+        const config = await res.json()
+        if (config.supabase_url) supabaseUrl = config.supabase_url
+        if (config.supabase_anon_key) supabaseAnonKey = config.supabase_anon_key
+        console.log('Supabase config loaded:', { url: supabaseUrl, hasKey: !!supabaseAnonKey })
+      }
+    } catch (e) {
+      console.warn('Failed to fetch frontend config:', e)
+    }
+  })()
+
+  return configPromise
 }
 
 async function createClient(): Promise<AnyClient | null> {

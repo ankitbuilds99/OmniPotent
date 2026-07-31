@@ -14,7 +14,9 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
 
   useEffect(() => {
     const handleCallback = async () => {
+      console.log('AuthCallback: checking Supabase config...')
       const configured = await checkSupabaseConfigured()
+      console.log('AuthCallback: configured =', configured)
       if (!configured) {
         setStatus('error')
         setMessage('Supabase is not configured')
