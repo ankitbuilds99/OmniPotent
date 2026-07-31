@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from app.connectors.base import Connector, ConnectorConfig, ConnectorError, QueryResult
+from app.connectors.base import Connector, ConnectorError, QueryResult
 
 log = logging.getLogger("devcopilot.connectors.grafana")
 

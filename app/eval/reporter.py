@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from app.eval.pipeline import EvalResult, EvalScenario
+from app.eval.pipeline import EvalResult
 
 log = logging.getLogger("devcopilot.eval.reporter")
 

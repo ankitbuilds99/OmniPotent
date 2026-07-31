@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Awaitable
 from uuid import uuid4
 
-from app.eval.scenarios import Scenario, ScenarioLoader, ExpectedOutcome
+from app.eval.scenarios import Scenario, ScenarioLoader
 from app.eval.metrics import (
     MetricsCalculator,
     AccuracyMetrics,

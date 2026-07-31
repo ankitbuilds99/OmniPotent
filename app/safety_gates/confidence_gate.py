@@ -275,7 +275,7 @@ class ConfidenceGate:
 
         if not passed:
             lines.append("")
-            lines.append(f"**⚠️ ESCALATION REQUIRED**")
+            lines.append("**⚠️ ESCALATION REQUIRED**")
             lines.append(f"Confidence {score:.0%} is below the {threshold:.0%} threshold.")
             lines.append("Human review required before proceeding.")
 

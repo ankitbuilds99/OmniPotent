@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable
+from typing import Any
 
-from app.router.classifier import TaskClassifier, TaskComplexity, TaskType, ClassificationResult
-from app.router.metrics import RouterMetrics, ModelPerformance
+from app.router.classifier import TaskClassifier, TaskComplexity, ClassificationResult
+from app.router.metrics import RouterMetrics
 
 log = logging.getLogger("devcopilot.router.adaptive")
 

@@ -9,7 +9,6 @@ Collectors:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -187,7 +186,7 @@ class LogCollector(DataCollector):
             )
 
         # Simulate response for now
-        log.debug("Would query ES at %s with: %s", es_url, es_query)
+        log.debug("Would query ES at %s/%s with: %s", es_url, index, es_query)
         return [
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),

@@ -18,9 +18,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
 
-from app.vpc_connector.redaction import RedactionEngine, create_redaction_engine
+from app.vpc_connector.redaction import create_redaction_engine
 from app.vpc_connector.collectors import (
     DataCollector,
     DataSourceType,

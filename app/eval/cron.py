@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 import httpx
 

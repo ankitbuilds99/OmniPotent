@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timezone
 
-from app.connectors.base import Connector, ConnectorConfig, ConnectorError, QueryResult
+from app.connectors.base import Connector, ConnectorError, QueryResult
 
 log = logging.getLogger("devcopilot.connectors.prometheus")
 

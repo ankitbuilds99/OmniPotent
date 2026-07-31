@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional
 from uuid import uuid4
 
 import strawberry
@@ -23,9 +23,7 @@ from app.api.graphql.types import (
     Severity,
     Hypothesis,
     Evidence,
-    ApprovalRequest,
     User,
-    ApiKey,
     Organization,
     UsageStats,
     EvalResult,

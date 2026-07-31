@@ -20,7 +20,6 @@ from app.monitoring.detectors import (
     TrendDetector,
     PatternDetector,
     Anomaly,
-    AnomalyType,
 )
 
 log = logging.getLogger("devcopilot.monitoring.ambient")
