@@ -35,9 +35,12 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
 
   // Get user metadata
   const email = user?.email || 'Not available'
-  const name = user?.user_metadata?.full_name || user?.user_metadata?.name || email.split('@')[0]
-  const avatarUrl = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
-  const provider = user?.app_metadata?.provider || 'email'
+  const nameFromMeta = user?.user_metadata?.full_name || user?.user_metadata?.name
+  const name = typeof nameFromMeta === 'string' ? nameFromMeta : email.split('@')[0]
+  const avatarFromMeta = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
+  const avatarUrl = typeof avatarFromMeta === 'string' ? avatarFromMeta : undefined
+  const providerFromMeta = user?.app_metadata?.provider
+  const provider = typeof providerFromMeta === 'string' ? providerFromMeta : 'email'
   const createdAt = user?.created_at ? new Date(user.created_at).toLocaleDateString() : 'Unknown'
 
   // Get provider icon

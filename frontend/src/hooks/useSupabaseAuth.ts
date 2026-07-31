@@ -9,6 +9,8 @@ interface User {
   id: string
   email?: string
   user_metadata?: Record<string, unknown>
+  app_metadata?: Record<string, unknown>
+  created_at?: string
 }
 
 interface Session {

@@ -173,7 +173,10 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
         onProfile={onProfile}
         onHistory={onHistory}
         isLoggedIn={!!user}
-        userAvatar={user?.user_metadata?.avatar_url || user?.user_metadata?.picture}
+        userAvatar={(() => {
+          const avatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
+          return typeof avatar === 'string' ? avatar : null
+        })()}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {signupOpen && <SignupModal onClose={() => setSignupOpen(false)} />}
