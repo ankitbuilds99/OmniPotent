@@ -97,7 +97,7 @@ class DiscordWebhook:
 
     async def send(self, message: DiscordMessage) -> dict[str, Any]:
         """Send a message via webhook."""
-        if not self.is_configured:
+        if not self.webhook_url:
             log.warning("Discord webhook not configured")
             return {"success": False, "error": "Discord webhook not configured"}
 
