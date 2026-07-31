@@ -1,18 +1,18 @@
 import { motion } from 'framer-motion'
 
-const COMPANIES = [
-  { name: 'Coinbase', logo: 'https://cdn.simpleicons.org/coinbase/0052FF' },
-  { name: 'DoorDash', logo: 'https://cdn.simpleicons.org/doordash/FF3008' },
-  { name: 'Snowflake', logo: 'https://cdn.simpleicons.org/snowflake/29B5E8' },
-  { name: 'Stripe', logo: 'https://cdn.simpleicons.org/stripe/635BFF' },
+const INTEGRATIONS = [
+  { name: 'Kubernetes', logo: 'https://cdn.simpleicons.org/kubernetes/326CE5' },
+  { name: 'Docker', logo: 'https://cdn.simpleicons.org/docker/2496ED' },
+  { name: 'Terraform', logo: 'https://cdn.simpleicons.org/terraform/844FBA' },
+  { name: 'GitHub', logo: 'https://cdn.simpleicons.org/github/FFFFFF' },
   { name: 'Datadog', logo: 'https://cdn.simpleicons.org/datadog/632CA6' },
   { name: 'PagerDuty', logo: 'https://cdn.simpleicons.org/pagerduty/06AC38' },
-  { name: 'HashiCorp', logo: 'https://cdn.simpleicons.org/hashicorp/000000' },
-  { name: 'Cloudflare', logo: 'https://cdn.simpleicons.org/cloudflare/F38020' },
-  { name: 'Vercel', logo: 'https://cdn.simpleicons.org/vercel/FFFFFF' },
-  { name: 'MongoDB', logo: 'https://cdn.simpleicons.org/mongodb/47A248' },
-  { name: 'Redis', logo: 'https://cdn.simpleicons.org/redis/DC382D' },
+  { name: 'Prometheus', logo: 'https://cdn.simpleicons.org/prometheus/E6522C' },
   { name: 'Grafana', logo: 'https://cdn.simpleicons.org/grafana/F46800' },
+  { name: 'Sentry', logo: 'https://cdn.simpleicons.org/sentry/362D59' },
+  { name: 'AWS', logo: 'https://cdn.simpleicons.org/amazonaws/FF9900' },
+  { name: 'ArgoCD', logo: 'https://cdn.simpleicons.org/argo/EF7B4D' },
+  { name: 'Slack', logo: 'https://cdn.simpleicons.org/slack/4A154B' },
 ]
 
 export function LogoCarousel() {
@@ -25,7 +25,7 @@ export function LogoCarousel() {
           whileInView={{ opacity: 1 }}
           viewport={{ once: true }}
         >
-          Trusted by engineering teams at
+          Integrates with your stack
         </motion.p>
       </div>
 
@@ -43,19 +43,19 @@ export function LogoCarousel() {
               repeat: Infinity,
             }}
           >
-            {[...COMPANIES, ...COMPANIES].map((company, i) => (
+            {[...INTEGRATIONS, ...INTEGRATIONS].map((integration, i) => (
               <div
-                key={`${company.name}-${i}`}
+                key={`${integration.name}-${i}`}
                 className="flex items-center gap-3 px-6 py-3 rounded-xl bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.1] transition-all duration-300 flex-shrink-0 group"
               >
                 <img
-                  src={company.logo}
-                  alt={company.name}
+                  src={integration.logo}
+                  alt={integration.name}
                   className="w-6 h-6 opacity-60 group-hover:opacity-100 transition-opacity"
                   loading="lazy"
                 />
                 <span className="text-white/50 group-hover:text-white/80 text-sm font-medium whitespace-nowrap transition-colors">
-                  {company.name}
+                  {integration.name}
                 </span>
               </div>
             ))}

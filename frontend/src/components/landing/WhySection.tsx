@@ -5,10 +5,10 @@ const CARDS = [
   {
     number: '01',
     icon: Brain,
-    title: 'AI Agents for Production',
+    title: 'AI-Powered Investigation',
     description:
       'Autonomous agents that understand your infrastructure, investigate incidents, and propose fixes with full context awareness.',
-    highlight: '5x faster MTTR',
+    highlight: 'Multi-LLM Support',
     color: '#00E7FF',
   },
   {
@@ -16,8 +16,8 @@ const CARDS = [
     icon: Zap,
     title: 'Deep Root Cause Analysis',
     description:
-      'Go beyond symptoms to find the actual cause. Our AI correlates logs, metrics, traces, and changes to pinpoint issues.',
-    highlight: '90% accuracy',
+      'Go beyond symptoms to find the actual cause. Correlates logs, metrics, traces, and recent changes to pinpoint issues.',
+    highlight: '35+ Connectors',
     color: '#7C3AED',
   },
   {
@@ -26,7 +26,7 @@ const CARDS = [
     title: 'Human-in-the-Loop Safety',
     description:
       'Every action requires your approval. The AI proposes, you decide. Full audit trail and confidence scoring for every recommendation.',
-    highlight: 'Zero auto-deploy',
+    highlight: 'Zero Auto-Deploy',
     color: '#00FFB3',
   },
 ]
