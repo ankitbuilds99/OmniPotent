@@ -40,6 +40,12 @@ services:
           name: copilot-db
           property: connectionString
 
+      # GitHub integration (set these for live GitHub mode)
+      - key: GITHUB_TOKEN
+        sync: false  # Your GitHub Personal Access Token with 'repo' scope
+      - key: GITHUB_REPO
+        sync: false  # Repository as 'owner/repo' (e.g., 'facebook/react')
+
       # Defaults
       - key: TARGET_REPO_PATH
         value: ./sample_repo

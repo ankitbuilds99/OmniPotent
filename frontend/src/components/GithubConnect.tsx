@@ -213,6 +213,9 @@ export function GithubConnect() {
               ? "Token saved in browser · auto-connects on reload"
               : "Session only · enter token each time"}
           </p>
+          <p className="gh__note gh__note--hint">
+            For persistent production use, set GITHUB_TOKEN and GITHUB_REPO in your deployment environment.
+          </p>
         </div>
       )}
       {error && !open && (
