@@ -33,9 +33,10 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
 
 async def auto_investigate(incident_id: str) -> None:
     """Start automatic investigation for an incident."""
+    from uuid import UUID
     try:
         store = get_incident_store()
-        store.start_investigation(incident_id)
+        store.start_investigation(UUID(incident_id))
         log.info("Auto-investigation started for incident %s", incident_id)
     except Exception as e:
         log.error("Failed to start auto-investigation: %s", e)

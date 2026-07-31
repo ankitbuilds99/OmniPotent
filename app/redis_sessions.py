@@ -90,8 +90,8 @@ class RedisRateLimiter:
         result = pipe.execute()[0]
 
         if not result:
-            tokens = self.burst_size
-            last_refill = now
+            tokens: float = float(self.burst_size)
+            last_refill: float = now
         else:
             tokens = float(result.get("tokens", self.burst_size))
             last_refill = float(result.get("last_refill", now))
