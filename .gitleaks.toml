@@ -4,18 +4,10 @@
 [extend]
 useDefault = true
 
-# Allow test files that contain fake/mock secrets for testing redaction
-[[allowlist]]
+# Global allowlist for test files containing fake secrets
+[allowlist]
 description = "Test files with fake secrets for redaction testing"
 paths = [
     '''tests/test_vpc_connector\.py''',
     '''tests/test_safety_gates\.py''',
-]
-
-# Allow specific test patterns that look like secrets but are clearly fake
-[[allowlist]]
-description = "Fake JWT tokens for testing"
-regexTarget = "match"
-regexes = [
-    '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiJ0ZXN0In0\.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA''',
 ]
