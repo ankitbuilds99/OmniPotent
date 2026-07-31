@@ -4,6 +4,7 @@ import { health } from "../api";
 import { useCopilot } from "../hooks/useCopilot";
 import { modelShort, useConfig } from "../hooks/useConfig";
 import { useMe } from "../hooks/useMe";
+import { useSupabaseAuth } from "../hooks/useSupabaseAuth";
 import { AdminPanel } from "./AdminPanel";
 import { SignupModal } from "./SignupModal";
 import { Composer } from "./Composer";
@@ -26,6 +27,8 @@ function TopBar({
   onSignup,
   onDashboard,
   onBilling,
+  onLogout,
+  isLoggedIn,
 }: {
   onHome: () => void;
   onNew: () => void;
@@ -33,6 +36,8 @@ function TopBar({
   onSignup: () => void;
   onDashboard?: () => void;
   onBilling?: () => void;
+  onLogout?: () => void;
+  isLoggedIn?: boolean;
 }) {
   const { config: cfg } = useConfig();
   const me = useMe();
@@ -64,10 +69,16 @@ function TopBar({
           <Icon name="refresh" size={14} />
           <span>New</span>
         </button>
-        <button className="nav__btn" onClick={onSignup}>Sign up</button>
+        {!isLoggedIn && <button className="nav__btn" onClick={onSignup}>Sign up</button>}
         {onDashboard && <button className="nav__btn" onClick={onDashboard}>Dashboard</button>}
         {onBilling && <button className="nav__btn" onClick={onBilling}>Billing</button>}
         <button className="nav__btn" onClick={onAdmin}>Admin</button>
+        {isLoggedIn && onLogout && (
+          <button className="nav__btn" onClick={onLogout}>
+            <Icon name="logout" size={14} />
+            <span>Logout</span>
+          </button>
+        )}
         <div className="nav__sep" />
         {cfg && <span className="nav__tag">{modelShort(cfg.model)}</span>}
         <span className={`nav__status ${online ? 'on' : ''}`}>
@@ -80,7 +91,7 @@ function TopBar({
   );
 }
 
-export function Console({ onHome, onDashboard, onBilling }: { onHome: () => void; onDashboard?: () => void; onBilling?: () => void }) {
+export function Console({ onHome, onDashboard, onBilling, onLogout }: { onHome: () => void; onDashboard?: () => void; onBilling?: () => void; onLogout?: () => void }) {
   const {
     turns,
     busy,
@@ -100,9 +111,15 @@ export function Console({ onHome, onDashboard, onBilling }: { onHome: () => void
   void _wsEnabled; void _wsAvailable; void _wsStatus; void _toggleWebSocket;
   const endRef = useRef<HTMLDivElement>(null);
   useMe();
+  const { user, signOut } = useSupabaseAuth();
   const [adminOpen, setAdminOpen] = useState(false);
   const [signupOpen, setSignupOpen] = useState(false);
   const disabled = busy || awaitingApproval;
+
+  const handleLogout = async () => {
+    await signOut();
+    onLogout?.();
+  };
 
   useEffect(() => {
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -120,6 +137,8 @@ export function Console({ onHome, onDashboard, onBilling }: { onHome: () => void
         onSignup={() => setSignupOpen(true)}
         onDashboard={onDashboard}
         onBilling={onBilling}
+        onLogout={handleLogout}
+        isLoggedIn={!!user}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {signupOpen && <SignupModal onClose={() => setSignupOpen(false)} />}

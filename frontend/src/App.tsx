@@ -63,6 +63,7 @@ export default function App() {
           onHome={() => setView("landing")}
           onDashboard={() => setView("dashboard")}
           onBilling={() => setView("billing")}
+          onLogout={() => setView("landing")}
         />
       )}
       {view === "api-docs" && (
