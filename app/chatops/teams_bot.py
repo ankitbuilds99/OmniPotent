@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
-from enum import Enum
 
 import httpx
 
@@ -378,12 +376,6 @@ class TeamsBot:
         approval_id: str,
     ) -> dict[str, Any]:
         """Build an approval request Adaptive Card."""
-        risk_color = {
-            "low": "good",
-            "medium": "warning",
-            "high": "attention",
-        }.get(risk_level.lower(), "default")
-
         return {
             "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
             "type": "AdaptiveCard",
