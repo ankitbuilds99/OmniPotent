@@ -1,6 +1,6 @@
 """Slack Bot Router - @mention support and slash commands."""
 
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Request, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 import hmac
@@ -237,7 +237,7 @@ def build_rca_result_blocks(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Status:*\n:white_check_mark: Verified",
+                    "text": "*Status:*\n:white_check_mark: Verified",
                 },
             ]
         },
@@ -442,11 +442,10 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
 @router.post("/commands/rca")
 async def slash_rca(request: Request, background_tasks: BackgroundTasks):
     """Handle /rca slash command."""
+    _ = background_tasks  # Will be used for async investigation
     form_data = await request.form()
 
     command_text = form_data.get("text", "")
-    response_url = form_data.get("response_url", "")
-    channel_id = form_data.get("channel_id", "")
     user_name = form_data.get("user_name", "")
 
     if not command_text:
