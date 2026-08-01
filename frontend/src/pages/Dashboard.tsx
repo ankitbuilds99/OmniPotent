@@ -359,9 +359,11 @@ interface DashboardProps {
   onAnalytics?: () => void;
   onSLO?: () => void;
   onRunbooks?: () => void;
+  onIntegrations?: () => void;
+  onKnowledge?: () => void;
 }
 
-export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall, onServiceMap, onNotifications, onPostmortem, onAnalytics, onSLO, onRunbooks }: DashboardProps) {
+export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall, onServiceMap, onNotifications, onPostmortem, onAnalytics, onSLO, onRunbooks, onIntegrations, onKnowledge }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
@@ -465,6 +467,24 @@ export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall
             >
               <Icon name="file-text" size={18} />
               <span className="font-medium">Postmortems</span>
+            </button>
+          )}
+          {onIntegrations && (
+            <button
+              onClick={onIntegrations}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-indigo-500 transition-colors"
+            >
+              <Icon name="zap" size={18} />
+              <span className="font-medium">Integrations</span>
+            </button>
+          )}
+          {onKnowledge && (
+            <button
+              onClick={onKnowledge}
+              className="flex items-center gap-2 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-teal-500 transition-colors"
+            >
+              <Icon name="book" size={18} />
+              <span className="font-medium">Knowledge Base</span>
             </button>
           )}
         </div>

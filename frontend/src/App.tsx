@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 
 import { Console } from "./components/Console";
 import { CinematicLanding } from "./components/landing/CinematicLanding";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { ApiDocs } from "./pages/ApiDocs";
 import { Dashboard } from "./pages/Dashboard";
 import { Billing } from "./pages/Billing";
@@ -19,8 +20,10 @@ import { Postmortem } from "./pages/Postmortem";
 import { Analytics } from "./pages/Analytics";
 import { SLOTracker } from "./pages/SLOTracker";
 import { RunbookBuilder } from "./pages/RunbookBuilder";
+import { IntegrationMarketplace } from "./pages/IntegrationMarketplace";
+import { KnowledgeBase } from "./pages/KnowledgeBase";
 
-type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team" | "incidents" | "oncall" | "servicemap" | "notifications" | "postmortem" | "analytics" | "slo" | "runbooks";
+type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team" | "incidents" | "oncall" | "servicemap" | "notifications" | "postmortem" | "analytics" | "slo" | "runbooks" | "onboarding" | "integrations" | "knowledge";
 
 export default function App() {
   const [view, setView] = useState<View>("landing");
@@ -55,7 +58,14 @@ export default function App() {
       {view === "login" && (
         <Login
           onBack={() => setView("landing")}
-          onSuccess={() => setView("console")}
+          onSuccess={() => {
+            const hasCompletedOnboarding = localStorage.getItem('onboarding_completed');
+            if (hasCompletedOnboarding) {
+              setView("console");
+            } else {
+              setView("onboarding");
+            }
+          }}
         />
       )}
       {view === "auth-callback" && (
@@ -97,6 +107,8 @@ export default function App() {
           onAnalytics={() => setView("analytics")}
           onSLO={() => setView("slo")}
           onRunbooks={() => setView("runbooks")}
+          onIntegrations={() => setView("integrations")}
+          onKnowledge={() => setView("knowledge")}
         />
       )}
       {view === "billing" && (
@@ -146,6 +158,24 @@ export default function App() {
       )}
       {view === "runbooks" && (
         <RunbookBuilder onBack={() => setView("dashboard")} />
+      )}
+      {view === "onboarding" && (
+        <OnboardingWizard
+          onComplete={() => {
+            localStorage.setItem('onboarding_completed', 'true');
+            setView("console");
+          }}
+          onSkip={() => {
+            localStorage.setItem('onboarding_completed', 'true');
+            setView("console");
+          }}
+        />
+      )}
+      {view === "integrations" && (
+        <IntegrationMarketplace onBack={() => setView("dashboard")} />
+      )}
+      {view === "knowledge" && (
+        <KnowledgeBase onBack={() => setView("dashboard")} />
       )}
     </>
   );
