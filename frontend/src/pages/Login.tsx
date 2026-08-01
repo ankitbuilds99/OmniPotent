@@ -98,8 +98,6 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     return null
   }
 
-  const hasOAuthProviders = supabaseConfigured || backendProviders.length > 0
-
   const handleBackendOAuth = (provider: string) => {
     const redirectUri = encodeURIComponent(window.location.origin + '/auth/callback')
     window.location.href = `${API_BASE}/auth/${provider}/login?redirect_uri=${redirectUri}`
@@ -521,21 +519,29 @@ export function Login({ onBack, onSuccess }: LoginProps) {
             )}
           </div>
 
-          {/* Demo mode quick access */}
-          {!hasOAuthProviders && (
-            <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--border)' }}>
-              <button
-                onClick={handleDemoLogin}
-                className="w-full py-2 rounded-lg text-sm font-medium transition-all hover:opacity-80"
-                style={{
-                  backgroundColor: 'var(--shell)',
-                  color: 'var(--text-dim)'
-                }}
-              >
-                Continue as Demo User
-              </button>
-            </div>
-          )}
+          {/* Demo mode - always available for solo users / quick access */}
+          <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--border)' }}>
+            <p className="text-center text-xs mb-3" style={{ color: 'var(--text-dim)' }}>
+              No account needed - try it instantly
+            </p>
+            <motion.button
+              onClick={handleDemoLogin}
+              className="w-full py-3 rounded-xl font-medium transition-all flex items-center justify-center gap-2"
+              style={{
+                backgroundColor: 'var(--shell)',
+                border: '1px solid var(--border)',
+                color: 'var(--text)'
+              }}
+              whileHover={{ scale: 1.01, borderColor: 'var(--accent)' }}
+              whileTap={{ scale: 0.99 }}
+            >
+              <Sparkles className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+              Try Demo (No Login Required)
+            </motion.button>
+            <p className="text-center text-xs mt-2" style={{ color: 'var(--text-dim)' }}>
+              Full access to all features with sample data
+            </p>
+          </div>
 
           {/* Terms */}
           <p className="mt-6 text-center text-xs" style={{ color: 'var(--text-dim)' }}>

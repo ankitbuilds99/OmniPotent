@@ -245,7 +245,7 @@ const INTEGRATIONS = [
   { name: 'Sentry', icon: 'sentry', color: '362D59' }
 ]
 
-export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
+export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onTryDemo?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const colors = useThemeColors()
   const { scrollYProgress } = useScroll({
@@ -363,10 +363,10 @@ export function HeroSection({ onLaunch }: { onLaunch: () => void }) {
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
           </button>
           <button
-            onClick={onLaunch}
+            onClick={onTryDemo || onLaunch}
             className="inline-flex items-center gap-2 px-8 py-4 text-white font-semibold rounded-xl border border-white/20 bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.08] hover:border-white/30 transition-all duration-200"
           >
-            Request Demo
+            Try Demo - No Login
           </button>
         </motion.div>
 

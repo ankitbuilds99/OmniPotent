@@ -17,7 +17,11 @@ import { Blog } from './Blog'
 import { Footer } from './Footer'
 import { CursorGlow } from './CursorGlow'
 
-export function CinematicLanding({ onLaunch, onDashboard: _onDashboard, onBilling: _onBilling }: { onLaunch: () => void; onDashboard?: () => void; onBilling?: () => void }) {
+export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling }: { onLaunch: () => void; onDashboard?: () => void; onBilling?: () => void }) {
+  const handleTryDemo = () => {
+    localStorage.setItem('demo_user', JSON.stringify({ email: 'demo@devops-copilot.com', name: 'Demo User' }))
+    if (onDashboard) onDashboard()
+  }
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Smooth scrolling with Lenis
@@ -61,7 +65,7 @@ export function CinematicLanding({ onLaunch, onDashboard: _onDashboard, onBillin
       {/* Main content */}
       <main>
         {/* Hero with 3D scene + integrations */}
-        <HeroSection onLaunch={onLaunch} />
+        <HeroSection onLaunch={onLaunch} onTryDemo={handleTryDemo} />
 
         {/* How It Works - Interactive Tutorial */}
         <HowItWorks onLaunch={onLaunch} />
