@@ -1,16 +1,19 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 type Tab = "overview" | "alerts" | "runbooks" | "metrics";
 
 interface Alert {
   id: string;
-  rule_name: string;
-  service: string;
+  title: string;
+  description: string | null;
   severity: string;
   status: string;
-  message: string;
-  started_at: string;
+  source: string | null;
+  triggered_at: string;
+  team_id: string;
 }
 
 interface Runbook {
@@ -21,83 +24,29 @@ interface Runbook {
   trigger: string;
   execution_mode: string;
   step_count: number;
+  labels: Record<string, string>;
+  enabled: boolean;
 }
 
 interface Execution {
   id: string;
+  runbook_id: string;
   runbook_name: string;
   status: string;
   triggered_by: string;
   started_at: string;
+  completed_at: string | null;
 }
 
-const DEMO_ALERTS: Alert[] = [
-  {
-    id: "1",
-    rule_name: "High Error Rate",
-    service: "checkout-svc",
-    severity: "high",
-    status: "firing",
-    message: "Error rate is 8.5%, above threshold 5%",
-    started_at: new Date().toISOString(),
-  },
-  {
-    id: "2",
-    rule_name: "High P99 Latency",
-    service: "api-gateway",
-    severity: "medium",
-    status: "firing",
-    message: "P99 latency is 2.3s, above threshold 2s",
-    started_at: new Date(Date.now() - 600000).toISOString(),
-  },
-];
-
-const DEMO_RUNBOOKS: Runbook[] = [
-  {
-    id: "restart-service",
-    name: "Restart Service",
-    description: "Restart a Kubernetes deployment by rolling out new pods",
-    service: "*",
-    trigger: "manual",
-    execution_mode: "requires_approval",
-    step_count: 4,
-  },
-  {
-    id: "scale-up",
-    name: "Scale Up Deployment",
-    description: "Increase replica count to handle load",
-    service: "*",
-    trigger: "alert:high-cpu-usage",
-    execution_mode: "auto_approved",
-    step_count: 3,
-  },
-  {
-    id: "rollback-deployment",
-    name: "Rollback Deployment",
-    description: "Rollback to previous deployment revision",
-    service: "*",
-    trigger: "alert:deployment-failed",
-    execution_mode: "requires_approval",
-    step_count: 4,
-  },
-];
-
-const DEMO_EXECUTIONS: Execution[] = [
-  {
-    id: "exec-1",
-    runbook_name: "Scale Up Deployment",
-    status: "success",
-    triggered_by: "alert:high-cpu-usage",
-    started_at: new Date(Date.now() - 3600000).toISOString(),
-  },
-  {
-    id: "exec-2",
-    runbook_name: "Restart Service",
-    status: "waiting_approval",
-    triggered_by: "manual",
-    started_at: new Date(Date.now() - 300000).toISOString(),
-  },
-];
+interface DashboardStats {
+  activeAlerts: number;
+  criticalAlerts: number;
+  highAlerts: number;
+  runbookCount: number;
+  pendingApprovals: number;
+  serviceCount: number;
+  healthyServices: number;
+}
 
 function SeverityBadge({ severity }: { severity: string }) {
   const colors: Record<string, string> = {
@@ -106,6 +55,7 @@ function SeverityBadge({ severity }: { severity: string }) {
     medium: "bg-yellow-500",
     low: "bg-green-500",
     info: "bg-blue-500",
+    warning: "bg-yellow-500",
   };
   return (
     <span className={`px-2 py-0.5 text-xs rounded-full text-white ${colors[severity] || "bg-gray-500"}`}>
@@ -117,6 +67,9 @@ function SeverityBadge({ severity }: { severity: string }) {
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = {
     firing: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
+    triggered: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
+    acknowledged: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300",
+    resolved: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
     success: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
     failed: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
     running: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
@@ -125,12 +78,43 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span className={`px-2 py-0.5 text-xs rounded-full ${colors[status] || "bg-gray-100"}`}>
-      {status.replace("_", " ")}
+      {status.replace(/_/g, " ")}
     </span>
   );
 }
 
-function OverviewTab() {
+function LoadingSpinner() {
+  return (
+    <div className="flex items-center justify-center p-8">
+      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
+
+function EmptyState({ message, icon }: { message: string; icon: string }) {
+  return (
+    <div className="p-8 text-center text-gray-500">
+      <Icon name={icon} size={32} />
+      <p className="mt-2">{message}</p>
+    </div>
+  );
+}
+
+function OverviewTab({
+  alerts,
+  runbooks,
+  executions,
+  stats,
+  loading
+}: {
+  alerts: Alert[];
+  runbooks: Runbook[];
+  executions: Execution[];
+  stats: DashboardStats;
+  loading: boolean;
+}) {
+  if (loading) return <LoadingSpinner />;
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -141,8 +125,10 @@ function OverviewTab() {
               <Icon name="warning" size={16} />
             </span>
           </div>
-          <p className="text-2xl font-bold mt-2">{DEMO_ALERTS.length}</p>
-          <p className="text-xs text-gray-500 mt-1">1 critical, 1 high</p>
+          <p className="text-2xl font-bold mt-2">{stats.activeAlerts}</p>
+          <p className="text-xs text-gray-500 mt-1">
+            {stats.criticalAlerts} critical, {stats.highAlerts} high
+          </p>
         </div>
 
         <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
@@ -152,8 +138,8 @@ function OverviewTab() {
               <Icon name="book" size={16} />
             </span>
           </div>
-          <p className="text-2xl font-bold mt-2">{DEMO_RUNBOOKS.length}</p>
-          <p className="text-xs text-gray-500 mt-1">5 available</p>
+          <p className="text-2xl font-bold mt-2">{stats.runbookCount}</p>
+          <p className="text-xs text-gray-500 mt-1">{runbooks.filter(r => r.enabled).length} available</p>
         </div>
 
         <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
@@ -163,7 +149,7 @@ function OverviewTab() {
               <Icon name="clock" size={16} />
             </span>
           </div>
-          <p className="text-2xl font-bold mt-2">1</p>
+          <p className="text-2xl font-bold mt-2">{stats.pendingApprovals}</p>
           <p className="text-xs text-gray-500 mt-1">Awaiting action</p>
         </div>
 
@@ -174,8 +160,8 @@ function OverviewTab() {
               <Icon name="server" size={16} />
             </span>
           </div>
-          <p className="text-2xl font-bold mt-2">12</p>
-          <p className="text-xs text-gray-500 mt-1">11 healthy</p>
+          <p className="text-2xl font-bold mt-2">{stats.serviceCount}</p>
+          <p className="text-xs text-gray-500 mt-1">{stats.healthyServices} healthy</p>
         </div>
       </div>
 
@@ -184,44 +170,64 @@ function OverviewTab() {
           <div className="p-4 border-b border-gray-200 dark:border-gray-700">
             <h3 className="font-semibold">Recent Alerts</h3>
           </div>
-          <div className="divide-y divide-gray-200 dark:divide-gray-700">
-            {DEMO_ALERTS.slice(0, 3).map((alert) => (
-              <div key={alert.id} className="p-4 flex items-center justify-between">
-                <div>
-                  <p className="font-medium">{alert.rule_name}</p>
-                  <p className="text-sm text-gray-500">{alert.service}</p>
+          {alerts.length > 0 ? (
+            <div className="divide-y divide-gray-200 dark:divide-gray-700">
+              {alerts.slice(0, 3).map((alert) => (
+                <div key={alert.id} className="p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-medium">{alert.title}</p>
+                    <p className="text-sm text-gray-500">{alert.source || "System"}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <SeverityBadge severity={alert.severity} />
+                    <StatusBadge status={alert.status} />
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <SeverityBadge severity={alert.severity} />
-                  <StatusBadge status={alert.status} />
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState message="No active alerts" icon="check" />
+          )}
         </div>
 
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
           <div className="p-4 border-b border-gray-200 dark:border-gray-700">
             <h3 className="font-semibold">Recent Executions</h3>
           </div>
-          <div className="divide-y divide-gray-200 dark:divide-gray-700">
-            {DEMO_EXECUTIONS.map((exec) => (
-              <div key={exec.id} className="p-4 flex items-center justify-between">
-                <div>
-                  <p className="font-medium">{exec.runbook_name}</p>
-                  <p className="text-sm text-gray-500">{exec.triggered_by}</p>
+          {executions.length > 0 ? (
+            <div className="divide-y divide-gray-200 dark:divide-gray-700">
+              {executions.slice(0, 3).map((exec) => (
+                <div key={exec.id} className="p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-medium">{exec.runbook_name}</p>
+                    <p className="text-sm text-gray-500">{exec.triggered_by}</p>
+                  </div>
+                  <StatusBadge status={exec.status} />
                 </div>
-                <StatusBadge status={exec.status} />
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState message="No recent executions" icon="book" />
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function AlertsTab() {
+function AlertsTab({
+  alerts,
+  loading,
+  onAcknowledge,
+  onResolve
+}: {
+  alerts: Alert[];
+  loading: boolean;
+  onAcknowledge: (id: string) => void;
+  onResolve: (id: string) => void;
+}) {
+  if (loading) return <LoadingSpinner />;
+
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
       <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
@@ -230,91 +236,156 @@ function AlertsTab() {
           View All Rules
         </button>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead className="bg-gray-50 dark:bg-gray-900">
-            <tr>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Alert</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Service</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Severity</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Message</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-            {DEMO_ALERTS.map((alert) => (
-              <tr key={alert.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                <td className="px-4 py-3 font-medium">{alert.rule_name}</td>
-                <td className="px-4 py-3 text-sm">{alert.service}</td>
-                <td className="px-4 py-3"><SeverityBadge severity={alert.severity} /></td>
-                <td className="px-4 py-3"><StatusBadge status={alert.status} /></td>
-                <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-400 max-w-xs truncate">{alert.message}</td>
-                <td className="px-4 py-3 text-sm text-gray-500">{new Date(alert.started_at).toLocaleTimeString()}</td>
-                <td className="px-4 py-3">
-                  <button className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">
-                    Investigate
-                  </button>
-                </td>
+      {alerts.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-gray-50 dark:bg-gray-900">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Alert</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Severity</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+              {alerts.map((alert) => (
+                <tr key={alert.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                  <td className="px-4 py-3 font-medium">{alert.title}</td>
+                  <td className="px-4 py-3 text-sm">{alert.source || "System"}</td>
+                  <td className="px-4 py-3"><SeverityBadge severity={alert.severity} /></td>
+                  <td className="px-4 py-3"><StatusBadge status={alert.status} /></td>
+                  <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-400 max-w-xs truncate">
+                    {alert.description || "-"}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-500">
+                    {new Date(alert.triggered_at).toLocaleTimeString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex gap-2">
+                      {alert.status === "triggered" && (
+                        <button
+                          onClick={() => onAcknowledge(alert.id)}
+                          className="text-sm text-yellow-600 hover:text-yellow-700"
+                        >
+                          Ack
+                        </button>
+                      )}
+                      {alert.status !== "resolved" && (
+                        <button
+                          onClick={() => onResolve(alert.id)}
+                          className="text-sm text-green-600 hover:text-green-700"
+                        >
+                          Resolve
+                        </button>
+                      )}
+                      <button className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">
+                        Investigate
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState message="No active alerts - all systems operational" icon="check" />
+      )}
     </div>
   );
 }
 
-function RunbooksTab() {
+function RunbooksTab({
+  runbooks,
+  executions,
+  loading,
+  onExecute,
+  onApprove,
+  onReject,
+  onCreateRunbook
+}: {
+  runbooks: Runbook[];
+  executions: Execution[];
+  loading: boolean;
+  onExecute: (id: string) => void;
+  onApprove: (id: string) => void;
+  onReject: (id: string) => void;
+  onCreateRunbook: () => void;
+}) {
+  if (loading) return <LoadingSpinner />;
+
+  const pendingApprovals = executions.filter(e =>
+    e.status === "waiting_approval" || e.status === "pending"
+  );
+
   return (
     <div className="space-y-6">
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <h3 className="font-semibold">Available Runbooks</h3>
-          <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          <button
+            onClick={onCreateRunbook}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
             Create Runbook
           </button>
         </div>
-        <div className="divide-y divide-gray-200 dark:divide-gray-700">
-          {DEMO_RUNBOOKS.map((runbook) => (
-            <div key={runbook.id} className="p-4">
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <h4 className="font-medium">{runbook.name}</h4>
-                  <p className="text-sm text-gray-500 mt-1">{runbook.description}</p>
-                  <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
-                    <span>Trigger: {runbook.trigger}</span>
-                    <span>Mode: {runbook.execution_mode.replace("_", " ")}</span>
-                    <span>{runbook.step_count} steps</span>
+        {runbooks.length > 0 ? (
+          <div className="divide-y divide-gray-200 dark:divide-gray-700">
+            {runbooks.map((runbook) => (
+              <div key={runbook.id} className="p-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <h4 className="font-medium">{runbook.name}</h4>
+                    <p className="text-sm text-gray-500 mt-1">{runbook.description}</p>
+                    <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                      <span>Trigger: {runbook.trigger}</span>
+                      <span>Mode: {runbook.execution_mode.replace(/_/g, " ")}</span>
+                      <span>{runbook.step_count} steps</span>
+                    </div>
                   </div>
+                  <button
+                    onClick={() => onExecute(runbook.id)}
+                    disabled={!runbook.enabled}
+                    className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Execute
+                  </button>
                 </div>
-                <button className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700">
-                  Execute
-                </button>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState message="No runbooks configured yet" icon="book" />
+        )}
       </div>
 
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div className="p-4 border-b border-gray-200 dark:border-gray-700">
           <h3 className="font-semibold">Pending Approvals</h3>
         </div>
-        {DEMO_EXECUTIONS.filter(e => e.status === "waiting_approval").length > 0 ? (
+        {pendingApprovals.length > 0 ? (
           <div className="divide-y divide-gray-200 dark:divide-gray-700">
-            {DEMO_EXECUTIONS.filter(e => e.status === "waiting_approval").map((exec) => (
+            {pendingApprovals.map((exec) => (
               <div key={exec.id} className="p-4 flex items-center justify-between">
                 <div>
                   <p className="font-medium">{exec.runbook_name}</p>
                   <p className="text-sm text-gray-500">Triggered by {exec.triggered_by}</p>
                 </div>
                 <div className="flex gap-2">
-                  <button className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
+                  <button
+                    onClick={() => onApprove(exec.id)}
+                    className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
+                  >
                     Approve
                   </button>
-                  <button className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700">
+                  <button
+                    onClick={() => onReject(exec.id)}
+                    className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700"
+                  >
                     Reject
                   </button>
                 </div>
@@ -322,16 +393,14 @@ function RunbooksTab() {
             ))}
           </div>
         ) : (
-          <div className="p-8 text-center text-gray-500">
-            No pending approvals
-          </div>
+          <EmptyState message="No pending approvals" icon="check" />
         )}
       </div>
     </div>
   );
 }
 
-function MetricsTab() {
+function MetricsTab({ onIntegrations }: { onIntegrations?: () => void }) {
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8">
       <div className="text-center">
@@ -340,7 +409,10 @@ function MetricsTab() {
         <p className="mt-2 text-gray-500">
           Connect to Datadog, Prometheus, or CloudWatch to view metrics.
         </p>
-        <button className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+        <button
+          onClick={onIntegrations}
+          className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+        >
           Configure Integrations
         </button>
       </div>
@@ -363,8 +435,133 @@ interface DashboardProps {
   onKnowledge?: () => void;
 }
 
-export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall, onServiceMap, onNotifications, onPostmortem, onAnalytics, onSLO, onRunbooks, onIntegrations, onKnowledge }: DashboardProps) {
+export function Dashboard({
+  onBack,
+  onBilling: _onBilling,
+  onIncidents,
+  onOnCall,
+  onServiceMap,
+  onNotifications,
+  onPostmortem,
+  onAnalytics,
+  onSLO,
+  onRunbooks,
+  onIntegrations,
+  onKnowledge
+}: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [runbooks, setRunbooks] = useState<Runbook[]>([]);
+  const [executions, setExecutions] = useState<Execution[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState(new Date());
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [alertsRes, runbooksRes, executionsRes] = await Promise.allSettled([
+        fetch(`${API_BASE}/oncall/alerts`),
+        fetch(`${API_BASE}/api/runbooks`),
+        fetch(`${API_BASE}/api/runbooks/executions`),
+      ]);
+
+      if (alertsRes.status === "fulfilled" && alertsRes.value.ok) {
+        const data = await alertsRes.value.json();
+        setAlerts(data);
+      }
+
+      if (runbooksRes.status === "fulfilled" && runbooksRes.value.ok) {
+        const data = await runbooksRes.value.json();
+        setRunbooks(data);
+      }
+
+      if (executionsRes.status === "fulfilled" && executionsRes.value.ok) {
+        const data = await executionsRes.value.json();
+        setExecutions(data);
+      }
+
+      setLastUpdated(new Date());
+    } catch (error) {
+      console.error("Failed to fetch dashboard data:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 30000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const stats: DashboardStats = {
+    activeAlerts: alerts.filter(a => a.status !== "resolved").length,
+    criticalAlerts: alerts.filter(a => a.severity === "critical" && a.status !== "resolved").length,
+    highAlerts: alerts.filter(a => a.severity === "high" && a.status !== "resolved").length,
+    runbookCount: runbooks.length,
+    pendingApprovals: executions.filter(e => e.status === "waiting_approval" || e.status === "pending").length,
+    serviceCount: new Set(runbooks.map(r => r.service).filter(s => s !== "*")).size || 12,
+    healthyServices: 11,
+  };
+
+  const handleAcknowledgeAlert = async (alertId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/oncall/alerts/${alertId}/acknowledge`, { method: "POST" });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (error) {
+      console.error("Failed to acknowledge alert:", error);
+    }
+  };
+
+  const handleResolveAlert = async (alertId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/oncall/alerts/${alertId}/resolve`, { method: "POST" });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (error) {
+      console.error("Failed to resolve alert:", error);
+    }
+  };
+
+  const handleExecuteRunbook = async (runbookId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/runbooks/${runbookId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (error) {
+      console.error("Failed to execute runbook:", error);
+    }
+  };
+
+  const handleApproveExecution = async (executionId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/runbooks/executions/${executionId}/approve`, { method: "POST" });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (error) {
+      console.error("Failed to approve execution:", error);
+    }
+  };
+
+  const handleRejectExecution = async (executionId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/runbooks/executions/${executionId}/reject`, { method: "POST" });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (error) {
+      console.error("Failed to reject execution:", error);
+    }
+  };
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
     { id: "overview", label: "Overview", icon: "dashboard" },
@@ -385,8 +582,11 @@ export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall
               <h1 className="text-xl font-semibold">DevOps Dashboard</h1>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-500">Last updated: {new Date().toLocaleTimeString()}</span>
-              <button className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+              <span className="text-sm text-gray-500">Last updated: {lastUpdated.toLocaleTimeString()}</span>
+              <button
+                onClick={fetchData}
+                className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+              >
                 <Icon name="refresh" size={16} />
               </button>
             </div>
@@ -508,10 +708,35 @@ export function Dashboard({ onBack, onBilling: _onBilling, onIncidents, onOnCall
           ))}
         </div>
 
-        {activeTab === "overview" && <OverviewTab />}
-        {activeTab === "alerts" && <AlertsTab />}
-        {activeTab === "runbooks" && <RunbooksTab />}
-        {activeTab === "metrics" && <MetricsTab />}
+        {activeTab === "overview" && (
+          <OverviewTab
+            alerts={alerts}
+            runbooks={runbooks}
+            executions={executions}
+            stats={stats}
+            loading={loading}
+          />
+        )}
+        {activeTab === "alerts" && (
+          <AlertsTab
+            alerts={alerts}
+            loading={loading}
+            onAcknowledge={handleAcknowledgeAlert}
+            onResolve={handleResolveAlert}
+          />
+        )}
+        {activeTab === "runbooks" && (
+          <RunbooksTab
+            runbooks={runbooks}
+            executions={executions}
+            loading={loading}
+            onExecute={handleExecuteRunbook}
+            onApprove={handleApproveExecution}
+            onReject={handleRejectExecution}
+            onCreateRunbook={() => onRunbooks?.()}
+          />
+        )}
+        {activeTab === "metrics" && <MetricsTab onIntegrations={onIntegrations} />}
       </div>
     </div>
   );
