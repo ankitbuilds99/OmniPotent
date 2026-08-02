@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.dashboard.metrics")
+log = logging.getLogger("omnipotent.dashboard.metrics")
 
 
 class InvestigationOutcome(str, Enum):

@@ -11,7 +11,7 @@ import httpx
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.chatops.teams")
+log = logging.getLogger("omnipotent.chatops.teams")
 _settings = get_settings()
 
 

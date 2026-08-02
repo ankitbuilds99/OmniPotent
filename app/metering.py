@@ -16,7 +16,7 @@ from app.tenancy import auth as tenant_auth
 from app.tenancy.models import quota, within_quota
 from app.tenancy.store import month_start
 
-log = logging.getLogger("devcopilot.metering")
+log = logging.getLogger("omnipotent.metering")
 
 
 async def record_investigation(tokens: int = 0, idem: str = "") -> None:

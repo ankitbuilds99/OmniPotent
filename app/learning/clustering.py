@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.learning.clustering")
+log = logging.getLogger("omnipotent.learning.clustering")
 
 
 class RootCauseCategory(Enum):

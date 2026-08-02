@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.integrations_advanced.sdk")
+log = logging.getLogger("omnipotent.integrations_advanced.sdk")
 
 
 class IntegrationCategory(str, Enum):

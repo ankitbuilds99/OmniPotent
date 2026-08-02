@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.log_intelligence.models")
+log = logging.getLogger("omnipotent.log_intelligence.models")
 
 
 class LogLevel(Enum):

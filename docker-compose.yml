@@ -20,7 +20,7 @@ services:
       COPILOT_RATE_LIMIT_PER_MIN: ${COPILOT_RATE_LIMIT_PER_MIN:-120}
       COPILOT_MAX_SESSIONS: ${COPILOT_MAX_SESSIONS:-50}
       # --- database ---
-      DATABASE_URL: ${DATABASE_URL:-postgresql://devcopilot:devcopilot@postgres:5432/devcopilot}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # --- LLM provider + keys ---
       COPILOT_PROVIDER: ${COPILOT_PROVIDER:-anthropic}
@@ -61,13 +61,13 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: devcopilot
-      POSTGRES_PASSWORD: devcopilot
-      POSTGRES_DB: devcopilot
+      POSTGRES_USER: omnipotent
+      POSTGRES_PASSWORD: omnipotent
+      POSTGRES_DB: omnipotent
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U devcopilot"]
+      test: ["CMD-SHELL", "pg_isready -U omnipotent"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -141,4 +141,4 @@ volumes:
 
 networks:
   default:
-    name: devcopilot-network
+    name: omnipotent-network

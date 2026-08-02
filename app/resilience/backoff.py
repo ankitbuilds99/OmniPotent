@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-log = logging.getLogger("devcopilot.resilience.backoff")
+log = logging.getLogger("omnipotent.resilience.backoff")
 
 
 class JitterStrategy(Enum):

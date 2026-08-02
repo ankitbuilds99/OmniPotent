@@ -38,7 +38,7 @@ from app.similar_search.recommendations import (
     FixTracker,
 )
 
-log = logging.getLogger("devcopilot.similar_search.search")
+log = logging.getLogger("omnipotent.similar_search.search")
 
 
 @dataclass

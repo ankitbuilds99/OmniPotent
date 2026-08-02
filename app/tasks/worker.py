@@ -12,7 +12,7 @@ import signal
 import sys
 from typing import Any
 
-log = logging.getLogger("devcopilot.tasks.worker")
+log = logging.getLogger("omnipotent.tasks.worker")
 
 
 def start_worker(

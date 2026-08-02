@@ -21,7 +21,7 @@ from app.eval.metrics import (
     EvalResultData,
 )
 
-log = logging.getLogger("devcopilot.eval.pipeline")
+log = logging.getLogger("omnipotent.eval.pipeline")
 
 
 @dataclass

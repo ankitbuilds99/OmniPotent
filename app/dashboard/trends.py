@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.dashboard.trends")
+log = logging.getLogger("omnipotent.dashboard.trends")
 
 
 class TrendDirection(str, Enum):

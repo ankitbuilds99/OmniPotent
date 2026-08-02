@@ -34,10 +34,10 @@ curl -s https://copilot.internal/healthz | jq .
 curl -s https://copilot.internal/readyz | jq .
 
 # Check pod status
-kubectl get pods -n devops-copilot
+kubectl get pods -n omnipotent
 
 # Check recent events
-kubectl get events -n devops-copilot --sort-by='.lastTimestamp' | tail -20
+kubectl get events -n omnipotent --sort-by='.lastTimestamp' | tail -20
 ```
 
 ### Impact Assessment
@@ -55,37 +55,37 @@ kubectl get events -n devops-copilot --sort-by='.lastTimestamp' | tail -20
 1. **If LLM provider is failing**:
 ```bash
 # Switch to fallback provider
-kubectl set env deployment/devops-copilot \
-  COPILOT_FALLBACK_PROVIDER=openai -n devops-copilot
+kubectl set env deployment/omnipotent \
+  COPILOT_FALLBACK_PROVIDER=openai -n omnipotent
 ```
 
 2. **If rate limited**:
 ```bash
 # Temporarily increase limits
-kubectl set env deployment/devops-copilot \
-  COPILOT_RATE_LIMIT=200 -n devops-copilot
+kubectl set env deployment/omnipotent \
+  COPILOT_RATE_LIMIT=200 -n omnipotent
 ```
 
 3. **If pods are crashing**:
 ```bash
 # Check recent logs
-kubectl logs -l app=copilot --tail=200 -n devops-copilot
+kubectl logs -l app=copilot --tail=200 -n omnipotent
 
 # Describe pod for events
-kubectl describe pod -l app=copilot -n devops-copilot | tail -50
+kubectl describe pod -l app=copilot -n omnipotent | tail -50
 ```
 
 ### Rollback Procedure
 
 ```bash
 # Get current revision
-kubectl rollout history deployment/devops-copilot -n devops-copilot
+kubectl rollout history deployment/omnipotent -n omnipotent
 
 # Rollback to previous version
-kubectl rollout undo deployment/devops-copilot -n devops-copilot
+kubectl rollout undo deployment/omnipotent -n omnipotent
 
 # Or rollback to specific revision
-kubectl rollout undo deployment/devops-copilot --to-revision=3 -n devops-copilot
+kubectl rollout undo deployment/omnipotent --to-revision=3 -n omnipotent
 ```
 
 ## Root Cause Analysis
@@ -124,7 +124,7 @@ kubectl logs -l app=copilot --since=1h | grep "llm" | grep -i "error\|fail\|time
 
 ### Communication
 
-1. **Internal**: Update #devops-copilot Slack channel
+1. **Internal**: Update #omnipotent Slack channel
 2. **Status Page**: Update status.internal.com if user-facing
 3. **Ticket**: Link to incident ticket
 
@@ -150,7 +150,7 @@ kubectl logs -l app=copilot --since=1h | grep "llm" | grep -i "error\|fail\|time
 
 | Role | Contact |
 |------|---------|
-| Primary Oncall | @devops-copilot-oncall |
+| Primary Oncall | @omnipotent-oncall |
 | Secondary | @platform-team |
 | Escalation | @engineering-manager |
 

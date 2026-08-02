@@ -26,7 +26,7 @@ from starlette.websockets import WebSocketState
 from app import audit
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.websocket")
+log = logging.getLogger("omnipotent.websocket")
 
 router = APIRouter(tags=["websocket"])
 

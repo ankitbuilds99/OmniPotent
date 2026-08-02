@@ -11,7 +11,7 @@ from typing import Any
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.redis_sessions")
+log = logging.getLogger("omnipotent.redis_sessions")
 
 _redis_client = None
 

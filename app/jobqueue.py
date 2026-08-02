@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-log = logging.getLogger("devcopilot.jobqueue")
+log = logging.getLogger("omnipotent.jobqueue")
 
 
 @dataclass

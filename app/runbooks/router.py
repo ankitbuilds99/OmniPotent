@@ -23,7 +23,7 @@ from app.runbooks.models import (
     DEFAULT_RUNBOOKS,
 )
 
-log = logging.getLogger("devcopilot.runbooks.api")
+log = logging.getLogger("omnipotent.runbooks.api")
 
 router = APIRouter(prefix="/runbooks", tags=["runbooks"])
 

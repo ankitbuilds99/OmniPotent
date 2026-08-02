@@ -1,10 +1,10 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: devops-copilot-default-deny
-  namespace: devops-copilot
+  name: omnipotent-default-deny
+  namespace: omnipotent
   labels:
-    app.kubernetes.io/name: devops-copilot
+    app.kubernetes.io/name: omnipotent
 spec:
   podSelector: {}
   policyTypes:
@@ -14,14 +14,14 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: devops-copilot-allow-ingress
-  namespace: devops-copilot
+  name: omnipotent-allow-ingress
+  namespace: omnipotent
   labels:
-    app.kubernetes.io/name: devops-copilot
+    app.kubernetes.io/name: omnipotent
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: devops-copilot
+      app.kubernetes.io/name: omnipotent
   policyTypes:
     - Ingress
   ingress:
@@ -54,14 +54,14 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: devops-copilot-allow-egress
-  namespace: devops-copilot
+  name: omnipotent-allow-egress
+  namespace: omnipotent
   labels:
-    app.kubernetes.io/name: devops-copilot
+    app.kubernetes.io/name: omnipotent
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: devops-copilot
+      app.kubernetes.io/name: omnipotent
   policyTypes:
     - Egress
   egress:

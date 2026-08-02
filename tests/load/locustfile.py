@@ -1,12 +1,12 @@
-"""Load testing for DevOps-Copilot API.
+"""Load testing for OmniPotent API.
 
 Run with:
-    locust -f tests/load/locustfile.py --host=https://api.devops-copilot.com
+    locust -f tests/load/locustfile.py --host=https://api.omnipotent.com
 
 Web UI: http://localhost:8089
 
 Headless mode:
-    locust -f tests/load/locustfile.py --host=https://api.devops-copilot.com \
+    locust -f tests/load/locustfile.py --host=https://api.omnipotent.com \
         --headless --users 100 --spawn-rate 10 --run-time 5m
 
 Targets:
@@ -36,8 +36,8 @@ class Config:
     TARGET_ERROR_RATE = 0.01
 
 
-class DevOpsCopilotUser(HttpUser):
-    """Simulates a regular DevOps-Copilot API user."""
+class OmniPotentUser(HttpUser):
+    """Simulates a regular OmniPotent API user."""
 
     wait_time = between(1, 3)
     weight = 10
@@ -354,7 +354,7 @@ class PowerUser(HttpUser):
 def on_test_start(environment, **kwargs):
     """Called when test starts."""
     print("=" * 60)
-    print("DevOps-Copilot Load Test")
+    print("OmniPotent Load Test")
     print("=" * 60)
     print(f"Target Host: {environment.host}")
     print(f"Target RPS: {Config.TARGET_RPS}")

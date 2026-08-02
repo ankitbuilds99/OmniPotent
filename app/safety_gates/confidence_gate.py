@@ -17,7 +17,7 @@ from typing import Any
 from app.config import get_settings
 from app.safety_gates.models import GateResult
 
-log = logging.getLogger("devcopilot.safety_gates.confidence")
+log = logging.getLogger("omnipotent.safety_gates.confidence")
 
 
 def _get_default_threshold() -> float:

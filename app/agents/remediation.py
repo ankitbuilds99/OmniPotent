@@ -14,7 +14,7 @@ from app.agents.base import BaseAgent
 from app.agents.protocol import AgentRole, MessageType, SharedContext
 from app.graph.prompts import REMEDIATION_AGENT_SYSTEM
 
-log = logging.getLogger("devcopilot.agents.remediation")
+log = logging.getLogger("omnipotent.agents.remediation")
 
 # Write tools that the remediation agent can propose (all require approval)
 _WRITE_TOOLS = {

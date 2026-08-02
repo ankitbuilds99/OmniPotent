@@ -15,7 +15,7 @@ from datetime import date, timedelta
 from enum import Enum
 from typing import Any, Protocol
 
-log = logging.getLogger("devcopilot.analytics.product_metrics")
+log = logging.getLogger("omnipotent.analytics.product_metrics")
 
 
 class MetricPeriod(str, Enum):

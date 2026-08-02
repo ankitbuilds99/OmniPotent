@@ -28,7 +28,7 @@ def test_llmobs_import_path_is_valid():
 
 
 def test_json_formatter_includes_request_id_and_level():
-    record = logging.LogRecord("devcopilot", logging.INFO, __file__, 1, "hello", None, None)
+    record = logging.LogRecord("omnipotent", logging.INFO, __file__, 1, "hello", None, None)
     record.request_id = "rid-123"
     out = json.loads(observability._JsonFormatter().format(record))
     assert out["msg"] == "hello"

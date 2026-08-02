@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.rca.bisection")
+log = logging.getLogger("omnipotent.rca.bisection")
 
 
 class CommitStatus(Enum):

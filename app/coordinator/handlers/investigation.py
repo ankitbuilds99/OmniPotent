@@ -19,7 +19,7 @@ import httpx
 
 from app.coordinator.dag_executor import TaskNode
 
-log = logging.getLogger("devcopilot.coordinator.handlers.investigation")
+log = logging.getLogger("omnipotent.coordinator.handlers.investigation")
 
 
 class LogsHandler:

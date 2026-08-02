@@ -25,7 +25,7 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: devops-copilot-api
+  ECR_REPOSITORY: omnipotent-api
 
 jobs:
   # ============================================================================
@@ -75,7 +75,7 @@ jobs:
         with:
           context: .
           push: false
-          tags: devops-copilot-api:${{ steps.meta.outputs.version }}
+          tags: omnipotent-api:${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -179,7 +179,7 @@ jobs:
       (github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging')
     environment:
       name: staging
-      url: https://staging-api.devops-copilot.com
+      url: https://staging-api.omnipotent.com
 
     steps:
       - uses: actions/checkout@v4
@@ -194,7 +194,7 @@ jobs:
       - name: Download task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition devops-copilot-api-staging \
+            --task-definition omnipotent-api-staging \
             --query taskDefinition > task-definition.json
 
       - name: Update task definition with new image
@@ -209,14 +209,14 @@ jobs:
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: devops-copilot-api
-          cluster: devops-copilot-staging
+          service: omnipotent-api
+          cluster: omnipotent-staging
           wait-for-service-stability: true
 
       - name: Run smoke tests
         run: |
           for i in {1..30}; do
-            if curl -sf https://staging-api.devops-copilot.com/health; then
+            if curl -sf https://staging-api.omnipotent.com/health; then
               echo "Health check passed"
               exit 0
             fi
@@ -238,7 +238,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*Staging Deploy*\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<https://staging-api.devops-copilot.com|View Staging>"
+                    "text": "*Staging Deploy*\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<https://staging-api.omnipotent.com|View Staging>"
                   }
                 }
               ]
@@ -263,7 +263,7 @@ jobs:
 
       - name: Run E2E tests
         env:
-          API_URL: https://staging-api.devops-copilot.com
+          API_URL: https://staging-api.omnipotent.com
           TEST_API_KEY: ${{ secrets.TEST_API_KEY }}
         run: |
           uv sync --extra dev
@@ -279,7 +279,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
     environment:
       name: production
-      url: https://api.devops-copilot.com
+      url: https://api.omnipotent.com
 
     steps:
       - uses: actions/checkout@v4
@@ -294,7 +294,7 @@ jobs:
       - name: Download task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition devops-copilot-api-prod \
+            --task-definition omnipotent-api-prod \
             --query taskDefinition > task-definition.json
 
       - name: Update task definition with new image
@@ -309,14 +309,14 @@ jobs:
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: devops-copilot-api
-          cluster: devops-copilot-prod
+          service: omnipotent-api
+          cluster: omnipotent-prod
           wait-for-service-stability: true
 
       - name: Run smoke tests
         run: |
           for i in {1..30}; do
-            if curl -sf https://api.devops-copilot.com/health; then
+            if curl -sf https://api.omnipotent.com/health; then
               echo "Health check passed"
               exit 0
             fi
@@ -338,7 +338,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*Production Deploy*\nVersion: `${{ github.ref_name }}`\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<https://api.devops-copilot.com|View Production>"
+                    "text": "*Production Deploy*\nVersion: `${{ github.ref_name }}`\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<https://api.omnipotent.com|View Production>"
                   }
                 }
               ]
@@ -418,6 +418,6 @@ jobs:
 
             ## Docker Image
             ```
-            devops-copilot-api:${{ github.ref_name }}
+            omnipotent-api:${{ github.ref_name }}
             ```
           generate_release_notes: true

@@ -23,7 +23,7 @@ from app.agents.remediation import RemediationAgent
 from app.agents.reviewer import ReviewerAgent
 from app.graph.prompts import ORCHESTRATOR_AGENT_SYSTEM
 
-log = logging.getLogger("devcopilot.agents.orchestrator")
+log = logging.getLogger("omnipotent.agents.orchestrator")
 
 
 class InvestigationPhase:

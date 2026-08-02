@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.playbook_marketplace.publishing")
+log = logging.getLogger("omnipotent.playbook_marketplace.publishing")
 
 
 class PublisherStatus(str, Enum):

@@ -20,17 +20,17 @@ from enum import Enum
 from typing import Any
 import aiohttp
 
-log = logging.getLogger("devcopilot.policy_engine.opa")
+log = logging.getLogger("omnipotent.policy_engine.opa")
 
 
 class OPAPolicyPackage(str, Enum):
     """Standard OPA policy packages."""
-    REMEDIATION = "devcopilot.remediation"
-    DEPLOYMENT = "devcopilot.deployment"
-    ACCESS = "devcopilot.access"
-    COMPLIANCE = "devcopilot.compliance"
-    INCIDENT = "devcopilot.incident"
-    CHANGE = "devcopilot.change"
+    REMEDIATION = "omnipotent.remediation"
+    DEPLOYMENT = "omnipotent.deployment"
+    ACCESS = "omnipotent.access"
+    COMPLIANCE = "omnipotent.compliance"
+    INCIDENT = "omnipotent.incident"
+    CHANGE = "omnipotent.change"
 
 
 @dataclass
@@ -106,7 +106,7 @@ class OPAResult:
 # Default policies in Rego
 DEFAULT_POLICIES = {
     "remediation_safety": '''
-package devcopilot.remediation
+package omnipotent.remediation
 
 default allow = false
 
@@ -156,7 +156,7 @@ warnings[w] {
 ''',
 
     "deployment_policy": '''
-package devcopilot.deployment
+package omnipotent.deployment
 
 default allow = false
 
@@ -199,7 +199,7 @@ violations[v] {
 ''',
 
     "compliance_policy": '''
-package devcopilot.compliance
+package omnipotent.compliance
 
 default allow = true
 
@@ -285,7 +285,7 @@ class OPAClient:
             policy = OPAPolicy(
                 id=name,
                 name=name.replace("_", " ").title(),
-                package=f"devcopilot.{name.split('_')[0]}",
+                package=f"omnipotent.{name.split('_')[0]}",
                 rego=rego,
                 description=f"Default {name} policy",
             )

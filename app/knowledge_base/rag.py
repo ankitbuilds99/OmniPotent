@@ -9,7 +9,7 @@ from typing import Any
 from enum import Enum
 import hashlib
 
-log = logging.getLogger("devcopilot.knowledge_base.rag")
+log = logging.getLogger("omnipotent.knowledge_base.rag")
 
 
 class DocumentType(str, Enum):

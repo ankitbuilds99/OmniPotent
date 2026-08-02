@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.verification.evidence_collector")
+log = logging.getLogger("omnipotent.verification.evidence_collector")
 
 
 class EvidenceSource(str, Enum):

@@ -13,13 +13,13 @@ import os
 from contextlib import contextmanager
 from typing import Iterator
 
-log = logging.getLogger("devcopilot.otel")
+log = logging.getLogger("omnipotent.otel")
 
 _ENABLED = False
 _tracer = None
 
 
-def init_tracing(service_name: str = "devops-copilot") -> bool:
+def init_tracing(service_name: str = "omnipotent") -> bool:
     """Wire an OTLP exporter if OTEL_EXPORTER_OTLP_ENDPOINT is set. Returns whether
     tracing is active. Safe to call once at startup; a failure degrades to no-op."""
     global _ENABLED, _tracer
@@ -36,7 +36,7 @@ def init_tracing(service_name: str = "devops-copilot") -> bool:
         provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
         trace.set_tracer_provider(provider)
-        _tracer = trace.get_tracer("devcopilot")
+        _tracer = trace.get_tracer("omnipotent")
         _ENABLED = True
         log.info("OpenTelemetry tracing enabled (endpoint=%s)", endpoint)
     except Exception:  # noqa: BLE001 — missing exporter/SDK → stay a no-op

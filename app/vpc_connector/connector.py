@@ -31,7 +31,7 @@ from app.vpc_connector.collectors import (
     QueryResult,
 )
 
-log = logging.getLogger("devcopilot.vpc_connector.connector")
+log = logging.getLogger("omnipotent.vpc_connector.connector")
 
 
 @dataclass
@@ -494,7 +494,7 @@ def create_connector_from_env() -> VPCConnector:
         connector_token=os.environ["DEVCOPILOT_CONNECTOR_TOKEN"],
         control_plane_url=os.environ.get(
             "DEVCOPILOT_CONTROL_PLANE_URL",
-            "wss://api.devops-copilot.com/connector",
+            "wss://api.omnipotent.com/connector",
         ),
         logs_config={
             "type": os.environ.get("DEVCOPILOT_LOG_SOURCE_TYPE", "elasticsearch"),

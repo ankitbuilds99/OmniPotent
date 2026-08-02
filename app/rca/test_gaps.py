@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.rca.test_gaps")
+log = logging.getLogger("omnipotent.rca.test_gaps")
 
 
 class GapSeverity(Enum):

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.analytics_advanced.core_metrics")
+log = logging.getLogger("omnipotent.analytics_advanced.core_metrics")
 
 
 class Severity(str, Enum):

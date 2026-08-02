@@ -16,7 +16,7 @@ from app.similar_search.models import (
     SearchFilters,
 )
 
-log = logging.getLogger("devcopilot.similar_search.embeddings")
+log = logging.getLogger("omnipotent.similar_search.embeddings")
 
 
 @dataclass

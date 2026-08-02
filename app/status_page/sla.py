@@ -16,7 +16,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.status_page.sla")
+log = logging.getLogger("omnipotent.status_page.sla")
 
 
 class SLAPeriod(Enum):

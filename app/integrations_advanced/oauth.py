@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.integrations_advanced.oauth")
+log = logging.getLogger("omnipotent.integrations_advanced.oauth")
 
 
 class OAuthProvider(str, Enum):
@@ -260,7 +260,7 @@ class OAuthManager:
 
         authorize_url = (
             f"{config.authorize_url}"
-            f"?client_id=devops_copilot"
+            f"?client_id=omnipotent"
             f"&response_type=code"
             f"&redirect_uri={redirect_uri}"
             f"&scope={'+'.join(config.scopes)}"

@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-log = logging.getLogger("devcopilot.billing.models")
+log = logging.getLogger("omnipotent.billing.models")
 
 
 class PlanTier(str, Enum):

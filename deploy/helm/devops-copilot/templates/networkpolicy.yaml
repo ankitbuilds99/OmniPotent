@@ -2,13 +2,13 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "devops-copilot.fullname" . }}
+  name: {{ include "omnipotent.fullname" . }}
   labels:
-    {{- include "devops-copilot.labels" . | nindent 4 }}
+    {{- include "omnipotent.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "devops-copilot.selectorLabels" . | nindent 6 }}
+      {{- include "omnipotent.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress

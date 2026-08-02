@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.postmortem.counterfactual")
+log = logging.getLogger("omnipotent.postmortem.counterfactual")
 
 
 class CounterfactualType(Enum):

@@ -9,7 +9,7 @@ from typing import Any
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.grafana")
+log = logging.getLogger("omnipotent.connectors.grafana")
 
 
 class GrafanaConnector(Connector):
@@ -184,7 +184,7 @@ class GrafanaConnector(Connector):
         now = datetime.now(timezone.utc)
         payload: dict[str, Any] = {
             "text": text,
-            "tags": tags or ["devops-copilot"],
+            "tags": tags or ["omnipotent"],
             "time": int((time_start or now).timestamp() * 1000),
         }
 

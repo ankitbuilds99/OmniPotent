@@ -19,7 +19,7 @@ from typing import Any
 from app.config import get_settings
 from app.safety_gates.models import GateResult
 
-log = logging.getLogger("devcopilot.safety_gates.policy")
+log = logging.getLogger("omnipotent.safety_gates.policy")
 
 
 def _get_max_blast_radius() -> dict[str, int]:

@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from app.safety_gates.models import GateResult
 
-log = logging.getLogger("devcopilot.safety_gates.sandbox")
+log = logging.getLogger("omnipotent.safety_gates.sandbox")
 
 
 @dataclass

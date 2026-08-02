@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
-log = logging.getLogger("devcopilot.growth.referral")
+log = logging.getLogger("omnipotent.growth.referral")
 
 
 class RewardType(str, Enum):
@@ -110,7 +110,7 @@ class ReferralLink:
         return {
             "id": self.id,
             "code": self.code,
-            "url": f"https://app.devcopilot.io/r/{self.code}",
+            "url": f"https://app.omnipotent.io/r/{self.code}",
             "clicks": self.clicks,
             "signups": self.signups,
             "activations": self.activations,

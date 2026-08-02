@@ -2,7 +2,7 @@
 
 ## 🚀 One-Click Deploy
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ankit25bcs10610/DevOps-Copilot)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ankit25bcs10610/OmniPotent)
 
 ---
 
@@ -25,7 +25,7 @@ git push origin main
 ### Step 3: Deploy via Blueprint
 
 1. Click **New** → **Blueprint**
-2. Connect your GitHub repo: `ankit25bcs10610/DevOps-Copilot`
+2. Connect your GitHub repo: `ankit25bcs10610/OmniPotent`
 3. Render will auto-detect `render.yaml`
 4. Click **Apply**
 
@@ -60,7 +60,7 @@ After deployment:
 After deploy completes:
 
 ```
-https://devops-copilot.onrender.com
+https://omnipotent.onrender.com
 ```
 
 (Your URL will be shown in Render dashboard)

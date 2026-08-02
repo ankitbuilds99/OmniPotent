@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.router.classifier")
+log = logging.getLogger("omnipotent.router.classifier")
 
 
 class TaskComplexity(str, Enum):

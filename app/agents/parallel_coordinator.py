@@ -23,7 +23,7 @@ import anthropic
 
 from app.agents.protocol import SharedContext
 
-log = logging.getLogger("devcopilot.agents.parallel_coordinator")
+log = logging.getLogger("omnipotent.agents.parallel_coordinator")
 
 
 class SpecialistType(str, Enum):

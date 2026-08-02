@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.rca.cross_service")
+log = logging.getLogger("omnipotent.rca.cross_service")
 
 
 class CallStatus(Enum):

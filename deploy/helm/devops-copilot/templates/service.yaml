@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "devops-copilot.fullname" . }}
+  name: {{ include "omnipotent.fullname" . }}
   labels:
-    {{- include "devops-copilot.labels" . | nindent 4 }}
+    {{- include "omnipotent.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -12,4 +12,4 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "devops-copilot.selectorLabels" . | nindent 4 }}
+    {{- include "omnipotent.selectorLabels" . | nindent 4 }}

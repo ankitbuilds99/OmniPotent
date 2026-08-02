@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.deployment.health")
+log = logging.getLogger("omnipotent.deployment.health")
 
 
 class HealthStatus(str, Enum):

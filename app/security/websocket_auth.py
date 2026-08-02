@@ -20,7 +20,7 @@ from fastapi import WebSocket
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.security.websocket_auth")
+log = logging.getLogger("omnipotent.security.websocket_auth")
 
 _FAILED_ATTEMPTS: dict[str, list[float]] = {}
 _FAILED_ATTEMPTS_LOCK = asyncio.Lock()

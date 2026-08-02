@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any, Optional
 from collections import defaultdict
 
-log = logging.getLogger("devcopilot.event_intelligence.noise_reduction")
+log = logging.getLogger("omnipotent.event_intelligence.noise_reduction")
 
 
 class NoiseCategory(str, Enum):

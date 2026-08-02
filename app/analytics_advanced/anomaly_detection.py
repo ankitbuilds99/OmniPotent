@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.analytics_advanced.anomaly_detection")
+log = logging.getLogger("omnipotent.analytics_advanced.anomaly_detection")
 
 
 class AnomalyType(str, Enum):

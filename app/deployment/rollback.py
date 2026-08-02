@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Any, Callable, Awaitable
 from uuid import uuid4
 
-log = logging.getLogger("devcopilot.deployment.rollback")
+log = logging.getLogger("omnipotent.deployment.rollback")
 
 
 class RollbackReason(str, Enum):

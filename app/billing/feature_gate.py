@@ -21,7 +21,7 @@ from app.billing.plans import (
     FEATURE_TO_MIN_TIER,
 )
 
-log = logging.getLogger("devcopilot.billing.feature_gate")
+log = logging.getLogger("omnipotent.billing.feature_gate")
 
 
 class BillingStore(Protocol):

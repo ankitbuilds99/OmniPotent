@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.integrations.jira")
+log = logging.getLogger("omnipotent.integrations.jira")
 
 
 class JiraIssueType(Enum):

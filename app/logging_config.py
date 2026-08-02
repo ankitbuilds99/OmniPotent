@@ -25,7 +25,7 @@ from typing import Any, Callable
 from app.observability import request_id_var
 
 # Service metadata for all logs
-SERVICE_NAME = os.environ.get("SERVICE_NAME", "devops-copilot")
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "omnipotent")
 SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "1.0.0")
 SERVICE_ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 HOSTNAME = socket.gethostname()
@@ -246,13 +246,13 @@ class LogContext:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a logger with the devcopilot prefix.
+    """Get a logger with the omnipotent prefix.
 
     Usage:
-        log = get_logger(__name__)  # devcopilot.module.submodule
+        log = get_logger(__name__)  # omnipotent.module.submodule
     """
     if name.startswith("app."):
-        name = "devcopilot." + name[4:]
-    elif not name.startswith("devcopilot."):
-        name = "devcopilot." + name
+        name = "omnipotent." + name[4:]
+    elif not name.startswith("omnipotent."):
+        name = "omnipotent." + name
     return logging.getLogger(name)

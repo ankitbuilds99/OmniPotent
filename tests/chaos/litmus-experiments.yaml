@@ -7,12 +7,12 @@ apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: copilot-pod-kill
-  namespace: devops-copilot
+  namespace: omnipotent
 spec:
   engineState: 'active'
   appinfo:
-    appns: 'devops-copilot'
-    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appns: 'omnipotent'
+    applabel: 'app.kubernetes.io/name=omnipotent'
     appkind: 'deployment'
   chaosServiceAccount: litmus-admin
   experiments:
@@ -37,7 +37,7 @@ spec:
               interval: 5s
               retry: 3
             httpProbe/inputs:
-              url: http://devops-copilot:8000/healthz
+              url: http://omnipotent:8000/healthz
               insecureSkipVerify: false
               method:
                 get:
@@ -50,12 +50,12 @@ apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: copilot-network-latency
-  namespace: devops-copilot
+  namespace: omnipotent
 spec:
   engineState: 'active'
   appinfo:
-    appns: 'devops-copilot'
-    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appns: 'omnipotent'
+    applabel: 'app.kubernetes.io/name=omnipotent'
     appkind: 'deployment'
   chaosServiceAccount: litmus-admin
   experiments:
@@ -82,7 +82,7 @@ spec:
               interval: 30s
               retry: 2
             httpProbe/inputs:
-              url: http://devops-copilot:8000/chat
+              url: http://omnipotent:8000/chat
               insecureSkipVerify: false
               method:
                 post:
@@ -97,11 +97,11 @@ apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: copilot-redis-failure
-  namespace: devops-copilot
+  namespace: omnipotent
 spec:
   engineState: 'active'
   appinfo:
-    appns: 'devops-copilot'
+    appns: 'omnipotent'
     applabel: 'app=redis'
     appkind: 'statefulset'
   chaosServiceAccount: litmus-admin
@@ -125,7 +125,7 @@ spec:
               interval: 5s
               retry: 5
             httpProbe/inputs:
-              url: http://devops-copilot:8000/healthz
+              url: http://omnipotent:8000/healthz
               method:
                 get:
                   criteria: ==
@@ -137,12 +137,12 @@ apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: copilot-cpu-stress
-  namespace: devops-copilot
+  namespace: omnipotent
 spec:
   engineState: 'active'
   appinfo:
-    appns: 'devops-copilot'
-    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appns: 'omnipotent'
+    applabel: 'app.kubernetes.io/name=omnipotent'
     appkind: 'deployment'
   chaosServiceAccount: litmus-admin
   experiments:
@@ -167,7 +167,7 @@ spec:
               interval: 10s
               retry: 3
             httpProbe/inputs:
-              url: http://devops-copilot:8000/metrics/slo
+              url: http://omnipotent:8000/metrics/slo
               method:
                 get:
                   criteria: contains
@@ -179,12 +179,12 @@ apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: copilot-memory-stress
-  namespace: devops-copilot
+  namespace: omnipotent
 spec:
   engineState: 'active'
   appinfo:
-    appns: 'devops-copilot'
-    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appns: 'omnipotent'
+    applabel: 'app.kubernetes.io/name=omnipotent'
     appkind: 'deployment'
   chaosServiceAccount: litmus-admin
   experiments:
@@ -205,12 +205,12 @@ apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: copilot-dns-failure
-  namespace: devops-copilot
+  namespace: omnipotent
 spec:
   engineState: 'active'
   appinfo:
-    appns: 'devops-copilot'
-    applabel: 'app.kubernetes.io/name=devops-copilot'
+    appns: 'omnipotent'
+    applabel: 'app.kubernetes.io/name=omnipotent'
     appkind: 'deployment'
   chaosServiceAccount: litmus-admin
   experiments:
@@ -231,7 +231,7 @@ spec:
               interval: 10s
               retry: 3
             cmdProbe/inputs:
-              command: 'curl -s http://devops-copilot:8000/config | jq -e .fallback_provider'
+              command: 'curl -s http://omnipotent:8000/config | jq -e .fallback_provider'
               comparator:
                 type: string
                 criteria: notEqual

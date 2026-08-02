@@ -9,7 +9,7 @@ import httpx
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.integrations.teams")
+log = logging.getLogger("omnipotent.integrations.teams")
 
 
 def is_teams_configured() -> bool:

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.analytics_advanced.team_analytics")
+log = logging.getLogger("omnipotent.analytics_advanced.team_analytics")
 
 
 class HealthStatus(str, Enum):

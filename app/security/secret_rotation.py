@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Awaitable, Callable
 
-log = logging.getLogger("devcopilot.security.secret_rotation")
+log = logging.getLogger("omnipotent.security.secret_rotation")
 
 
 class RotationStatus(Enum):

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Set
 
-log = logging.getLogger("devcopilot.redis_pool")
+log = logging.getLogger("omnipotent.redis_pool")
 
 
 class RedisPoolType(Enum):

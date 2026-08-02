@@ -17,7 +17,7 @@ from app.billing import (
 from app.config import get_settings
 from app import tenant_context
 
-log = logging.getLogger("devcopilot.api.billing")
+log = logging.getLogger("omnipotent.api.billing")
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 

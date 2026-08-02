@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.compliance.evidence")
+log = logging.getLogger("omnipotent.compliance.evidence")
 
 
 class EvidenceType(Enum):

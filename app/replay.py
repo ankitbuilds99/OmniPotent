@@ -30,7 +30,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
 
-log = logging.getLogger("devcopilot.replay")
+log = logging.getLogger("omnipotent.replay")
 
 # LangChain stamps a fresh random id (``lc_<uuid>``) onto content blocks — e.g. when
 # a tool returns a list, each item becomes a block carrying its own id. Those ids are

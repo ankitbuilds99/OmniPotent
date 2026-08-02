@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: devops-copilot
+  name: omnipotent
   labels:
-    app.kubernetes.io/name: devops-copilot
-    app.kubernetes.io/part-of: devops-copilot
+    app.kubernetes.io/name: omnipotent
+    app.kubernetes.io/part-of: omnipotent

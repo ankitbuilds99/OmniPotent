@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.incidents.store import get_incident_store
 from app.incidents.models import IncidentSeverity
 
-log = logging.getLogger("devcopilot.webhooks")
+log = logging.getLogger("omnipotent.webhooks")
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 

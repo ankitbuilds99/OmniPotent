@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-log = logging.getLogger("devcopilot.github_app.reviewer_suggester")
+log = logging.getLogger("omnipotent.github_app.reviewer_suggester")
 
 
 @dataclass

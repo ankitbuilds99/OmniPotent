@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.onboarding.rescue")
+log = logging.getLogger("omnipotent.onboarding.rescue")
 
 
 class RescueTriggerType(str, Enum):

@@ -1,8 +1,8 @@
 {
   "title": "DevOps Copilot — Complete Observability",
-  "uid": "devops-copilot-complete",
+  "uid": "omnipotent-complete",
   "schemaVersion": 39,
-  "tags": ["devops-copilot", "slo", "llm", "mcp"],
+  "tags": ["omnipotent", "slo", "llm", "mcp"],
   "timezone": "browser",
   "templating": {
     "list": [

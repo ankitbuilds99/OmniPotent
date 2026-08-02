@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.compliance.controls")
+log = logging.getLogger("omnipotent.compliance.controls")
 
 
 class ControlFramework(Enum):

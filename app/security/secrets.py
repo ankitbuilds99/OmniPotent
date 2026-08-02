@@ -22,7 +22,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("devcopilot.security.secrets")
+log = logging.getLogger("omnipotent.security.secrets")
 
 
 class SecretType(Enum):

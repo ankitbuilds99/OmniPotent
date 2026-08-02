@@ -10,7 +10,7 @@ from enum import Enum
 
 from app.dependency_graph.graph import DependencyGraph, ServiceNode
 
-log = logging.getLogger("devcopilot.dependency_graph.blast_radius")
+log = logging.getLogger("omnipotent.dependency_graph.blast_radius")
 
 
 class ImpactLevel(str, Enum):

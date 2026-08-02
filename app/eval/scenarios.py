@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("devcopilot.eval.scenarios")
+log = logging.getLogger("omnipotent.eval.scenarios")
 
 
 class IncidentType(str, Enum):

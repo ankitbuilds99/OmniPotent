@@ -64,7 +64,7 @@ from app.graph.nodes import (
 )
 from app.graph.state import AgentState
 
-log = logging.getLogger("devcopilot.guardrails")
+log = logging.getLogger("omnipotent.guardrails")
 
 
 def make_guarded_tool_node(tools):

@@ -27,7 +27,7 @@ from app.planning.execution_engine import (
     create_default_tools,
 )
 
-log = logging.getLogger("devcopilot.planning.api")
+log = logging.getLogger("omnipotent.planning.api")
 
 router = APIRouter(prefix="/planning", tags=["planning"])
 

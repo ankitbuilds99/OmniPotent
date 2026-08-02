@@ -21,7 +21,7 @@ from typing import Any
 
 from app.verification.evidence_collector import Evidence, EvidenceSource
 
-log = logging.getLogger("devcopilot.verification.hallucination_detector")
+log = logging.getLogger("omnipotent.verification.hallucination_detector")
 
 
 class HallucinationType(str, Enum):

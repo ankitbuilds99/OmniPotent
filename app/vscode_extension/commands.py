@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.vscode_extension.commands")
+log = logging.getLogger("omnipotent.vscode_extension.commands")
 
 
 @dataclass
@@ -26,7 +26,7 @@ class VSCodeCommand:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "command": f"devcopilot.{self.command_id}",
+            "command": f"omnipotent.{self.command_id}",
             "title": self.title,
             "description": self.description,
             "category": self.category,
@@ -255,23 +255,23 @@ class CommandPalette:
         """Get status bar items for VS Code."""
         return [
             {
-                "id": "devcopilot.status",
+                "id": "omnipotent.status",
                 "alignment": "right",
                 "priority": 100,
                 "text": "$(shield) DevOps Copilot",
                 "tooltip": "System status and quick actions",
-                "command": "devcopilot.openInvestigation",
+                "command": "omnipotent.openInvestigation",
             },
             {
-                "id": "devcopilot.incidents",
+                "id": "omnipotent.incidents",
                 "alignment": "right",
                 "priority": 99,
                 "text": "$(bell) 1 Active",
                 "tooltip": "Active incidents",
-                "command": "devcopilot.viewRelatedIncidents",
+                "command": "omnipotent.viewRelatedIncidents",
             },
             {
-                "id": "devcopilot.oncall",
+                "id": "omnipotent.oncall",
                 "alignment": "right",
                 "priority": 98,
                 "text": "$(person) On-Call: You",
@@ -283,22 +283,22 @@ class CommandPalette:
         """Get sidebar view definitions."""
         return [
             {
-                "id": "devcopilot.incidents",
+                "id": "omnipotent.incidents",
                 "name": "Active Incidents",
                 "icon": "media/alert.svg",
             },
             {
-                "id": "devcopilot.stats",
+                "id": "omnipotent.stats",
                 "name": "Quick Stats",
                 "icon": "media/chart.svg",
             },
             {
-                "id": "devcopilot.investigations",
+                "id": "omnipotent.investigations",
                 "name": "Recent Investigations",
                 "icon": "media/search.svg",
             },
             {
-                "id": "devcopilot.fileRisk",
+                "id": "omnipotent.fileRisk",
                 "name": "File Risk Analysis",
                 "icon": "media/warning.svg",
             },

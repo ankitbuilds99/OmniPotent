@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-log = logging.getLogger("devcopilot.observability.slo")
+log = logging.getLogger("omnipotent.observability.slo")
 
 
 @dataclass

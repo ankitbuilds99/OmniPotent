@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from typing import Any
 
-log = logging.getLogger("devcopilot.sso.emergency_bypass")
+log = logging.getLogger("omnipotent.sso.emergency_bypass")
 
 
 class BypassReason(Enum):

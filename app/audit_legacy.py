@@ -1,7 +1,7 @@
 """Audit trail for security-relevant actions.
 
 Emits structured, append-only audit events (who/what/when) on a dedicated
-`devcopilot.audit` logger AND keeps them queryable: an in-process ring buffer
+`omnipotent.audit` logger AND keeps them queryable: an in-process ring buffer
 backs a read API (GET /audit), and — when COPILOT_AUDIT_LOG is set — every event
 is also appended to a JSONL file for durable, tamper-evident retention. Records
 carry the request-id (via observability) so an action can be correlated
@@ -20,7 +20,7 @@ from collections import deque
 
 from app import observability, tenant_context
 
-_audit = logging.getLogger("devcopilot.audit")
+_audit = logging.getLogger("omnipotent.audit")
 
 # Recent events kept in memory for the read API (bounded so memory is fixed).
 _BUFFER: deque[dict] = deque(maxlen=2000)

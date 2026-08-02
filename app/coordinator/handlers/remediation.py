@@ -17,7 +17,7 @@ from typing import Any
 
 from app.coordinator.dag_executor import TaskNode
 
-log = logging.getLogger("devcopilot.coordinator.handlers.remediation")
+log = logging.getLogger("omnipotent.coordinator.handlers.remediation")
 
 
 class ScaleHandler:

@@ -30,7 +30,7 @@ from app.oncall.models import (
 )
 from app.oncall.schedule_service import ScheduleService
 
-log = logging.getLogger("devcopilot.oncall.escalation")
+log = logging.getLogger("omnipotent.oncall.escalation")
 
 
 class EscalationService:

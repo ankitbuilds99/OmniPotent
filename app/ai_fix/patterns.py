@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("devcopilot.ai_fix.patterns")
+log = logging.getLogger("omnipotent.ai_fix.patterns")
 
 
 @dataclass

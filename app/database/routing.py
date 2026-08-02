@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncGenerator, Literal
 
-log = logging.getLogger("devcopilot.database.routing")
+log = logging.getLogger("omnipotent.database.routing")
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession

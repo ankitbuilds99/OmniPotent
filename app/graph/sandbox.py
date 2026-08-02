@@ -31,7 +31,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-log = logging.getLogger("devcopilot.sandbox")
+log = logging.getLogger("omnipotent.sandbox")
 
 _MAX_OUT = 2000  # cap captured output so a chatty test can't bloat the report/context
 

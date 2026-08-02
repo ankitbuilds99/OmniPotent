@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.analytics_advanced.human_loop")
+log = logging.getLogger("omnipotent.analytics_advanced.human_loop")
 
 
 class ActionType(str, Enum):

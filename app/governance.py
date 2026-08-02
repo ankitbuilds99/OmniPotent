@@ -21,7 +21,7 @@ from typing import Any
 
 from app import audit
 
-log = logging.getLogger("devcopilot.governance")
+log = logging.getLogger("omnipotent.governance")
 
 
 def retention_cutoff(days: int, now_epoch: float | None = None) -> str:

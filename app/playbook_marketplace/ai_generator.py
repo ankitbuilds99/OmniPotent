@@ -17,7 +17,7 @@ from app.playbook_marketplace.catalog import (
     PlaybookStep,
 )
 
-log = logging.getLogger("devcopilot.playbook_marketplace.ai_generator")
+log = logging.getLogger("omnipotent.playbook_marketplace.ai_generator")
 
 
 @dataclass

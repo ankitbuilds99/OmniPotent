@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("devcopilot.roi.benchmarks")
+log = logging.getLogger("omnipotent.roi.benchmarks")
 
 
 @dataclass

@@ -16,7 +16,7 @@ from enum import Enum
 from typing import Any
 import hashlib
 
-log = logging.getLogger("devcopilot.policy_engine.change_windows")
+log = logging.getLogger("omnipotent.policy_engine.change_windows")
 
 
 class WindowType(str, Enum):

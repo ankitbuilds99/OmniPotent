@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 
 from app.slo_poller import is_page_worthy
 
-log = logging.getLogger("devcopilot.autonomy")
+log = logging.getLogger("omnipotent.autonomy")
 
 # The only actions autonomy may take unattended — reversible, bounded blast radius.
 REVERSIBLE_ACTIONS: set[str] = {"rollback_deployment", "restart_deployment"}

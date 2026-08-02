@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.sso_advanced.session_management")
+log = logging.getLogger("omnipotent.sso_advanced.session_management")
 
 
 class SessionStatus(str, Enum):

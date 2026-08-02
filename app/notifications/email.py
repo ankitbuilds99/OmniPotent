@@ -17,7 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
-log = logging.getLogger("devcopilot.notifications.email")
+log = logging.getLogger("omnipotent.notifications.email")
 
 
 @dataclass

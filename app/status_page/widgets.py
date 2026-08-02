@@ -13,7 +13,7 @@ from typing import Any
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.status_page.widgets")
+log = logging.getLogger("omnipotent.status_page.widgets")
 _settings = get_settings()
 
 

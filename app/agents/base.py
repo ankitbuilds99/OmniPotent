@@ -30,7 +30,7 @@ from app.llm import cached_system, get_llm
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
 
-log = logging.getLogger("devcopilot.agents.base")
+log = logging.getLogger("omnipotent.agents.base")
 
 
 class BaseAgent(ABC):

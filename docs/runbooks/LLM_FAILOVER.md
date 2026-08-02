@@ -68,23 +68,23 @@ Primary (Anthropic) → Fallback (OpenAI) → Emergency (Groq)
 
 ```bash
 # Immediate switch to OpenAI
-kubectl set env deployment/devops-copilot \
+kubectl set env deployment/omnipotent \
   COPILOT_PROVIDER=openai \
   COPILOT_MODEL=gpt-4o \
-  -n devops-copilot
+  -n omnipotent
 
 # Or switch to Groq (faster, lower quality)
-kubectl set env deployment/devops-copilot \
+kubectl set env deployment/omnipotent \
   COPILOT_PROVIDER=groq \
   COPILOT_MODEL=llama-3.3-70b-versatile \
-  -n devops-copilot
+  -n omnipotent
 ```
 
 ### Reset Circuit Breaker
 
 ```bash
 # Restart pods to reset circuit breaker state
-kubectl rollout restart deployment/devops-copilot -n devops-copilot
+kubectl rollout restart deployment/omnipotent -n omnipotent
 ```
 
 ### Verify Failover
@@ -143,13 +143,13 @@ kubectl logs -l app=copilot --tail=10 | grep "Using provider"
 
 ```bash
 # Restore to Anthropic
-kubectl set env deployment/devops-copilot \
+kubectl set env deployment/omnipotent \
   COPILOT_PROVIDER=anthropic \
   COPILOT_MODEL=claude-sonnet-4-20250514 \
-  -n devops-copilot
+  -n omnipotent
 
 # Verify restoration
-kubectl rollout status deployment/devops-copilot -n devops-copilot
+kubectl rollout status deployment/omnipotent -n omnipotent
 ```
 
 ## Prevention
@@ -162,10 +162,10 @@ curl -s https://api.anthropic.com/v1/usage \
   -H "x-api-key: $ANTHROPIC_API_KEY"
 
 # Implement request queuing
-kubectl set env deployment/devops-copilot \
+kubectl set env deployment/omnipotent \
   COPILOT_LLM_QUEUE_SIZE=100 \
   COPILOT_LLM_CONCURRENCY=5 \
-  -n devops-copilot
+  -n omnipotent
 ```
 
 ### Multi-Provider Setup
@@ -190,7 +190,7 @@ kubectl create secret generic copilot-secrets \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # Restart to pick up new key
-kubectl rollout restart deployment/devops-copilot -n devops-copilot
+kubectl rollout restart deployment/omnipotent -n omnipotent
 ```
 
 ### Related ADRs

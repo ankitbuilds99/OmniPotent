@@ -25,7 +25,7 @@ from app.log_intelligence.models import (
     TraceWaterfall,
 )
 
-log = logging.getLogger("devcopilot.log_intelligence.analyzer")
+log = logging.getLogger("omnipotent.log_intelligence.analyzer")
 
 
 class LogAnalyzer:

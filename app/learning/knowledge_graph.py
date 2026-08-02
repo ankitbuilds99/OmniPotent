@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.learning.knowledge_graph")
+log = logging.getLogger("omnipotent.learning.knowledge_graph")
 
 
 class NodeType(Enum):

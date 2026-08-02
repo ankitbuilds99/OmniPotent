@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.coordinator.resource_pool")
+log = logging.getLogger("omnipotent.coordinator.resource_pool")
 
 
 @dataclass

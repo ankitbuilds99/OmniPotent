@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.predictive.signals")
+log = logging.getLogger("omnipotent.predictive.signals")
 
 
 class SignalType(Enum):

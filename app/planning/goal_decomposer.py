@@ -17,7 +17,7 @@ import uuid
 
 from app.planning.task_graph import TaskGraph, TaskType, TaskPriority
 
-log = logging.getLogger("devcopilot.planning.goal_decomposer")
+log = logging.getLogger("omnipotent.planning.goal_decomposer")
 
 
 class GoalCategory(str, Enum):

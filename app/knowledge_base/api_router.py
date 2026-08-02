@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from app.knowledge_base.rag import KnowledgeBase, Document, DocumentType
 
-log = logging.getLogger("devcopilot.knowledge_base.api")
+log = logging.getLogger("omnipotent.knowledge_base.api")
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 

@@ -14,7 +14,7 @@ from app.deduplication.models import (
     AlertSeverity,
 )
 
-log = logging.getLogger("devcopilot.deduplication.grouping")
+log = logging.getLogger("omnipotent.deduplication.grouping")
 
 
 @dataclass

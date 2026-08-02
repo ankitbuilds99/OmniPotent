@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Any
 import math
 
-log = logging.getLogger("devcopilot.digital_twin.downtime")
+log = logging.getLogger("omnipotent.digital_twin.downtime")
 
 
 class DowntimeRisk(str, Enum):

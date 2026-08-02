@@ -10,7 +10,7 @@ import httpx
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.integrations.jira")
+log = logging.getLogger("omnipotent.integrations.jira")
 
 
 def is_jira_configured() -> bool:
@@ -324,9 +324,9 @@ async def link_to_investigation(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "globalId": f"devops-copilot:{investigation_id}",
+                    "globalId": f"omnipotent:{investigation_id}",
                     "application": {
-                        "type": "com.devops-copilot",
+                        "type": "com.omnipotent",
                         "name": "DevOps Copilot",
                     },
                     "object": {

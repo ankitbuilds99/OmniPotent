@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.cost_tracking.revenue")
+log = logging.getLogger("omnipotent.cost_tracking.revenue")
 
 
 @dataclass

@@ -11,7 +11,7 @@ from typing import Any
 
 from app.eval.pipeline import EvalResult
 
-log = logging.getLogger("devcopilot.eval.reporter")
+log = logging.getLogger("omnipotent.eval.reporter")
 
 
 class ReportFormat(str, Enum):

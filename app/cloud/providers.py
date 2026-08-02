@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 from enum import Enum
 
-log = logging.getLogger("devcopilot.cloud.providers")
+log = logging.getLogger("omnipotent.cloud.providers")
 
 
 class CloudProvider(str, Enum):

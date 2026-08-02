@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.rca_advanced.pattern_detector")
+log = logging.getLogger("omnipotent.rca_advanced.pattern_detector")
 
 
 class PatternCategory(str, Enum):

@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: devops-copilot
+namespace: omnipotent
 
 resources:
   - namespace.yaml
@@ -15,10 +15,10 @@ resources:
   - networkpolicy.yaml
 
 commonLabels:
-  app.kubernetes.io/name: devops-copilot
+  app.kubernetes.io/name: omnipotent
   app.kubernetes.io/version: "1.0.0"
   app.kubernetes.io/managed-by: kustomize
 
 images:
-  - name: ghcr.io/ankit25bcs10610/devops-copilot
+  - name: ghcr.io/ankit25bcs10610/omnipotent
     newTag: latest

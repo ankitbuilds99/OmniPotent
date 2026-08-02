@@ -26,7 +26,7 @@ from app.correlation.models import (
     RootCauseAnalysis,
 )
 
-log = logging.getLogger("devcopilot.correlation.engine")
+log = logging.getLogger("omnipotent.correlation.engine")
 
 
 class CorrelationEngine:

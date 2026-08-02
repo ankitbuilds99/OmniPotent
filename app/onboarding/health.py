@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.onboarding.health")
+log = logging.getLogger("omnipotent.onboarding.health")
 
 
 class ActivationCheckStatus(str, Enum):

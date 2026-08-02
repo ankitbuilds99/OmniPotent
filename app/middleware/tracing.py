@@ -21,7 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-log = logging.getLogger("devcopilot.middleware.tracing")
+log = logging.getLogger("omnipotent.middleware.tracing")
 
 _trace_context: ContextVar["TraceContext | None"] = ContextVar(
     "trace_context", default=None
@@ -126,7 +126,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app: Any,
-        service_name: str = "devops-copilot",
+        service_name: str = "omnipotent",
         propagate_headers: bool = True,
         sample_rate: float = 1.0,
     ):

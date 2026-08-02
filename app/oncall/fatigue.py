@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.oncall.fatigue")
+log = logging.getLogger("omnipotent.oncall.fatigue")
 
 
 class FatigueLevel(Enum):

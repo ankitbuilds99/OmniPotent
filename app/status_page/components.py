@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.status_page.components")
+log = logging.getLogger("omnipotent.status_page.components")
 
 
 class ComponentStatus(Enum):

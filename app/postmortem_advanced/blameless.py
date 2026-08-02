@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("devcopilot.postmortem_advanced.blameless")
+log = logging.getLogger("omnipotent.postmortem_advanced.blameless")
 
 
 @dataclass

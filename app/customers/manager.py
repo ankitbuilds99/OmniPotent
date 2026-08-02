@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.customers")
+log = logging.getLogger("omnipotent.customers")
 
 
 class CustomerTier(str, Enum):

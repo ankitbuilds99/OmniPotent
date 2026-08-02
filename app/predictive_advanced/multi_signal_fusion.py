@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.predictive_advanced.multi_signal_fusion")
+log = logging.getLogger("omnipotent.predictive_advanced.multi_signal_fusion")
 
 
 class SignalSource(str, Enum):

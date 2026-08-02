@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.oncall.swap")
+log = logging.getLogger("omnipotent.oncall.swap")
 
 
 class SwapStatus(Enum):

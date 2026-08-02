@@ -14,7 +14,7 @@ import httpx
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.chatops.slack")
+log = logging.getLogger("omnipotent.chatops.slack")
 _settings = get_settings()
 
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.sso_advanced.audit")
+log = logging.getLogger("omnipotent.sso_advanced.audit")
 
 
 class AuditEventType(str, Enum):

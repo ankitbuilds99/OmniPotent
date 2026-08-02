@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.growth.tiers")
+log = logging.getLogger("omnipotent.growth.tiers")
 
 
 class FeatureAccess(str, Enum):

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.slack_advanced.natural_language")
+log = logging.getLogger("omnipotent.slack_advanced.natural_language")
 
 
 class CommandType(str, Enum):

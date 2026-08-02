@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Coroutine
 
-log = logging.getLogger("devcopilot.llm.semantic_cache")
+log = logging.getLogger("omnipotent.llm.semantic_cache")
 
 
 @dataclass

@@ -13,7 +13,7 @@ from typing import Any
 
 from app.risk.scorer import RiskLevel, RiskScore
 
-log = logging.getLogger("devcopilot.risk.deploy_strategy")
+log = logging.getLogger("omnipotent.risk.deploy_strategy")
 
 
 class StrategyType(Enum):

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.predictive.calibration")
+log = logging.getLogger("omnipotent.predictive.calibration")
 
 
 class PredictionOutcome(Enum):

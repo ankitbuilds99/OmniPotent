@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.vscode_extension.annotations")
+log = logging.getLogger("omnipotent.vscode_extension.annotations")
 
 
 class AnnotationSeverity(str, Enum):
@@ -109,9 +109,9 @@ class IncidentAnnotation:
         lines.extend([
             "---",
             "",
-            f"[Apply AI Fix](command:devcopilot.applyFix?{self.annotation_id}) | "
+            f"[Apply AI Fix](command:omnipotent.applyFix?{self.annotation_id}) | "
             f"[View Investigation]({self.incident_url}) | "
-            "[Dismiss](command:devcopilot.dismissAnnotation)",
+            "[Dismiss](command:omnipotent.dismissAnnotation)",
         ])
 
         return "\n".join(lines)

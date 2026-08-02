@@ -16,7 +16,7 @@ from app.similar_search.models import (
     RootCauseCategory,
 )
 
-log = logging.getLogger("devcopilot.similar_search.knowledge_graph")
+log = logging.getLogger("omnipotent.similar_search.knowledge_graph")
 
 
 class NodeType:

@@ -15,7 +15,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
-log = logging.getLogger("devcopilot.scaling")
+log = logging.getLogger("omnipotent.scaling")
 
 
 @dataclass

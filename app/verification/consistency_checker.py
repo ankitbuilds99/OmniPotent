@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.verification.consistency_checker")
+log = logging.getLogger("omnipotent.verification.consistency_checker")
 
 
 @dataclass

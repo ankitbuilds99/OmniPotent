@@ -15,7 +15,7 @@ from app.agents.base import BaseAgent
 from app.agents.protocol import AgentRole, MessageType, SharedContext
 from app.graph.prompts import INVESTIGATOR_AGENT_SYSTEM
 
-log = logging.getLogger("devcopilot.agents.investigator")
+log = logging.getLogger("omnipotent.agents.investigator")
 
 # Tools the investigator prioritizes (read-only investigation tools)
 _INVESTIGATION_TOOLS = {

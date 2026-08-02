@@ -37,7 +37,7 @@ from app.api.graphql.types import (
     AlertUpdate,
 )
 
-log = logging.getLogger("devcopilot.api.graphql")
+log = logging.getLogger("omnipotent.api.graphql")
 
 
 # In-memory stores for demo (replace with real data sources)

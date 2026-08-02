@@ -15,7 +15,7 @@ from app.deduplication.models import (
     SuppressionType,
 )
 
-log = logging.getLogger("devcopilot.deduplication.topology")
+log = logging.getLogger("omnipotent.deduplication.topology")
 
 
 @dataclass

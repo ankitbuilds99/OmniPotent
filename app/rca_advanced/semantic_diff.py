@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.rca_advanced.semantic_diff")
+log = logging.getLogger("omnipotent.rca_advanced.semantic_diff")
 
 
 class ChangeType(str, Enum):

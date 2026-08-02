@@ -16,7 +16,7 @@ from app.database.supabase_client import (
     is_supabase_configured,
 )
 
-log = logging.getLogger("devcopilot.database.repositories")
+log = logging.getLogger("omnipotent.database.repositories")
 
 
 class InvestigationRepository:

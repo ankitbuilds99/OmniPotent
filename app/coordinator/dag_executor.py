@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable
 
-log = logging.getLogger("devcopilot.coordinator.dag_executor")
+log = logging.getLogger("omnipotent.coordinator.dag_executor")
 
 
 class ExecutionState(str, Enum):

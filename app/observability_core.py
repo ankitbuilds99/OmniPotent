@@ -19,7 +19,7 @@ import os
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot")
+log = logging.getLogger("omnipotent")
 _INITIALIZED = False
 
 # Set by the API request-id middleware; flows into every log record via the
@@ -105,7 +105,7 @@ def setup_datadog_apm() -> None:
     llmobs_on = _truthy(os.environ.get("DD_LLMOBS_ENABLED", ""))
     if not (get_settings().dd_trace_enabled or llmobs_on):
         return
-    os.environ.setdefault("DD_SERVICE", "devops-copilot")
+    os.environ.setdefault("DD_SERVICE", "omnipotent")
     os.environ.setdefault("DD_ENV", get_settings().copilot_env)
     try:
         import ddtrace.auto  # noqa: F401  — auto-instruments imported libraries on import
@@ -121,7 +121,7 @@ def setup_datadog_apm() -> None:
             # Agentless when an API key is present and no agent host is configured.
             if os.environ.get("DD_API_KEY") and not os.environ.get("DD_AGENT_HOST"):
                 os.environ.setdefault("DD_LLMOBS_AGENTLESS_ENABLED", "1")
-            ml_app = os.environ.get("DD_LLMOBS_ML_APP", "devops-copilot")
+            ml_app = os.environ.get("DD_LLMOBS_ML_APP", "omnipotent")
             LLMObs.enable(ml_app=ml_app)
             log.info("Datadog LLM Observability enabled (ml_app=%s site=%s)",
                      ml_app, os.environ.get("DD_SITE", "datadoghq.com"))

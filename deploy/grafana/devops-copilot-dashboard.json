@@ -52,7 +52,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"devops-copilot\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"omnipotent\"}[5m])) by (le)) * 1000",
           "legendFormat": "P99 Latency",
           "refId": "A"
         }
@@ -94,7 +94,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total{job=\"devops-copilot\", status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"devops-copilot\"}[5m]))",
+          "expr": "sum(rate(http_requests_total{job=\"omnipotent\", status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"omnipotent\"}[5m]))",
           "legendFormat": "Error Rate",
           "refId": "A"
         }
@@ -134,7 +134,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total{job=\"devops-copilot\"}[5m]))",
+          "expr": "sum(rate(http_requests_total{job=\"omnipotent\"}[5m]))",
           "legendFormat": "Requests/sec",
           "refId": "A"
         }
@@ -186,7 +186,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(devops_copilot_investigations_total[5m])) by (status)",
+          "expr": "sum(rate(omnipotent_investigations_total[5m])) by (status)",
           "legendFormat": "{{ status }}",
           "refId": "A"
         }
@@ -225,17 +225,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(devops_copilot_investigation_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(omnipotent_investigation_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "P50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(devops_copilot_investigation_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(omnipotent_investigation_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "P95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(devops_copilot_investigation_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(omnipotent_investigation_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "P99",
           "refId": "C"
         }
@@ -280,7 +280,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(devops_copilot_agent_invocations_total[5m])) by (agent_type)",
+          "expr": "sum(rate(omnipotent_agent_invocations_total[5m])) by (agent_type)",
           "legendFormat": "{{ agent_type }}",
           "refId": "A"
         }
@@ -318,7 +318,7 @@
       },
       "targets": [
         {
-          "expr": "avg(devops_copilot_agent_confidence_score) by (agent_type)",
+          "expr": "avg(omnipotent_agent_confidence_score) by (agent_type)",
           "legendFormat": "{{ agent_type }}",
           "refId": "A"
         }
@@ -357,7 +357,7 @@
       "id": 12,
       "targets": [
         {
-          "expr": "100 * sum(rate(container_cpu_usage_seconds_total{pod=~\"devops-copilot.*\"}[5m])) / sum(kube_pod_container_resource_limits{pod=~\"devops-copilot.*\", resource=\"cpu\"})",
+          "expr": "100 * sum(rate(container_cpu_usage_seconds_total{pod=~\"omnipotent.*\"}[5m])) / sum(kube_pod_container_resource_limits{pod=~\"omnipotent.*\", resource=\"cpu\"})",
           "legendFormat": "CPU Usage",
           "refId": "A"
         }
@@ -388,7 +388,7 @@
       "id": 13,
       "targets": [
         {
-          "expr": "sum(container_memory_working_set_bytes{pod=~\"devops-copilot.*\"})",
+          "expr": "sum(container_memory_working_set_bytes{pod=~\"omnipotent.*\"})",
           "legendFormat": "Memory Usage",
           "refId": "A"
         }
@@ -418,7 +418,7 @@
       "id": 14,
       "targets": [
         {
-          "expr": "sum(kube_pod_status_ready{pod=~\"devops-copilot.*\", condition=\"true\"})",
+          "expr": "sum(kube_pod_status_ready{pod=~\"omnipotent.*\", condition=\"true\"})",
           "legendFormat": "Ready Pods",
           "refId": "A"
         }
@@ -430,7 +430,7 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["devops-copilot", "ai", "incidents"],
+  "tags": ["omnipotent", "ai", "incidents"],
   "templating": {
     "list": [
       {
@@ -453,7 +453,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "DevOps Copilot",
-  "uid": "devops-copilot-main",
+  "uid": "omnipotent-main",
   "version": 1,
   "weekStart": ""
 }

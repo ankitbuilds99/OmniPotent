@@ -21,7 +21,7 @@ from starlette.responses import Response
 
 from app.middleware.tracing import get_trace_context
 
-log = logging.getLogger("devcopilot.middleware.request_logger")
+log = logging.getLogger("omnipotent.middleware.request_logger")
 
 
 SENSITIVE_HEADERS = frozenset({

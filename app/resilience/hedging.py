@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
-log = logging.getLogger("devcopilot.resilience.hedging")
+log = logging.getLogger("omnipotent.resilience.hedging")
 
 T = TypeVar("T")
 

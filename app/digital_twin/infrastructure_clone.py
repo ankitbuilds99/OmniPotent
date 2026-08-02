@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Any
 import uuid
 
-log = logging.getLogger("devcopilot.digital_twin.clone")
+log = logging.getLogger("omnipotent.digital_twin.clone")
 
 
 class CloneStrategy(str, Enum):
@@ -289,11 +289,11 @@ class InfrastructureCloner:
                 "labels": {
                     "digital-twin": "true",
                     "ttl-hours": str(config.ttl_hours),
-                    "managed-by": "devcopilot",
+                    "managed-by": "omnipotent",
                 },
                 "annotations": {
-                    "devcopilot.io/clone-strategy": config.strategy.value,
-                    "devcopilot.io/expires-at": (
+                    "omnipotent.io/clone-strategy": config.strategy.value,
+                    "omnipotent.io/expires-at": (
                         datetime.now(timezone.utc) + timedelta(hours=config.ttl_hours)
                     ).isoformat(),
                 },

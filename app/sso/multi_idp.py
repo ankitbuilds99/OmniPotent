@@ -17,7 +17,7 @@ from typing import Any
 
 from app.sso.saml import SAMLConfig
 
-log = logging.getLogger("devcopilot.sso.multi_idp")
+log = logging.getLogger("omnipotent.sso.multi_idp")
 
 
 class IdPRoutingStrategy(Enum):

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 from enum import Enum
 
-log = logging.getLogger("devcopilot.chatops.commands")
+log = logging.getLogger("omnipotent.chatops.commands")
 
 
 class CommandType(str, Enum):

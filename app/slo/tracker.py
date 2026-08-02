@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.slo.tracker")
+log = logging.getLogger("omnipotent.slo.tracker")
 
 
 class SLIType(Enum):

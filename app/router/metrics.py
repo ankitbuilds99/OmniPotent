@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 from collections import defaultdict
 
-log = logging.getLogger("devcopilot.router.metrics")
+log = logging.getLogger("omnipotent.router.metrics")
 
 
 @dataclass

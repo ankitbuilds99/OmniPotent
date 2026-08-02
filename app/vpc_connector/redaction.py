@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("devcopilot.vpc_connector.redaction")
+log = logging.getLogger("omnipotent.vpc_connector.redaction")
 
 
 @dataclass

@@ -220,7 +220,7 @@ class Settings(BaseSettings):
     # --- Observability ---
     langchain_tracing_v2: bool = False
     langchain_api_key: str = ""
-    langchain_project: str = "devops-copilot"
+    langchain_project: str = "omnipotent"
     # Optional Sentry error tracking (needs `pip install sentry-sdk`). Empty = off.
     sentry_dsn: str = ""
     # Datadog APM self-instrumentation of the copilot (needs `ddtrace` + a DD agent).
@@ -424,7 +424,7 @@ class Settings(BaseSettings):
     copilot_log_file: str = ""
 
     # --- Service Metadata ---
-    service_name: str = "devops-copilot"
+    service_name: str = "omnipotent"
     service_version: str = "1.0.0"
 
     # --- Deployment Strategy Defaults ---
@@ -438,7 +438,7 @@ class Settings(BaseSettings):
     # --- Email Notifications ---
     # Email provider: smtp | ses | sendgrid | resend
     email_provider: str = "smtp"
-    email_from: str = "noreply@devops-copilot.io"
+    email_from: str = "noreply@omnipotent.io"
     smtp_host: str = "localhost"
     smtp_port: int = 587
     smtp_user: str = ""

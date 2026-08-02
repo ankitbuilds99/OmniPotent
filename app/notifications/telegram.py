@@ -1,4 +1,4 @@
-"""Telegram notifications for DevOps-Copilot.
+"""Telegram notifications for OmniPotent.
 
 Provides:
 - Bot-based notifications
@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.notifications.telegram")
+log = logging.getLogger("omnipotent.notifications.telegram")
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 

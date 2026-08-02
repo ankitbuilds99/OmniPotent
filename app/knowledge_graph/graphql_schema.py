@@ -26,7 +26,7 @@ from app.knowledge_graph.neo4j_backend import (
     RelationType,
 )
 
-log = logging.getLogger("devcopilot.knowledge_graph.graphql")
+log = logging.getLogger("omnipotent.knowledge_graph.graphql")
 
 
 @strawberry.type

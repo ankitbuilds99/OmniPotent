@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Awaitable
 
-log = logging.getLogger("devcopilot.planning.task_graph")
+log = logging.getLogger("omnipotent.planning.task_graph")
 
 
 class TaskStatus(str, Enum):

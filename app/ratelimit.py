@@ -17,7 +17,7 @@ import logging
 import time
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.ratelimit")
+log = logging.getLogger("omnipotent.ratelimit")
 
 
 class InMemoryRateLimiter:

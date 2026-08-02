@@ -27,7 +27,7 @@ from app.coordinator.handlers import (
 from app.coordinator.replanner import DynamicReplanner
 from app.coordinator.resource_pool import ResourcePool
 
-log = logging.getLogger("devcopilot.coordinator.api")
+log = logging.getLogger("omnipotent.coordinator.api")
 
 router = APIRouter(prefix="/coordinator", tags=["coordinator"])
 

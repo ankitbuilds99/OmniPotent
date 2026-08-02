@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Generic, TypeVar
 
-log = logging.getLogger("devcopilot.resilience.fallback")
+log = logging.getLogger("omnipotent.resilience.fallback")
 
 T = TypeVar("T")
 

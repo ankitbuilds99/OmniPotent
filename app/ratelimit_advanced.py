@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Protocol
 
-log = logging.getLogger("devcopilot.ratelimit.advanced")
+log = logging.getLogger("omnipotent.ratelimit.advanced")
 
 
 class RateLimitAlgorithm(Enum):

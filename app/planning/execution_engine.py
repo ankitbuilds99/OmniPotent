@@ -25,7 +25,7 @@ from app.planning.task_graph import (
     ExecutionResult,
 )
 
-log = logging.getLogger("devcopilot.planning.execution_engine")
+log = logging.getLogger("omnipotent.planning.execution_engine")
 
 
 @dataclass

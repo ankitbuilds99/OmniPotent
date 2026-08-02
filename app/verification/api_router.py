@@ -20,7 +20,7 @@ from app.verification.verification_agent import (
     create_verification_agent,
 )
 
-log = logging.getLogger("devcopilot.verification.api")
+log = logging.getLogger("omnipotent.verification.api")
 
 router = APIRouter(prefix="/verification", tags=["verification"])
 

@@ -16,7 +16,7 @@ from app.postmortem_advanced.models import (
     LessonScope,
 )
 
-log = logging.getLogger("devcopilot.postmortem_advanced.patterns")
+log = logging.getLogger("omnipotent.postmortem_advanced.patterns")
 
 
 class PatternType(str, Enum):

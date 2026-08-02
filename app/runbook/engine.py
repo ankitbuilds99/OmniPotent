@@ -22,7 +22,7 @@ from app.runbook.models import (
     StepType,
 )
 
-log = logging.getLogger("devcopilot.runbook.engine")
+log = logging.getLogger("omnipotent.runbook.engine")
 
 
 class RunbookEngine:

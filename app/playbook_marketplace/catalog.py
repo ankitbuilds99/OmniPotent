@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.playbook_marketplace.catalog")
+log = logging.getLogger("omnipotent.playbook_marketplace.catalog")
 
 
 class PlaybookCategory(str, Enum):

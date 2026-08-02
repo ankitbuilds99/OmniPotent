@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.secrets.advanced")
+log = logging.getLogger("omnipotent.secrets.advanced")
 
 
 class SecretProvider(Enum):
@@ -214,7 +214,7 @@ class HashiCorpVaultProvider(SecretProviderInterface):
         url: str = "",
         token: str = "",
         mount: str = "secret",
-        path: str = "devops-copilot",
+        path: str = "omnipotent",
     ):
         self._url = url or os.environ.get("VAULT_ADDR", "")
         self._token = token or os.environ.get("VAULT_TOKEN", "")

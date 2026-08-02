@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.slack_bot.war_room")
+log = logging.getLogger("omnipotent.slack_bot.war_room")
 
 
 class WarRoomStatus(str, Enum):

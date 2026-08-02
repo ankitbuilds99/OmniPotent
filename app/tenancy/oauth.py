@@ -19,7 +19,7 @@ import secrets
 import time
 from typing import Any
 
-log = logging.getLogger("devcopilot.tenancy.oauth")
+log = logging.getLogger("omnipotent.tenancy.oauth")
 
 STATE_EXPIRY_SECONDS = 600
 SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))

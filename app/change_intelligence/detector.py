@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from enum import Enum
 
-log = logging.getLogger("devcopilot.change_intelligence.detector")
+log = logging.getLogger("omnipotent.change_intelligence.detector")
 
 
 class ChangeType(str, Enum):

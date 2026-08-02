@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("devcopilot.security.request_signing")
+log = logging.getLogger("omnipotent.security.request_signing")
 
 REPLAY_WINDOW = 300
 _SEEN_SIGNATURES: dict[str, float] = {}

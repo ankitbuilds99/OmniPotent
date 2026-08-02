@@ -9,7 +9,7 @@ from typing import Any
 from enum import Enum
 from collections import defaultdict
 
-log = logging.getLogger("devcopilot.dependency_graph.graph")
+log = logging.getLogger("omnipotent.dependency_graph.graph")
 
 
 class DependencyType(str, Enum):

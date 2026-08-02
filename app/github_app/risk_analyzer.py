@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.github_app.risk_analyzer")
+log = logging.getLogger("omnipotent.github_app.risk_analyzer")
 
 
 class RiskLevel(str, Enum):

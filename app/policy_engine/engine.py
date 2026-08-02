@@ -19,7 +19,7 @@ from typing import Any
 import hashlib
 import json
 
-log = logging.getLogger("devcopilot.policy_engine")
+log = logging.getLogger("omnipotent.policy_engine")
 
 
 class PolicyDecision(str, Enum):
@@ -406,7 +406,7 @@ class PolicyEngine:
 
         try:
             result = await self.opa.evaluate(
-                policy_path=f"devcopilot/{action}",
+                policy_path=f"omnipotent/{action}",
                 input_data=input_data,
             )
             return result.to_dict() if hasattr(result, "to_dict") else result

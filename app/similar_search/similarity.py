@@ -17,7 +17,7 @@ from app.similar_search.models import (
     RootCauseCategory,
 )
 
-log = logging.getLogger("devcopilot.similar_search.similarity")
+log = logging.getLogger("omnipotent.similar_search.similarity")
 
 
 class SymptomMatcher:

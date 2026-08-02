@@ -13,7 +13,7 @@ from typing import Any, Optional
 from collections import defaultdict
 import statistics
 
-log = logging.getLogger("devcopilot.event_intelligence.feature_store")
+log = logging.getLogger("omnipotent.event_intelligence.feature_store")
 
 
 @dataclass

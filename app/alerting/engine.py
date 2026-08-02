@@ -21,7 +21,7 @@ from app.alerting.rules import (
 )
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.alerting")
+log = logging.getLogger("omnipotent.alerting")
 
 _settings = get_settings()
 
@@ -390,7 +390,7 @@ class AlertEngine:
             "payload": {
                 "summary": f"{alert.rule_name} on {alert.service}",
                 "severity": severity_map.get(alert.severity, "error"),
-                "source": "devops-copilot",
+                "source": "omnipotent",
                 "custom_details": {
                     "message": alert.message,
                     "value": alert.value,

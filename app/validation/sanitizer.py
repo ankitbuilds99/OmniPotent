@@ -16,7 +16,7 @@ import re
 import unicodedata
 from typing import Any
 
-log = logging.getLogger("devcopilot.validation.sanitizer")
+log = logging.getLogger("omnipotent.validation.sanitizer")
 
 
 class SanitizationError(Exception):

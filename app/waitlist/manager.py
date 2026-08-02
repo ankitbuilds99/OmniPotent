@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.waitlist")
+log = logging.getLogger("omnipotent.waitlist")
 
 
 class WaitlistTier(str, Enum):

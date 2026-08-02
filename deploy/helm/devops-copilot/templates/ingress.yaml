@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "devops-copilot.fullname" . }}
+  name: {{ include "omnipotent.fullname" . }}
   labels:
-    {{- include "devops-copilot.labels" . | nindent 4 }}
+    {{- include "omnipotent.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -33,7 +33,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ include "devops-copilot.fullname" $ }}
+                name: {{ include "omnipotent.fullname" $ }}
                 port:
                   number: {{ $.Values.service.port }}
           {{- end }}

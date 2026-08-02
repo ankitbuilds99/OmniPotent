@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.analytics_advanced.roi_calculator")
+log = logging.getLogger("omnipotent.analytics_advanced.roi_calculator")
 
 
 @dataclass

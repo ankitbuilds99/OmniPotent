@@ -15,7 +15,7 @@ import logging
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.supabase")
+log = logging.getLogger("omnipotent.supabase")
 
 # Asymmetric only — never allow HS256 here (would let a leaked public key forge tokens).
 _ALGORITHMS = ["RS256", "ES256"]

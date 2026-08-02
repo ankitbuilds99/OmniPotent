@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any
 from collections import defaultdict
 
-log = logging.getLogger("devcopilot.analytics.cost")
+log = logging.getLogger("omnipotent.analytics.cost")
 
 
 class CostCategory(Enum):

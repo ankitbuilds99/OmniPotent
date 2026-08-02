@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.chaos_engineering.recommendations")
+log = logging.getLogger("omnipotent.chaos_engineering.recommendations")
 
 
 class ExperimentRisk(str, Enum):

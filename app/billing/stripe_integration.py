@@ -23,7 +23,7 @@ from app.billing.models import (
 )
 from app.billing.plans import PlanManager
 
-log = logging.getLogger("devcopilot.billing.stripe")
+log = logging.getLogger("omnipotent.billing.stripe")
 
 
 class StripeClient(Protocol):

@@ -3,7 +3,7 @@
     "name": "frontend"
   },
   "provider": {
-    "name": "devops-copilot-api"
+    "name": "omnipotent-api"
   },
   "interactions": [
     {

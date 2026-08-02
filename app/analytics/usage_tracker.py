@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from dataclasses import dataclass, field
 
-log = logging.getLogger("devcopilot.analytics.usage")
+log = logging.getLogger("omnipotent.analytics.usage")
 
 
 @dataclass

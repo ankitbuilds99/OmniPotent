@@ -57,7 +57,7 @@ from app.tenancy import models as tn_models
 
 # Activate logging + LangSmith tracing before any model/graph is built.
 observability.init()
-log = logging.getLogger("devcopilot.api")
+log = logging.getLogger("omnipotent.api")
 
 # Static catalog of the MCP servers + their tools, surfaced to the UI sidebar.
 # Mirrors app/mcp/client.py — kept here so /config needs no server subprocesses.
@@ -659,7 +659,7 @@ preferred code generator (openapi-generator, swagger-codegen, etc.).
 """,
     contact={
         "name": "DevOps Copilot Team",
-        "url": "https://github.com/ankit25bcs10610/DevOps-Copilot",
+        "url": "https://github.com/ankit25bcs10610/OmniPotent",
         "email": "support@devopscopilot.dev",
     },
     license_info={

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from typing import Any
 
-log = logging.getLogger("devcopilot.sso.session_intelligence")
+log = logging.getLogger("omnipotent.sso.session_intelligence")
 
 
 class AnomalyType(Enum):

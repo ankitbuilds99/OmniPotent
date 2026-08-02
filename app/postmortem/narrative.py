@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.postmortem.narrative")
+log = logging.getLogger("omnipotent.postmortem.narrative")
 
 
 @dataclass

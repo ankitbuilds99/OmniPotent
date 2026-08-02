@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Coroutine, TypeVar
 
-log = logging.getLogger("devcopilot.resilience.degradation")
+log = logging.getLogger("omnipotent.resilience.degradation")
 
 T = TypeVar("T")
 

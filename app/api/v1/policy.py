@@ -33,7 +33,7 @@ from app.policy_engine import (
 )
 from app.policy_engine.change_windows import RecurrencePattern
 
-log = logging.getLogger("devcopilot.api.policy")
+log = logging.getLogger("omnipotent.api.policy")
 
 router = APIRouter(prefix="/policy", tags=["policy-engine"])
 

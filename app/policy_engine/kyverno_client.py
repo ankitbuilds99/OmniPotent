@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.policy_engine.kyverno")
+log = logging.getLogger("omnipotent.policy_engine.kyverno")
 
 
 class KyvernoPolicyType(str, Enum):
@@ -148,7 +148,7 @@ class KyvernoResult:
 # Default Kyverno policies for DevOps Copilot
 DEFAULT_KYVERNO_POLICIES = [
     KyvernoPolicy(
-        name="devcopilot-require-labels",
+        name="omnipotent-require-labels",
         description="Require standard labels on all deployments",
         rules=[
             KyvernoRule(
@@ -192,7 +192,7 @@ DEFAULT_KYVERNO_POLICIES = [
         ],
     ),
     KyvernoPolicy(
-        name="devcopilot-resource-limits",
+        name="omnipotent-resource-limits",
         description="Require resource limits on containers",
         rules=[
             KyvernoRule(
@@ -228,7 +228,7 @@ DEFAULT_KYVERNO_POLICIES = [
         ],
     ),
     KyvernoPolicy(
-        name="devcopilot-no-latest-tag",
+        name="omnipotent-no-latest-tag",
         description="Disallow 'latest' image tag in production",
         rules=[
             KyvernoRule(
@@ -264,7 +264,7 @@ DEFAULT_KYVERNO_POLICIES = [
         ],
     ),
     KyvernoPolicy(
-        name="devcopilot-replica-minimum",
+        name="omnipotent-replica-minimum",
         description="Require minimum replicas for production deployments",
         rules=[
             KyvernoRule(
@@ -298,7 +298,7 @@ DEFAULT_KYVERNO_POLICIES = [
         ],
     ),
     KyvernoPolicy(
-        name="devcopilot-add-defaults",
+        name="omnipotent-add-defaults",
         description="Add default labels and annotations",
         rules=[
             KyvernoRule(
@@ -313,10 +313,10 @@ DEFAULT_KYVERNO_POLICIES = [
                     "patchStrategicMerge": {
                         "metadata": {
                             "labels": {
-                                "app.kubernetes.io/managed-by": "devcopilot"
+                                "app.kubernetes.io/managed-by": "omnipotent"
                             },
                             "annotations": {
-                                "devcopilot.io/last-modified": "{{time.Now()}}"
+                                "omnipotent.io/last-modified": "{{time.Now()}}"
                             }
                         }
                     }

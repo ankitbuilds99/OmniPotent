@@ -31,7 +31,7 @@ from app.oncall.models import (
 )
 from app.oncall.schedule_service import ScheduleService
 
-log = logging.getLogger("devcopilot.oncall.ai")
+log = logging.getLogger("omnipotent.oncall.ai")
 
 
 class AIOncallService:

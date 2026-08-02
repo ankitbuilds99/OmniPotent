@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from typing import Any, Callable, TypeVar, ParamSpec
 
-log = logging.getLogger("devcopilot.cache")
+log = logging.getLogger("omnipotent.cache")
 
 P = ParamSpec("P")
 T = TypeVar("T")

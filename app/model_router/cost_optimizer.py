@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from collections import defaultdict
 
-log = logging.getLogger("devcopilot.model_router.cost")
+log = logging.getLogger("omnipotent.model_router.cost")
 
 
 @dataclass

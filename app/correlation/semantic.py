@@ -12,7 +12,7 @@ from typing import Any
 
 from app.correlation.models import Alert
 
-log = logging.getLogger("devcopilot.correlation.semantic")
+log = logging.getLogger("omnipotent.correlation.semantic")
 
 
 @dataclass

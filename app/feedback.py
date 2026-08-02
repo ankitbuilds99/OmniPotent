@@ -19,7 +19,7 @@ import time
 
 from app import audit
 
-log = logging.getLogger("devcopilot.feedback")
+log = logging.getLogger("omnipotent.feedback")
 
 _LOG_PATH = os.environ.get("COPILOT_FEEDBACK_LOG", "feedback.jsonl").strip()
 

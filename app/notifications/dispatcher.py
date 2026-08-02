@@ -18,7 +18,7 @@ from typing import Any
 from app.notifications.email import send_email
 from app.notifications.push import send_push_notification
 
-log = logging.getLogger("devcopilot.notifications.dispatcher")
+log = logging.getLogger("omnipotent.notifications.dispatcher")
 
 
 class NotificationChannel(Enum):

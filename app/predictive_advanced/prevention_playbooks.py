@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.predictive_advanced.prevention_playbooks")
+log = logging.getLogger("omnipotent.predictive_advanced.prevention_playbooks")
 
 
 class PlaybookCategory(str, Enum):

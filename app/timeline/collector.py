@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable, Awaitable
 
-log = logging.getLogger("devcopilot.timeline.collector")
+log = logging.getLogger("omnipotent.timeline.collector")
 
 
 class EventType(Enum):

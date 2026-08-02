@@ -17,7 +17,7 @@ from app.service_map.models import (
     ImpactLevel,
 )
 
-log = logging.getLogger("devcopilot.service_map.simulation")
+log = logging.getLogger("omnipotent.service_map.simulation")
 
 
 class FailureSimulator:

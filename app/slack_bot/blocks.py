@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.slack_bot.blocks")
+log = logging.getLogger("omnipotent.slack_bot.blocks")
 
 
 @dataclass

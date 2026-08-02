@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.postmortem.action_items")
+log = logging.getLogger("omnipotent.postmortem.action_items")
 
 
 class ActionPriority(Enum):

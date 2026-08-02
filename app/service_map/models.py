@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.service_map.models")
+log = logging.getLogger("omnipotent.service_map.models")
 
 
 class HealthStatus(Enum):

@@ -157,9 +157,9 @@ class TestRequestMetrics:
 
         prometheus = metrics.to_prometheus()
 
-        assert "devcopilot_http_requests_total" in prometheus
-        assert "devcopilot_http_errors_total" in prometheus
-        assert 'devcopilot_http_requests_total{status="200"} 1' in prometheus
+        assert "omnipotent_http_requests_total" in prometheus
+        assert "omnipotent_http_errors_total" in prometheus
+        assert 'omnipotent_http_requests_total{status="200"} 1' in prometheus
 
     def test_metrics_reset(self):
         """Test metrics reset."""

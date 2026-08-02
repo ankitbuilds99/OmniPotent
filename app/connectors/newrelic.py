@@ -7,7 +7,7 @@ import time
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.newrelic")
+log = logging.getLogger("omnipotent.connectors.newrelic")
 
 
 class NewRelicConnector(Connector):

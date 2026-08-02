@@ -29,7 +29,7 @@ from app.digital_twin import (
 from app.digital_twin.simulator import SimulationType
 from app.digital_twin.chaos_engine import SafetyLevel
 
-log = logging.getLogger("devcopilot.api.digital_twin")
+log = logging.getLogger("omnipotent.api.digital_twin")
 
 router = APIRouter(prefix="/digital-twin", tags=["digital-twin"])
 

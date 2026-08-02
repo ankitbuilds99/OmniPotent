@@ -17,7 +17,7 @@ from app.deduplication.models import (
     FingerprintRule,
 )
 
-log = logging.getLogger("devcopilot.deduplication.fingerprint")
+log = logging.getLogger("omnipotent.deduplication.fingerprint")
 
 
 @dataclass

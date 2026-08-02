@@ -11,7 +11,7 @@ from typing import Any
 
 from app.postmortem_advanced.models import Postmortem
 
-log = logging.getLogger("devcopilot.postmortem_advanced.export")
+log = logging.getLogger("omnipotent.postmortem_advanced.export")
 
 
 class ExportFormat(str, Enum):

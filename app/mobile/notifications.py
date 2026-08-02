@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.mobile.notifications")
+log = logging.getLogger("omnipotent.mobile.notifications")
 
 
 class NotificationPriority(str, Enum):

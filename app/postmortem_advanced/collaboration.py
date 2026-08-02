@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-log = logging.getLogger("devcopilot.postmortem_advanced.collaboration")
+log = logging.getLogger("omnipotent.postmortem_advanced.collaboration")
 
 
 class EditorStatus(str, Enum):

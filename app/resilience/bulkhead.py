@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from threading import Semaphore
 from typing import Any, AsyncIterator, Callable, Iterator, TypeVar
 
-log = logging.getLogger("devcopilot.resilience.bulkhead")
+log = logging.getLogger("omnipotent.resilience.bulkhead")
 
 T = TypeVar("T")
 

@@ -18,7 +18,7 @@ from app.incidents.models import (
 )
 from app.incidents.store import get_incident_store
 
-log = logging.getLogger("devcopilot.incidents.api")
+log = logging.getLogger("omnipotent.incidents.api")
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 

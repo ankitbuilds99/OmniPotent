@@ -15,7 +15,7 @@ from app.service_map.models import (
     ServiceHealth,
 )
 
-log = logging.getLogger("devcopilot.service_map.health")
+log = logging.getLogger("omnipotent.service_map.health")
 
 
 @dataclass

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Generator, TypeVar
 
-log = logging.getLogger("devcopilot.debug")
+log = logging.getLogger("omnipotent.debug")
 
 F = TypeVar("F", bound=Callable[..., Any])
 

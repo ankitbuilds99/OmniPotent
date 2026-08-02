@@ -14,7 +14,7 @@ from typing import Any
 
 from app.predictive.predictions import PredictedIncident, IncidentType
 
-log = logging.getLogger("devcopilot.predictive.business_impact")
+log = logging.getLogger("omnipotent.predictive.business_impact")
 
 
 class ImpactCategory(Enum):

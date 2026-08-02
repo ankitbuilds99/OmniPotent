@@ -13,7 +13,7 @@ from pathlib import Path
 
 from app.marketplace.registry import get_registry
 
-log = logging.getLogger("devcopilot.marketplace")
+log = logging.getLogger("omnipotent.marketplace")
 
 INSTALLED_AGENTS_PATH = Path(__file__).parent / "installed.json"
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.analytics_advanced.dashboards")
+log = logging.getLogger("omnipotent.analytics_advanced.dashboards")
 
 
 class WidgetType(str, Enum):

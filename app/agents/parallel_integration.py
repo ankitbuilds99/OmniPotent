@@ -23,7 +23,7 @@ from app.safety_gates.orchestrator import SafetyGateOrchestrator
 from app.safety_gates.confidence_gate import ConfidenceGate
 from app.safety_gates.models import SafetyDecision, SafetyEvaluationResult
 
-log = logging.getLogger("devcopilot.agents.parallel_integration")
+log = logging.getLogger("omnipotent.agents.parallel_integration")
 
 
 @dataclass

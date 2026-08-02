@@ -31,7 +31,7 @@ ECS Fargate provides serverless container orchestration with automatic scaling.
 ```bash
 # Create ECR repository
 aws ecr create-repository \
-    --repository-name devops-copilot \
+    --repository-name omnipotent \
     --image-scanning-configuration scanOnPush=true \
     --region us-west-2
 
@@ -45,14 +45,14 @@ aws ecr get-login-password --region us-west-2 | \
 
 ```bash
 # Build the image
-docker build -t devops-copilot:latest .
+docker build -t omnipotent:latest .
 
 # Tag for ECR
-docker tag devops-copilot:latest \
-    <account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest
+docker tag omnipotent:latest \
+    <account-id>.dkr.ecr.us-west-2.amazonaws.com/omnipotent:latest
 
 # Push to ECR
-docker push <account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest
+docker push <account-id>.dkr.ecr.us-west-2.amazonaws.com/omnipotent:latest
 ```
 
 ### 1.3 Create VPC and Networking
@@ -60,7 +60,7 @@ docker push <account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest
 ```bash
 # Create VPC (or use existing)
 aws ec2 create-vpc --cidr-block 10.0.0.0/16 --tag-specifications \
-    'ResourceType=vpc,Tags=[{Key=Name,Value=devops-copilot-vpc}]'
+    'ResourceType=vpc,Tags=[{Key=Name,Value=omnipotent-vpc}]'
 
 # Create subnets (at least 2 for ALB)
 aws ec2 create-subnet --vpc-id <vpc-id> --cidr-block 10.0.1.0/24 \
@@ -73,7 +73,7 @@ aws ec2 create-subnet --vpc-id <vpc-id> --cidr-block 10.0.2.0/24 \
 
 ```bash
 # Create cluster
-aws ecs create-cluster --cluster-name devops-copilot --capacity-providers FARGATE
+aws ecs create-cluster --cluster-name omnipotent --capacity-providers FARGATE
 
 # Create task execution role (for pulling images, logging)
 aws iam create-role --role-name ecsTaskExecutionRole --assume-role-policy-document '{
@@ -94,7 +94,7 @@ aws iam attach-role-policy --role-name ecsTaskExecutionRole \
 ```bash
 # Create secret for API keys
 aws secretsmanager create-secret \
-    --name devops-copilot/api-keys \
+    --name omnipotent/api-keys \
     --secret-string '{
         "COPILOT_API_TOKEN": "your-secure-token",
         "ANTHROPIC_API_KEY": "sk-ant-...",
@@ -111,7 +111,7 @@ Create `task-definition.json`:
 
 ```json
 {
-  "family": "devops-copilot",
+  "family": "omnipotent",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
@@ -119,8 +119,8 @@ Create `task-definition.json`:
   "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
   "taskRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskRole",
   "containerDefinitions": [{
-    "name": "devops-copilot",
-    "image": "<account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest",
+    "name": "omnipotent",
+    "image": "<account-id>.dkr.ecr.us-west-2.amazonaws.com/omnipotent:latest",
     "portMappings": [{
       "containerPort": 8000,
       "protocol": "tcp"
@@ -133,17 +133,17 @@ Create `task-definition.json`:
     "secrets": [
       {
         "name": "COPILOT_API_TOKEN",
-        "valueFrom": "arn:aws:secretsmanager:us-west-2:<account-id>:secret:devops-copilot/api-keys:COPILOT_API_TOKEN::"
+        "valueFrom": "arn:aws:secretsmanager:us-west-2:<account-id>:secret:omnipotent/api-keys:COPILOT_API_TOKEN::"
       },
       {
         "name": "ANTHROPIC_API_KEY",
-        "valueFrom": "arn:aws:secretsmanager:us-west-2:<account-id>:secret:devops-copilot/api-keys:ANTHROPIC_API_KEY::"
+        "valueFrom": "arn:aws:secretsmanager:us-west-2:<account-id>:secret:omnipotent/api-keys:ANTHROPIC_API_KEY::"
       }
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
       "options": {
-        "awslogs-group": "/ecs/devops-copilot",
+        "awslogs-group": "/ecs/omnipotent",
         "awslogs-region": "us-west-2",
         "awslogs-stream-prefix": "ecs"
       }
@@ -169,7 +169,7 @@ aws ecs register-task-definition --cli-input-json file://task-definition.json
 ```bash
 # Create security group for ALB
 aws ec2 create-security-group \
-    --group-name devops-copilot-alb-sg \
+    --group-name omnipotent-alb-sg \
     --description "ALB security group" \
     --vpc-id <vpc-id>
 
@@ -180,14 +180,14 @@ aws ec2 authorize-security-group-ingress \
 
 # Create ALB
 aws elbv2 create-load-balancer \
-    --name devops-copilot-alb \
+    --name omnipotent-alb \
     --subnets <subnet-1> <subnet-2> \
     --security-groups <alb-sg-id> \
     --type application
 
 # Create target group
 aws elbv2 create-target-group \
-    --name devops-copilot-tg \
+    --name omnipotent-tg \
     --protocol HTTP \
     --port 8000 \
     --vpc-id <vpc-id> \
@@ -200,7 +200,7 @@ aws elbv2 create-target-group \
 ```bash
 # Create security group for ECS tasks
 aws ec2 create-security-group \
-    --group-name devops-copilot-ecs-sg \
+    --group-name omnipotent-ecs-sg \
     --description "ECS tasks security group" \
     --vpc-id <vpc-id>
 
@@ -212,13 +212,13 @@ aws ec2 authorize-security-group-ingress \
 
 # Create service
 aws ecs create-service \
-    --cluster devops-copilot \
-    --service-name devops-copilot-service \
-    --task-definition devops-copilot \
+    --cluster omnipotent \
+    --service-name omnipotent-service \
+    --task-definition omnipotent \
     --desired-count 2 \
     --launch-type FARGATE \
     --network-configuration "awsvpcConfiguration={subnets=[<subnet-1>,<subnet-2>],securityGroups=[<ecs-sg-id>],assignPublicIp=ENABLED}" \
-    --load-balancers "targetGroupArn=<target-group-arn>,containerName=devops-copilot,containerPort=8000"
+    --load-balancers "targetGroupArn=<target-group-arn>,containerName=omnipotent,containerPort=8000"
 ```
 
 ### 1.9 Configure Auto Scaling
@@ -227,7 +227,7 @@ aws ecs create-service \
 # Register scalable target
 aws application-autoscaling register-scalable-target \
     --service-namespace ecs \
-    --resource-id service/devops-copilot/devops-copilot-service \
+    --resource-id service/omnipotent/omnipotent-service \
     --scalable-dimension ecs:service:DesiredCount \
     --min-capacity 1 \
     --max-capacity 10
@@ -235,7 +235,7 @@ aws application-autoscaling register-scalable-target \
 # Create scaling policy (target CPU 70%)
 aws application-autoscaling put-scaling-policy \
     --service-namespace ecs \
-    --resource-id service/devops-copilot/devops-copilot-service \
+    --resource-id service/omnipotent/omnipotent-service \
     --scalable-dimension ecs:service:DesiredCount \
     --policy-name cpu-scaling \
     --policy-type TargetTrackingScaling \
@@ -260,7 +260,7 @@ For teams already using Kubernetes.
 ```bash
 # Using eksctl (recommended)
 eksctl create cluster \
-    --name devops-copilot \
+    --name omnipotent \
     --region us-west-2 \
     --nodegroup-name workers \
     --node-type t3.medium \
@@ -278,22 +278,22 @@ Create `k8s/deployment.yaml`:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: devops-copilot
+  name: omnipotent
   labels:
-    app: devops-copilot
+    app: omnipotent
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: devops-copilot
+      app: omnipotent
   template:
     metadata:
       labels:
-        app: devops-copilot
+        app: omnipotent
     spec:
       containers:
-      - name: devops-copilot
-        image: <account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest
+      - name: omnipotent
+        image: <account-id>.dkr.ecr.us-west-2.amazonaws.com/omnipotent:latest
         ports:
         - containerPort: 8000
         env:
@@ -303,7 +303,7 @@ spec:
           value: "json"
         envFrom:
         - secretRef:
-            name: devops-copilot-secrets
+            name: omnipotent-secrets
         resources:
           requests:
             memory: "512Mi"
@@ -327,10 +327,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: devops-copilot
+  name: omnipotent
 spec:
   selector:
-    app: devops-copilot
+    app: omnipotent
   ports:
   - port: 80
     targetPort: 8000
@@ -339,12 +339,12 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: devops-copilot
+  name: omnipotent
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: devops-copilot
+    name: omnipotent
   minReplicas: 2
   maxReplicas: 10
   metrics:
@@ -360,7 +360,7 @@ spec:
 
 ```bash
 # Create Kubernetes secret from AWS Secrets Manager
-kubectl create secret generic devops-copilot-secrets \
+kubectl create secret generic omnipotent-secrets \
     --from-literal=COPILOT_API_TOKEN='your-token' \
     --from-literal=ANTHROPIC_API_KEY='sk-ant-...' \
     --from-literal=DATADOG_API_KEY='...'
@@ -382,18 +382,18 @@ For predictable workloads or development.
 
 ```bash
 # Create key pair
-aws ec2 create-key-pair --key-name devops-copilot-key \
-    --query 'KeyMaterial' --output text > devops-copilot-key.pem
-chmod 400 devops-copilot-key.pem
+aws ec2 create-key-pair --key-name omnipotent-key \
+    --query 'KeyMaterial' --output text > omnipotent-key.pem
+chmod 400 omnipotent-key.pem
 
 # Launch instance
 aws ec2 run-instances \
     --image-id ami-0c55b159cbfafe1f0 \
     --instance-type t3.medium \
-    --key-name devops-copilot-key \
+    --key-name omnipotent-key \
     --security-group-ids <sg-id> \
     --user-data file://user-data.sh \
-    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=devops-copilot}]'
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=omnipotent}]'
 ```
 
 ### 3.2 User Data Script
@@ -417,16 +417,16 @@ curl -L "https://github.com/docker/compose/releases/latest/download/docker-compo
 chmod +x /usr/local/bin/docker-compose
 
 # Pull and run
-docker pull <account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest
+docker pull <account-id>.dkr.ecr.us-west-2.amazonaws.com/omnipotent:latest
 
 docker run -d \
-    --name devops-copilot \
+    --name omnipotent \
     --restart unless-stopped \
     -p 8000:8000 \
     -e COPILOT_PROVIDER=anthropic \
     -e COPILOT_API_TOKEN=$COPILOT_API_TOKEN \
     -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-    <account-id>.dkr.ecr.us-west-2.amazonaws.com/devops-copilot:latest
+    <account-id>.dkr.ecr.us-west-2.amazonaws.com/omnipotent:latest
 ```
 
 ---
@@ -438,7 +438,7 @@ For production multi-tenant deployments:
 ```bash
 # Create RDS instance
 aws rds create-db-instance \
-    --db-instance-identifier devops-copilot-db \
+    --db-instance-identifier omnipotent-db \
     --db-instance-class db.t3.micro \
     --engine postgres \
     --engine-version 15 \
@@ -454,7 +454,7 @@ aws rds create-db-instance \
 Set the database URL in your environment:
 
 ```bash
-DATABASE_URL=postgresql://copilot_admin:<password>@<rds-endpoint>:5432/devops_copilot
+DATABASE_URL=postgresql://copilot_admin:<password>@<rds-endpoint>:5432/omnipotent
 ```
 
 ---
@@ -466,8 +466,8 @@ DATABASE_URL=postgresql://copilot_admin:<password>@<rds-endpoint>:5432/devops_co
 Logs are automatically sent to CloudWatch when using ECS. Create log group:
 
 ```bash
-aws logs create-log-group --log-group-name /ecs/devops-copilot
-aws logs put-retention-policy --log-group-name /ecs/devops-copilot --retention-in-days 30
+aws logs create-log-group --log-group-name /ecs/omnipotent
+aws logs put-retention-policy --log-group-name /ecs/omnipotent --retention-in-days 30
 ```
 
 ### CloudWatch Alarms
@@ -475,20 +475,20 @@ aws logs put-retention-policy --log-group-name /ecs/devops-copilot --retention-i
 ```bash
 # High CPU alarm
 aws cloudwatch put-metric-alarm \
-    --alarm-name devops-copilot-high-cpu \
+    --alarm-name omnipotent-high-cpu \
     --metric-name CPUUtilization \
     --namespace AWS/ECS \
     --statistic Average \
     --period 300 \
     --threshold 80 \
     --comparison-operator GreaterThanThreshold \
-    --dimensions Name=ClusterName,Value=devops-copilot Name=ServiceName,Value=devops-copilot-service \
+    --dimensions Name=ClusterName,Value=omnipotent Name=ServiceName,Value=omnipotent-service \
     --evaluation-periods 2 \
     --alarm-actions <sns-topic-arn>
 
 # 5xx errors alarm
 aws cloudwatch put-metric-alarm \
-    --alarm-name devops-copilot-5xx-errors \
+    --alarm-name omnipotent-5xx-errors \
     --metric-name HTTPCode_Target_5XX_Count \
     --namespace AWS/ApplicationELB \
     --statistic Sum \
@@ -507,9 +507,9 @@ The `/metrics/slo` endpoint exposes Prometheus metrics. Configure scraping:
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: 'devops-copilot'
+  - job_name: 'omnipotent'
     static_configs:
-      - targets: ['devops-copilot.internal:8000']
+      - targets: ['omnipotent.internal:8000']
     metrics_path: /metrics/slo
     scrape_interval: 30s
 ```
@@ -549,7 +549,7 @@ Create a task role with minimal permissions:
       "Action": [
         "secretsmanager:GetSecretValue"
       ],
-      "Resource": "arn:aws:secretsmanager:*:*:secret:devops-copilot/*"
+      "Resource": "arn:aws:secretsmanager:*:*:secret:omnipotent/*"
     },
     {
       "Effect": "Allow",
@@ -557,7 +557,7 @@ Create a task role with minimal permissions:
         "logs:CreateLogStream",
         "logs:PutLogEvents"
       ],
-      "Resource": "arn:aws:logs:*:*:log-group:/ecs/devops-copilot:*"
+      "Resource": "arn:aws:logs:*:*:log-group:/ecs/omnipotent:*"
     }
   ]
 }
@@ -567,11 +567,11 @@ Create a task role with minimal permissions:
 
 ```bash
 aws wafv2 create-web-acl \
-    --name devops-copilot-waf \
+    --name omnipotent-waf \
     --scope REGIONAL \
     --default-action Allow={} \
     --rules file://waf-rules.json \
-    --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=devops-copilot
+    --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=omnipotent
 ```
 
 ---
@@ -621,13 +621,13 @@ For cost savings (up to 70% off):
 
 ```bash
 # View ECS service events
-aws ecs describe-services --cluster devops-copilot --services devops-copilot-service
+aws ecs describe-services --cluster omnipotent --services omnipotent-service
 
 # View task logs
-aws logs tail /ecs/devops-copilot --follow
+aws logs tail /ecs/omnipotent --follow
 
 # Force new deployment
-aws ecs update-service --cluster devops-copilot --service devops-copilot-service --force-new-deployment
+aws ecs update-service --cluster omnipotent --service omnipotent-service --force-new-deployment
 ```
 
 ---

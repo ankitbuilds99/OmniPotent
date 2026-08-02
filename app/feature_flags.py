@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.features")
+log = logging.getLogger("omnipotent.features")
 
 
 class FlagStatus(Enum):

@@ -11,7 +11,7 @@ from datetime import datetime, time, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.mobile.routing")
+log = logging.getLogger("omnipotent.mobile.routing")
 
 
 class RoutingReason(str, Enum):

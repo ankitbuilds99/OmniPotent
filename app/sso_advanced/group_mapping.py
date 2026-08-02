@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.sso_advanced.group_mapping")
+log = logging.getLogger("omnipotent.sso_advanced.group_mapping")
 
 
 class AppRole(str, Enum):

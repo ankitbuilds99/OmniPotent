@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.learning.expertise")
+log = logging.getLogger("omnipotent.learning.expertise")
 
 
 @dataclass

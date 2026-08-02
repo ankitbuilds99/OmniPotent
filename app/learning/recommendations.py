@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, TypedDict
 
-log = logging.getLogger("devcopilot.learning.recommendations")
+log = logging.getLogger("omnipotent.learning.recommendations")
 
 
 class RecommendationPriority(Enum):

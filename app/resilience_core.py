@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Callable, Iterable, TypeVar
 
-log = logging.getLogger("devcopilot.resilience")
+log = logging.getLogger("omnipotent.resilience")
 
 T = TypeVar("T")
 

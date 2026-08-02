@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "devops-copilot.fullname" . }}
+  name: {{ include "omnipotent.fullname" . }}
   labels:
-    {{- include "devops-copilot.labels" . | nindent 4 }}
+    {{- include "omnipotent.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "devops-copilot.selectorLabels" . | nindent 6 }}
+      {{- include "omnipotent.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -20,13 +20,13 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "devops-copilot.selectorLabels" . | nindent 8 }}
+        {{- include "omnipotent.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "devops-copilot.serviceAccountName" . }}
+      serviceAccountName: {{ include "omnipotent.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -41,26 +41,26 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "devops-copilot.fullname" . }}-config
+                name: {{ include "omnipotent.fullname" . }}-config
             - secretRef:
-                name: {{ include "devops-copilot.fullname" . }}-secrets
+                name: {{ include "omnipotent.fullname" . }}-secrets
           env:
             {{- if .Values.redis.enabled }}
             - name: REDIS_URL
-              value: "redis://:$(REDIS_PASSWORD)@{{ include "devops-copilot.fullname" . }}-redis-master:6379/0"
+              value: "redis://:$(REDIS_PASSWORD)@{{ include "omnipotent.fullname" . }}-redis-master:6379/0"
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "devops-copilot.fullname" . }}-redis
+                  name: {{ include "omnipotent.fullname" . }}-redis
                   key: redis-password
             {{- end }}
             {{- if .Values.postgresql.enabled }}
             - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "devops-copilot.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "devops-copilot.fullname" . }}-postgresql
+                  name: {{ include "omnipotent.fullname" . }}-postgresql
                   key: password
             {{- end }}
           livenessProbe:

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from enum import Enum
 
-log = logging.getLogger("devcopilot.security_scanner.scanner")
+log = logging.getLogger("omnipotent.security_scanner.scanner")
 
 
 class VulnerabilitySeverity(str, Enum):

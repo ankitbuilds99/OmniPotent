@@ -25,7 +25,7 @@ from app.rbac.permissions import (
 )
 from app.rbac.manager import RBACManager
 
-log = logging.getLogger("devcopilot.rbac.middleware")
+log = logging.getLogger("omnipotent.rbac.middleware")
 
 _current_permissions: ContextVar[PermissionSet] = ContextVar(
     "current_permissions", default=PermissionSet()

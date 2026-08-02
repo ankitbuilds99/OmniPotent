@@ -22,7 +22,7 @@ from app.event_intelligence.severity_predictor import (
 )
 from app.event_intelligence.feature_store import FeatureStore
 
-log = logging.getLogger("devcopilot.event_intelligence.api")
+log = logging.getLogger("omnipotent.event_intelligence.api")
 
 router = APIRouter(prefix="/event-intelligence", tags=["event-intelligence"])
 

@@ -18,7 +18,7 @@ from typing import Any, Callable, Sequence
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
-log = logging.getLogger("devcopilot.api.versioning")
+log = logging.getLogger("omnipotent.api.versioning")
 
 
 class APIVersion(Enum):

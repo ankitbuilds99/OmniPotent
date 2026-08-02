@@ -18,7 +18,7 @@ from app.deduplication.models import (
     FlappingAlert,
 )
 
-log = logging.getLogger("devcopilot.deduplication.suppression")
+log = logging.getLogger("omnipotent.deduplication.suppression")
 
 
 @dataclass

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.notifications.sms")
+log = logging.getLogger("omnipotent.notifications.sms")
 
 
 class CallStatus(str, Enum):

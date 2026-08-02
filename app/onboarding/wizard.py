@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.onboarding")
+log = logging.getLogger("omnipotent.onboarding")
 
 
 class ChecklistStatus(Enum):

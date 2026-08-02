@@ -32,7 +32,7 @@ from app.verification.hallucination_detector import (
     HallucinationType,
 )
 
-log = logging.getLogger("devcopilot.verification.agent")
+log = logging.getLogger("omnipotent.verification.agent")
 
 
 class VerificationStatus(str, Enum):

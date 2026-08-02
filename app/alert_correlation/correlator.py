@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from enum import Enum
 
-log = logging.getLogger("devcopilot.alert_correlation.correlator")
+log = logging.getLogger("omnipotent.alert_correlation.correlator")
 
 
 class AlertSeverity(str, Enum):

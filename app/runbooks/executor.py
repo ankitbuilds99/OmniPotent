@@ -24,7 +24,7 @@ from app.runbooks.models import (
     StepType,
 )
 
-log = logging.getLogger("devcopilot.runbooks")
+log = logging.getLogger("omnipotent.runbooks")
 
 
 class RunbookExecutor:

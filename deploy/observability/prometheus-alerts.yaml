@@ -1,7 +1,7 @@
 # Prometheus alert rules for DevOps Copilot observability.
 # Scrape target: GET /metrics (Prometheus exposition).
 groups:
-  - name: devops-copilot-slo
+  - name: omnipotent-slo
     rules:
       # Multi-window, multi-burn-rate alerts (Google SRE style)
       - alert: CopilotSLOBurnRateCritical
@@ -75,7 +75,7 @@ groups:
         annotations:
           summary: "Copilot investigations slow: >20% take longer than 60s (15m)"
 
-  - name: devops-copilot-llm
+  - name: omnipotent-llm
     rules:
       - alert: CopilotLLMHighErrorRate
         expr: |
@@ -125,7 +125,7 @@ groups:
         annotations:
           summary: "Copilot token spend > 2x same-hour-yesterday baseline"
 
-  - name: devops-copilot-mcp
+  - name: omnipotent-mcp
     rules:
       - alert: CopilotMCPToolHighErrorRate
         expr: |
@@ -146,7 +146,7 @@ groups:
         annotations:
           summary: "MCP tool {{ $labels.tool }} p95 latency > 10s"
 
-  - name: devops-copilot-circuit-breaker
+  - name: omnipotent-circuit-breaker
     rules:
       - alert: CopilotCircuitBreakerOpen
         expr: copilot_circuit_breaker_state == 2
@@ -166,7 +166,7 @@ groups:
         annotations:
           summary: "Circuit breaker flapping for {{ $labels.provider }}"
 
-  - name: devops-copilot-security
+  - name: omnipotent-security
     rules:
       - alert: CopilotHighAuthFailures
         expr: |
@@ -195,7 +195,7 @@ groups:
         annotations:
           summary: "High rate limit rejections (>100/5min)"
 
-  - name: devops-copilot-capacity
+  - name: omnipotent-capacity
     rules:
       - alert: CopilotHighActiveInvestigations
         expr: copilot_investigations_active > 50

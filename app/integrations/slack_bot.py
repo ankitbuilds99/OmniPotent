@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Any, Callable, Coroutine
 from urllib.parse import parse_qs
 
-log = logging.getLogger("devcopilot.integrations.slack")
+log = logging.getLogger("omnipotent.integrations.slack")
 
 
 class SlackEventType(Enum):

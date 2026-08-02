@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.vscode_extension.pr_risk")
+log = logging.getLogger("omnipotent.vscode_extension.pr_risk")
 
 
 class RiskLevel(str, Enum):

@@ -1,4 +1,4 @@
-"""Supabase client for DevOps-Copilot.
+"""Supabase client for OmniPotent.
 
 Provides both the Supabase JS-style client (for RLS-aware queries) and direct
 PostgreSQL access via SQLAlchemy (for admin operations and migrations).
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.database.supabase")
+log = logging.getLogger("omnipotent.database.supabase")
 
 _HAS_SUPABASE = False
 try:

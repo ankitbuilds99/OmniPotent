@@ -10,7 +10,7 @@ from enum import Enum
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.cost_optimization.analyzer")
+log = logging.getLogger("omnipotent.cost_optimization.analyzer")
 
 
 class ResourceCategory(str, Enum):

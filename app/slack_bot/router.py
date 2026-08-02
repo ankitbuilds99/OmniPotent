@@ -287,7 +287,7 @@ def build_rca_result_blocks(
                         "emoji": True,
                     },
                     "action_id": "view_full_report",
-                    "url": "https://devops-copilot.example.com/investigation/123",
+                    "url": "https://omnipotent.example.com/investigation/123",
                 },
             ]
         },
@@ -361,7 +361,7 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
         event = payload.event
         event_type = event.get("type")
 
-        # Handle app mentions: @devops-copilot investigate X
+        # Handle app mentions: @omnipotent investigate X
         if event_type == "app_mention":
             text = event.get("text", "")
             channel: str = event.get("channel", "")
@@ -389,9 +389,9 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
                 await send_slack_message(
                     channel,
                     "Hi! I'm DevOps Copilot. Mention me with a question like:\n"
-                    "• `@devops-copilot why is checkout slow?`\n"
-                    "• `@devops-copilot investigate payment failures`\n"
-                    "• `@devops-copilot what changed in the last hour?`",
+                    "• `@omnipotent why is checkout slow?`\n"
+                    "• `@omnipotent investigate payment failures`\n"
+                    "• `@omnipotent what changed in the last hour?`",
                     thread_ts,
                 )
 
@@ -587,7 +587,7 @@ async def slash_oncall(request: Request):
 
 @router.post("/commands/help")
 async def slash_help(request: Request):
-    """Handle /devops-copilot-help slash command."""
+    """Handle /omnipotent-help slash command."""
     return {
         "response_type": "ephemeral",
         "blocks": [
@@ -610,7 +610,7 @@ async def slash_help(request: Request):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "• `/rca [query]` - Start an AI investigation\n• `/status [service]` - Check system status\n• `/oncall [team]` - See who's on call\n• `/devops-copilot-help` - Show this help",
+                    "text": "• `/rca [query]` - Start an AI investigation\n• `/status [service]` - Check system status\n• `/oncall [team]` - See who's on call\n• `/omnipotent-help` - Show this help",
                 }
             },
             {"type": "divider"},

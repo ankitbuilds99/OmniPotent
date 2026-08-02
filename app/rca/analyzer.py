@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.rca.analyzer")
+log = logging.getLogger("omnipotent.rca.analyzer")
 
 
 class AnalysisStatus(Enum):

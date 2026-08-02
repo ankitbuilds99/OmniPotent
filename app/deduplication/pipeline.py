@@ -43,7 +43,7 @@ from app.deduplication.suppression import (
     SuppressionConfig,
 )
 
-log = logging.getLogger("devcopilot.deduplication.pipeline")
+log = logging.getLogger("omnipotent.deduplication.pipeline")
 
 
 @dataclass

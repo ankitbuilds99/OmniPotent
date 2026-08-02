@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-log = logging.getLogger("devcopilot.eval.metrics")
+log = logging.getLogger("omnipotent.eval.metrics")
 
 
 @dataclass

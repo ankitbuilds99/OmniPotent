@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.reports.generator")
+log = logging.getLogger("omnipotent.reports.generator")
 
 
 class ReportFormat(Enum):

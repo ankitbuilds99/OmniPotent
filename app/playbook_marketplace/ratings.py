@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.playbook_marketplace.ratings")
+log = logging.getLogger("omnipotent.playbook_marketplace.ratings")
 
 
 @dataclass

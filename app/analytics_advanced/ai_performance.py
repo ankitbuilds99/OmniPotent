@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.analytics_advanced.ai_performance")
+log = logging.getLogger("omnipotent.analytics_advanced.ai_performance")
 
 
 class AIActionType(str, Enum):

@@ -9,7 +9,7 @@ from typing import Any
 from app.router.classifier import TaskClassifier, TaskComplexity, ClassificationResult
 from app.router.metrics import RouterMetrics
 
-log = logging.getLogger("devcopilot.router.adaptive")
+log = logging.getLogger("omnipotent.router.adaptive")
 
 
 @dataclass

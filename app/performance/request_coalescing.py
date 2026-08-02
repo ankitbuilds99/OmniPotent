@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Generic, TypeVar
 
-log = logging.getLogger("devcopilot.performance.coalescing")
+log = logging.getLogger("omnipotent.performance.coalescing")
 
 T = TypeVar("T")
 

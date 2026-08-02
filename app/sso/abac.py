@@ -17,7 +17,7 @@ from datetime import datetime, time, timezone
 from enum import Enum, auto
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.sso.abac")
+log = logging.getLogger("omnipotent.sso.abac")
 
 
 class Permission(Enum):

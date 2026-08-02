@@ -16,7 +16,7 @@ from app.billing.feature_gate import FeatureGateService
 from app.billing.usage_tracker import UsageTracker, UsageReporter
 from app.billing.stripe_integration import StripeBillingService
 
-log = logging.getLogger("devcopilot.billing.api")
+log = logging.getLogger("omnipotent.billing.api")
 
 
 @dataclass

@@ -1,5 +1,5 @@
 [project]
-name = "devops-copilot"
+name = "omnipotent"
 version = "0.1.0"
 description = "An autonomous DevOps assistant built with LangChain, LangGraph, and MCP"
 readme = "README.md"

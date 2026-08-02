@@ -1,34 +1,34 @@
-# Prometheus Alerting Rules for DevOps-Copilot
+# Prometheus Alerting Rules for OmniPotent
 # Place in /etc/prometheus/rules/ and reload Prometheus
 
 groups:
   # ============================================================================
   # HTTP / API ALERTS
   # ============================================================================
-  - name: devops-copilot-http
+  - name: omnipotent-http
     rules:
       - alert: HighErrorRate
         expr: |
-          sum(rate(devcopilot_http_requests_total{status=~"5.."}[5m])) /
-          sum(rate(devcopilot_http_requests_total[5m])) > 0.05
+          sum(rate(omnipotent_http_requests_total{status=~"5.."}[5m])) /
+          sum(rate(omnipotent_http_requests_total[5m])) > 0.05
         for: 5m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High error rate detected"
           description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
-          runbook_url: "https://docs.devops-copilot.com/runbooks/high-error-rate"
+          runbook_url: "https://docs.omnipotent.com/runbooks/high-error-rate"
 
       - alert: HighLatencyP95
         expr: |
           histogram_quantile(0.95,
-            rate(devcopilot_http_request_duration_seconds_bucket[5m])
+            rate(omnipotent_http_request_duration_seconds_bucket[5m])
           ) > 2
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High P95 latency"
           description: "P95 latency is {{ $value | humanizeDuration }} (threshold: 2s)"
@@ -36,22 +36,22 @@ groups:
       - alert: HighLatencyP99
         expr: |
           histogram_quantile(0.99,
-            rate(devcopilot_http_request_duration_seconds_bucket[5m])
+            rate(omnipotent_http_request_duration_seconds_bucket[5m])
           ) > 5
         for: 5m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Critical P99 latency"
           description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 5s)"
 
       - alert: TooManyActiveRequests
-        expr: devcopilot_http_active_requests > 100
+        expr: omnipotent_http_active_requests > 100
         for: 2m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High number of active requests"
           description: "{{ $value }} active requests (potential bottleneck)"
@@ -59,7 +59,7 @@ groups:
   # ============================================================================
   # INVESTIGATION ALERTS
   # ============================================================================
-  - name: devops-copilot-investigations
+  - name: omnipotent-investigations
     rules:
       - alert: InvestigationFailureRate
         expr: |
@@ -68,7 +68,7 @@ groups:
         for: 10m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High investigation failure rate"
           description: "{{ $value | humanizePercentage }} of investigations failing"
@@ -79,7 +79,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Investigation timeouts increasing"
           description: "{{ $value }} timeouts in the last 10 minutes"
@@ -92,7 +92,7 @@ groups:
         for: 10m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Investigations taking too long"
           description: "P95 investigation duration is {{ $value | humanizeDuration }}"
@@ -102,7 +102,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High number of concurrent investigations"
           description: "{{ $value }} active investigations (may impact performance)"
@@ -110,7 +110,7 @@ groups:
   # ============================================================================
   # LLM / AI ALERTS
   # ============================================================================
-  - name: devops-copilot-llm
+  - name: omnipotent-llm
     rules:
       - alert: LLMErrorRate
         expr: |
@@ -119,11 +119,11 @@ groups:
         for: 5m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High LLM API error rate"
           description: "{{ $value | humanizePercentage }} of LLM calls failing"
-          runbook_url: "https://docs.devops-copilot.com/runbooks/llm-errors"
+          runbook_url: "https://docs.omnipotent.com/runbooks/llm-errors"
 
       - alert: LLMHighLatency
         expr: |
@@ -133,7 +133,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "LLM API latency is high"
           description: "P95 LLM latency is {{ $value | humanizeDuration }}"
@@ -144,7 +144,7 @@ groups:
         for: 1h
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High LLM cost spike"
           description: "${{ $value | humanize }} spent on LLM in the last hour"
@@ -154,7 +154,7 @@ groups:
         for: 1m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Circuit breaker is open"
           description: "Circuit breaker for {{ $labels.provider }} is open"
@@ -162,7 +162,7 @@ groups:
   # ============================================================================
   # SAFETY GATE ALERTS
   # ============================================================================
-  - name: devops-copilot-safety
+  - name: omnipotent-safety
     rules:
       - alert: SafetyGateRejectionsHigh
         expr: |
@@ -170,7 +170,7 @@ groups:
         for: 5m
         labels:
           severity: info
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Elevated safety gate rejections"
           description: "{{ $value }} actions blocked in the last 10 minutes"
@@ -180,7 +180,7 @@ groups:
           sum(increase(copilot_injection_attempts_total[5m])) > 0
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Prompt injection attempts detected"
           description: "{{ $value }} injection attempts in the last 5 minutes"
@@ -188,14 +188,14 @@ groups:
   # ============================================================================
   # INFRASTRUCTURE ALERTS
   # ============================================================================
-  - name: devops-copilot-infrastructure
+  - name: omnipotent-infrastructure
     rules:
       - alert: DatabaseConnectionsLow
         expr: copilot_db_connections{state="available"} < 5
         for: 2m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Database connection pool exhausted"
           description: "Only {{ $value }} connections available"
@@ -208,7 +208,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Slow database queries"
           description: "P95 query duration is {{ $value | humanizeDuration }}"
@@ -220,7 +220,7 @@ groups:
         for: 10m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Low cache hit rate"
           description: "Cache hit rate is {{ $value | humanizePercentage }}"
@@ -230,7 +230,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "Job queue backlog building up"
           description: "{{ $value }} jobs waiting in queue"
@@ -240,7 +240,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High number of WebSocket connections"
           description: "{{ $value }} active WebSocket connections"
@@ -248,7 +248,7 @@ groups:
   # ============================================================================
   # AUTHENTICATION ALERTS
   # ============================================================================
-  - name: devops-copilot-auth
+  - name: omnipotent-auth
     rules:
       - alert: AuthFailuresHigh
         expr: |
@@ -256,7 +256,7 @@ groups:
         for: 5m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High authentication failure rate"
           description: "{{ $value }} auth failures per second"
@@ -267,7 +267,7 @@ groups:
         for: 5m
         labels:
           severity: info
-          service: devops-copilot
+          service: omnipotent
         annotations:
           summary: "High rate limit hits"
           description: "{{ $value }} rate limit hits per second"
@@ -275,18 +275,18 @@ groups:
   # ============================================================================
   # SLO ALERTS
   # ============================================================================
-  - name: devops-copilot-slo
+  - name: omnipotent-slo
     rules:
       - alert: SLOAvailabilityBreach
         expr: |
           1 - (
-            sum(rate(devcopilot_http_requests_total{status=~"5.."}[30m])) /
-            sum(rate(devcopilot_http_requests_total[30m]))
+            sum(rate(omnipotent_http_requests_total{status=~"5.."}[30m])) /
+            sum(rate(omnipotent_http_requests_total[30m]))
           ) < 0.999
         for: 15m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
           slo: availability
         annotations:
           summary: "SLO Availability breach"
@@ -295,12 +295,12 @@ groups:
       - alert: SLOLatencyBreach
         expr: |
           histogram_quantile(0.95,
-            rate(devcopilot_http_request_duration_seconds_bucket[30m])
+            rate(omnipotent_http_request_duration_seconds_bucket[30m])
           ) > 0.5
         for: 15m
         labels:
           severity: warning
-          service: devops-copilot
+          service: omnipotent
           slo: latency
         annotations:
           summary: "SLO Latency breach"
@@ -309,13 +309,13 @@ groups:
       - alert: ErrorBudgetExhausted
         expr: |
           (1 - (
-            sum(rate(devcopilot_http_requests_total{status=~"5.."}[24h])) /
-            sum(rate(devcopilot_http_requests_total[24h]))
+            sum(rate(omnipotent_http_requests_total{status=~"5.."}[24h])) /
+            sum(rate(omnipotent_http_requests_total[24h]))
           )) < 0.99
         for: 5m
         labels:
           severity: critical
-          service: devops-copilot
+          service: omnipotent
           slo: error_budget
         annotations:
           summary: "Error budget nearly exhausted"

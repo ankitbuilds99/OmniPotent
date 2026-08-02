@@ -36,7 +36,7 @@ from app.decision_engine.option_ranker import (
     RankingStrategy,
 )
 
-log = logging.getLogger("devcopilot.decision_engine")
+log = logging.getLogger("omnipotent.decision_engine")
 
 
 class DecisionConfidence(str, Enum):

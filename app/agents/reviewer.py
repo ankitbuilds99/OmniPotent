@@ -15,7 +15,7 @@ from app.agents.base import BaseAgent
 from app.agents.protocol import AgentRole, MessageType, SharedContext
 from app.graph.prompts import REVIEWER_AGENT_SYSTEM
 
-log = logging.getLogger("devcopilot.agents.reviewer")
+log = logging.getLogger("omnipotent.agents.reviewer")
 
 
 class ReviewerAgent(BaseAgent):

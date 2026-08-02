@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-log = logging.getLogger("devcopilot.event_intelligence.severity_predictor")
+log = logging.getLogger("omnipotent.event_intelligence.severity_predictor")
 
 
 class PredictedSeverity(str, Enum):

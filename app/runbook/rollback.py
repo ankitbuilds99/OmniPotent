@@ -18,7 +18,7 @@ from app.runbook.models import (
     StepType,
 )
 
-log = logging.getLogger("devcopilot.runbook.rollback")
+log = logging.getLogger("omnipotent.runbook.rollback")
 
 
 @dataclass

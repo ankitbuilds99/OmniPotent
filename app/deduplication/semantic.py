@@ -14,7 +14,7 @@ from app.deduplication.models import (
     SemanticMatch,
 )
 
-log = logging.getLogger("devcopilot.deduplication.semantic")
+log = logging.getLogger("omnipotent.deduplication.semantic")
 
 
 @dataclass

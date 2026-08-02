@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.compliance.trust_portal")
+log = logging.getLogger("omnipotent.compliance.trust_portal")
 
 
 class DocumentCategory(Enum):

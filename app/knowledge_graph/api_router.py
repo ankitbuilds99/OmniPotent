@@ -24,7 +24,7 @@ from app.knowledge_graph.neo4j_backend import (
 from app.knowledge_graph.sync_engine import ContinuousSyncEngine
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.knowledge_graph.api")
+log = logging.getLogger("omnipotent.knowledge_graph.api")
 
 router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 

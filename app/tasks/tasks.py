@@ -21,7 +21,7 @@ import dramatiq
 from app.config import get_settings
 from app.tasks.broker import get_broker
 
-log = logging.getLogger("devcopilot.tasks")
+log = logging.getLogger("omnipotent.tasks")
 _settings = get_settings()
 
 get_broker()
@@ -236,7 +236,7 @@ async def _send_pagerduty_notification(
                 "payload": {
                     "summary": message,
                     "severity": metadata.get("severity", "warning"),
-                    "source": "devops-copilot",
+                    "source": "omnipotent",
                 },
             },
             timeout=_settings.http_timeout_default,

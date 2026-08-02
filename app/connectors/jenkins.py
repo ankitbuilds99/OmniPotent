@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.jenkins")
+log = logging.getLogger("omnipotent.connectors.jenkins")
 
 
 class JenkinsConnector(Connector):

@@ -18,7 +18,7 @@ from app.similar_search.models import (
     IncidentSeverity,
 )
 
-log = logging.getLogger("devcopilot.similar_search.patterns")
+log = logging.getLogger("omnipotent.similar_search.patterns")
 
 
 @dataclass

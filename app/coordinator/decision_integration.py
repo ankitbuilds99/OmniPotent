@@ -49,7 +49,7 @@ from app.digital_twin import (
 from app.digital_twin.simulator import SimulationType
 from app.digital_twin.chaos_engine import SafetyLevel
 
-log = logging.getLogger("devcopilot.coordinator.decision_integration")
+log = logging.getLogger("omnipotent.coordinator.decision_integration")
 
 
 @dataclass

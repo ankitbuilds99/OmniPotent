@@ -13,7 +13,7 @@ from app.deduplication.models import (
     FatigueMetrics,
 )
 
-log = logging.getLogger("devcopilot.deduplication.analytics")
+log = logging.getLogger("omnipotent.deduplication.analytics")
 
 
 @dataclass

@@ -10,7 +10,7 @@ from typing import Any
 
 from app.postmortem_advanced.models import Postmortem, PostmortemStatus
 
-log = logging.getLogger("devcopilot.postmortem_advanced.analytics")
+log = logging.getLogger("omnipotent.postmortem_advanced.analytics")
 
 
 @dataclass

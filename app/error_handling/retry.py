@@ -16,7 +16,7 @@ from typing import Any, Callable, TypeVar
 
 from app.error_handling.exceptions import CopilotError
 
-log = logging.getLogger("devcopilot.error_handling.retry")
+log = logging.getLogger("omnipotent.error_handling.retry")
 
 F = TypeVar("F", bound=Callable[..., Any])
 

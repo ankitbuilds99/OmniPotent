@@ -24,7 +24,7 @@ from dramatiq.middleware import (
     TimeLimit,
 )
 
-log = logging.getLogger("devcopilot.tasks")
+log = logging.getLogger("omnipotent.tasks")
 
 _broker: dramatiq.Broker | None = None
 

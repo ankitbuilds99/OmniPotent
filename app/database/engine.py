@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.database")
+log = logging.getLogger("omnipotent.database")
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None

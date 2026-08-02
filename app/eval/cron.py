@@ -16,7 +16,7 @@ import httpx
 from app.eval.pipeline import EvalPipeline, EvalConfig, EvalResult
 from app.eval.reporter import EvalReporter, ReportFormat
 
-log = logging.getLogger("devcopilot.eval.cron")
+log = logging.getLogger("omnipotent.eval.cron")
 
 
 @dataclass
@@ -257,7 +257,7 @@ class NightlyEvalCron:
                 "payload": {
                     "summary": f"Agent Eval Regression: {len(regressions)} metrics degraded",
                     "severity": "warning",
-                    "source": "devops-copilot-eval",
+                    "source": "omnipotent-eval",
                     "custom_details": {
                         "eval_id": result.eval_id,
                         "accuracy": result.metrics.accuracy.exact_match_rate,

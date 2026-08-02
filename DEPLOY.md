@@ -74,10 +74,10 @@ curl -fsS http://localhost:8000/healthz
 
 **Plain Docker:**
 ```bash
-docker build -t devops-copilot .
+docker build -t omnipotent .
 docker run -d -p 8000:8000 \
   -e COPILOT_ENV=production -e COPILOT_API_TOKEN=... -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v copilot_state:/data devops-copilot
+  -v copilot_state:/data omnipotent
 ```
 
 **No Docker (uvicorn):**

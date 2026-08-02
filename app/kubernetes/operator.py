@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 from enum import Enum
 
-log = logging.getLogger("devcopilot.kubernetes.operator")
+log = logging.getLogger("omnipotent.kubernetes.operator")
 
 
 class CRDKind(str, Enum):

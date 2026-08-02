@@ -34,7 +34,7 @@ from app.auth.oauth import (
 )
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.auth.endpoints")
+log = logging.getLogger("omnipotent.auth.endpoints")
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 

@@ -12,8 +12,8 @@ Cut MTTR from 4 hours to 15 minutes — with full human oversight.
 
 <br/>
 
-[![CI](https://github.com/ankit25bcs10610/DevOps-Copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/ankit25bcs10610/DevOps-Copilot/actions/workflows/ci.yml)
-[![Deploy](https://github.com/ankit25bcs10610/DevOps-Copilot/actions/workflows/deploy.yml/badge.svg)](https://github.com/ankit25bcs10610/DevOps-Copilot/actions/workflows/deploy.yml)
+[![CI](https://github.com/ankit25bcs10610/OmniPotent/actions/workflows/ci.yml/badge.svg)](https://github.com/ankit25bcs10610/OmniPotent/actions/workflows/ci.yml)
+[![Deploy](https://github.com/ankit25bcs10610/OmniPotent/actions/workflows/deploy.yml/badge.svg)](https://github.com/ankit25bcs10610/OmniPotent/actions/workflows/deploy.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776ab.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00b894.svg)](LICENSE)
 [![SOC2 Ready](https://img.shields.io/badge/SOC2-Ready-00d084.svg)](#compliance)
@@ -243,8 +243,8 @@ Any fails  → Human approval
 
 ```bash
 # Clone the repository
-git clone https://github.com/ankit25bcs10610/DevOps-Copilot.git
-cd DevOps-Copilot
+git clone https://github.com/ankit25bcs10610/OmniPotent.git
+cd OmniPotent
 
 # Configure environment
 cp .env.example .env
@@ -330,7 +330,7 @@ Proceed with rollback? [Y/n]:
 ### Start Investigation
 
 ```bash
-curl -X POST https://api.devops-copilot.com/v1/investigations \
+curl -X POST https://api.omnipotent.com/v1/investigations \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -471,7 +471,7 @@ uv run ruff format app tests
 ### Project Structure
 
 ```
-DevOps-Copilot/
+OmniPotent/
 ├── app/
 │   ├── agents/              # 6 parallel specialist agents
 │   ├── api/                 # FastAPI routes + GraphQL
@@ -512,9 +512,9 @@ DevOps-Copilot/
 ## Support
 
 - **Documentation**: [docs/](docs/)
-- **Issues**: [GitHub Issues](https://github.com/ankit25bcs10610/DevOps-Copilot/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/ankit25bcs10610/DevOps-Copilot/discussions)
-- **Email**: support@devops-copilot.com
+- **Issues**: [GitHub Issues](https://github.com/ankit25bcs10610/OmniPotent/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/ankit25bcs10610/OmniPotent/discussions)
+- **Email**: support@omnipotent.com
 
 ---
 

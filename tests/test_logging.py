@@ -121,7 +121,7 @@ class TestHumanFormatter:
         """Should format log in human-readable format."""
         formatter = HumanFormatter(use_colors=False)
         record = logging.LogRecord(
-            name="devcopilot.test",
+            name="omnipotent.test",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -133,7 +133,7 @@ class TestHumanFormatter:
         output = formatter.format(record)
 
         assert "INFO" in output
-        assert "devcopilot.test" in output
+        assert "omnipotent.test" in output
         assert "Test message" in output
 
     def test_includes_request_id(self):
@@ -259,19 +259,19 @@ class TestGetLogger:
     """Tests for get_logger function."""
 
     def test_prefixes_app_names(self):
-        """Should prefix app.* with devcopilot."""
+        """Should prefix app.* with omnipotent."""
         logger = get_logger("app.api.main")
 
-        assert logger.name == "devcopilot.api.main"
+        assert logger.name == "omnipotent.api.main"
 
     def test_prefixes_plain_names(self):
         """Should prefix plain names."""
         logger = get_logger("mymodule")
 
-        assert logger.name == "devcopilot.mymodule"
+        assert logger.name == "omnipotent.mymodule"
 
-    def test_preserves_devcopilot_prefix(self):
-        """Should not double-prefix devcopilot names."""
-        logger = get_logger("devcopilot.test")
+    def test_preserves_omnipotent_prefix(self):
+        """Should not double-prefix omnipotent names."""
+        logger = get_logger("omnipotent.test")
 
-        assert logger.name == "devcopilot.test"
+        assert logger.name == "omnipotent.test"

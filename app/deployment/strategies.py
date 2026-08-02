@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Any, Callable, Awaitable
 from uuid import uuid4
 
-log = logging.getLogger("devcopilot.deployment.strategies")
+log = logging.getLogger("omnipotent.deployment.strategies")
 
 
 class DeploymentStatus(str, Enum):

@@ -33,7 +33,7 @@ from app.oncall.models import (
     OncallAlert,
 )
 
-log = logging.getLogger("devcopilot.oncall.api")
+log = logging.getLogger("omnipotent.oncall.api")
 
 router = APIRouter(prefix="/oncall", tags=["oncall"])
 

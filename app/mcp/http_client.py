@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.mcp.http")
+log = logging.getLogger("omnipotent.mcp.http")
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3

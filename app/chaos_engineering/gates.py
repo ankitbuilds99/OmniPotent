@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.chaos_engineering.gates")
+log = logging.getLogger("omnipotent.chaos_engineering.gates")
 
 
 class GateStatus(str, Enum):

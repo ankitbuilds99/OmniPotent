@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any, AsyncIterator
 from contextlib import asynccontextmanager
 
-log = logging.getLogger("devcopilot.knowledge_graph.neo4j")
+log = logging.getLogger("omnipotent.knowledge_graph.neo4j")
 
 
 class NodeType(str, Enum):

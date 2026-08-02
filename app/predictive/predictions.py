@@ -18,7 +18,7 @@ from app.predictive.signals import (
     get_signal_correlator,
 )
 
-log = logging.getLogger("devcopilot.predictive.predictions")
+log = logging.getLogger("omnipotent.predictive.predictions")
 
 
 class PredictionConfidence(Enum):

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.scheduled_reports")
+log = logging.getLogger("omnipotent.scheduled_reports")
 
 
 class ReportType(Enum):

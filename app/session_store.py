@@ -16,7 +16,7 @@ from typing import Any
 
 from app.redis_pool import RedisPoolType, get_redis
 
-log = logging.getLogger("devcopilot.session_store")
+log = logging.getLogger("omnipotent.session_store")
 
 SESSION_TTL = 86400
 SESSION_PREFIX = "session:"

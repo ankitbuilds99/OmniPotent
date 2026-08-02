@@ -13,7 +13,7 @@ from typing import Any
 
 from app.log_intelligence.models import ErrorCluster, LogEntry, LogLevel
 
-log = logging.getLogger("devcopilot.log_intelligence.clustering")
+log = logging.getLogger("omnipotent.log_intelligence.clustering")
 
 
 @dataclass

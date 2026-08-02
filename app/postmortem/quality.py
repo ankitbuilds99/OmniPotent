@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-log = logging.getLogger("devcopilot.postmortem.quality")
+log = logging.getLogger("omnipotent.postmortem.quality")
 
 
 @dataclass

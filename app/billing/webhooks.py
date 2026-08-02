@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.billing.webhooks")
+log = logging.getLogger("omnipotent.billing.webhooks")
 
 _PLANS = {"free", "team", "enterprise", "starter_monthly", "starter_yearly", "pro_monthly"}
 

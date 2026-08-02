@@ -21,7 +21,7 @@ import jwt
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.auth.oauth")
+log = logging.getLogger("omnipotent.auth.oauth")
 
 
 @dataclass

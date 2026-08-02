@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.growth.achievements")
+log = logging.getLogger("omnipotent.growth.achievements")
 
 
 class AchievementStatus(str, Enum):

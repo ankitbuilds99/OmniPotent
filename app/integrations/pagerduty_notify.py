@@ -9,7 +9,7 @@ import httpx
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.integrations.pagerduty_notify")
+log = logging.getLogger("omnipotent.integrations.pagerduty_notify")
 
 PAGERDUTY_API_BASE = "https://api.pagerduty.com"
 

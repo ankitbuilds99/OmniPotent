@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.gitlab")
+log = logging.getLogger("omnipotent.connectors.gitlab")
 
 
 class GitLabConnector(Connector):

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.slack_bot.handlers")
+log = logging.getLogger("omnipotent.slack_bot.handlers")
 
 
 class EventType(str, Enum):

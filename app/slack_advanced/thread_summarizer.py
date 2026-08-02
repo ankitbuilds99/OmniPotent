@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.slack_advanced.thread_summarizer")
+log = logging.getLogger("omnipotent.slack_advanced.thread_summarizer")
 
 
 @dataclass

@@ -12,7 +12,7 @@ from typing import Any
 
 from app.log_intelligence.models import LogEntry
 
-log = logging.getLogger("devcopilot.log_intelligence.code_linking")
+log = logging.getLogger("omnipotent.log_intelligence.code_linking")
 
 
 @dataclass

@@ -18,7 +18,7 @@ from enum import Enum
 from typing import Any
 from collections import deque
 
-log = logging.getLogger("devcopilot.monitoring.detectors")
+log = logging.getLogger("omnipotent.monitoring.detectors")
 
 
 class AnomalyType(str, Enum):

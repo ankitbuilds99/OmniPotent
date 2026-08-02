@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Awaitable
 
-log = logging.getLogger("devcopilot.runbook_builder")
+log = logging.getLogger("omnipotent.runbook_builder")
 
 
 class StepType(Enum):

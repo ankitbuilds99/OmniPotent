@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.roi.reports")
+log = logging.getLogger("omnipotent.roi.reports")
 
 
 class ReportFormat(str, Enum):

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
-log = logging.getLogger("devcopilot.support.help_system")
+log = logging.getLogger("omnipotent.support.help_system")
 
 
 class TicketStatus(str, Enum):

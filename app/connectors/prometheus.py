@@ -9,7 +9,7 @@ from typing import Any
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.prometheus")
+log = logging.getLogger("omnipotent.connectors.prometheus")
 
 
 @dataclass

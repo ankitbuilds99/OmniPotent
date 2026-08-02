@@ -242,7 +242,7 @@ class TestVPCConnector:
         config = ConnectorConfig(
             connector_id="test-connector-001",
             organization_id="org-test",
-            control_plane_url="wss://api.devops-copilot.com/connector",
+            control_plane_url="wss://api.omnipotent.com/connector",
             connector_token="test-token-secret",
             logs_config={"type": "elasticsearch"},
             metrics_config={"type": "prometheus"},

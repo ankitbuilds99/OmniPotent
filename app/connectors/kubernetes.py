@@ -10,7 +10,7 @@ from typing import Any
 
 from app.connectors.base import Connector, ConnectorConfig, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.kubernetes")
+log = logging.getLogger("omnipotent.connectors.kubernetes")
 
 
 @dataclass

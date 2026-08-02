@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Any
 import uuid
 
-log = logging.getLogger("devcopilot.digital_twin.rollback")
+log = logging.getLogger("omnipotent.digital_twin.rollback")
 
 
 class RollbackStrategy(str, Enum):

@@ -17,7 +17,7 @@ import os
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, TypeVar
 
-log = logging.getLogger("devcopilot.observability.tracing")
+log = logging.getLogger("omnipotent.observability.tracing")
 
 _INITIALIZED = False
 _TRACER = None
@@ -27,7 +27,7 @@ T = TypeVar("T")
 
 
 def init_tracing(
-    service_name: str = "devops-copilot",
+    service_name: str = "omnipotent",
     sample_rate: float = 1.0,
 ) -> bool:
     """Initialize OpenTelemetry tracing.
@@ -81,7 +81,7 @@ def init_tracing(
 
         trace.set_tracer_provider(provider)
 
-        _TRACER = trace.get_tracer("devops-copilot", "1.0.0")
+        _TRACER = trace.get_tracer("omnipotent", "1.0.0")
         _ENABLED = True
 
         log.info(

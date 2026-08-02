@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any, Callable
 
-log = logging.getLogger("devcopilot.spend")
+log = logging.getLogger("omnipotent.spend")
 
 
 def over_cap(total: int, cap: int) -> bool:

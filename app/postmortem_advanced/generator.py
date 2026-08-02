@@ -29,7 +29,7 @@ from app.postmortem_advanced.models import (
     LessonScope,
 )
 
-log = logging.getLogger("devcopilot.postmortem_advanced.generator")
+log = logging.getLogger("omnipotent.postmortem_advanced.generator")
 
 
 @dataclass

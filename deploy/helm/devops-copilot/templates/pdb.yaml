@@ -2,12 +2,12 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "devops-copilot.fullname" . }}
+  name: {{ include "omnipotent.fullname" . }}
   labels:
-    {{- include "devops-copilot.labels" . | nindent 4 }}
+    {{- include "omnipotent.labels" . | nindent 4 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
-      {{- include "devops-copilot.selectorLabels" . | nindent 6 }}
+      {{- include "omnipotent.selectorLabels" . | nindent 6 }}
 {{- end }}

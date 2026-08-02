@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Iterator, TypeVar
 
-log = logging.getLogger("devcopilot.resilience.timeout")
+log = logging.getLogger("omnipotent.resilience.timeout")
 
 T = TypeVar("T")
 

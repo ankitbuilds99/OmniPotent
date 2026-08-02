@@ -23,7 +23,7 @@ from app.service_map.models import (
     TeamOwnership,
 )
 
-log = logging.getLogger("devcopilot.service_map.graph")
+log = logging.getLogger("omnipotent.service_map.graph")
 
 
 class ServiceGraph:

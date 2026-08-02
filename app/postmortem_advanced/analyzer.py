@@ -18,7 +18,7 @@ from app.postmortem_advanced.models import (
     Hypothesis,
 )
 
-log = logging.getLogger("devcopilot.postmortem_advanced.analyzer")
+log = logging.getLogger("omnipotent.postmortem_advanced.analyzer")
 
 
 @dataclass

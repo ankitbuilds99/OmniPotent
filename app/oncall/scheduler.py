@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone, time
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.oncall.scheduler")
+log = logging.getLogger("omnipotent.oncall.scheduler")
 
 
 class RotationType(Enum):

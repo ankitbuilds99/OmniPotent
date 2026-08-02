@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.chaos_engineering.blast_radius")
+log = logging.getLogger("omnipotent.chaos_engineering.blast_radius")
 
 
 class ContainmentAction(str, Enum):

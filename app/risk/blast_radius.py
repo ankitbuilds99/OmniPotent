@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.risk.blast_radius")
+log = logging.getLogger("omnipotent.risk.blast_radius")
 
 
 @dataclass

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, TypeVar
 
-log = logging.getLogger("devcopilot.error_handling.circuit_breaker")
+log = logging.getLogger("omnipotent.error_handling.circuit_breaker")
 
 F = TypeVar("F", bound=Callable[..., Any])
 

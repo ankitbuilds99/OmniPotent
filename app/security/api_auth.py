@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.security.api_auth")
+log = logging.getLogger("omnipotent.security.api_auth")
 
 
 class KeyRole(Enum):

@@ -17,7 +17,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.oncall.compensation")
+log = logging.getLogger("omnipotent.oncall.compensation")
 
 
 class ShiftType(Enum):

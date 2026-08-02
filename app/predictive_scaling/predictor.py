@@ -9,7 +9,7 @@ from typing import Any
 from enum import Enum
 import math
 
-log = logging.getLogger("devcopilot.predictive_scaling.predictor")
+log = logging.getLogger("omnipotent.predictive_scaling.predictor")
 
 
 class ScalingDirection(str, Enum):

@@ -24,7 +24,7 @@ from app.compliance.controls import (
     get_control_registry,
 )
 
-log = logging.getLogger("devcopilot.compliance.dashboard")
+log = logging.getLogger("omnipotent.compliance.dashboard")
 
 
 class AlertSeverity(Enum):

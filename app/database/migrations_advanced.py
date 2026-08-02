@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, TypeVar
 
-log = logging.getLogger("devcopilot.migrations")
+log = logging.getLogger("omnipotent.migrations")
 
 T = TypeVar("T")
 

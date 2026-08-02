@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.ai_fix.generator")
+log = logging.getLogger("omnipotent.ai_fix.generator")
 
 
 class FixStrategyType(Enum):

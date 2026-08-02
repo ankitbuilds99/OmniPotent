@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.rca_advanced.auto_fix_pr")
+log = logging.getLogger("omnipotent.rca_advanced.auto_fix_pr")
 
 
 class FixType(str, Enum):

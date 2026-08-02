@@ -34,7 +34,7 @@ from app.oncall.models import (
     OncallHolidayCalendar,
 )
 
-log = logging.getLogger("devcopilot.oncall.schedule_service")
+log = logging.getLogger("omnipotent.oncall.schedule_service")
 
 
 class ScheduleService:

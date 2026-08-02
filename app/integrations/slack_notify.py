@@ -12,7 +12,7 @@ import httpx
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.integrations.slack_notify")
+log = logging.getLogger("omnipotent.integrations.slack_notify")
 
 
 def is_slack_configured() -> bool:

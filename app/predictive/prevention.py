@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from app.predictive.predictions import PredictedIncident, IncidentType
 
-log = logging.getLogger("devcopilot.predictive.prevention")
+log = logging.getLogger("omnipotent.predictive.prevention")
 
 
 class ActionType(Enum):

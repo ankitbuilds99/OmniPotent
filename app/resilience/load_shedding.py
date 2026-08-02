@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import AsyncIterator, Callable
 
-log = logging.getLogger("devcopilot.resilience.load_shedding")
+log = logging.getLogger("omnipotent.resilience.load_shedding")
 
 
 class Priority(IntEnum):

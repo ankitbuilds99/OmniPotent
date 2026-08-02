@@ -18,7 +18,7 @@ from enum import Enum
 from typing import Any, Callable
 import uuid
 
-log = logging.getLogger("devcopilot.digital_twin.chaos")
+log = logging.getLogger("omnipotent.digital_twin.chaos")
 
 
 class FailureType(str, Enum):

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.postmortem.generator")
+log = logging.getLogger("omnipotent.postmortem.generator")
 
 
 class ActionItemStatus(Enum):

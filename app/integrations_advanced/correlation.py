@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.integrations_advanced.correlation")
+log = logging.getLogger("omnipotent.integrations_advanced.correlation")
 
 
 class EventType(str, Enum):

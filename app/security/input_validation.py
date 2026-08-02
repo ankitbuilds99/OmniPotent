@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from urllib.parse import urlparse
 
-log = logging.getLogger("devcopilot.security.input_validation")
+log = logging.getLogger("omnipotent.security.input_validation")
 
 
 class ValidationSeverity(Enum):

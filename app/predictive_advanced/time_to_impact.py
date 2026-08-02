@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.predictive_advanced.time_to_impact")
+log = logging.getLogger("omnipotent.predictive_advanced.time_to_impact")
 
 
 class CountdownStatus(str, Enum):

@@ -162,5 +162,5 @@ Long-running investigations may timeout:
 ## Getting Help
 
 - **Documentation**: Check this guide and API docs
-- **GitHub Issues**: Report bugs at [github.com/your-org/devops-copilot](https://github.com/your-org/devops-copilot/issues)
-- **Slack Support**: Join #devops-copilot-help
+- **GitHub Issues**: Report bugs at [github.com/your-org/omnipotent](https://github.com/your-org/omnipotent/issues)
+- **Slack Support**: Join #omnipotent-help

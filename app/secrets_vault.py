@@ -16,7 +16,7 @@ from functools import lru_cache
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.secrets")
+log = logging.getLogger("omnipotent.secrets")
 
 
 @lru_cache(maxsize=1)

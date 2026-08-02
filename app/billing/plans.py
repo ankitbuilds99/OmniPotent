@@ -12,7 +12,7 @@ from app.billing.models import (
     PlanFeatures,
 )
 
-log = logging.getLogger("devcopilot.billing.plans")
+log = logging.getLogger("omnipotent.billing.plans")
 
 
 def _create_starter_features() -> PlanFeatures:

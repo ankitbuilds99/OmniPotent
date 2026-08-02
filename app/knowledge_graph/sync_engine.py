@@ -30,7 +30,7 @@ from app.knowledge_graph.neo4j_backend import (
     RelationType,
 )
 
-log = logging.getLogger("devcopilot.knowledge_graph.sync")
+log = logging.getLogger("omnipotent.knowledge_graph.sync")
 
 
 class SyncSource(str, Enum):

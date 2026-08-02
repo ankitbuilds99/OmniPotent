@@ -1,11 +1,11 @@
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: devops-copilot
-  namespace: devops-copilot
+  name: omnipotent
+  namespace: omnipotent
 spec:
   scaleTargetRef:
-    name: devops-copilot
+    name: omnipotent
   pollingInterval: 15
   cooldownPeriod: 300
   minReplicaCount: 3
@@ -36,12 +36,12 @@ spec:
         metricName: http_requests_per_second
         query: |
           sum(rate(http_requests_total{
-            namespace="devops-copilot",
-            service="devops-copilot"
+            namespace="omnipotent",
+            service="omnipotent"
           }[2m])) /
           count(kube_pod_info{
-            namespace="devops-copilot",
-            pod=~"devops-copilot.*"
+            namespace="omnipotent",
+            pod=~"omnipotent.*"
           })
         threshold: "100"
         activationThreshold: "50"
@@ -53,7 +53,7 @@ spec:
         metricName: active_investigations
         query: |
           sum(copilot_active_investigations{
-            namespace="devops-copilot"
+            namespace="omnipotent"
           })
         threshold: "20"
         activationThreshold: "10"
@@ -65,7 +65,7 @@ spec:
         metricName: llm_queue_depth
         query: |
           sum(copilot_llm_pending_requests{
-            namespace="devops-copilot"
+            namespace="omnipotent"
           })
         threshold: "50"
         activationThreshold: "25"
@@ -78,7 +78,7 @@ spec:
         query: |
           histogram_quantile(0.95,
             sum(rate(http_request_duration_seconds_bucket{
-              namespace="devops-copilot"
+              namespace="omnipotent"
             }[5m])) by (le)
           )
         threshold: "2.0"
@@ -87,7 +87,7 @@ spec:
     # 5. Redis job queue length (Dramatiq tasks)
     - type: redis
       metadata:
-        address: redis.devops-copilot:6379
+        address: redis.omnipotent:6379
         listName: dramatiq:default
         listLength: "100"
         activationListLength: "50"

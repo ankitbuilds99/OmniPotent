@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.github_app.pattern_matcher")
+log = logging.getLogger("omnipotent.github_app.pattern_matcher")
 
 
 @dataclass

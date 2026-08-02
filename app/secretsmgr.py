@@ -20,7 +20,7 @@ import os
 from functools import lru_cache
 from typing import Any, Protocol
 
-log = logging.getLogger("devcopilot.secretsmgr")
+log = logging.getLogger("omnipotent.secretsmgr")
 
 
 class SecretsProvider(Protocol):
@@ -61,7 +61,7 @@ class AwsSecretsManagerProvider:
 class VaultProvider:
     """HashiCorp Vault KV v2. Reads `mount/data/<path>` and returns data[name]."""
 
-    def __init__(self, client: Any = None, mount: str = "secret", path: str = "devops-copilot"):
+    def __init__(self, client: Any = None, mount: str = "secret", path: str = "omnipotent"):
         self._client = client
         self._mount = mount
         self._path = path

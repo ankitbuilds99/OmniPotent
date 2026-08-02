@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Awaitable, Callable
 
-log = logging.getLogger("devcopilot.slo")
+log = logging.getLogger("omnipotent.slo")
 
 
 def is_page_worthy(burn: dict) -> bool:

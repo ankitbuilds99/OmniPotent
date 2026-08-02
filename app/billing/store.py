@@ -20,7 +20,7 @@ from app.billing.models import (
 )
 from app.billing.plans import PRICING_PLANS
 
-log = logging.getLogger("devcopilot.billing.store")
+log = logging.getLogger("omnipotent.billing.store")
 
 
 class InMemoryBillingStore:

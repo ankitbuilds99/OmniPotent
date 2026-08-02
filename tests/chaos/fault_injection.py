@@ -22,7 +22,7 @@ from typing import Any, Callable, TypeVar
 
 import pytest
 
-log = logging.getLogger("devcopilot.chaos")
+log = logging.getLogger("omnipotent.chaos")
 
 T = TypeVar("T")
 

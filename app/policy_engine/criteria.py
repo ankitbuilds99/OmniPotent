@@ -18,7 +18,7 @@ from enum import Enum
 from typing import Any, Callable, Awaitable
 import re
 
-log = logging.getLogger("devcopilot.policy_engine.criteria")
+log = logging.getLogger("omnipotent.policy_engine.criteria")
 
 
 class CriteriaType(str, Enum):

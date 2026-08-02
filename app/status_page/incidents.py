@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.status_page.incidents")
+log = logging.getLogger("omnipotent.status_page.incidents")
 
 
 class IncidentStatus(Enum):

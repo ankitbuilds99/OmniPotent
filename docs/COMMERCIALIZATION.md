@@ -1,6 +1,6 @@
 # Commercialization — multi-tenant SaaS layer
 
-DevOps-Copilot ships an **additive, opt-in** commercial layer that turns the
+OmniPotent ships an **additive, opt-in** commercial layer that turns the
 single-tenant demo into a multi-tenant B2B SaaS. Everything below is gated by
 `COPILOT_MULTI_TENANT` (default **off**) — when off, the app runs exactly as the
 offline single-artifact demo, byte-for-byte. It was built in the research-prescribed

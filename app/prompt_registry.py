@@ -16,7 +16,7 @@ import logging
 import os
 from pathlib import Path
 
-log = logging.getLogger("devcopilot.prompts")
+log = logging.getLogger("omnipotent.prompts")
 
 
 def _seed() -> dict[str, dict[str, str]]:

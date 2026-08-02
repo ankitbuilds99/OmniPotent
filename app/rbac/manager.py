@@ -21,7 +21,7 @@ from app.rbac.permissions import (
     ROLE_PERMISSIONS,
 )
 
-log = logging.getLogger("devcopilot.rbac.manager")
+log = logging.getLogger("omnipotent.rbac.manager")
 
 
 @dataclass

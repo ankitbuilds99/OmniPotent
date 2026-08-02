@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
-log = logging.getLogger("devcopilot.billing.subscriptions")
+log = logging.getLogger("omnipotent.billing.subscriptions")
 
 
 class SubscriptionStatus(str, Enum):

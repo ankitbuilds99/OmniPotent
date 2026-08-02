@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.predictive_advanced.cascade_predictor")
+log = logging.getLogger("omnipotent.predictive_advanced.cascade_predictor")
 
 
 class CascadePhase(str, Enum):

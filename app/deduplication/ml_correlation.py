@@ -14,7 +14,7 @@ from app.deduplication.models import (
     CorrelationCluster,
 )
 
-log = logging.getLogger("devcopilot.deduplication.ml_correlation")
+log = logging.getLogger("omnipotent.deduplication.ml_correlation")
 
 
 @dataclass

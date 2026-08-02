@@ -422,7 +422,7 @@ All errors follow this format:
 
 ### Python
 ```python
-from devops_copilot import Client
+from omnipotent import Client
 
 client = Client(api_key="dcp_...")
 result = client.investigate("Why is the API slow?")
@@ -431,9 +431,9 @@ print(result.root_cause)
 
 ### JavaScript
 ```javascript
-import { DevOpsCopilot } from '@devops-copilot/sdk';
+import { OmniPotent } from '@omnipotent/sdk';
 
-const client = new DevOpsCopilot({ apiKey: 'dcp_...' });
+const client = new OmniPotent({ apiKey: 'dcp_...' });
 const result = await client.investigate('Why is the API slow?');
 console.log(result.rootCause);
 ```

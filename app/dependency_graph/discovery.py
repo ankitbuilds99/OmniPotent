@@ -11,7 +11,7 @@ from enum import Enum
 
 import httpx
 
-log = logging.getLogger("devcopilot.dependency_graph.discovery")
+log = logging.getLogger("omnipotent.dependency_graph.discovery")
 
 
 class ServiceType(str, Enum):

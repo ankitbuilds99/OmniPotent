@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.sso_advanced.scim")
+log = logging.getLogger("omnipotent.sso_advanced.scim")
 
 
 class SCIMOperation(str, Enum):

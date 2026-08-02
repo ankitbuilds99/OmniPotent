@@ -10,7 +10,7 @@ from typing import Any, Callable, Awaitable
 from enum import Enum
 import random
 
-log = logging.getLogger("devcopilot.chaos.experiments")
+log = logging.getLogger("omnipotent.chaos.experiments")
 
 
 class ExperimentType(str, Enum):

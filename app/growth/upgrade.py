@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.growth.upgrade")
+log = logging.getLogger("omnipotent.growth.upgrade")
 
 
 class UpgradeMomentType(str, Enum):

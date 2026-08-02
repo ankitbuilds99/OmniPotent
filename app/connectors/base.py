@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.connectors.base")
+log = logging.getLogger("omnipotent.connectors.base")
 
 
 class ConnectorError(Exception):

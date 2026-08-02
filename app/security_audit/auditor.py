@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("devcopilot.security_audit.auditor")
+log = logging.getLogger("omnipotent.security_audit.auditor")
 
 
 class Severity(str, Enum):

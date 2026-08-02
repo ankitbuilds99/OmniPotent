@@ -26,7 +26,7 @@ from app.safety_gates.models import (
     SafetyEvaluationResult,
 )
 
-log = logging.getLogger("devcopilot.safety_gates.orchestrator")
+log = logging.getLogger("omnipotent.safety_gates.orchestrator")
 
 
 class SafetyGateOrchestrator:

@@ -20,7 +20,7 @@ from app.model_router.adaptive_router import (
 from app.model_router.complexity_analyzer import ComplexityAnalyzer
 from app.model_router.cost_optimizer import CostOptimizer
 
-log = logging.getLogger("devcopilot.model_router.api")
+log = logging.getLogger("omnipotent.model_router.api")
 
 router = APIRouter(prefix="/model-router", tags=["model-router"])
 

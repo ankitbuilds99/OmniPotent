@@ -26,7 +26,7 @@ from app.coordinator.dag_executor import (
     TaskPriority,
 )
 
-log = logging.getLogger("devcopilot.coordinator.replanner")
+log = logging.getLogger("omnipotent.coordinator.replanner")
 
 
 class ReplanStrategy(str, Enum):

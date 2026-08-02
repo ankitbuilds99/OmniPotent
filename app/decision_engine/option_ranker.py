@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any
 import hashlib
 
-log = logging.getLogger("devcopilot.decision_engine.option_ranker")
+log = logging.getLogger("omnipotent.decision_engine.option_ranker")
 
 
 class RankingStrategy(str, Enum):

@@ -29,7 +29,7 @@ from app.error_handling.handlers import (
 )
 from app.middleware.tracing import get_trace_context
 
-log = logging.getLogger("devcopilot.middleware.error_handler")
+log = logging.getLogger("omnipotent.middleware.error_handler")
 
 
 def _error_response(

@@ -15,7 +15,7 @@ from app.deduplication.models import (
     CascadeChain,
 )
 
-log = logging.getLogger("devcopilot.deduplication.temporal")
+log = logging.getLogger("omnipotent.deduplication.temporal")
 
 
 @dataclass

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.security.session_binding")
+log = logging.getLogger("omnipotent.security.session_binding")
 
 
 class BindingStrength(Enum):

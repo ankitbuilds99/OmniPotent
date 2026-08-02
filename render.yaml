@@ -4,7 +4,7 @@
 services:
   # Main application (Backend + Frontend)
   - type: web
-    name: devops-copilot
+    name: omnipotent
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
@@ -90,7 +90,7 @@ services:
   # Uncomment below if you want to deploy separately
 
   # - type: web
-  #   name: devops-copilot-api
+  #   name: omnipotent-api
   #   runtime: python
   #   buildCommand: pip install -e .
   #   startCommand: uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
@@ -103,7 +103,7 @@ services:
   #       sync: false
 
   # - type: web
-  #   name: devops-copilot-web
+  #   name: omnipotent-web
   #   runtime: static
   #   buildCommand: cd frontend && npm install && npm run build
   #   staticPublishPath: ./frontend/dist

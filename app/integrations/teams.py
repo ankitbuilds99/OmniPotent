@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.integrations.teams")
+log = logging.getLogger("omnipotent.integrations.teams")
 
 
 class CardStyle(Enum):

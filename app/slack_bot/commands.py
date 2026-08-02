@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Awaitable
 
-log = logging.getLogger("devcopilot.slack_bot.commands")
+log = logging.getLogger("omnipotent.slack_bot.commands")
 
 
 class CommandCategory(str, Enum):

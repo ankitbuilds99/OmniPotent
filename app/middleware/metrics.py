@@ -24,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-log = logging.getLogger("devcopilot.middleware.metrics")
+log = logging.getLogger("omnipotent.middleware.metrics")
 
 # Histogram buckets for latency (in milliseconds)
 LATENCY_BUCKETS_MS = (10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000)
@@ -176,61 +176,61 @@ class RequestMetrics:
         lines = []
 
         # Total requests counter
-        lines.append("# HELP devcopilot_http_requests_total Total HTTP requests")
-        lines.append("# TYPE devcopilot_http_requests_total counter")
+        lines.append("# HELP omnipotent_http_requests_total Total HTTP requests")
+        lines.append("# TYPE omnipotent_http_requests_total counter")
         for status, count in sorted(self.requests_by_status.items()):
-            lines.append(f'devcopilot_http_requests_total{{status="{status}"}} {count}')
+            lines.append(f'omnipotent_http_requests_total{{status="{status}"}} {count}')
 
         # Requests by method
-        lines.append("# HELP devcopilot_http_requests_by_method HTTP requests by method")
-        lines.append("# TYPE devcopilot_http_requests_by_method counter")
+        lines.append("# HELP omnipotent_http_requests_by_method HTTP requests by method")
+        lines.append("# TYPE omnipotent_http_requests_by_method counter")
         for method, count in sorted(self.requests_by_method.items()):
-            lines.append(f'devcopilot_http_requests_by_method{{method="{method}"}} {count}')
+            lines.append(f'omnipotent_http_requests_by_method{{method="{method}"}} {count}')
 
         # Error counter
-        lines.append("# HELP devcopilot_http_errors_total Total HTTP errors")
-        lines.append("# TYPE devcopilot_http_errors_total counter")
-        lines.append(f"devcopilot_http_errors_total {self.total_errors}")
+        lines.append("# HELP omnipotent_http_errors_total Total HTTP errors")
+        lines.append("# TYPE omnipotent_http_errors_total counter")
+        lines.append(f"omnipotent_http_errors_total {self.total_errors}")
         for error_type, count in sorted(self.errors_by_type.items()):
-            lines.append(f'devcopilot_http_errors_total{{type="{error_type}"}} {count}')
+            lines.append(f'omnipotent_http_errors_total{{type="{error_type}"}} {count}')
 
         # Latency percentiles (gauges)
-        lines.append("# HELP devcopilot_http_request_duration_ms Request duration percentiles")
-        lines.append("# TYPE devcopilot_http_request_duration_ms gauge")
-        lines.append(f'devcopilot_http_request_duration_ms{{quantile="0.5"}} {round(self.p50_latency_ms, 2)}')
-        lines.append(f'devcopilot_http_request_duration_ms{{quantile="0.95"}} {round(self.p95_latency_ms, 2)}')
-        lines.append(f'devcopilot_http_request_duration_ms{{quantile="0.99"}} {round(self.p99_latency_ms, 2)}')
+        lines.append("# HELP omnipotent_http_request_duration_ms Request duration percentiles")
+        lines.append("# TYPE omnipotent_http_request_duration_ms gauge")
+        lines.append(f'omnipotent_http_request_duration_ms{{quantile="0.5"}} {round(self.p50_latency_ms, 2)}')
+        lines.append(f'omnipotent_http_request_duration_ms{{quantile="0.95"}} {round(self.p95_latency_ms, 2)}')
+        lines.append(f'omnipotent_http_request_duration_ms{{quantile="0.99"}} {round(self.p99_latency_ms, 2)}')
 
         # Latency histogram
-        lines.append("# HELP devcopilot_http_request_duration_seconds_bucket Request duration histogram")
-        lines.append("# TYPE devcopilot_http_request_duration_seconds_bucket histogram")
+        lines.append("# HELP omnipotent_http_request_duration_seconds_bucket Request duration histogram")
+        lines.append("# TYPE omnipotent_http_request_duration_seconds_bucket histogram")
         cumulative = 0
         for bucket in sorted(LATENCY_BUCKETS_MS):
             cumulative += self.latency_buckets.get(bucket, 0)
             bucket_seconds = bucket / 1000.0
-            lines.append(f'devcopilot_http_request_duration_seconds_bucket{{le="{bucket_seconds}"}} {cumulative}')
-        lines.append(f'devcopilot_http_request_duration_seconds_bucket{{le="+Inf"}} {self.latency_count}')
-        lines.append(f"devcopilot_http_request_duration_seconds_sum {round(self.latency_sum_ms / 1000.0, 4)}")
-        lines.append(f"devcopilot_http_request_duration_seconds_count {self.latency_count}")
+            lines.append(f'omnipotent_http_request_duration_seconds_bucket{{le="{bucket_seconds}"}} {cumulative}')
+        lines.append(f'omnipotent_http_request_duration_seconds_bucket{{le="+Inf"}} {self.latency_count}')
+        lines.append(f"omnipotent_http_request_duration_seconds_sum {round(self.latency_sum_ms / 1000.0, 4)}")
+        lines.append(f"omnipotent_http_request_duration_seconds_count {self.latency_count}")
 
         # Active requests
-        lines.append("# HELP devcopilot_http_active_requests Currently active requests")
-        lines.append("# TYPE devcopilot_http_active_requests gauge")
-        lines.append(f"devcopilot_http_active_requests {self.active_requests}")
+        lines.append("# HELP omnipotent_http_active_requests Currently active requests")
+        lines.append("# TYPE omnipotent_http_active_requests gauge")
+        lines.append(f"omnipotent_http_active_requests {self.active_requests}")
 
         # Error rate (derived metric)
-        lines.append("# HELP devcopilot_http_error_rate Current error rate")
-        lines.append("# TYPE devcopilot_http_error_rate gauge")
-        lines.append(f"devcopilot_http_error_rate {round(self.error_rate, 4)}")
+        lines.append("# HELP omnipotent_http_error_rate Current error rate")
+        lines.append("# TYPE omnipotent_http_error_rate gauge")
+        lines.append(f"omnipotent_http_error_rate {round(self.error_rate, 4)}")
 
         # Per-endpoint latencies
-        lines.append("# HELP devcopilot_http_endpoint_duration_ms Per-endpoint request duration")
-        lines.append("# TYPE devcopilot_http_endpoint_duration_ms gauge")
+        lines.append("# HELP omnipotent_http_endpoint_duration_ms Per-endpoint request duration")
+        lines.append("# TYPE omnipotent_http_endpoint_duration_ms gauge")
         for endpoint, tracker in self.latency_by_endpoint.items():
             safe_ep = endpoint.replace('"', '\\"')
-            lines.append(f'devcopilot_http_endpoint_duration_ms{{endpoint="{safe_ep}",quantile="0.5"}} {round(tracker.p50, 2)}')
-            lines.append(f'devcopilot_http_endpoint_duration_ms{{endpoint="{safe_ep}",quantile="0.95"}} {round(tracker.p95, 2)}')
-            lines.append(f'devcopilot_http_endpoint_duration_ms{{endpoint="{safe_ep}",quantile="0.99"}} {round(tracker.p99, 2)}')
+            lines.append(f'omnipotent_http_endpoint_duration_ms{{endpoint="{safe_ep}",quantile="0.5"}} {round(tracker.p50, 2)}')
+            lines.append(f'omnipotent_http_endpoint_duration_ms{{endpoint="{safe_ep}",quantile="0.95"}} {round(tracker.p95, 2)}')
+            lines.append(f'omnipotent_http_endpoint_duration_ms{{endpoint="{safe_ep}",quantile="0.99"}} {round(tracker.p99, 2)}')
 
         return "\n".join(lines)
 

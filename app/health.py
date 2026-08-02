@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Awaitable
 
-log = logging.getLogger("devcopilot.health")
+log = logging.getLogger("omnipotent.health")
 
 
 class HealthStatus(Enum):

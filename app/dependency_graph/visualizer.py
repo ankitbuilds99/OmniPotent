@@ -9,7 +9,7 @@ from enum import Enum
 
 from app.dependency_graph.graph import DependencyGraph, HealthStatus
 
-log = logging.getLogger("devcopilot.dependency_graph.visualizer")
+log = logging.getLogger("omnipotent.dependency_graph.visualizer")
 
 
 class VisualizationFormat(str, Enum):

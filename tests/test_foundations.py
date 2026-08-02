@@ -12,7 +12,7 @@ _HAS_CRYPTO = importlib.util.find_spec("cryptography") is not None
 
 
 def test_audit_record_emits_structured_event(caplog):
-    with caplog.at_level(logging.INFO, logger="devcopilot.audit"):
+    with caplog.at_level(logging.INFO, logger="omnipotent.audit"):
         audit.record("approval.decided", thread="t1", approved=True)
     assert any("approval.decided" in r.getMessage() and "t1" in r.getMessage() for r in caplog.records)
 

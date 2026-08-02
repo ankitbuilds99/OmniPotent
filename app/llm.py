@@ -25,7 +25,7 @@ from langchain_core.messages import SystemMessage
 from app import replay, runtime
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.llm")
+log = logging.getLogger("omnipotent.llm")
 
 # Per-provider default models: (main, fast).
 _DEFAULTS = {

@@ -14,7 +14,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("devcopilot.verification.confidence_calibrator")
+log = logging.getLogger("omnipotent.verification.confidence_calibrator")
 
 
 @dataclass

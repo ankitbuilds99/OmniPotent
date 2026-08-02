@@ -9,7 +9,7 @@ from email.mime.text import MIMEText
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.email")
+log = logging.getLogger("omnipotent.email")
 
 
 @dataclass
@@ -100,7 +100,7 @@ class EmailService:
             return False
 
         try:
-            from_email = getattr(self.settings, "email_from", "noreply@devops-copilot.io")
+            from_email = getattr(self.settings, "email_from", "noreply@omnipotent.io")
             client.send_email(
                 Source=from_email,
                 Destination={"ToAddresses": [message.to]},
@@ -127,7 +127,7 @@ class EmailService:
         try:
             from sendgrid.helpers.mail import Mail
 
-            from_email = getattr(self.settings, "email_from", "noreply@devops-copilot.io")
+            from_email = getattr(self.settings, "email_from", "noreply@omnipotent.io")
             mail = Mail(
                 from_email=from_email,
                 to_emails=message.to,
@@ -148,7 +148,7 @@ class EmailService:
             return False
 
         try:
-            from_email = getattr(self.settings, "email_from", "noreply@devops-copilot.io")
+            from_email = getattr(self.settings, "email_from", "noreply@omnipotent.io")
             client.Emails.send({
                 "from": from_email,
                 "to": message.to,
@@ -169,7 +169,7 @@ class EmailService:
         smtp_port = getattr(self.settings, "smtp_port", 587)
         smtp_user = getattr(self.settings, "smtp_user", "")
         smtp_pass = getattr(self.settings, "smtp_pass", "")
-        from_email = getattr(self.settings, "email_from", "noreply@devops-copilot.io")
+        from_email = getattr(self.settings, "email_from", "noreply@omnipotent.io")
 
         try:
             msg = MIMEMultipart("alternative")

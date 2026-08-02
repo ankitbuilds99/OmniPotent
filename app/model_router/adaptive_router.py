@@ -19,7 +19,7 @@ from app.model_router.complexity_analyzer import (
 )
 from app.model_router.cost_optimizer import CostOptimizer, CostEstimate
 
-log = logging.getLogger("devcopilot.model_router.router")
+log = logging.getLogger("omnipotent.model_router.router")
 
 
 class ModelConfig(TypedDict):

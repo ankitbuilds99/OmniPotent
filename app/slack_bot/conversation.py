@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.slack_bot.conversation")
+log = logging.getLogger("omnipotent.slack_bot.conversation")
 
 
 class Intent(str, Enum):

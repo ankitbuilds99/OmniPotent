@@ -28,7 +28,7 @@ from app.error_handling.exceptions import (
     ConflictError,
 )
 
-log = logging.getLogger("devcopilot.error_handling.handlers")
+log = logging.getLogger("omnipotent.error_handling.handlers")
 
 
 class ErrorClassification(str, Enum):

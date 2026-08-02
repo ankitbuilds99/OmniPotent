@@ -1,4 +1,4 @@
-"""Discord notifications for DevOps-Copilot.
+"""Discord notifications for OmniPotent.
 
 Provides:
 - Webhook-based notifications
@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-log = logging.getLogger("devcopilot.notifications.discord")
+log = logging.getLogger("omnipotent.notifications.discord")
 
 
 class DiscordColor(int, Enum):
@@ -89,7 +89,7 @@ class DiscordWebhook:
 
     def __init__(self, webhook_url: str | None = None):
         self.webhook_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
-        self.default_username = "DevOps-Copilot"
+        self.default_username = "OmniPotent"
 
     @property
     def is_configured(self) -> bool:

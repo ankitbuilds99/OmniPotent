@@ -47,12 +47,12 @@ class TestPactProvider:
         from pact import Verifier
 
         verifier = Verifier(
-            provider="devops-copilot-api",
+            provider="omnipotent-api",
             provider_base_url="http://localhost:8000",
         )
 
         output, _ = verifier.verify_pacts(
-            pact_url="tests/contract/pacts/frontend-devops-copilot-api.json",
+            pact_url="tests/contract/pacts/frontend-omnipotent-api.json",
             provider_states_setup_url="http://localhost:8000/_pact/provider-states",
         )
 
@@ -65,12 +65,12 @@ class TestPactProvider:
         from pact import Verifier
 
         verifier = Verifier(
-            provider="devops-copilot-api",
+            provider="omnipotent-api",
             provider_base_url="http://localhost:8000",
         )
 
         output, _ = verifier.verify_pacts(
-            pact_url="tests/contract/pacts/slack-integration-devops-copilot-api.json",
+            pact_url="tests/contract/pacts/slack-integration-omnipotent-api.json",
         )
 
         assert output == 0, "Slack contract verification failed"

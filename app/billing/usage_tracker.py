@@ -14,7 +14,7 @@ from app.billing.models import (
     MetricType,
 )
 
-log = logging.getLogger("devcopilot.billing.usage_tracker")
+log = logging.getLogger("omnipotent.billing.usage_tracker")
 
 
 class UsageStore(Protocol):

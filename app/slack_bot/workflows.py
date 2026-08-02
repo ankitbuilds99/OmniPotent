@@ -14,7 +14,7 @@ from typing import Any
 
 from app.config import get_settings
 
-log = logging.getLogger("devcopilot.slack_bot.workflows")
+log = logging.getLogger("omnipotent.slack_bot.workflows")
 _DEFAULT_ORG_ID = get_settings().default_org_id
 
 

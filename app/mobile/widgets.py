@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.mobile.widgets")
+log = logging.getLogger("omnipotent.mobile.widgets")
 
 
 class WidgetSize(str, Enum):

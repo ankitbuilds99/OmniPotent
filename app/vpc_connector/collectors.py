@@ -20,7 +20,7 @@ from typing import Any
 
 from app.vpc_connector.redaction import RedactionEngine
 
-log = logging.getLogger("devcopilot.vpc_connector.collectors")
+log = logging.getLogger("omnipotent.vpc_connector.collectors")
 
 
 class DataSourceType(str, Enum):

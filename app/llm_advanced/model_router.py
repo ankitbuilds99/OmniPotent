@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.llm.router")
+log = logging.getLogger("omnipotent.llm.router")
 
 
 class ModelTier(Enum):

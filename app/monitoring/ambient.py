@@ -23,7 +23,7 @@ from app.monitoring.detectors import (
     Anomaly,
 )
 
-log = logging.getLogger("devcopilot.monitoring.ambient")
+log = logging.getLogger("omnipotent.monitoring.ambient")
 _settings = get_settings()
 
 

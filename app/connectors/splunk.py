@@ -8,7 +8,7 @@ import time
 
 from app.connectors.base import Connector, ConnectorError, QueryResult
 
-log = logging.getLogger("devcopilot.connectors.splunk")
+log = logging.getLogger("omnipotent.connectors.splunk")
 
 
 class SplunkConnector(Connector):

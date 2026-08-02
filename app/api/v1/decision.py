@@ -29,7 +29,7 @@ from app.decision_engine.engine import (
     IncidentContext,
 )
 
-log = logging.getLogger("devcopilot.api.decision")
+log = logging.getLogger("omnipotent.api.decision")
 
 router = APIRouter(prefix="/decision", tags=["decision-engine"])
 

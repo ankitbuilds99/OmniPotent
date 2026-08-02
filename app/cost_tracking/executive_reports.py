@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.cost_tracking.executive_reports")
+log = logging.getLogger("omnipotent.cost_tracking.executive_reports")
 
 
 class ReportPeriod(str, Enum):

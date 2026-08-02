@@ -32,7 +32,7 @@ from app.graph.sandbox import run_counterfactual
 from app.graph.state import AgentState
 from app.llm import cached_system, get_llm
 
-log = logging.getLogger("devcopilot.agent")
+log = logging.getLogger("omnipotent.agent")
 
 
 def _log_usage(node: str, resp) -> int:

@@ -37,7 +37,7 @@ from app.digital_twin.chaos_engine import (
     SafetyLevel,
 )
 
-log = logging.getLogger("devcopilot.digital_twin.simulator")
+log = logging.getLogger("omnipotent.digital_twin.simulator")
 
 
 class SimulationType(str, Enum):

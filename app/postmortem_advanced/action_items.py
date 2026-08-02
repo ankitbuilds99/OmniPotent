@@ -19,7 +19,7 @@ from app.postmortem_advanced.models import (
     CodeSnippet,
 )
 
-log = logging.getLogger("devcopilot.postmortem_advanced.action_items")
+log = logging.getLogger("omnipotent.postmortem_advanced.action_items")
 
 
 @dataclass

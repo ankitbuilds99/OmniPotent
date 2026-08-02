@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger("devcopilot.notifications.push")
+log = logging.getLogger("omnipotent.notifications.push")
 
 
 @dataclass

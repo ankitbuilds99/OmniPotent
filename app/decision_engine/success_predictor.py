@@ -23,7 +23,7 @@ from typing import Any
 import hashlib
 import json
 
-log = logging.getLogger("devcopilot.decision_engine.success_predictor")
+log = logging.getLogger("omnipotent.decision_engine.success_predictor")
 
 
 class ActionType(str, Enum):

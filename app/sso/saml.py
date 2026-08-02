@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any
 from urllib.parse import urlencode
 
-log = logging.getLogger("devcopilot.sso.saml")
+log = logging.getLogger("omnipotent.sso.saml")
 
 
 class SAMLProvider(Enum):

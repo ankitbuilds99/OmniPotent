@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-log = logging.getLogger("devcopilot.growth.usage")
+log = logging.getLogger("omnipotent.growth.usage")
 
 
 class UsageLimitType(str, Enum):

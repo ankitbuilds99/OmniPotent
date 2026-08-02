@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Protocol
 
-log = logging.getLogger("devcopilot.onboarding.flow")
+log = logging.getLogger("omnipotent.onboarding.flow")
 
 
 class ActivationMilestone(str, Enum):
