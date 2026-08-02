@@ -230,7 +230,7 @@ class EvidenceCollector:
         for keyword in keywords[:3]:
             try:
                 query = f'{{app="{service_id}"}} |= "{keyword}"'
-                params = {
+                params: dict[str, str | int] = {
                     "query": query,
                     "start": int(start_time.timestamp() * 1e9),
                     "end": int(end_time.timestamp() * 1e9),

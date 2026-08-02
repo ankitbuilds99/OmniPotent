@@ -100,7 +100,7 @@ class LogsHandler:
         client = await self._get_client()
 
         query = f'{{app="{service}"}}'
-        params = {
+        params: dict[str, str | int] = {
             "query": query,
             "start": int(start_time.timestamp() * 1e9),
             "end": int(end_time.timestamp() * 1e9),
@@ -610,7 +610,7 @@ Format as JSON:
         correlation_data: dict[str, Any],
     ) -> dict[str, Any]:
         """Generate hypotheses using heuristics when LLM is unavailable."""
-        hypotheses = []
+        hypotheses: list[dict[str, Any]] = []
 
         correlations = correlation_data.get("correlations", [])
 

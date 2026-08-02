@@ -643,9 +643,10 @@ class DAGExecutor:
                 task_execution.state = ExecutionState.COMPLETED
                 task_execution.output = output
                 task_execution.completed_at = datetime.now(timezone.utc)
-                task_execution.duration_ms = int(
-                    (task_execution.completed_at - task_execution.started_at).total_seconds() * 1000
-                )
+                if task_execution.started_at:
+                    task_execution.duration_ms = int(
+                        (task_execution.completed_at - task_execution.started_at).total_seconds() * 1000
+                    )
 
                 if task.branches and isinstance(output, dict):
                     branch_key = output.get("_branch")

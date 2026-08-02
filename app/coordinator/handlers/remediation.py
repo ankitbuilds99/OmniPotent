@@ -520,8 +520,8 @@ class VerificationHandler:
         inputs: dict[str, Any],
     ) -> dict[str, Any]:
         """Verify that remediation was successful."""
-        service = inputs.get("service")
-        deployment = inputs.get("deployment", service)
+        service: str = inputs.get("service", "")
+        deployment: str = inputs.get("deployment") or service
         checks = inputs.get("checks", ["health", "errors", "latency"])
         wait_seconds = inputs.get("wait_seconds", 60)
 
