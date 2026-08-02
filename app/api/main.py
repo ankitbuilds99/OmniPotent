@@ -751,6 +751,14 @@ include_graphql_router(knowledge_graph_router)  # Add GraphQL if strawberry is i
 from app.planning.api_router import router as planning_router  # noqa: E402
 app.include_router(planning_router, prefix="/api")
 
+# Include coordinator router for DAG-based task execution.
+from app.coordinator.api_router import router as coordinator_router  # noqa: E402
+app.include_router(coordinator_router, prefix="/api")
+
+# Include verification agent router for claim verification and safety checks.
+from app.verification.api_router import router as verification_router  # noqa: E402
+app.include_router(verification_router, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")
