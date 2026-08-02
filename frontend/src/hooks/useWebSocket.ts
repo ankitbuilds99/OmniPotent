@@ -1,5 +1,5 @@
 /**
- * WebSocket hook for real-time communication with DevOps Copilot.
+ * WebSocket hook for real-time communication with OmniPotent.
  *
  * Provides an alternative to SSE with:
  * - Bidirectional communication
@@ -66,7 +66,7 @@ export interface UseWebSocketReturn {
 }
 
 /**
- * Hook for WebSocket communication with the DevOps Copilot backend.
+ * Hook for WebSocket communication with the OmniPotent backend.
  *
  * Usage:
  * ```tsx

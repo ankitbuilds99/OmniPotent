@@ -1,4 +1,4 @@
-// Thin, typed client for the DevOps Copilot backend.
+// Thin, typed client for the OmniPotent backend.
 
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 

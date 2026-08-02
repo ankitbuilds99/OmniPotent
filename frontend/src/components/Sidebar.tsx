@@ -75,7 +75,7 @@ export function Sidebar() {
 
       <a
         className="side-help"
-        href="https://github.com/ankit25bcs10610/DevOps-Copilot#readme"
+        href="https://github.com/ankit25bcs10610/OmniPotent#readme"
         target="_blank"
         rel="noopener noreferrer"
       >

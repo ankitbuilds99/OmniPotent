@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { githubConnect, githubDisconnect } from "../api";
 import { refreshConfig, useConfig } from "../hooks/useConfig";
 
-const STORAGE_KEY = "devops-copilot-github";
+const STORAGE_KEY = "omnipotent-github";
 
 /** Load saved GitHub credentials from localStorage */
 function loadSavedCredentials(): { token: string; repo: string } | null {
@@ -159,7 +159,7 @@ export function GithubConnect() {
         <div className="gh__form">
           <a
             className="gh__gettoken"
-            href="https://github.com/settings/tokens/new?description=DevOps%20Copilot&scopes=repo"
+            href="https://github.com/settings/tokens/new?description=OmniPotent&scopes=repo"
             target="_blank"
             rel="noopener noreferrer"
           >

@@ -19,7 +19,7 @@ import { CursorGlow } from './CursorGlow'
 
 export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling }: { onLaunch: () => void; onDashboard?: () => void; onBilling?: () => void }) {
   const handleTryDemo = () => {
-    localStorage.setItem('demo_user', JSON.stringify({ email: 'demo@devops-copilot.com', name: 'Demo User' }))
+    localStorage.setItem('demo_user', JSON.stringify({ email: 'demo@omnipotent.com', name: 'Demo User' }))
     if (onDashboard) onDashboard()
   }
   const containerRef = useRef<HTMLDivElement>(null)

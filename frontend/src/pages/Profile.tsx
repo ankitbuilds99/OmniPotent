@@ -241,7 +241,7 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
                 Guest Mode
               </h2>
               <p style={{ color: 'var(--text-2)' }}>
-                You're using DevOps Copilot without authentication.
+                You're using OmniPotent without authentication.
                 Sign in to save your investigations and access more features.
               </p>
             </div>

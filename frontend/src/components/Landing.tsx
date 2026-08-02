@@ -165,7 +165,7 @@ export function Landing({ onLaunch }: { onLaunch: () => void }) {
           <span className="lnav__logo">
             <Icon name="tool" size={18} />
           </span>
-          <span>DevOps Copilot</span>
+          <span>OmniPotent</span>
         </div>
         <div className="lnav__links">
           <a href="#features">Platform</a>
@@ -523,7 +523,7 @@ export function Landing({ onLaunch }: { onLaunch: () => void }) {
 
       <footer className="lfoot">
         <span>
-          DevOps Copilot · built by{" "}
+          OmniPotent · built by{" "}
           <a href="https://github.com/ankit25bcs10610" target="_blank" rel="noreferrer">
             Ankit Pandey
           </a>

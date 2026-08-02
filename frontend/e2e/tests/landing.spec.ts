@@ -5,7 +5,7 @@ test.describe('Landing Page', () => {
     await page.goto('/');
 
     // Check for main elements
-    await expect(page.locator('text=DevOps Copilot')).toBeVisible();
+    await expect(page.locator('text=OmniPotent')).toBeVisible();
   });
 
   test('should have launch button', async ({ page }) => {

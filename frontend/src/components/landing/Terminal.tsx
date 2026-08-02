@@ -148,7 +148,7 @@ export function Terminal() {
               <div className="terminal-dot red" />
               <div className="terminal-dot yellow" />
               <div className="terminal-dot green" />
-              <span className="ml-4 text-white/40 text-sm font-mono flex-1">devops-copilot ~ production</span>
+              <span className="ml-4 text-white/40 text-sm font-mono flex-1">omnipotent ~ production</span>
               {isComplete && (
                 <button
                   onClick={handleRestart}

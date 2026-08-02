@@ -179,14 +179,14 @@ const FOOTER_LINKS = {
   Resources: [
     { label: 'Documentation', href: '#docs' },
     { label: 'Blog', href: '#blog' },
-    { label: 'GitHub Repo', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot', external: true },
-    { label: 'Changelog', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/commits/main', external: true }
+    { label: 'GitHub Repo', href: 'https://github.com/ankit25bcs10610/OmniPotent', external: true },
+    { label: 'Changelog', href: 'https://github.com/ankit25bcs10610/OmniPotent/commits/main', external: true }
   ],
   Connect: [
     { label: 'Contact Me', href: 'mailto:ankit25bcs10610@gmail.com' },
     { label: 'LinkedIn', href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', external: true },
     { label: 'GitHub Profile', href: 'https://github.com/ankit25bcs10610', external: true },
-    { label: 'Report Issue', href: 'https://github.com/ankit25bcs10610/DevOps-Copilot/issues', external: true }
+    { label: 'Report Issue', href: 'https://github.com/ankit25bcs10610/OmniPotent/issues', external: true }
   ]
 }
 
@@ -255,7 +255,7 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
                   <Sparkles className="w-5 h-5 text-background" />
                 </div>
                 <span className="font-display text-xl font-bold text-white">
-                  DevOps Copilot
+                  OmniPotent
                 </span>
               </div>
               <p className="text-white/60 text-sm mb-4 max-w-xs">
@@ -312,7 +312,7 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
           <div className="flex flex-col md:flex-row items-center justify-between pt-8 border-t border-glass-border gap-4">
             <div className="flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center sm:text-left">
               <p className="text-white/50 text-sm">
-                © {new Date().getFullYear()} DevOps Copilot
+                © {new Date().getFullYear()} OmniPotent
               </p>
               <span className="hidden sm:inline text-white/30">•</span>
               <p className="text-white/50 text-sm">

@@ -483,7 +483,7 @@ export function AIChat() {
                   <Sparkles className="w-5 h-5 text-white" />
                 </div>
                 <div>
-                  <div className="font-semibold text-white">DevOps Copilot</div>
+                  <div className="font-semibold text-white">OmniPotent</div>
                   <div className="text-xs text-green-400 flex items-center gap-1.5">
                     <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
                     Online

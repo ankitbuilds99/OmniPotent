@@ -71,7 +71,7 @@ function TopBar({
     <header className="nav">
       <button className="nav__brand" onClick={onHome}>
         <span className="nav__logo"><Icon name="sparkles" size={16} /></span>
-        <span className="nav__name">DevOps Copilot</span>
+        <span className="nav__name">OmniPotent</span>
       </button>
 
       <div className="nav__right">

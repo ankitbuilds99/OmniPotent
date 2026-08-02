@@ -436,7 +436,7 @@ function ConnectModal({ integration, onClose, onSave }: {
             </div>
             <h4 className="font-semibold text-lg mb-2">Connection Successful!</h4>
             <p className="text-gray-400">
-              {integration.name} is now connected to DevOps Copilot.
+              {integration.name} is now connected to OmniPotent.
               AI can now query your {integration.category} data.
             </p>
           </div>

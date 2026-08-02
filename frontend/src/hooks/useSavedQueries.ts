@@ -14,7 +14,7 @@ export interface SavedQuery {
   lastUsedAt?: string
 }
 
-const STORAGE_KEY = 'devops-copilot-saved-queries'
+const STORAGE_KEY = 'omnipotent-saved-queries'
 const MAX_QUERIES = 20
 
 function generateId(): string {

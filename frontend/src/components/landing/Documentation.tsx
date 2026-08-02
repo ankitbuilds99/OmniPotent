@@ -29,7 +29,7 @@ const DOCS_SECTIONS = [
       steps: [
         {
           title: 'Clone the repository',
-          code: 'git clone https://github.com/ankit25bcs10610/DevOps-Copilot.git\ncd DevOps-Copilot'
+          code: 'git clone https://github.com/ankit25bcs10610/OmniPotent.git\ncd OmniPotent'
         },
         {
           title: 'Install dependencies',
@@ -382,7 +382,7 @@ export function Documentation() {
 
                     {/* GitHub link */}
                     <a
-                      href="https://github.com/ankit25bcs10610/DevOps-Copilot"
+                      href="https://github.com/ankit25bcs10610/OmniPotent"
                       target="_blank"
                       rel="noreferrer"
                       className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white hover:bg-white/10 transition-all mt-4"

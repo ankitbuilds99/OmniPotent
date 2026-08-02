@@ -1,4 +1,4 @@
-/* ===== DevOps Copilot — 3D landing / command center ===== */
+/* ===== OmniPotent — 3D landing / command center ===== */
 .landing {
   /* Theme-aware background - inherits from :root/data-theme */
   --landing-bg: var(--bg, #050816);

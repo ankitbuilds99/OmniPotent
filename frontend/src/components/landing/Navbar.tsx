@@ -65,7 +65,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
               <Sparkles className="w-5 h-5 text-background" />
             </motion.div>
             <span className="font-display text-xl font-bold text-white hidden sm:block">
-              DevOps Copilot
+              OmniPotent
             </span>
           </a>
 

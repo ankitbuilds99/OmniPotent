@@ -239,7 +239,7 @@ function DemoContent({ step, isActive }: { step: typeof STEPS[0]; isActive: bool
               <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
               <div className="w-3 h-3 rounded-full bg-green-500/80" />
             </div>
-            <span className="text-white/40 text-sm">DevOps Copilot</span>
+            <span className="text-white/40 text-sm">OmniPotent</span>
           </div>
           <div className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-3 border border-white/10">
             <Sparkles className="w-5 h-5 text-primary" />
@@ -542,7 +542,7 @@ export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
             viewport={{ once: true }}
             transition={{ delay: 0.2 }}
           >
-            Watch how DevOps Copilot investigates and resolves incidents
+            Watch how OmniPotent investigates and resolves incidents
           </motion.p>
         </div>
 

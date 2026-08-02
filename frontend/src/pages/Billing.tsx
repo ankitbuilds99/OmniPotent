@@ -351,7 +351,7 @@ export function Billing({ onBack }: BillingProps) {
                   billingCycle={billingCycle}
                   isCurrent={subscription?.plan.name === plan.name}
                   onSelect={handleSelectPlan}
-                  onContact={() => window.open('mailto:sales@devcopilot.ai', '_blank')}
+                  onContact={() => window.open('mailto:sales@omnipotent.ai', '_blank')}
                   loading={actionLoading}
                   index={index}
                 />

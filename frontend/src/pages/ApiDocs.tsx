@@ -316,10 +316,10 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
         {/* Intro */}
         <div className="max-w-3xl mb-12">
           <h2 className="font-display text-3xl font-bold text-white mb-4">
-            DevOps Copilot REST API
+            OmniPotent REST API
           </h2>
           <p className="text-white/60 text-lg mb-6">
-            The complete API reference for DevOps Copilot. Use these endpoints to integrate
+            The complete API reference for OmniPotent. Use these endpoints to integrate
             AI-powered incident investigation into your workflows.
           </p>
 
@@ -336,7 +336,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
               <ExternalLink className="w-3 h-3" />
             </a>
             <a
-              href="https://github.com/ankit25bcs10610/DevOps-Copilot"
+              href="https://github.com/ankit25bcs10610/OmniPotent"
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70 text-sm transition-colors"

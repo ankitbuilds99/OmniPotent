@@ -404,7 +404,7 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
 
   const handlePlanSelect = async (plan: PricingPlan) => {
     if (plan.tier === 'enterprise') {
-      window.open('mailto:sales@devcopilot.ai?subject=Enterprise%20Inquiry', '_blank');
+      window.open('mailto:sales@omnipotent.ai?subject=Enterprise%20Inquiry', '_blank');
       return;
     }
 
@@ -537,7 +537,7 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
               Check our docs
             </a>{' '}
             or{' '}
-            <a href="mailto:support@devcopilot.ai" className="text-primary hover:underline">
+            <a href="mailto:support@omnipotent.ai" className="text-primary hover:underline">
               contact us
             </a>
           </p>

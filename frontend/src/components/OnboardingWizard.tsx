@@ -43,7 +43,7 @@ function WelcomeStep({ onTryPlayground }: { onTryPlayground: () => void }) {
         <Sparkles className="w-10 h-10 text-white" />
       </motion.div>
 
-      <h2 className="text-2xl font-bold mb-3">Welcome to DevOps Copilot</h2>
+      <h2 className="text-2xl font-bold mb-3">Welcome to OmniPotent</h2>
       <p className="text-gray-400 mb-8 max-w-md mx-auto">
         AI-powered incident investigation that helps you resolve issues 5x faster.
         Let's get you set up in just a few minutes.
@@ -119,7 +119,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
     <div>
       <h2 className="text-2xl font-bold mb-3 text-center">See AI Investigation in Action</h2>
       <p className="text-gray-400 mb-6 text-center">
-        Watch how DevOps Copilot investigates a sample incident
+        Watch how OmniPotent investigates a sample incident
       </p>
 
       <div

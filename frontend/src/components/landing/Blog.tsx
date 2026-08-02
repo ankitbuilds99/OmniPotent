@@ -14,7 +14,7 @@ import {
 const BLOG_POSTS = [
   {
     id: 1,
-    title: 'Building an AI-Powered DevOps Copilot with LangGraph',
+    title: 'Building an AI-Powered OmniPotent with LangGraph',
     excerpt: 'Learn how we built an intelligent agent that can investigate incidents, analyze logs, and even create pull requests - all powered by LLMs and a graph-based workflow engine.',
     author: 'Ankit Pandey',
     date: '2024-07-20',
@@ -24,7 +24,7 @@ const BLOG_POSTS = [
     color: '#00E7FF',
     featured: true,
     tags: ['AI', 'LangGraph', 'DevOps', 'Python'],
-    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot#readme'
+    url: 'https://github.com/ankit25bcs10610/OmniPotent#readme'
   },
   {
     id: 2,
@@ -38,7 +38,7 @@ const BLOG_POSTS = [
     color: '#00FFB3',
     featured: false,
     tags: ['Incident Response', 'Automation', 'Metrics'],
-    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot#features'
+    url: 'https://github.com/ankit25bcs10610/OmniPotent#features'
   },
   {
     id: 3,
@@ -52,7 +52,7 @@ const BLOG_POSTS = [
     color: '#FF9900',
     featured: false,
     tags: ['AI Safety', 'Best Practices', 'Security'],
-    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot#human-in-the-loop-approval'
+    url: 'https://github.com/ankit25bcs10610/OmniPotent#human-in-the-loop-approval'
   },
   {
     id: 4,
@@ -66,7 +66,7 @@ const BLOG_POSTS = [
     color: '#7C3AED',
     featured: false,
     tags: ['Integration', 'API', 'Tutorial'],
-    url: 'https://github.com/ankit25bcs10610/DevOps-Copilot/tree/main/app/mcp'
+    url: 'https://github.com/ankit25bcs10610/OmniPotent/tree/main/app/mcp'
   }
 ]
 
@@ -308,7 +308,7 @@ export function Blog() {
               <p className="text-white/50 text-sm">Get notified about new posts and features</p>
             </div>
             <a
-              href="mailto:ankit25bcs10610@gmail.com?subject=Subscribe to DevOps Copilot updates"
+              href="mailto:ankit25bcs10610@gmail.com?subject=Subscribe to OmniPotent updates"
               className="px-6 py-3 bg-primary/20 hover:bg-primary/30 text-primary font-medium rounded-xl border border-primary/30 transition-colors whitespace-nowrap"
             >
               Subscribe via Email

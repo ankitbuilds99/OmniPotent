@@ -1,5 +1,5 @@
 /**
- * Supabase client for DevOps-Copilot frontend.
+ * Supabase client for OmniPotent frontend.
  *
  * This module provides a type-safe wrapper around the Supabase client.
  * It supports both build-time env vars (VITE_SUPABASE_*) and runtime

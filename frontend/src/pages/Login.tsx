@@ -181,7 +181,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
   }
 
   const handleDemoLogin = () => {
-    localStorage.setItem('demo_user', JSON.stringify({ email: 'demo@devops-copilot.com', name: 'Demo User' }))
+    localStorage.setItem('demo_user', JSON.stringify({ email: 'demo@omnipotent.com', name: 'Demo User' }))
     onSuccess()
   }
 
@@ -256,7 +256,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
               {mode === 'forgot' && 'Reset password'}
             </h1>
             <p className="text-sm mt-2" style={{ color: 'var(--text-dim)' }}>
-              {mode === 'login' && 'Sign in to DevOps Copilot'}
+              {mode === 'login' && 'Sign in to OmniPotent'}
               {mode === 'signup' && 'Start your free trial'}
               {mode === 'forgot' && 'We\'ll send you a reset link'}
             </p>
