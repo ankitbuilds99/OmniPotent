@@ -518,6 +518,14 @@ OmniPotent/
 
 ---
 
+## Contributors
+
+<a href="https://github.com/ankit25bcs10610">
+  <img src="https://github.com/ankit25bcs10610.png" width="50" height="50" alt="ankit25bcs10610" style="border-radius: 50%;" />
+</a>
+
+---
+
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
