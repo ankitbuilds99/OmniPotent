@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, TypedDict
 
 from app.model_router.complexity_analyzer import (
     ComplexityAnalyzer,
@@ -20,6 +20,16 @@ from app.model_router.complexity_analyzer import (
 from app.model_router.cost_optimizer import CostOptimizer, CostEstimate
 
 log = logging.getLogger("devcopilot.model_router.router")
+
+
+class ModelConfig(TypedDict):
+    """Configuration for a model."""
+    tier: "ModelTier"
+    avg_latency_ms: int
+    quality_score: float
+    supports_streaming: bool
+    supports_function_calling: bool
+    max_context: int
 
 
 class ModelTier(str, Enum):
@@ -87,7 +97,7 @@ class AdaptiveModelRouter:
     """
 
     # Model configurations with capabilities
-    MODEL_CONFIGS = {
+    MODEL_CONFIGS: dict[str, ModelConfig] = {
         "claude-3-5-haiku-latest": {
             "tier": ModelTier.FAST,
             "avg_latency_ms": 500,

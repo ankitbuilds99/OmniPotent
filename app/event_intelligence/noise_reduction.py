@@ -123,15 +123,13 @@ class NoiseReductionEngine:
         self._correlation_window: list[dict[str, Any]] = []
 
         # Statistics tracking
-        self._stats = {
-            "total_evaluated": 0,
-            "noise_detected": 0,
-            "by_category": defaultdict(int),
-        }
+        self._total_evaluated: int = 0
+        self._noise_detected: int = 0
+        self._by_category: dict[str, int] = defaultdict(int)
 
     async def evaluate(self, signal: NoiseSignal) -> NoiseDecision:
         """Main entry point - evaluate if alert is noise."""
-        self._stats["total_evaluated"] += 1
+        self._total_evaluated += 1
 
         # Enrich signal with historical context
         signal = await self._enrich_signal(signal)
@@ -170,9 +168,9 @@ class NoiseReductionEngine:
         decision = self._aggregate_decisions(signal.alert_id, results)
 
         if decision.is_noise:
-            self._stats["noise_detected"] += 1
+            self._noise_detected += 1
             if decision.noise_category:
-                self._stats["by_category"][decision.noise_category.value] += 1
+                self._by_category[decision.noise_category.value] += 1
 
         return decision
 
@@ -488,13 +486,13 @@ class NoiseReductionEngine:
     def get_stats(self) -> dict[str, Any]:
         """Get noise reduction statistics."""
         return {
-            "total_evaluated": self._stats["total_evaluated"],
-            "noise_detected": self._stats["noise_detected"],
+            "total_evaluated": self._total_evaluated,
+            "noise_detected": self._noise_detected,
             "noise_rate": (
-                self._stats["noise_detected"] / self._stats["total_evaluated"]
-                if self._stats["total_evaluated"] > 0 else 0
+                self._noise_detected / self._total_evaluated
+                if self._total_evaluated > 0 else 0
             ),
-            "by_category": dict(self._stats["by_category"]),
+            "by_category": dict(self._by_category),
             "active_holds": len(self._transient_holds),
             "dedup_cache_size": len(self._dedup_cache),
             "correlation_window_size": len(self._correlation_window),
