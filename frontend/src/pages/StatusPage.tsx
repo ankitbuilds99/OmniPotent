@@ -57,18 +57,21 @@ export function StatusPage({ onBack }: StatusPageProps) {
 
   const loadStatus = async () => {
     setLoading(true)
+    const startTime = Date.now()
     try {
       // Try to fetch real status from API
       const res = await fetch('/healthz')
+      const apiLatency = Date.now() - startTime
+
       if (res.ok) {
         const health = await res.json()
-        // Map health to services
+        // Map health to services with real latency
         setServices([
           {
             name: 'API Server',
             status: health.status === 'ok' ? 'operational' : 'degraded',
-            latency: Math.floor(Math.random() * 50) + 20,
-            uptime: 99.95,
+            latency: apiLatency,
+            uptime: health.uptime_percent,
             lastChecked: new Date().toISOString()
           },
           {
@@ -78,51 +81,60 @@ export function StatusPage({ onBack }: StatusPageProps) {
           },
           {
             name: 'LLM Provider',
-            status: 'operational',
-            latency: Math.floor(Math.random() * 200) + 100,
+            status: health.llm?.configured ? 'operational' : 'maintenance',
+            latency: health.llm?.latency_ms,
             lastChecked: new Date().toISOString()
           },
           {
             name: 'Database',
-            status: 'operational',
-            uptime: 99.99,
+            status: health.database?.connected ? 'operational' : 'outage',
+            uptime: health.database?.uptime_percent,
             lastChecked: new Date().toISOString()
           },
           {
             name: 'Authentication',
-            status: 'operational',
+            status: health.auth?.configured ? 'operational' : 'maintenance',
             lastChecked: new Date().toISOString()
           }
         ])
       }
 
-      // Demo incidents (in production, fetch from API)
-      setIncidents([
-        {
-          id: '1',
-          title: 'Increased API Latency',
-          status: 'resolved',
-          severity: 'minor',
-          createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-          updatedAt: new Date(Date.now() - 86400000 * 2 + 3600000).toISOString(),
-          updates: [
-            { message: 'Issue resolved. Root cause was connection pool exhaustion.', timestamp: new Date(Date.now() - 86400000 * 2 + 3600000).toISOString() },
-            { message: 'Fix deployed. Monitoring.', timestamp: new Date(Date.now() - 86400000 * 2 + 2400000).toISOString() },
-            { message: 'Investigating increased latency on API endpoints.', timestamp: new Date(Date.now() - 86400000 * 2).toISOString() }
-          ]
+      // Fetch real incidents from API
+      try {
+        const incidentsRes = await fetch('/api/incidents?limit=5')
+        if (incidentsRes.ok) {
+          const incidentsData = await incidentsRes.json()
+          const mappedIncidents: Incident[] = incidentsData
+            .filter((inc: Record<string, unknown>) => inc.status === 'resolved' || inc.severity)
+            .slice(0, 5)
+            .map((inc: Record<string, unknown>) => ({
+              id: inc.id,
+              title: inc.title || 'Service Incident',
+              status: inc.status === 'resolved' ? 'resolved' : 'investigating',
+              severity: inc.severity === 'critical' ? 'critical' : inc.severity === 'high' ? 'major' : 'minor',
+              createdAt: inc.triggered_at || new Date().toISOString(),
+              updatedAt: inc.resolved_at || inc.acknowledged_at || inc.triggered_at || new Date().toISOString(),
+              updates: []
+            }))
+          setIncidents(mappedIncidents)
+        } else {
+          setIncidents([])
         }
-      ])
+      } catch {
+        setIncidents([])
+      }
 
       setLastUpdated(new Date())
     } catch {
-      // Fallback to demo data
+      // Show degraded status if health check fails
       setServices([
-        { name: 'API Server', status: 'operational', latency: 45, uptime: 99.95 },
-        { name: 'WebSocket', status: 'operational' },
-        { name: 'LLM Provider', status: 'operational', latency: 150 },
-        { name: 'Database', status: 'operational', uptime: 99.99 },
-        { name: 'Authentication', status: 'operational' }
+        { name: 'API Server', status: 'degraded', lastChecked: new Date().toISOString() },
+        { name: 'WebSocket', status: 'degraded', lastChecked: new Date().toISOString() },
+        { name: 'LLM Provider', status: 'degraded', lastChecked: new Date().toISOString() },
+        { name: 'Database', status: 'degraded', lastChecked: new Date().toISOString() },
+        { name: 'Authentication', status: 'degraded', lastChecked: new Date().toISOString() }
       ])
+      setIncidents([])
     } finally {
       setLoading(false)
     }

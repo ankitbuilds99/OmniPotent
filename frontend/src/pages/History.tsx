@@ -98,8 +98,7 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
     } catch (err) {
       console.error('Failed to load investigations:', err)
       setError('Failed to load investigation history')
-      // Load demo data as fallback
-      setInvestigations(getDemoInvestigations())
+      setInvestigations([])
     } finally {
       setLoading(false)
     }
@@ -531,61 +530,4 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
       </main>
     </div>
   )
-}
-
-// Demo data for when Supabase is not configured
-function getDemoInvestigations(): Investigation[] {
-  return [
-    {
-      id: '1',
-      thread_id: 'demo-1',
-      query: 'Why is the checkout API throwing 500 errors?',
-      summary: 'Root cause identified: null pointer exception in discount calculation after recent deploy.',
-      status: 'completed',
-      tokens_used: 2450,
-      latency_ms: 12500,
-      feedback_rating: 'up',
-      created_at: new Date(Date.now() - 3600000).toISOString(),
-      completed_at: new Date(Date.now() - 3500000).toISOString(),
-      report: {
-        root_cause: 'Null pointer in discount calculation',
-        confidence: 'high',
-        affected_services: ['checkout-api', 'payment-service']
-      }
-    },
-    {
-      id: '2',
-      thread_id: 'demo-2',
-      query: 'Database connection pool exhaustion on user-service',
-      summary: 'Connection leak found in user session handler. Fix deployed.',
-      status: 'completed',
-      tokens_used: 3200,
-      latency_ms: 18000,
-      feedback_rating: 'up',
-      created_at: new Date(Date.now() - 86400000).toISOString(),
-      completed_at: new Date(Date.now() - 86300000).toISOString(),
-      report: {
-        root_cause: 'Connection leak in session handler',
-        confidence: 'high',
-        resolution: 'Added connection.close() in finally block'
-      }
-    },
-    {
-      id: '3',
-      thread_id: 'demo-3',
-      query: 'High latency on search API endpoints',
-      summary: 'Missing index on products table causing full table scans.',
-      status: 'completed',
-      tokens_used: 1800,
-      latency_ms: 9500,
-      feedback_rating: null,
-      created_at: new Date(Date.now() - 172800000).toISOString(),
-      completed_at: new Date(Date.now() - 172700000).toISOString(),
-      report: {
-        root_cause: 'Missing database index',
-        confidence: 'high',
-        recommendation: 'CREATE INDEX idx_products_category ON products(category_id)'
-      }
-    }
-  ]
 }

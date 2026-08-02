@@ -2,7 +2,7 @@
  * Incidents Page - Incident management with 6-agent investigation and safety gates
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -17,8 +17,11 @@ import {
   BookOpen,
   Radio,
   RefreshCw,
-  Plus
+  Plus,
+  Loader2
 } from "lucide-react";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface AgentResult {
   agent_type: "knowledge" | "reasoning" | "action" | "learning" | "collaboration" | "ambient";
@@ -58,84 +61,6 @@ interface Incident {
   assigned_to?: string;
   investigation?: Investigation;
 }
-
-const DEMO_INCIDENTS: Incident[] = [
-  {
-    id: "inc-001",
-    title: "High error rate on checkout-service",
-    severity: "critical",
-    status: "investigating",
-    affected_services: ["checkout-service", "payment-gateway", "inventory-service"],
-    created_at: new Date(Date.now() - 900000).toISOString(),
-    updated_at: new Date(Date.now() - 60000).toISOString(),
-    assigned_to: "oncall-primary",
-    investigation: {
-      id: "inv-001",
-      status: "running",
-      confidence_score: 0.82,
-      root_cause_hypothesis: "Database connection pool exhaustion due to increased traffic",
-      agent_results: [
-        { agent_type: "knowledge", status: "completed", confidence_score: 0.85, findings_count: 3, duration_ms: 4200 },
-        { agent_type: "reasoning", status: "completed", confidence_score: 0.88, findings_count: 2, duration_ms: 5100 },
-        { agent_type: "action", status: "running", confidence_score: 0, findings_count: 0, duration_ms: 0 },
-        { agent_type: "learning", status: "completed", confidence_score: 0.79, findings_count: 4, duration_ms: 3800 },
-        { agent_type: "collaboration", status: "completed", confidence_score: 0.75, findings_count: 2, duration_ms: 2100 },
-        { agent_type: "ambient", status: "pending", confidence_score: 0, findings_count: 0, duration_ms: 0 },
-      ],
-      safety_evaluation: {
-        overall_decision: "escalated",
-        gates: {
-          confidence: { passed: true, score: 0.82, threshold: 0.8 },
-          policy: { passed: false, violations: ["blast_radius_exceeded"] },
-          sandbox: { passed: false, test_result: "pending" },
-        },
-      },
-      duration_ms: 15200,
-    },
-  },
-  {
-    id: "inc-002",
-    title: "API Gateway latency spike",
-    severity: "high",
-    status: "identified",
-    affected_services: ["api-gateway"],
-    created_at: new Date(Date.now() - 3600000).toISOString(),
-    updated_at: new Date(Date.now() - 1800000).toISOString(),
-    assigned_to: "oncall-secondary",
-    investigation: {
-      id: "inv-002",
-      status: "completed",
-      confidence_score: 0.91,
-      root_cause_hypothesis: "Memory leak in recent deployment v2.4.1",
-      agent_results: [
-        { agent_type: "knowledge", status: "completed", confidence_score: 0.90, findings_count: 2, duration_ms: 3500 },
-        { agent_type: "reasoning", status: "completed", confidence_score: 0.92, findings_count: 3, duration_ms: 4200 },
-        { agent_type: "action", status: "completed", confidence_score: 0.89, findings_count: 2, duration_ms: 3100 },
-        { agent_type: "learning", status: "completed", confidence_score: 0.88, findings_count: 5, duration_ms: 4800 },
-        { agent_type: "collaboration", status: "completed", confidence_score: 0.85, findings_count: 1, duration_ms: 1900 },
-        { agent_type: "ambient", status: "completed", confidence_score: 0.94, findings_count: 3, duration_ms: 2800 },
-      ],
-      safety_evaluation: {
-        overall_decision: "approved",
-        gates: {
-          confidence: { passed: true, score: 0.91, threshold: 0.8 },
-          policy: { passed: true, violations: [] },
-          sandbox: { passed: true, test_result: "rollback_verified" },
-        },
-      },
-      duration_ms: 20300,
-    },
-  },
-  {
-    id: "inc-003",
-    title: "Intermittent 503 errors on user-service",
-    severity: "medium",
-    status: "monitoring",
-    affected_services: ["user-service"],
-    created_at: new Date(Date.now() - 7200000).toISOString(),
-    updated_at: new Date(Date.now() - 3600000).toISOString(),
-  },
-];
 
 function SeverityBadge({ severity }: { severity: Incident["severity"] }) {
   const config = {
@@ -221,6 +146,25 @@ function ConfidenceBar({ score, threshold = 0.8 }: { score: number; threshold?: 
   );
 }
 
+function LoadingState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-16">
+      <Loader2 className="w-8 h-8 animate-spin" style={{ color: "var(--accent)" }} />
+      <p className="mt-4 text-sm" style={{ color: "var(--text-2)" }}>Loading incidents...</p>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-16">
+      <CheckCircle className="w-12 h-12" style={{ color: "var(--ok)" }} />
+      <p className="mt-4 text-lg font-medium" style={{ color: "var(--text)" }}>All Clear</p>
+      <p className="text-sm" style={{ color: "var(--text-2)" }}>No active incidents</p>
+    </div>
+  );
+}
+
 function SafetyGatesCard({ evaluation }: { evaluation: SafetyEvaluation }) {
   const decisionColors = {
     approved: { border: "var(--ok)", bg: "rgba(45, 212, 167, 0.1)" },
@@ -251,7 +195,6 @@ function SafetyGatesCard({ evaluation }: { evaluation: SafetyEvaluation }) {
       </div>
 
       <div className="space-y-3">
-        {/* Gate 1: Confidence */}
         <div
           className="flex items-center justify-between p-2 rounded"
           style={{ backgroundColor: "var(--surface)" }}
@@ -270,7 +213,6 @@ function SafetyGatesCard({ evaluation }: { evaluation: SafetyEvaluation }) {
           </span>
         </div>
 
-        {/* Gate 2: Policy */}
         <div
           className="flex items-center justify-between p-2 rounded"
           style={{ backgroundColor: "var(--surface)" }}
@@ -288,7 +230,6 @@ function SafetyGatesCard({ evaluation }: { evaluation: SafetyEvaluation }) {
           )}
         </div>
 
-        {/* Gate 3: Sandbox */}
         <div
           className="flex items-center justify-between p-2 rounded"
           style={{ backgroundColor: "var(--surface)" }}
@@ -340,43 +281,42 @@ function InvestigationCard({ investigation }: { investigation: Investigation }) 
         </span>
       </div>
 
-      {/* 6-Agent Progress */}
-      <div>
-        <div className="flex items-center justify-between text-sm mb-2">
-          <span style={{ color: "var(--text-2)" }}>6-Agent Parallel Investigation</span>
-          <span className="font-mono" style={{ color: "var(--text)" }}>{completedAgents}/{totalAgents}</span>
-        </div>
-        <div className="grid grid-cols-6 gap-1">
-          {investigation.agent_results.map((agent) => (
-            <div
-              key={agent.agent_type}
-              className="p-2 rounded text-center text-xs"
-              style={{
-                backgroundColor: agent.status === "completed" ? "rgba(45, 212, 167, 0.15)" :
-                  agent.status === "running" ? "rgba(100, 145, 255, 0.15)" :
-                  agent.status === "failed" ? "rgba(255, 107, 107, 0.15)" :
-                  "var(--bg)",
-              }}
-              title={`${agent.agent_type}: ${agent.findings_count} findings, ${agent.confidence_score * 100}% confidence`}
-            >
-              <div className="flex justify-center mb-1">
-                <AgentStatusIndicator status={agent.status} />
+      {totalAgents > 0 && (
+        <div>
+          <div className="flex items-center justify-between text-sm mb-2">
+            <span style={{ color: "var(--text-2)" }}>6-Agent Parallel Investigation</span>
+            <span className="font-mono" style={{ color: "var(--text)" }}>{completedAgents}/{totalAgents}</span>
+          </div>
+          <div className="grid grid-cols-6 gap-1">
+            {investigation.agent_results.map((agent) => (
+              <div
+                key={agent.agent_type}
+                className="p-2 rounded text-center text-xs"
+                style={{
+                  backgroundColor: agent.status === "completed" ? "rgba(45, 212, 167, 0.15)" :
+                    agent.status === "running" ? "rgba(100, 145, 255, 0.15)" :
+                    agent.status === "failed" ? "rgba(255, 107, 107, 0.15)" :
+                    "var(--bg)",
+                }}
+                title={`${agent.agent_type}: ${agent.findings_count} findings, ${agent.confidence_score * 100}% confidence`}
+              >
+                <div className="flex justify-center mb-1">
+                  <AgentStatusIndicator status={agent.status} />
+                </div>
+                <div className="truncate flex items-center justify-center gap-1" style={{ color: "var(--text)" }}>
+                  <AgentIcon type={agent.agent_type} />
+                </div>
               </div>
-              <div className="truncate flex items-center justify-center gap-1" style={{ color: "var(--text)" }}>
-                <AgentIcon type={agent.agent_type} />
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Confidence Score */}
       <div>
         <div className="text-sm mb-1" style={{ color: "var(--text-2)" }}>Overall Confidence</div>
         <ConfidenceBar score={investigation.confidence_score} />
       </div>
 
-      {/* Root Cause */}
       {investigation.root_cause_hypothesis && (
         <div className="p-3 rounded-lg" style={{ backgroundColor: "var(--bg)" }}>
           <div className="text-xs uppercase tracking-wide mb-1" style={{ color: "var(--text-2)" }}>
@@ -388,7 +328,6 @@ function InvestigationCard({ investigation }: { investigation: Investigation }) 
         </div>
       )}
 
-      {/* Safety Gates */}
       {investigation.safety_evaluation && (
         <SafetyGatesCard evaluation={investigation.safety_evaluation} />
       )}
@@ -449,7 +388,17 @@ function IncidentRow({ incident, onSelect }: { incident: Incident; onSelect: () 
   );
 }
 
-function IncidentDetail({ incident, onBack }: { incident: Incident; onBack: () => void }) {
+function IncidentDetail({
+  incident,
+  onBack,
+  onAcknowledge,
+  onResolve
+}: {
+  incident: Incident;
+  onBack: () => void;
+  onAcknowledge: () => void;
+  onResolve: () => void;
+}) {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -471,18 +420,24 @@ function IncidentDetail({ incident, onBack }: { incident: Incident; onBack: () =
           </div>
         </div>
         <div className="flex gap-2">
-          <button
-            className="px-4 py-2 rounded-lg font-medium"
-            style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
-          >
-            Acknowledge
-          </button>
-          <button
-            className="px-4 py-2 rounded-lg"
-            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
-          >
-            Escalate
-          </button>
+          {incident.status === "triggered" && (
+            <button
+              onClick={onAcknowledge}
+              className="px-4 py-2 rounded-lg font-medium"
+              style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
+            >
+              Acknowledge
+            </button>
+          )}
+          {incident.status !== "resolved" && (
+            <button
+              onClick={onResolve}
+              className="px-4 py-2 rounded-lg"
+              style={{ border: "1px solid var(--ok)", color: "var(--ok)" }}
+            >
+              Resolve
+            </button>
+          )}
         </div>
       </div>
 
@@ -492,7 +447,6 @@ function IncidentDetail({ incident, onBack }: { incident: Incident; onBack: () =
             <InvestigationCard investigation={incident.investigation} />
           )}
 
-          {/* Timeline */}
           <div
             className="rounded-xl p-4"
             style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
@@ -572,51 +526,68 @@ function IncidentDetail({ incident, onBack }: { incident: Incident; onBack: () =
 }
 
 export function Incidents({ onBack }: { onBack: () => void }) {
-  const [incidents, setIncidents] = useState<Incident[]>(DEMO_INCIDENTS);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("active");
-  const [, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
 
-  // Fetch incidents from API
-  useEffect(() => {
-    const fetchIncidents = async () => {
-      try {
-        const { listIncidents } = await import("../api");
-        const data = await listIncidents();
-        // Transform API response to local format
-        const transformed: Incident[] = data.map(inc => ({
+  const fetchIncidents = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/incidents`);
+      if (res.ok) {
+        const data = await res.json();
+        const transformed: Incident[] = data.map((inc: Record<string, unknown>) => ({
           id: inc.id,
           title: inc.title,
-          severity: inc.severity,
-          status: inc.status,
-          affected_services: [inc.service],
-          created_at: inc.triggered_at,
-          updated_at: inc.acknowledged_at || inc.triggered_at,
+          severity: inc.severity || "medium",
+          status: inc.status || "triggered",
+          affected_services: inc.service ? [inc.service] : [],
+          created_at: inc.triggered_at || new Date().toISOString(),
+          updated_at: inc.acknowledged_at || inc.triggered_at || new Date().toISOString(),
           assigned_to: inc.assignee || undefined,
           investigation: inc.has_investigation ? {
             id: `inv-${inc.id}`,
             status: "running" as const,
-            confidence_score: inc.investigation_confidence || 0,
+            confidence_score: (inc.investigation_confidence as number) || 0,
             root_cause_hypothesis: "Investigation in progress...",
             agent_results: [],
             duration_ms: 0,
           } : undefined,
         }));
-        if (transformed.length > 0) {
-          setIncidents(transformed);
-        }
-      } catch (err) {
-        console.warn("Failed to fetch incidents, using demo data:", err);
-      } finally {
-        setLoading(false);
+        setIncidents(transformed);
       }
-    };
-    fetchIncidents();
+    } catch (error) {
+      console.error("Failed to fetch incidents:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-    // Poll for updates every 10 seconds
+  useEffect(() => {
+    fetchIncidents();
     const interval = setInterval(fetchIncidents, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchIncidents]);
+
+  const handleAcknowledge = async (incidentId: string) => {
+    try {
+      await fetch(`${API_BASE}/api/incidents/${incidentId}/acknowledge`, { method: "POST" });
+      fetchIncidents();
+      setSelectedIncident(null);
+    } catch (error) {
+      console.error("Failed to acknowledge incident:", error);
+    }
+  };
+
+  const handleResolve = async (incidentId: string) => {
+    try {
+      await fetch(`${API_BASE}/api/incidents/${incidentId}/resolve`, { method: "POST" });
+      fetchIncidents();
+      setSelectedIncident(null);
+    } catch (error) {
+      console.error("Failed to resolve incident:", error);
+    }
+  };
 
   const filteredIncidents = incidents.filter(inc => {
     if (filter === "active") return inc.status !== "resolved";
@@ -643,6 +614,13 @@ export function Incidents({ onBack }: { onBack: () => void }) {
         </div>
         <div className="nav__right">
           <button
+            onClick={fetchIncidents}
+            className="p-2 rounded-lg mr-2"
+            style={{ border: "1px solid var(--border)" }}
+          >
+            <RefreshCw size={16} />
+          </button>
+          <button
             className="px-4 py-2 rounded-lg font-medium flex items-center gap-2"
             style={{ backgroundColor: "var(--bad)", color: "white" }}
           >
@@ -655,7 +633,12 @@ export function Incidents({ onBack }: { onBack: () => void }) {
       <main className="max-w-7xl mx-auto px-4 py-6">
         {selectedIncident ? (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-            <IncidentDetail incident={selectedIncident} onBack={() => setSelectedIncident(null)} />
+            <IncidentDetail
+              incident={selectedIncident}
+              onBack={() => setSelectedIncident(null)}
+              onAcknowledge={() => handleAcknowledge(selectedIncident.id)}
+              onResolve={() => handleResolve(selectedIncident.id)}
+            />
           </motion.div>
         ) : (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
@@ -681,27 +664,33 @@ export function Incidents({ onBack }: { onBack: () => void }) {
               className="rounded-xl overflow-hidden"
               style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
             >
-              <table className="w-full">
-                <thead>
-                  <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                    <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Incident</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Severity</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Status</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Assigned</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Created</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>AI</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredIncidents.map((incident) => (
-                    <IncidentRow
-                      key={incident.id}
-                      incident={incident}
-                      onSelect={() => setSelectedIncident(incident)}
-                    />
-                  ))}
-                </tbody>
-              </table>
+              {loading ? (
+                <LoadingState />
+              ) : filteredIncidents.length === 0 ? (
+                <EmptyState />
+              ) : (
+                <table className="w-full">
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Incident</th>
+                      <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Severity</th>
+                      <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Status</th>
+                      <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Assigned</th>
+                      <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>Created</th>
+                      <th className="px-4 py-3 text-left text-sm font-medium" style={{ color: "var(--text-2)" }}>AI</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredIncidents.map((incident) => (
+                      <IncidentRow
+                        key={incident.id}
+                        incident={incident}
+                        onSelect={() => setSelectedIncident(incident)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </motion.div>
         )}

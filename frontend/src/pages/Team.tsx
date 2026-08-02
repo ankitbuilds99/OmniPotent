@@ -61,23 +61,36 @@ export function Team({ onBack }: TeamProps) {
   const loadTeam = async () => {
     setLoading(true)
     try {
-      // In production, fetch from API
-      // For now, use demo data
-      setMembers([
-        {
-          id: '1',
-          email: user?.email || 'you@example.com',
-          name: 'You',
-          role: 'owner',
-          status: 'active',
-          avatarUrl: user?.user_metadata?.avatar_url as string | undefined,
-          joinedAt: new Date().toISOString(),
-          lastActive: new Date().toISOString()
+      // Fetch team members from API
+      const res = await fetch('/api/team/members')
+      if (res.ok) {
+        const data = await res.json()
+        setMembers(data.members || [])
+        setInvitations(data.invitations || [])
+      } else {
+        // If API not available, show current user only
+        if (user) {
+          setMembers([
+            {
+              id: user.id,
+              email: user.email || '',
+              name: (user.user_metadata?.full_name as string) || (user.user_metadata?.name as string) || 'You',
+              role: 'owner',
+              status: 'active',
+              avatarUrl: user.user_metadata?.avatar_url as string | undefined,
+              joinedAt: new Date().toISOString(),
+              lastActive: new Date().toISOString()
+            }
+          ])
+        } else {
+          setMembers([])
         }
-      ])
-      setInvitations([])
+        setInvitations([])
+      }
     } catch {
       setError('Failed to load team members')
+      setMembers([])
+      setInvitations([])
     } finally {
       setLoading(false)
     }

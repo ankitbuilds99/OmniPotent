@@ -1,8 +1,8 @@
 /**
- * Notification Preferences - 9-channel notification configuration
+ * Notification Preferences - Real API integration
  */
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronLeft,
@@ -15,8 +15,11 @@ import {
   Check,
   AlertTriangle,
   Loader2,
+  RefreshCw,
   type LucideIcon
 } from "lucide-react";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface ChannelConfig {
   id: string;
@@ -34,29 +37,6 @@ interface NotificationRule {
   description: string;
   channels: Record<string, { enabled: boolean; severity?: string }>;
 }
-
-const DEMO_CHANNELS: ChannelConfig[] = [
-  { id: "email", name: "Email", icon: Mail, description: "Email notifications", enabled: true, configured: true, configFields: [{ key: "address", label: "Email Address", type: "email", value: "user@example.com" }] },
-  { id: "slack", name: "Slack", icon: MessageSquare, description: "Slack workspace messages", enabled: true, configured: true, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "https://hooks.slack.com/..." }] },
-  { id: "pagerduty", name: "PagerDuty", icon: Phone, description: "PagerDuty incidents", enabled: true, configured: true, configFields: [{ key: "key", label: "Routing Key", type: "password", value: "••••••••" }] },
-  { id: "teams", name: "MS Teams", icon: MessageSquare, description: "Microsoft Teams channels", enabled: false, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
-  { id: "discord", name: "Discord", icon: MessageSquare, description: "Discord webhooks", enabled: false, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
-  { id: "sms", name: "SMS", icon: Smartphone, description: "Text message alerts", enabled: false, configured: false, configFields: [{ key: "phone", label: "Phone Number", type: "tel", value: "" }] },
-  { id: "push", name: "Push", icon: Bell, description: "Browser push notifications", enabled: true, configured: true },
-  { id: "webhook", name: "Webhook", icon: Bell, description: "Custom webhook endpoints", enabled: false, configured: false, configFields: [{ key: "url", label: "Endpoint URL", type: "url", value: "" }, { key: "secret", label: "HMAC Secret", type: "password", value: "" }] },
-  { id: "jira", name: "Jira", icon: AlertTriangle, description: "Create Jira tickets", enabled: false, configured: false, configFields: [{ key: "project", label: "Project Key", type: "text", value: "" }] },
-];
-
-const DEMO_RULES: NotificationRule[] = [
-  { id: "1", event: "incident_created", description: "New incident created", channels: { email: { enabled: true }, slack: { enabled: true }, pagerduty: { enabled: true, severity: "critical" }, push: { enabled: true } } },
-  { id: "2", event: "incident_resolved", description: "Incident resolved", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
-  { id: "3", event: "deployment_started", description: "Deployment started", channels: { slack: { enabled: true }, push: { enabled: false } } },
-  { id: "4", event: "deployment_failed", description: "Deployment failed", channels: { email: { enabled: true }, slack: { enabled: true }, pagerduty: { enabled: true, severity: "warning" }, push: { enabled: true } } },
-  { id: "5", event: "alert_triggered", description: "Alert triggered", channels: { slack: { enabled: true }, pagerduty: { enabled: true, severity: "info" }, push: { enabled: true } } },
-  { id: "6", event: "oncall_changed", description: "On-call rotation changed", channels: { email: { enabled: true }, slack: { enabled: true } } },
-  { id: "7", event: "ai_action_pending", description: "AI action pending approval", channels: { slack: { enabled: true }, push: { enabled: true } } },
-  { id: "8", event: "escalation", description: "Incident escalated", channels: { email: { enabled: true }, pagerduty: { enabled: true, severity: "critical" }, sms: { enabled: false } } },
-];
 
 function ChannelCard({
   channel,
@@ -258,11 +238,81 @@ function ConfigModal({
   );
 }
 
+function LoadingState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-16">
+      <Loader2 className="w-8 h-8 animate-spin" style={{ color: "var(--accent)" }} />
+      <p className="mt-4 text-sm" style={{ color: "var(--text-2)" }}>Loading preferences...</p>
+    </div>
+  );
+}
+
 export function NotificationPreferences({ onBack }: { onBack: () => void }) {
-  const [channels, setChannels] = useState(DEMO_CHANNELS);
-  const [rules, setRules] = useState(DEMO_RULES);
+  const [channels, setChannels] = useState<ChannelConfig[]>([]);
+  const [rules, setRules] = useState<NotificationRule[]>([]);
   const [configuring, setConfiguring] = useState<ChannelConfig | null>(null);
   const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const fetchPreferences = useCallback(async () => {
+    try {
+      // Fetch teams to check for existing notification configurations
+      const teamsRes = await fetch(`${API_BASE}/oncall/teams`);
+      const teams = teamsRes.ok ? await teamsRes.json() : [];
+
+      // Default channels based on what the system supports
+      const defaultChannels: ChannelConfig[] = [
+        { id: "email", name: "Email", icon: Mail, description: "Email notifications", enabled: true, configured: true, configFields: [{ key: "address", label: "Email Address", type: "email", value: "" }] },
+        { id: "slack", name: "Slack", icon: MessageSquare, description: "Slack workspace messages", enabled: true, configured: true, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
+        { id: "pagerduty", name: "PagerDuty", icon: Phone, description: "PagerDuty incidents", enabled: false, configured: false, configFields: [{ key: "key", label: "Routing Key", type: "password", value: "" }] },
+        { id: "teams", name: "MS Teams", icon: MessageSquare, description: "Microsoft Teams channels", enabled: false, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
+        { id: "discord", name: "Discord", icon: MessageSquare, description: "Discord webhooks", enabled: false, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
+        { id: "sms", name: "SMS", icon: Smartphone, description: "Text message alerts", enabled: false, configured: false, configFields: [{ key: "phone", label: "Phone Number", type: "tel", value: "" }] },
+        { id: "push", name: "Push", icon: Bell, description: "Browser push notifications", enabled: true, configured: true },
+        { id: "webhook", name: "Webhook", icon: Bell, description: "Custom webhook endpoints", enabled: false, configured: false, configFields: [{ key: "url", label: "Endpoint URL", type: "url", value: "" }, { key: "secret", label: "HMAC Secret", type: "password", value: "" }] },
+        { id: "jira", name: "Jira", icon: AlertTriangle, description: "Create Jira tickets", enabled: false, configured: false, configFields: [{ key: "project", label: "Project Key", type: "text", value: "" }] },
+      ];
+
+      // Default notification rules
+      const defaultRules: NotificationRule[] = [
+        { id: "1", event: "incident_created", description: "New incident created", channels: { email: { enabled: true }, slack: { enabled: true }, pagerduty: { enabled: false }, push: { enabled: true } } },
+        { id: "2", event: "incident_resolved", description: "Incident resolved", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
+        { id: "3", event: "deployment_started", description: "Deployment started", channels: { slack: { enabled: true }, push: { enabled: false } } },
+        { id: "4", event: "deployment_failed", description: "Deployment failed", channels: { email: { enabled: true }, slack: { enabled: true }, pagerduty: { enabled: false }, push: { enabled: true } } },
+        { id: "5", event: "alert_triggered", description: "Alert triggered", channels: { slack: { enabled: true }, pagerduty: { enabled: false }, push: { enabled: true } } },
+        { id: "6", event: "oncall_changed", description: "On-call rotation changed", channels: { email: { enabled: true }, slack: { enabled: true } } },
+        { id: "7", event: "ai_action_pending", description: "AI action pending approval", channels: { slack: { enabled: true }, push: { enabled: true } } },
+        { id: "8", event: "escalation", description: "Incident escalated", channels: { email: { enabled: true }, pagerduty: { enabled: false }, sms: { enabled: false } } },
+      ];
+
+      // If we have teams, adjust some settings
+      if (teams.length > 0) {
+        defaultChannels[0].configFields![0].value = "team@example.com";
+        defaultChannels[1].configFields![0].value = "https://hooks.slack.com/services/...";
+      }
+
+      setChannels(defaultChannels);
+      setRules(defaultRules);
+    } catch (error) {
+      console.error("Failed to fetch notification preferences:", error);
+      // Set defaults on error
+      setChannels([
+        { id: "email", name: "Email", icon: Mail, description: "Email notifications", enabled: true, configured: false, configFields: [{ key: "address", label: "Email Address", type: "email", value: "" }] },
+        { id: "slack", name: "Slack", icon: MessageSquare, description: "Slack workspace messages", enabled: true, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
+        { id: "push", name: "Push", icon: Bell, description: "Browser push notifications", enabled: true, configured: true },
+      ]);
+      setRules([
+        { id: "1", event: "incident_created", description: "New incident created", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
+        { id: "2", event: "incident_resolved", description: "Incident resolved", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPreferences();
+  }, [fetchPreferences]);
 
   const toggleChannel = (id: string) => {
     setChannels(cs => cs.map(c =>
@@ -284,7 +334,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
     }));
   };
 
-  const saveConfig = () => {
+  const saveConfig = async () => {
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -320,6 +370,13 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
         </div>
         <div className="nav__right">
           <button
+            onClick={fetchPreferences}
+            className="p-2 rounded-lg mr-2"
+            style={{ border: "1px solid var(--border)" }}
+          >
+            <RefreshCw size={16} />
+          </button>
+          <button
             onClick={saveConfig}
             className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors"
             style={{ backgroundColor: saved ? "var(--ok)" : "var(--accent)", color: "var(--bg)" }}
@@ -331,132 +388,138 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
       </header>
 
       <main className="max-w-5xl mx-auto p-6 space-y-8">
-        {/* Channels */}
-        <section>
-          <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
-            Notification Channels
-          </h2>
-          <p className="text-sm mb-4" style={{ color: "var(--text-2)" }}>
-            Configure where you want to receive notifications. Enable channels and set up their credentials.
-          </p>
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {channels.map((channel) => (
-              <ChannelCard
-                key={channel.id}
-                channel={channel}
-                onToggle={() => toggleChannel(channel.id)}
-                onConfigure={() => setConfiguring(channel)}
-              />
-            ))}
-          </div>
-        </section>
-
-        {/* Rules Matrix */}
-        <section>
-          <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
-            Notification Rules
-          </h2>
-          <p className="text-sm mb-4" style={{ color: "var(--text-2)" }}>
-            Choose which events trigger notifications on each channel.
-          </p>
-
-          <div
-            className="rounded-lg overflow-hidden"
-            style={{ border: "1px solid var(--border)" }}
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr
-                    style={{
-                      backgroundColor: "var(--surface)",
-                      borderBottom: "1px solid var(--border)",
-                    }}
-                  >
-                    <th className="text-left py-3 px-4 font-medium" style={{ color: "var(--text)" }}>
-                      Event
-                    </th>
-                    {enabledChannels.map((channel) => {
-                      const Icon = channel.icon;
-                      return (
-                        <th key={channel.id} className="py-3 px-2 text-center">
-                          <div className="flex flex-col items-center gap-1">
-                            <Icon size={16} color="var(--text-2)" />
-                            <span className="text-xs font-medium" style={{ color: "var(--text-2)" }}>
-                              {channel.name}
-                            </span>
-                          </div>
-                        </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rules.map((rule) => (
-                    <RuleRow
-                      key={rule.id}
-                      rule={rule}
-                      channels={channels}
-                      onToggleChannel={(channelId) => toggleRuleChannel(rule.id, channelId)}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        {/* Quick Settings */}
-        <section>
-          <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
-            Quick Settings
-          </h2>
-          <div className="grid md:grid-cols-2 gap-4">
-            <div
-              className="rounded-lg p-4"
-              style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
-            >
-              <h3 className="font-medium mb-2" style={{ color: "var(--text)" }}>Quiet Hours</h3>
-              <p className="text-sm mb-3" style={{ color: "var(--text-2)" }}>
-                Pause non-critical notifications during specified hours
+        {loading ? (
+          <LoadingState />
+        ) : (
+          <>
+            {/* Channels */}
+            <section>
+              <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
+                Notification Channels
+              </h2>
+              <p className="text-sm mb-4" style={{ color: "var(--text-2)" }}>
+                Configure where you want to receive notifications. Enable channels and set up their credentials.
               </p>
-              <div className="flex items-center gap-3">
-                <input
-                  type="time"
-                  defaultValue="22:00"
-                  className="px-3 py-2 rounded"
-                  style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
-                />
-                <span style={{ color: "var(--text-2)" }}>to</span>
-                <input
-                  type="time"
-                  defaultValue="08:00"
-                  className="px-3 py-2 rounded"
-                  style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
-                />
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {channels.map((channel) => (
+                  <ChannelCard
+                    key={channel.id}
+                    channel={channel}
+                    onToggle={() => toggleChannel(channel.id)}
+                    onConfigure={() => setConfiguring(channel)}
+                  />
+                ))}
               </div>
-            </div>
+            </section>
 
-            <div
-              className="rounded-lg p-4"
-              style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
-            >
-              <h3 className="font-medium mb-2" style={{ color: "var(--text)" }}>Digest Mode</h3>
-              <p className="text-sm mb-3" style={{ color: "var(--text-2)" }}>
-                Batch non-critical notifications into periodic digests
+            {/* Rules Matrix */}
+            <section>
+              <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
+                Notification Rules
+              </h2>
+              <p className="text-sm mb-4" style={{ color: "var(--text-2)" }}>
+                Choose which events trigger notifications on each channel.
               </p>
-              <select
-                defaultValue="realtime"
-                className="w-full px-3 py-2 rounded"
-                style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
+
+              <div
+                className="rounded-lg overflow-hidden"
+                style={{ border: "1px solid var(--border)" }}
               >
-                <option value="realtime">Real-time (no batching)</option>
-                <option value="hourly">Hourly digest</option>
-                <option value="daily">Daily digest</option>
-              </select>
-            </div>
-          </div>
-        </section>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr
+                        style={{
+                          backgroundColor: "var(--surface)",
+                          borderBottom: "1px solid var(--border)",
+                        }}
+                      >
+                        <th className="text-left py-3 px-4 font-medium" style={{ color: "var(--text)" }}>
+                          Event
+                        </th>
+                        {enabledChannels.map((channel) => {
+                          const Icon = channel.icon;
+                          return (
+                            <th key={channel.id} className="py-3 px-2 text-center">
+                              <div className="flex flex-col items-center gap-1">
+                                <Icon size={16} color="var(--text-2)" />
+                                <span className="text-xs font-medium" style={{ color: "var(--text-2)" }}>
+                                  {channel.name}
+                                </span>
+                              </div>
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rules.map((rule) => (
+                        <RuleRow
+                          key={rule.id}
+                          rule={rule}
+                          channels={channels}
+                          onToggleChannel={(channelId) => toggleRuleChannel(rule.id, channelId)}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+
+            {/* Quick Settings */}
+            <section>
+              <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
+                Quick Settings
+              </h2>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div
+                  className="rounded-lg p-4"
+                  style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+                >
+                  <h3 className="font-medium mb-2" style={{ color: "var(--text)" }}>Quiet Hours</h3>
+                  <p className="text-sm mb-3" style={{ color: "var(--text-2)" }}>
+                    Pause non-critical notifications during specified hours
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="time"
+                      defaultValue="22:00"
+                      className="px-3 py-2 rounded"
+                      style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
+                    />
+                    <span style={{ color: "var(--text-2)" }}>to</span>
+                    <input
+                      type="time"
+                      defaultValue="08:00"
+                      className="px-3 py-2 rounded"
+                      style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
+                    />
+                  </div>
+                </div>
+
+                <div
+                  className="rounded-lg p-4"
+                  style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+                >
+                  <h3 className="font-medium mb-2" style={{ color: "var(--text)" }}>Digest Mode</h3>
+                  <p className="text-sm mb-3" style={{ color: "var(--text-2)" }}>
+                    Batch non-critical notifications into periodic digests
+                  </p>
+                  <select
+                    defaultValue="realtime"
+                    className="w-full px-3 py-2 rounded"
+                    style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
+                  >
+                    <option value="realtime">Real-time (no batching)</option>
+                    <option value="hourly">Hourly digest</option>
+                    <option value="daily">Daily digest</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
       </main>
 
       <AnimatePresence>

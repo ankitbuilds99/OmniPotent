@@ -1,8 +1,8 @@
 /**
- * On-Call Management Page
+ * On-Call Management Page - Real API integration
  */
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   ChevronLeft,
@@ -11,8 +11,12 @@ import {
   Users,
   Plus,
   X,
-  ChevronRight
+  ChevronRight,
+  RefreshCw,
+  Loader2
 } from "lucide-react";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface OnCallUser {
   id: string;
@@ -54,49 +58,6 @@ interface EscalationPolicy {
   steps: EscalationStep[];
 }
 
-const DEMO_USERS: OnCallUser[] = [
-  { id: "u1", name: "Alice Chen", email: "alice@example.com", phone: "+1-555-0101", slack_id: "U001" },
-  { id: "u2", name: "Bob Smith", email: "bob@example.com", phone: "+1-555-0102", slack_id: "U002" },
-  { id: "u3", name: "Carol Davis", email: "carol@example.com", phone: "+1-555-0103", slack_id: "U003" },
-  { id: "u4", name: "David Lee", email: "david@example.com", phone: "+1-555-0104", slack_id: "U004" },
-];
-
-const DEMO_SCHEDULE: OnCallSchedule = {
-  id: "sched-1",
-  name: "Platform Team On-Call",
-  timezone: "America/Los_Angeles",
-  rotation_type: "weekly",
-  current_shifts: [
-    {
-      id: "shift-1",
-      user: DEMO_USERS[0],
-      role: "primary",
-      start_time: new Date(Date.now() - 86400000).toISOString(),
-      end_time: new Date(Date.now() + 518400000).toISOString(),
-      status: "active",
-    },
-    {
-      id: "shift-2",
-      user: DEMO_USERS[1],
-      role: "secondary",
-      start_time: new Date(Date.now() - 86400000).toISOString(),
-      end_time: new Date(Date.now() + 518400000).toISOString(),
-      status: "active",
-    },
-  ],
-  participants: DEMO_USERS,
-};
-
-const DEMO_ESCALATION: EscalationPolicy = {
-  id: "esc-1",
-  name: "Critical Incident Escalation",
-  steps: [
-    { order: 1, targets: ["primary"], delay_minutes: 0, channels: ["sms", "slack", "push"] },
-    { order: 2, targets: ["primary", "secondary"], delay_minutes: 5, channels: ["voice", "sms"] },
-    { order: 3, targets: ["escalation", "manager"], delay_minutes: 15, channels: ["voice", "sms", "email"] },
-  ],
-};
-
 function UserAvatar({ user, size = "md" }: { user: OnCallUser; size?: "sm" | "md" | "lg" }) {
   const sizes = { sm: 32, md: 40, lg: 48 };
   const fontSize = { sm: "0.75rem", md: "0.875rem", lg: "1rem" };
@@ -134,8 +95,41 @@ function RoleBadge({ role }: { role: OnCallShift["role"] }) {
   );
 }
 
+function LoadingState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-16">
+      <Loader2 className="w-8 h-8 animate-spin" style={{ color: "var(--accent)" }} />
+      <p className="mt-4 text-sm" style={{ color: "var(--text-2)" }}>Loading on-call data...</p>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-16">
+      <Users className="w-12 h-12" style={{ color: "var(--text-2)" }} />
+      <p className="mt-4 text-lg font-medium" style={{ color: "var(--text)" }}>No Schedules</p>
+      <p className="text-sm" style={{ color: "var(--text-2)" }}>Create a schedule to get started</p>
+    </div>
+  );
+}
+
 function CurrentOnCall({ schedule }: { schedule: OnCallSchedule }) {
   const activeShifts = schedule.current_shifts.filter(s => s.status === "active");
+
+  if (activeShifts.length === 0) {
+    return (
+      <div
+        className="rounded-xl p-6"
+        style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+      >
+        <h3 className="font-semibold text-lg" style={{ color: "var(--text)" }}>
+          Who's On-Call Now
+        </h3>
+        <p className="mt-4 text-sm" style={{ color: "var(--text-2)" }}>No active shifts</p>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -256,7 +250,11 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
         ))}
         {weekDays.map((date, i) => {
           const isToday = date.toDateString() === today.toDateString();
-          const onCallUser = schedule.participants[i % schedule.participants.length];
+          const onCallUser = schedule.participants[i % Math.max(1, schedule.participants.length)] || {
+            id: "unknown",
+            name: "Unassigned",
+            email: "",
+          };
 
           return (
             <div
@@ -286,11 +284,11 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
 
 function EscalationPolicyCard({ policy }: { policy: EscalationPolicy }) {
   const channelIcons: Record<string, string> = {
-    sms: "📱",
-    voice: "📞",
-    email: "📧",
-    slack: "💬",
-    push: "🔔",
+    sms: "SMS",
+    voice: "Call",
+    email: "Email",
+    slack: "Slack",
+    push: "Push",
   };
 
   return (
@@ -335,7 +333,7 @@ function EscalationPolicyCard({ policy }: { policy: EscalationPolicy }) {
                       className="px-2 py-0.5 rounded text-xs"
                       style={{ backgroundColor: "var(--bg)", color: "var(--text-2)" }}
                     >
-                      {channelIcons[ch]} {ch}
+                      {channelIcons[ch] || ch}
                     </span>
                   ))}
                 </div>
@@ -348,7 +346,11 @@ function EscalationPolicyCard({ policy }: { policy: EscalationPolicy }) {
   );
 }
 
-function OverrideModal({ onClose }: { onClose: () => void }) {
+function OverrideModal({ users, onClose, onCreate }: {
+  users: OnCallUser[];
+  onClose: () => void;
+  onCreate: (userId: string, start: string, end: string) => void;
+}) {
   const [selectedUser, setSelectedUser] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -391,7 +393,7 @@ function OverrideModal({ onClose }: { onClose: () => void }) {
               }}
             >
               <option value="">Select a person...</option>
-              {DEMO_USERS.map((user) => (
+              {users.map((user) => (
                 <option key={user.id} value={user.id}>{user.name}</option>
               ))}
             </select>
@@ -438,6 +440,11 @@ function OverrideModal({ onClose }: { onClose: () => void }) {
             Cancel
           </button>
           <button
+            onClick={() => {
+              if (selectedUser && startDate && endDate) {
+                onCreate(selectedUser, startDate, endDate);
+              }
+            }}
             className="flex-1 px-4 py-2 rounded-lg font-medium"
             style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
           >
@@ -450,7 +457,116 @@ function OverrideModal({ onClose }: { onClose: () => void }) {
 }
 
 export function OnCall({ onBack }: { onBack: () => void }) {
+  const [schedule, setSchedule] = useState<OnCallSchedule | null>(null);
+  const [escalationPolicy, setEscalationPolicy] = useState<EscalationPolicy | null>(null);
+  const [users, setUsers] = useState<OnCallUser[]>([]);
   const [showOverrideModal, setShowOverrideModal] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    try {
+      // Fetch teams
+      const teamsRes = await fetch(`${API_BASE}/oncall/teams`);
+      const teams = teamsRes.ok ? await teamsRes.json() : [];
+
+      if (teams.length > 0) {
+        const teamId = teams[0].id;
+
+        // Fetch current on-call for team
+        const oncallRes = await fetch(`${API_BASE}/oncall/teams/${teamId}/current-oncall`);
+        const currentOncall = oncallRes.ok ? await oncallRes.json() : null;
+
+        // Fetch escalation policies
+        const policiesRes = await fetch(`${API_BASE}/oncall/teams/${teamId}/escalation-policies`);
+        const policies = policiesRes.ok ? await policiesRes.json() : [];
+
+        // Transform current on-call data into schedule format
+        const scheduleData: OnCallSchedule = {
+          id: currentOncall?.schedule_id || "default",
+          name: teams[0].name || "On-Call Schedule",
+          timezone: teams[0].timezone || "UTC",
+          rotation_type: "weekly",
+          current_shifts: currentOncall?.shifts?.map((s: Record<string, unknown>) => ({
+            id: s.id || `shift-${s.user_id || 'unknown'}`,
+            user: {
+              id: s.user_id,
+              name: s.user_name || "On-Call User",
+              email: s.user_email || "",
+              phone: s.user_phone,
+              slack_id: s.slack_id,
+            },
+            role: s.role || "primary",
+            start_time: s.start_time,
+            end_time: s.end_time,
+            status: "active" as const,
+          })) || [],
+          participants: currentOncall?.participants?.map((p: Record<string, unknown>) => ({
+            id: p.user_id,
+            name: p.user_name || "Team Member",
+            email: p.user_email || "",
+          })) || [],
+        };
+
+        setSchedule(scheduleData);
+        setUsers(scheduleData.participants);
+
+        // Set escalation policy
+        if (policies.length > 0) {
+          const policyId = policies[0].id;
+          const policyDetailRes = await fetch(`${API_BASE}/oncall/escalation-policies/${policyId}`);
+          if (policyDetailRes.ok) {
+            const policyDetail = await policyDetailRes.json();
+            setEscalationPolicy({
+              id: policyDetail.id,
+              name: policyDetail.name,
+              steps: policyDetail.steps?.map((s: Record<string, unknown>, idx: number) => ({
+                order: idx + 1,
+                targets: s.targets || ["on-call"],
+                delay_minutes: s.delay_minutes || 0,
+                channels: s.notification_channels || ["slack"],
+              })) || [],
+            });
+          }
+        }
+      } else {
+        // No teams - show empty state
+        setSchedule(null);
+        setEscalationPolicy(null);
+        setUsers([]);
+      }
+    } catch (error) {
+      console.error("Failed to fetch on-call data:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 30000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const handleCreateOverride = async (userId: string, start: string, end: string) => {
+    if (!schedule) return;
+
+    try {
+      await fetch(`${API_BASE}/oncall/overrides`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schedule_id: schedule.id,
+          override_user_id: userId,
+          start_time: new Date(start).toISOString(),
+          end_time: new Date(end).toISOString(),
+        }),
+      });
+      setShowOverrideModal(false);
+      fetchData();
+    } catch (error) {
+      console.error("Failed to create override:", error);
+    }
+  };
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: "var(--bg)" }}>
@@ -471,9 +587,17 @@ export function OnCall({ onBack }: { onBack: () => void }) {
         </div>
         <div className="nav__right">
           <button
+            onClick={fetchData}
+            className="p-2 rounded-lg mr-2"
+            style={{ border: "1px solid var(--border)" }}
+          >
+            <RefreshCw size={16} />
+          </button>
+          <button
             onClick={() => setShowOverrideModal(true)}
             className="px-4 py-2 rounded-lg font-medium"
             style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+            disabled={!schedule}
           >
             Create Override
           </button>
@@ -488,47 +612,79 @@ export function OnCall({ onBack }: { onBack: () => void }) {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="grid grid-cols-1 lg:grid-cols-3 gap-6"
-        >
-          <div className="lg:col-span-2 space-y-6">
-            <CurrentOnCall schedule={DEMO_SCHEDULE} />
-            <ScheduleCalendar schedule={DEMO_SCHEDULE} />
-          </div>
-          <div className="space-y-6">
-            <EscalationPolicyCard policy={DEMO_ESCALATION} />
+        {loading ? (
+          <LoadingState />
+        ) : !schedule ? (
+          <EmptyState />
+        ) : (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="grid grid-cols-1 lg:grid-cols-3 gap-6"
+          >
+            <div className="lg:col-span-2 space-y-6">
+              <CurrentOnCall schedule={schedule} />
+              <ScheduleCalendar schedule={schedule} />
+            </div>
+            <div className="space-y-6">
+              {escalationPolicy ? (
+                <EscalationPolicyCard policy={escalationPolicy} />
+              ) : (
+                <div
+                  className="rounded-xl p-6"
+                  style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+                >
+                  <h3 className="font-semibold text-lg mb-4" style={{ color: "var(--text)" }}>
+                    Escalation Policy
+                  </h3>
+                  <p className="text-sm" style={{ color: "var(--text-2)" }}>
+                    No escalation policy configured
+                  </p>
+                </div>
+              )}
 
-            {/* Team Members */}
-            <div
-              className="rounded-xl p-6"
-              style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
-            >
-              <h3 className="font-semibold text-lg mb-4" style={{ color: "var(--text)" }}>
-                Team Members
-              </h3>
-              <div className="space-y-3">
-                {DEMO_USERS.map((user) => (
-                  <div key={user.id} className="flex items-center gap-3">
-                    <UserAvatar user={user} size="sm" />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate" style={{ color: "var(--text)" }}>
-                        {user.name}
+              {/* Team Members */}
+              <div
+                className="rounded-xl p-6"
+                style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+              >
+                <h3 className="font-semibold text-lg mb-4" style={{ color: "var(--text)" }}>
+                  Team Members
+                </h3>
+                {users.length > 0 ? (
+                  <div className="space-y-3">
+                    {users.map((user) => (
+                      <div key={user.id} className="flex items-center gap-3">
+                        <UserAvatar user={user} size="sm" />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium truncate" style={{ color: "var(--text)" }}>
+                            {user.name}
+                          </div>
+                          <div className="text-xs truncate" style={{ color: "var(--text-2)" }}>
+                            {user.email}
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-xs truncate" style={{ color: "var(--text-2)" }}>
-                        {user.email}
-                      </div>
-                    </div>
+                    ))}
                   </div>
-                ))}
+                ) : (
+                  <p className="text-sm" style={{ color: "var(--text-2)" }}>
+                    No team members found
+                  </p>
+                )}
               </div>
             </div>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
       </main>
 
-      {showOverrideModal && <OverrideModal onClose={() => setShowOverrideModal(false)} />}
+      {showOverrideModal && (
+        <OverrideModal
+          users={users}
+          onClose={() => setShowOverrideModal(false)}
+          onCreate={handleCreateOverride}
+        />
+      )}
     </div>
   );
 }

@@ -1,5 +1,11 @@
-import { useState, useCallback } from "react";
+/**
+ * Runbook Builder - Real API integration
+ */
+
+import { useState, useCallback, useEffect } from "react";
 import { Icon } from "../components/Icon";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface RunbookStep {
   id: string;
@@ -28,73 +34,6 @@ interface Runbook {
   status: "draft" | "active" | "disabled";
   execution_count: number;
 }
-
-const DEMO_RUNBOOK: Runbook = {
-  id: "rb-001",
-  name: "Restart Service on High Error Rate",
-  description: "Automatically restart a service when error rate exceeds threshold",
-  trigger: "alert",
-  steps: [
-    {
-      id: "step-1",
-      type: "notification",
-      name: "Notify Team",
-      config: {
-        channels: ["slack"],
-        message: "High error rate detected on {{service}}. Initiating auto-remediation.",
-      },
-      next: "step-2",
-    },
-    {
-      id: "step-2",
-      type: "condition",
-      name: "Check Error Rate",
-      config: {
-        condition: "error_rate > 5",
-        service: "{{service}}",
-      },
-      onSuccess: "step-3",
-      onFailure: "step-5",
-    },
-    {
-      id: "step-3",
-      type: "approval",
-      name: "Request Approval",
-      config: {
-        approvers: ["oncall-primary"],
-        timeout_minutes: 5,
-        auto_approve_if_no_response: false,
-      },
-      onSuccess: "step-4",
-      onFailure: "step-5",
-    },
-    {
-      id: "step-4",
-      type: "command",
-      name: "Restart Deployment",
-      config: {
-        command: "kubectl rollout restart deployment/{{service}}",
-        timeout_seconds: 120,
-      },
-      next: "step-5",
-    },
-    {
-      id: "step-5",
-      type: "notification",
-      name: "Notify Result",
-      config: {
-        channels: ["slack"],
-        message: "Remediation complete for {{service}}.",
-      },
-    },
-  ],
-  variables: [
-    { name: "service", type: "string", required: true },
-    { name: "namespace", type: "string", default: "production", required: false },
-  ],
-  status: "active",
-  execution_count: 47,
-};
 
 const STEP_TEMPLATES = [
   { type: "command", name: "Run Command", icon: "terminal", description: "Execute shell command or kubectl" },
@@ -490,13 +429,129 @@ function AddStepPanel({ onAdd }: { onAdd: (type: string) => void }) {
   );
 }
 
-export function RunbookBuilder({ onBack }: { onBack: () => void }) {
-  const [runbook, setRunbook] = useState<Runbook>(DEMO_RUNBOOK);
-  const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
+function LoadingState() {
+  return (
+    <div className="flex items-center justify-center py-16">
+      <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full" />
+    </div>
+  );
+}
 
-  const selectedStep = selectedStepIndex !== null ? runbook.steps[selectedStepIndex] : null;
+function EmptyRunbook(): Runbook {
+  return {
+    id: `rb-${Date.now()}`,
+    name: "New Runbook",
+    description: "",
+    trigger: "manual",
+    steps: [],
+    variables: [],
+    status: "draft",
+    execution_count: 0,
+  };
+}
+
+export function RunbookBuilder({ onBack }: { onBack: () => void }) {
+  const [runbook, setRunbook] = useState<Runbook | null>(null);
+  const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const fetchRunbook = useCallback(async () => {
+    try {
+      // Fetch existing runbooks
+      const res = await fetch(`${API_BASE}/api/runbooks`);
+      if (res.ok) {
+        const runbooks = await res.json();
+        if (runbooks.length > 0) {
+          // Load the first runbook for editing
+          const detailRes = await fetch(`${API_BASE}/api/runbooks/${runbooks[0].id}`);
+          if (detailRes.ok) {
+            const detail = await detailRes.json();
+            const loadedRunbook: Runbook = {
+              id: detail.id,
+              name: detail.name,
+              description: detail.description || "",
+              trigger: detail.trigger || "manual",
+              steps: detail.steps?.map((s: Record<string, unknown>, i: number) => ({
+                id: s.id || `step-${i}`,
+                type: s.step_type || "command",
+                name: s.name || `Step ${i + 1}`,
+                config: s.params || {},
+                next: s.next,
+                onSuccess: s.on_success,
+                onFailure: s.on_failure,
+              })) || [],
+              variables: [],
+              status: detail.enabled ? "active" : "draft",
+              execution_count: 0,
+            };
+            setRunbook(loadedRunbook);
+          } else {
+            setRunbook(EmptyRunbook());
+          }
+        } else {
+          setRunbook(EmptyRunbook());
+        }
+      } else {
+        setRunbook(EmptyRunbook());
+      }
+    } catch (error) {
+      console.error("Failed to fetch runbook:", error);
+      setRunbook(EmptyRunbook());
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRunbook();
+  }, [fetchRunbook]);
+
+  const saveRunbook = async () => {
+    if (!runbook) return;
+
+    setSaving(true);
+    try {
+      const payload = {
+        name: runbook.name,
+        description: runbook.description,
+        trigger: runbook.trigger,
+        execution_mode: "requires_approval",
+        steps: runbook.steps.map(s => ({
+          id: s.id,
+          name: s.name,
+          step_type: s.type,
+          action: s.config.command || "",
+          params: s.config,
+          timeout_seconds: Number(s.config.timeout_seconds) || 300,
+        })),
+      };
+
+      const isNew = runbook.id.startsWith("rb-") && !runbook.id.includes("-");
+      const url = isNew ? `${API_BASE}/api/runbooks` : `${API_BASE}/api/runbooks/${runbook.id}`;
+      const method = isNew ? "POST" : "PUT";
+
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const saved = await res.json();
+        setRunbook({ ...runbook, id: saved.id });
+      }
+    } catch (error) {
+      console.error("Failed to save runbook:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectedStep = runbook && selectedStepIndex !== null ? runbook.steps[selectedStepIndex] : null;
 
   const addStep = useCallback((type: string) => {
+    if (!runbook) return;
     const newStep: RunbookStep = {
       id: `step-${Date.now()}`,
       type: type as RunbookStep["type"],
@@ -508,13 +563,14 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
   }, [runbook]);
 
   const updateStep = useCallback((step: RunbookStep) => {
-    if (selectedStepIndex === null) return;
+    if (!runbook || selectedStepIndex === null) return;
     const newSteps = [...runbook.steps];
     newSteps[selectedStepIndex] = step;
     setRunbook({ ...runbook, steps: newSteps });
   }, [runbook, selectedStepIndex]);
 
   const deleteStep = useCallback((index: number) => {
+    if (!runbook) return;
     setRunbook({
       ...runbook,
       steps: runbook.steps.filter((_, i) => i !== index),
@@ -523,6 +579,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
   }, [runbook]);
 
   const moveStep = useCallback((index: number, direction: -1 | 1) => {
+    if (!runbook) return;
     const newIndex = index + direction;
     if (newIndex < 0 || newIndex >= runbook.steps.length) return;
 
@@ -531,6 +588,27 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
     setRunbook({ ...runbook, steps: newSteps });
     setSelectedStepIndex(newIndex);
   }, [runbook]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+        <LoadingState />
+      </div>
+    );
+  }
+
+  if (!runbook) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+        <div className="text-center text-gray-500">
+          <p>Failed to load runbook</p>
+          <button onClick={fetchRunbook} className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg">
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -564,8 +642,12 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
               <button className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700">
                 Test Run
               </button>
-              <button className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700">
-                Save Draft
+              <button
+                onClick={saveRunbook}
+                disabled={saving}
+                className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700"
+              >
+                {saving ? "Saving..." : "Save Draft"}
               </button>
               <button className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
                 Publish
@@ -599,20 +681,26 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
             </div>
 
             <div className="space-y-2">
-              {runbook.steps.map((step, i) => (
-                <StepCard
-                  key={step.id}
-                  step={step}
-                  index={i}
-                  selected={selectedStepIndex === i}
-                  onSelect={() => setSelectedStepIndex(i)}
-                  onDelete={() => deleteStep(i)}
-                  onMoveUp={() => moveStep(i, -1)}
-                  onMoveDown={() => moveStep(i, 1)}
-                  isFirst={i === 0}
-                  isLast={i === runbook.steps.length - 1}
-                />
-              ))}
+              {runbook.steps.length === 0 ? (
+                <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500">
+                  No steps yet. Add a step to get started.
+                </div>
+              ) : (
+                runbook.steps.map((step, i) => (
+                  <StepCard
+                    key={step.id}
+                    step={step}
+                    index={i}
+                    selected={selectedStepIndex === i}
+                    onSelect={() => setSelectedStepIndex(i)}
+                    onDelete={() => deleteStep(i)}
+                    onMoveUp={() => moveStep(i, -1)}
+                    onMoveDown={() => moveStep(i, 1)}
+                    isFirst={i === 0}
+                    isLast={i === runbook.steps.length - 1}
+                  />
+                ))
+              )}
             </div>
 
             <AddStepPanel onAdd={addStep} />

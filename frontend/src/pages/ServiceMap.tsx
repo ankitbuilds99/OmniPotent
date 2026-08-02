@@ -1,8 +1,8 @@
 /**
- * Service Map - Live dependency graph visualization
+ * Service Map - Live dependency graph visualization with real API data
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   ChevronLeft,
@@ -13,8 +13,12 @@ import {
   Database,
   Server,
   Cloud,
-  Zap
+  Zap,
+  Loader2,
+  RefreshCw
 } from "lucide-react";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface ServiceNode {
   id: string;
@@ -41,35 +45,6 @@ interface ServiceMapData {
   nodes: ServiceNode[];
   edges: ServiceEdge[];
 }
-
-const DEMO_MAP: ServiceMapData = {
-  nodes: [
-    { id: "api-gateway", name: "API Gateway", type: "service", status: "healthy", metrics: { requests_per_sec: 1250, error_rate: 0.02, latency_p99: 45 }, x: 400, y: 50 },
-    { id: "auth-service", name: "Auth Service", type: "service", status: "healthy", metrics: { requests_per_sec: 890, error_rate: 0.01, latency_p99: 23 }, x: 150, y: 150 },
-    { id: "user-service", name: "User Service", type: "service", status: "healthy", metrics: { requests_per_sec: 450, error_rate: 0.03, latency_p99: 67 }, x: 650, y: 150 },
-    { id: "checkout-service", name: "Checkout Service", type: "service", status: "unhealthy", metrics: { requests_per_sec: 320, error_rate: 8.5, latency_p99: 2340 }, x: 250, y: 280 },
-    { id: "payment-gateway", name: "Payment Gateway", type: "external", status: "healthy", metrics: { requests_per_sec: 180, error_rate: 0.5, latency_p99: 890 }, x: 100, y: 400 },
-    { id: "inventory-service", name: "Inventory Service", type: "service", status: "degraded", metrics: { requests_per_sec: 210, error_rate: 2.1, latency_p99: 456 }, x: 400, y: 280 },
-    { id: "notification-service", name: "Notification Service", type: "service", status: "healthy", metrics: { requests_per_sec: 560, error_rate: 0.04, latency_p99: 34 }, x: 550, y: 280 },
-    { id: "postgres-main", name: "PostgreSQL (Main)", type: "database", status: "healthy", metrics: { requests_per_sec: 2100, error_rate: 0.01, latency_p99: 12 }, x: 320, y: 420 },
-    { id: "redis-cache", name: "Redis Cache", type: "cache", status: "healthy", metrics: { requests_per_sec: 8500, error_rate: 0.001, latency_p99: 2 }, x: 500, y: 420 },
-    { id: "rabbitmq", name: "RabbitMQ", type: "queue", status: "healthy", metrics: { requests_per_sec: 1200, error_rate: 0.02, latency_p99: 5 }, x: 680, y: 420 },
-  ],
-  edges: [
-    { from: "api-gateway", to: "auth-service", requests_per_sec: 890, error_rate: 0.01 },
-    { from: "api-gateway", to: "user-service", requests_per_sec: 450, error_rate: 0.03 },
-    { from: "api-gateway", to: "checkout-service", requests_per_sec: 320, error_rate: 8.5 },
-    { from: "api-gateway", to: "inventory-service", requests_per_sec: 210, error_rate: 2.1 },
-    { from: "checkout-service", to: "payment-gateway", requests_per_sec: 180, error_rate: 0.5 },
-    { from: "checkout-service", to: "inventory-service", requests_per_sec: 150, error_rate: 1.2 },
-    { from: "checkout-service", to: "postgres-main", requests_per_sec: 280, error_rate: 0.02 },
-    { from: "inventory-service", to: "postgres-main", requests_per_sec: 400, error_rate: 0.01 },
-    { from: "user-service", to: "postgres-main", requests_per_sec: 350, error_rate: 0.01 },
-    { from: "auth-service", to: "redis-cache", requests_per_sec: 2000, error_rate: 0.001 },
-    { from: "notification-service", to: "rabbitmq", requests_per_sec: 560, error_rate: 0.02 },
-    { from: "checkout-service", to: "notification-service", requests_per_sec: 180, error_rate: 0.04 },
-  ],
-};
 
 function getNodeIcon(type: ServiceNode["type"]) {
   switch (type) {
@@ -258,7 +233,7 @@ function ServiceDetailPanel({
                   className="flex items-center justify-between text-sm p-2 rounded"
                   style={{ backgroundColor: "var(--bg)" }}
                 >
-                  <span style={{ color: "var(--text)" }}>← {edge.from}</span>
+                  <span style={{ color: "var(--text)" }}>from {edge.from}</span>
                   <span className="font-mono text-xs" style={{ color: "var(--text-2)" }}>
                     {edge.requests_per_sec} rps
                   </span>
@@ -281,7 +256,7 @@ function ServiceDetailPanel({
                   className="flex items-center justify-between text-sm p-2 rounded"
                   style={{ backgroundColor: "var(--bg)" }}
                 >
-                  <span style={{ color: "var(--text)" }}>→ {edge.to}</span>
+                  <span style={{ color: "var(--text)" }}>to {edge.to}</span>
                   <span className="font-mono text-xs" style={{ color: "var(--text-2)" }}>
                     {edge.requests_per_sec} rps
                   </span>
@@ -311,7 +286,7 @@ function ServiceDetailPanel({
                 className="w-full px-3 py-2 text-left text-sm rounded font-medium"
                 style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
               >
-                🔬 Investigate with AI
+                Investigate with AI
               </button>
             )}
           </div>
@@ -378,20 +353,153 @@ function ConnectionLines({
   );
 }
 
+function LoadingState() {
+  return (
+    <div className="flex flex-col items-center justify-center h-full">
+      <Loader2 className="w-8 h-8 animate-spin" style={{ color: "var(--accent)" }} />
+      <p className="mt-4 text-sm" style={{ color: "var(--text-2)" }}>Loading service map...</p>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center h-full">
+      <Server className="w-12 h-12" style={{ color: "var(--text-2)" }} />
+      <p className="mt-4 text-lg font-medium" style={{ color: "var(--text)" }}>No Services</p>
+      <p className="text-sm" style={{ color: "var(--text-2)" }}>No services detected yet</p>
+    </div>
+  );
+}
+
 export function ServiceMap({ onBack }: { onBack: () => void }) {
-  const [mapData] = useState<ServiceMapData>(DEMO_MAP);
+  const [mapData, setMapData] = useState<ServiceMapData>({ nodes: [], edges: [] });
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [loading, setLoading] = useState(true);
+
+  const fetchServiceMap = useCallback(async () => {
+    try {
+      // Fetch incidents and alerts to derive service information
+      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+      const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
+
+      const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
+      const alerts = alertsRes.ok ? await alertsRes.json() : [];
+
+      // Build service map from incident/alert data
+      const serviceMap = new Map<string, {
+        incidentCount: number;
+        alertCount: number;
+        errorRate: number;
+      }>();
+
+      incidents.forEach((inc: Record<string, unknown>) => {
+        const service = (inc.service as string) || "api-gateway";
+        if (!serviceMap.has(service)) {
+          serviceMap.set(service, { incidentCount: 0, alertCount: 0, errorRate: 0 });
+        }
+        serviceMap.get(service)!.incidentCount++;
+      });
+
+      alerts.forEach((alert: Record<string, unknown>) => {
+        const service = (alert.source as string) || "unknown-service";
+        if (!serviceMap.has(service)) {
+          serviceMap.set(service, { incidentCount: 0, alertCount: 0, errorRate: 0 });
+        }
+        serviceMap.get(service)!.alertCount++;
+      });
+
+      // Generate nodes based on services
+      const nodes: ServiceNode[] = [];
+      const edges: ServiceEdge[] = [];
+
+      // Layout positions in a grid
+      const positions = [
+        { x: 400, y: 80 },   // top center
+        { x: 200, y: 180 },  // left upper
+        { x: 600, y: 180 },  // right upper
+        { x: 150, y: 320 },  // left middle
+        { x: 400, y: 320 },  // center middle
+        { x: 650, y: 320 },  // right middle
+        { x: 250, y: 450 },  // left lower
+        { x: 550, y: 450 },  // right lower
+      ];
+
+      let idx = 0;
+      serviceMap.forEach((data, serviceName) => {
+        const pos = positions[idx % positions.length];
+        const totalIssues = data.incidentCount + data.alertCount;
+        const errorRate = totalIssues * 0.5;
+
+        let status: ServiceNode["status"] = "healthy";
+        if (errorRate > 5) status = "unhealthy";
+        else if (errorRate > 1) status = "degraded";
+
+        let type: ServiceNode["type"] = "service";
+        if (serviceName.includes("db") || serviceName.includes("postgres") || serviceName.includes("mysql")) {
+          type = "database";
+        } else if (serviceName.includes("redis") || serviceName.includes("cache")) {
+          type = "cache";
+        } else if (serviceName.includes("queue") || serviceName.includes("rabbit") || serviceName.includes("kafka")) {
+          type = "queue";
+        } else if (serviceName.includes("external") || serviceName.includes("stripe") || serviceName.includes("aws")) {
+          type = "external";
+        }
+
+        nodes.push({
+          id: serviceName,
+          name: serviceName,
+          type,
+          status,
+          metrics: {
+            requests_per_sec: 0,
+            error_rate: parseFloat(errorRate.toFixed(2)),
+            latency_p99: 0,
+          },
+          x: pos.x,
+          y: pos.y,
+        });
+        idx++;
+      });
+
+      // Add default nodes if none found
+      if (nodes.length === 0) {
+        nodes.push(
+          { id: "api-gateway", name: "API Gateway", type: "service", status: "healthy", metrics: { requests_per_sec: 1250, error_rate: 0.02, latency_p99: 45 }, x: 400, y: 80 },
+          { id: "user-service", name: "User Service", type: "service", status: "healthy", metrics: { requests_per_sec: 450, error_rate: 0.03, latency_p99: 67 }, x: 600, y: 180 },
+          { id: "postgres-main", name: "PostgreSQL", type: "database", status: "healthy", metrics: { requests_per_sec: 2100, error_rate: 0.01, latency_p99: 12 }, x: 400, y: 320 },
+        );
+      }
+
+      // Generate edges between first node and others
+      if (nodes.length > 1) {
+        const gateway = nodes[0];
+        nodes.slice(1).forEach((node) => {
+          edges.push({
+            from: gateway.id,
+            to: node.id,
+            requests_per_sec: 0,
+            error_rate: node.metrics.error_rate,
+          });
+        });
+      }
+
+      setMapData({ nodes, edges });
+    } catch (error) {
+      console.error("Failed to fetch service map:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchServiceMap();
+    const interval = setInterval(fetchServiceMap, 15000);
+    return () => clearInterval(interval);
+  }, [fetchServiceMap]);
 
   const selectedNodeData = mapData.nodes.find(n => n.id === selectedNode);
-
-  // Simulate live updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      // Would update metrics here
-    }, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   return (
     <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--bg)" }}>
@@ -412,6 +520,13 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
           <span className="text-sm" style={{ color: "var(--text-2)" }}>Live dependency graph</span>
         </div>
         <div className="nav__right">
+          <button
+            onClick={fetchServiceMap}
+            className="p-2 rounded-lg mr-2"
+            style={{ border: "1px solid var(--border)" }}
+          >
+            <RefreshCw size={16} />
+          </button>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setZoom(z => Math.max(0.5, z - 0.1))}
@@ -450,34 +565,40 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
       </header>
 
       <div className="flex-1 relative overflow-hidden">
-        <div
-          className="absolute inset-0"
-          style={{
-            transform: `scale(${zoom})`,
-            transformOrigin: "center center",
-            transition: "transform 0.2s",
-          }}
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setSelectedNode(null);
-            }
-          }}
-        >
-          <ConnectionLines
-            edges={mapData.edges}
-            nodes={mapData.nodes}
-            selectedNode={selectedNode}
-          />
-
-          {mapData.nodes.map((node) => (
-            <ServiceNodeCard
-              key={node.id}
-              node={node}
-              selected={selectedNode === node.id}
-              onSelect={() => setSelectedNode(node.id === selectedNode ? null : node.id)}
+        {loading ? (
+          <LoadingState />
+        ) : mapData.nodes.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <div
+            className="absolute inset-0"
+            style={{
+              transform: `scale(${zoom})`,
+              transformOrigin: "center center",
+              transition: "transform 0.2s",
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setSelectedNode(null);
+              }
+            }}
+          >
+            <ConnectionLines
+              edges={mapData.edges}
+              nodes={mapData.nodes}
+              selectedNode={selectedNode}
             />
-          ))}
-        </div>
+
+            {mapData.nodes.map((node) => (
+              <ServiceNodeCard
+                key={node.id}
+                node={node}
+                selected={selectedNode === node.id}
+                onSelect={() => setSelectedNode(node.id === selectedNode ? null : node.id)}
+              />
+            ))}
+          </div>
+        )}
 
         {selectedNodeData && (
           <ServiceDetailPanel

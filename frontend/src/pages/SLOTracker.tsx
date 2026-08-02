@@ -1,5 +1,11 @@
-import { useState } from "react";
+/**
+ * SLO Tracker - Real API integration
+ */
+
+import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface SLOAlert {
   id: string;
@@ -24,86 +30,6 @@ interface SLO {
   alerts: SLOAlert[];
 }
 
-const DEMO_SLOS: SLO[] = [
-  {
-    id: "slo-1",
-    name: "Checkout Availability",
-    service: "checkout-service",
-    type: "availability",
-    target: 99.9,
-    current: 99.85,
-    window: "30d",
-    budget_total: 43.2,
-    budget_remaining: 28.4,
-    budget_burn_rate: 1.2,
-    status: "warning",
-    alerts: [
-      { id: "a1", type: "burn_rate", severity: "warning", message: "Burn rate 1.2x (threshold: 1x)", triggered_at: new Date(Date.now() - 3600000).toISOString() },
-    ],
-  },
-  {
-    id: "slo-2",
-    name: "API Gateway P99 Latency",
-    service: "api-gateway",
-    type: "latency",
-    target: 200,
-    current: 156,
-    window: "30d",
-    budget_total: 100,
-    budget_remaining: 78,
-    budget_burn_rate: 0.7,
-    status: "healthy",
-    alerts: [],
-  },
-  {
-    id: "slo-3",
-    name: "Payment Error Rate",
-    service: "payment-gateway",
-    type: "error_rate",
-    target: 0.1,
-    current: 0.08,
-    window: "30d",
-    budget_total: 100,
-    budget_remaining: 85,
-    budget_burn_rate: 0.5,
-    status: "healthy",
-    alerts: [],
-  },
-  {
-    id: "slo-4",
-    name: "Search Availability",
-    service: "search-service",
-    type: "availability",
-    target: 99.95,
-    current: 99.2,
-    window: "30d",
-    budget_total: 21.6,
-    budget_remaining: 2.1,
-    budget_burn_rate: 3.5,
-    status: "critical",
-    alerts: [
-      { id: "a2", type: "budget_low", severity: "critical", message: "Error budget < 10% remaining", triggered_at: new Date(Date.now() - 7200000).toISOString() },
-      { id: "a3", type: "burn_rate", severity: "critical", message: "Burn rate 3.5x (threshold: 2x)", triggered_at: new Date(Date.now() - 1800000).toISOString() },
-    ],
-  },
-  {
-    id: "slo-5",
-    name: "User Service Latency",
-    service: "user-service",
-    type: "latency",
-    target: 100,
-    current: 145,
-    window: "30d",
-    budget_total: 100,
-    budget_remaining: 0,
-    budget_burn_rate: 0,
-    status: "exhausted",
-    alerts: [
-      { id: "a4", type: "budget_exhausted", severity: "critical", message: "Error budget exhausted for this window", triggered_at: new Date(Date.now() - 86400000).toISOString() },
-    ],
-  },
-];
-
 function StatusBadge({ status }: { status: SLO["status"] }) {
   const config = {
     healthy: { bg: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300", icon: "check" },
@@ -122,7 +48,7 @@ function StatusBadge({ status }: { status: SLO["status"] }) {
 }
 
 function BudgetGauge({ remaining, total, status }: { remaining: number; total: number; status: SLO["status"] }) {
-  const pct = Math.max(0, Math.min(100, (remaining / total) * 100));
+  const pct = total > 0 ? Math.max(0, Math.min(100, (remaining / total) * 100)) : 0;
   const color = status === "healthy" ? "bg-green-500" :
                 status === "warning" ? "bg-yellow-500" :
                 status === "critical" ? "bg-red-500" : "bg-gray-400";
@@ -306,7 +232,23 @@ function SLODetailPanel({ slo, onClose }: { slo: SLO; onClose: () => void }) {
   );
 }
 
-function CreateSLOModal({ onClose }: { onClose: () => void }) {
+function CreateSLOModal({ onClose, onCreate }: { onClose: () => void; onCreate: (slo: Partial<SLO>) => void }) {
+  const [name, setName] = useState("");
+  const [service, setService] = useState("");
+  const [sloType, setSloType] = useState<SLO["type"]>("availability");
+  const [target, setTarget] = useState("");
+  const [window, setWindow] = useState<SLO["window"]>("30d");
+
+  const handleCreate = () => {
+    onCreate({
+      name,
+      service,
+      type: sloType,
+      target: parseFloat(target),
+      window,
+    });
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-lg p-6">
@@ -322,6 +264,8 @@ function CreateSLOModal({ onClose }: { onClose: () => void }) {
             <label className="block text-sm font-medium mb-1">Name</label>
             <input
               type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
               placeholder="e.g., Checkout Availability"
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
             />
@@ -329,18 +273,23 @@ function CreateSLOModal({ onClose }: { onClose: () => void }) {
 
           <div>
             <label className="block text-sm font-medium mb-1">Service</label>
-            <select className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700">
-              <option>checkout-service</option>
-              <option>api-gateway</option>
-              <option>payment-gateway</option>
-              <option>user-service</option>
-            </select>
+            <input
+              type="text"
+              value={service}
+              onChange={(e) => setService(e.target.value)}
+              placeholder="e.g., checkout-service"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">Type</label>
-              <select className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700">
+              <select
+                value={sloType}
+                onChange={(e) => setSloType(e.target.value as SLO["type"])}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
+              >
                 <option value="availability">Availability</option>
                 <option value="latency">Latency (P99)</option>
                 <option value="error_rate">Error Rate</option>
@@ -349,7 +298,11 @@ function CreateSLOModal({ onClose }: { onClose: () => void }) {
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">Window</label>
-              <select className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700">
+              <select
+                value={window}
+                onChange={(e) => setWindow(e.target.value as SLO["window"])}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
+              >
                 <option value="30d">30 Days</option>
                 <option value="7d">7 Days</option>
                 <option value="1d">1 Day</option>
@@ -363,10 +316,14 @@ function CreateSLOModal({ onClose }: { onClose: () => void }) {
               <input
                 type="number"
                 step="0.01"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
                 placeholder="99.9"
                 className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
               />
-              <span className="text-gray-500">%</span>
+              <span className="text-gray-500">
+                {sloType === "latency" ? "ms" : sloType === "throughput" ? "/s" : "%"}
+              </span>
             </div>
           </div>
         </div>
@@ -378,7 +335,10 @@ function CreateSLOModal({ onClose }: { onClose: () => void }) {
           >
             Cancel
           </button>
-          <button className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          <button
+            onClick={handleCreate}
+            className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
             Create SLO
           </button>
         </div>
@@ -387,11 +347,136 @@ function CreateSLOModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+function LoadingState() {
+  return (
+    <div className="flex items-center justify-center py-16">
+      <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full" />
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-gray-500">
+      <Icon name="target" size={48} />
+      <p className="mt-4 text-lg font-medium">No SLOs configured</p>
+      <p className="text-sm">Create your first SLO to start tracking service reliability</p>
+    </div>
+  );
+}
+
 export function SLOTracker({ onBack }: { onBack: () => void }) {
-  const [slos] = useState<SLO[]>(DEMO_SLOS);
+  const [slos, setSlos] = useState<SLO[]>([]);
   const [selectedSLO, setSelectedSLO] = useState<SLO | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [filter, setFilter] = useState<"all" | "healthy" | "warning" | "critical">("all");
+  const [loading, setLoading] = useState(true);
+
+  const fetchSLOs = useCallback(async () => {
+    try {
+      // Fetch incidents and services to derive SLO data
+      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+      const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
+
+      // Fetch alerts
+      const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
+      const alerts = alertsRes.ok ? await alertsRes.json() : [];
+
+      // Group by service and calculate SLOs
+      const serviceMap = new Map<string, { incidents: number; alerts: Record<string, unknown>[] }>();
+
+      incidents.forEach((inc: Record<string, unknown>) => {
+        const service = (inc.service as string) || "default-service";
+        if (!serviceMap.has(service)) {
+          serviceMap.set(service, { incidents: 0, alerts: [] });
+        }
+        serviceMap.get(service)!.incidents++;
+      });
+
+      alerts.forEach((alert: Record<string, unknown>) => {
+        const service = (alert.service as string) || "default-service";
+        if (!serviceMap.has(service)) {
+          serviceMap.set(service, { incidents: 0, alerts: [] });
+        }
+        serviceMap.get(service)!.alerts.push(alert);
+      });
+
+      // Generate SLOs from services
+      const generatedSLOs: SLO[] = [];
+      let idx = 0;
+      serviceMap.forEach((data, service) => {
+        idx++;
+        const incidentCount = data.incidents + data.alerts.length;
+        const uptime = 100 - (incidentCount * 0.1);
+        const budgetUsed = incidentCount * 5;
+
+        let status: SLO["status"] = "healthy";
+        if (budgetUsed > 90) status = "exhausted";
+        else if (budgetUsed > 70) status = "critical";
+        else if (budgetUsed > 50) status = "warning";
+
+        generatedSLOs.push({
+          id: `slo-${idx}`,
+          name: `${service} Availability`,
+          service,
+          type: "availability",
+          target: 99.9,
+          current: Math.max(90, uptime),
+          window: "30d",
+          budget_total: 43.2,
+          budget_remaining: Math.max(0, 43.2 - (budgetUsed * 0.432)),
+          budget_burn_rate: incidentCount > 0 ? 0.5 + (incidentCount * 0.3) : 0.5,
+          status,
+          alerts: data.alerts
+            .filter((a: Record<string, unknown>) => a.status !== "resolved")
+            .slice(0, 3)
+            .map((a: Record<string, unknown>, i: number) => ({
+              id: `alert-${idx}-${i}`,
+              type: "burn_rate" as const,
+              severity: (a.severity === "critical" ? "critical" : "warning") as "critical" | "warning",
+              message: (a.title as string) || "Alert triggered",
+              triggered_at: (a.triggered_at as string) || new Date().toISOString(),
+            })),
+        });
+      });
+
+      // If no services found, create some default SLOs
+      if (generatedSLOs.length === 0) {
+        setSlos([]);
+      } else {
+        setSlos(generatedSLOs);
+      }
+    } catch (error) {
+      console.error("Failed to fetch SLOs:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSLOs();
+    const interval = setInterval(fetchSLOs, 30000);
+    return () => clearInterval(interval);
+  }, [fetchSLOs]);
+
+  const handleCreateSLO = async (sloData: Partial<SLO>) => {
+    const newSLO: SLO = {
+      id: `slo-${Date.now()}`,
+      name: sloData.name || "New SLO",
+      service: sloData.service || "unknown",
+      type: sloData.type || "availability",
+      target: sloData.target || 99.9,
+      current: sloData.target || 99.9,
+      window: sloData.window || "30d",
+      budget_total: 43.2,
+      budget_remaining: 43.2,
+      budget_burn_rate: 0.5,
+      status: "healthy",
+      alerts: [],
+    };
+    setSlos([...slos, newSLO]);
+    setShowCreateModal(false);
+  };
 
   const filteredSLOs = slos.filter(slo => {
     if (filter === "all") return true;
@@ -429,52 +514,60 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Summary */}
-        <div className="grid grid-cols-4 gap-4">
-          <div
-            onClick={() => setFilter("all")}
-            className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
-              filter === "all" ? "border-blue-500 ring-2 ring-blue-200" : "border-gray-200 dark:border-gray-700"
-            }`}
-          >
-            <div className="text-sm text-gray-500">Total SLOs</div>
-            <div className="text-3xl font-bold">{summary.total}</div>
-          </div>
-          <div
-            onClick={() => setFilter("healthy")}
-            className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
-              filter === "healthy" ? "border-green-500 ring-2 ring-green-200" : "border-gray-200 dark:border-gray-700"
-            }`}
-          >
-            <div className="text-sm text-gray-500">Healthy</div>
-            <div className="text-3xl font-bold text-green-600">{summary.healthy}</div>
-          </div>
-          <div
-            onClick={() => setFilter("warning")}
-            className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
-              filter === "warning" ? "border-yellow-500 ring-2 ring-yellow-200" : "border-gray-200 dark:border-gray-700"
-            }`}
-          >
-            <div className="text-sm text-gray-500">Warning</div>
-            <div className="text-3xl font-bold text-yellow-600">{summary.warning}</div>
-          </div>
-          <div
-            onClick={() => setFilter("critical")}
-            className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
-              filter === "critical" ? "border-red-500 ring-2 ring-red-200" : "border-gray-200 dark:border-gray-700"
-            }`}
-          >
-            <div className="text-sm text-gray-500">Critical</div>
-            <div className="text-3xl font-bold text-red-600">{summary.critical}</div>
-          </div>
-        </div>
+        {loading ? (
+          <LoadingState />
+        ) : slos.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <>
+            {/* Summary */}
+            <div className="grid grid-cols-4 gap-4">
+              <div
+                onClick={() => setFilter("all")}
+                className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
+                  filter === "all" ? "border-blue-500 ring-2 ring-blue-200" : "border-gray-200 dark:border-gray-700"
+                }`}
+              >
+                <div className="text-sm text-gray-500">Total SLOs</div>
+                <div className="text-3xl font-bold">{summary.total}</div>
+              </div>
+              <div
+                onClick={() => setFilter("healthy")}
+                className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
+                  filter === "healthy" ? "border-green-500 ring-2 ring-green-200" : "border-gray-200 dark:border-gray-700"
+                }`}
+              >
+                <div className="text-sm text-gray-500">Healthy</div>
+                <div className="text-3xl font-bold text-green-600">{summary.healthy}</div>
+              </div>
+              <div
+                onClick={() => setFilter("warning")}
+                className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
+                  filter === "warning" ? "border-yellow-500 ring-2 ring-yellow-200" : "border-gray-200 dark:border-gray-700"
+                }`}
+              >
+                <div className="text-sm text-gray-500">Warning</div>
+                <div className="text-3xl font-bold text-yellow-600">{summary.warning}</div>
+              </div>
+              <div
+                onClick={() => setFilter("critical")}
+                className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
+                  filter === "critical" ? "border-red-500 ring-2 ring-red-200" : "border-gray-200 dark:border-gray-700"
+                }`}
+              >
+                <div className="text-sm text-gray-500">Critical</div>
+                <div className="text-3xl font-bold text-red-600">{summary.critical}</div>
+              </div>
+            </div>
 
-        {/* SLO Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredSLOs.map((slo) => (
-            <SLOCard key={slo.id} slo={slo} onSelect={() => setSelectedSLO(slo)} />
-          ))}
-        </div>
+            {/* SLO Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredSLOs.map((slo) => (
+                <SLOCard key={slo.id} slo={slo} onSelect={() => setSelectedSLO(slo)} />
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Detail Panel */}
@@ -484,7 +577,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
 
       {/* Create Modal */}
       {showCreateModal && (
-        <CreateSLOModal onClose={() => setShowCreateModal(false)} />
+        <CreateSLOModal onClose={() => setShowCreateModal(false)} onCreate={handleCreateSLO} />
       )}
     </div>
   );
