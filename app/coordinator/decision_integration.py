@@ -131,7 +131,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         self.max_risk = max_risk_score
         self.simulate_first = simulate_before_execute
 
-        self._pending_approvals: dict[str, DecisionGate] = {}
+        self._decision_gates: dict[str, DecisionGate] = {}
         self._decision_cache: dict[str, DecisionResult] = {}
 
     async def execute_with_decision(
@@ -176,7 +176,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
 
         if dag_decision.outcome == DecisionOutcome.REQUIRE_APPROVAL:
             gate = DecisionGate(name=f"dag_{dag.id}", decision_result=dag_decision)
-            self._pending_approvals[dag.id] = gate
+            self._decision_gates[dag.id] = gate
 
             if self.require_approval:
                 log.info("DAG %s requires approval before execution", dag.id)
@@ -302,7 +302,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         safeguards = decision.safeguards if self.auto_safeguards else []
 
         # Get execution order
-        levels = dag.get_parallel_levels()
+        levels = dag.get_execution_levels()
 
         for level_tasks in levels:
             level_results = await asyncio.gather(*[
@@ -310,15 +310,20 @@ class DecisionAwareDAGExecutor(DAGExecutor):
                 for tid in level_tasks
             ], return_exceptions=True)
 
-            for tid, result in zip(level_tasks, level_results):
-                if isinstance(result, Exception):
+            for tid, raw_result in zip(level_tasks, level_results):
+                if isinstance(raw_result, Exception):
                     results[tid] = EnhancedTaskExecution(
                         task_id=tid,
                         state=ExecutionState.FAILED,
-                        error=str(result),
+                        error=str(raw_result),
                     )
+                elif isinstance(raw_result, EnhancedTaskExecution):
+                    results[tid] = raw_result
                 else:
-                    results[tid] = result
+                    results[tid] = EnhancedTaskExecution(
+                        task_id=tid,
+                        state=ExecutionState.COMPLETED,
+                    )
 
         return results
 
@@ -371,9 +376,9 @@ class DecisionAwareDAGExecutor(DAGExecutor):
                     return execution
 
             # Execute the actual task
-            handler = self._handlers.get(task.handler)
+            handler = self.handlers.get(task.handler)
             if handler:
-                result = await handler(task.input_params)
+                result = await handler(task, task.input_params)
                 execution.output = result
                 execution.state = ExecutionState.COMPLETED
             else:
@@ -524,7 +529,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         reason: str = "",
     ) -> bool:
         """Approve a pending DAG for execution."""
-        gate = self._pending_approvals.get(dag_id)
+        gate = self._decision_gates.get(dag_id)
         if not gate:
             return False
 
@@ -540,7 +545,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         """Get all pending approval requests."""
         return [
             {"dag_id": dag_id, "gate": gate.to_dict()}
-            for dag_id, gate in self._pending_approvals.items()
+            for dag_id, gate in self._decision_gates.items()
             if not gate.approved
         ]
 

@@ -650,13 +650,17 @@ class CriteriaEvaluator:
     ) -> bool:
         """Compare actual value against threshold using operator."""
         if operator == CriteriaOperator.LESS_THAN:
-            return float(actual) < float(threshold)
+            thresh = float(threshold) if not isinstance(threshold, tuple) else threshold[0]
+            return float(actual) < thresh
         elif operator == CriteriaOperator.LESS_THAN_OR_EQUAL:
-            return float(actual) <= float(threshold)
+            thresh = float(threshold) if not isinstance(threshold, tuple) else threshold[0]
+            return float(actual) <= thresh
         elif operator == CriteriaOperator.GREATER_THAN:
-            return float(actual) > float(threshold)
+            thresh = float(threshold) if not isinstance(threshold, tuple) else threshold[0]
+            return float(actual) > thresh
         elif operator == CriteriaOperator.GREATER_THAN_OR_EQUAL:
-            return float(actual) >= float(threshold)
+            thresh = float(threshold) if not isinstance(threshold, tuple) else threshold[0]
+            return float(actual) >= thresh
         elif operator == CriteriaOperator.EQUAL:
             return str(actual) == str(threshold)
         elif operator == CriteriaOperator.NOT_EQUAL:

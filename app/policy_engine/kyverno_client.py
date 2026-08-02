@@ -70,25 +70,27 @@ class KyvernoPolicy:
         kind = "Policy" if self.namespace else "ClusterPolicy"
         api_version = "kyverno.io/v1"
 
-        manifest = {
+        metadata: dict[str, Any] = {
+            "name": self.name,
+            "annotations": {
+                "policies.kyverno.io/description": self.description,
+                **self.annotations,
+            },
+        }
+
+        if self.namespace:
+            metadata["namespace"] = self.namespace
+
+        manifest: dict[str, Any] = {
             "apiVersion": api_version,
             "kind": kind,
-            "metadata": {
-                "name": self.name,
-                "annotations": {
-                    "policies.kyverno.io/description": self.description,
-                    **self.annotations,
-                },
-            },
+            "metadata": metadata,
             "spec": {
                 "validationFailureAction": self.validation_action.value,
                 "background": self.background,
                 "rules": [rule.to_dict() for rule in self.rules],
             },
         }
-
-        if self.namespace:
-            manifest["metadata"]["namespace"] = self.namespace
 
         return manifest
 
@@ -591,7 +593,7 @@ class KyvernoClient:
             path = key
 
         parts = path.split(".")
-        current = resource
+        current: Any = resource
 
         for part in parts:
             if isinstance(current, dict):

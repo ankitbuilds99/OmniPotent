@@ -617,12 +617,16 @@ class OptionRanker:
             "factors_b_wins": [],
         }
 
+        factors_a_wins: list[str] = []
+        factors_b_wins: list[str] = []
         for factor in scores_a.keys():
             if scores_a[factor] > scores_b[factor]:
-                comparison["factors_a_wins"].append(factor)
+                factors_a_wins.append(factor)
             elif scores_b[factor] > scores_a[factor]:
-                comparison["factors_b_wins"].append(factor)
+                factors_b_wins.append(factor)
 
+        comparison["factors_a_wins"] = factors_a_wins
+        comparison["factors_b_wins"] = factors_b_wins
         return comparison
 
 

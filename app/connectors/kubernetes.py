@@ -585,7 +585,19 @@ class KubernetesConnector(Connector):
         import time
         start = time.time()
 
-        policy = {
+        policy_types: list[str] = []
+        ingress_list: list[dict] = []
+        egress_list: list[dict] = []
+
+        if ingress_rules is not None:
+            policy_types.append("Ingress")
+            ingress_list = ingress_rules
+
+        if egress_rules is not None:
+            policy_types.append("Egress")
+            egress_list = egress_rules
+
+        policy: dict[str, Any] = {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
             "metadata": {
@@ -596,17 +608,11 @@ class KubernetesConnector(Connector):
                 "podSelector": {
                     "matchLabels": pod_selector,
                 },
-                "policyTypes": [],
+                "policyTypes": policy_types,
+                "ingress": ingress_list,
+                "egress": egress_list,
             },
         }
-
-        if ingress_rules is not None:
-            policy["spec"]["policyTypes"].append("Ingress")
-            policy["spec"]["ingress"] = ingress_rules
-
-        if egress_rules is not None:
-            policy["spec"]["policyTypes"].append("Egress")
-            policy["spec"]["egress"] = egress_rules
 
         try:
             await self._post(

@@ -554,7 +554,7 @@ class ChaosEngine:
     ) -> list[ExperimentTarget]:
         """Select a percentage of targets deterministically using hash-based selection."""
         count = max(1, int(len(targets) * percentage / 100))
-        sorted_targets = sorted(targets, key=lambda t: hash(t.name + t.namespace))
+        sorted_targets = sorted(targets, key=lambda t: hash(t.name + (t.namespace or "")))
         return sorted_targets[:min(count, len(targets))]
 
     async def _inject_failure(
@@ -603,8 +603,9 @@ class ChaosEngine:
 
         for target in targets:
             if target.type == "pod":
-                log.info("Killing pod %s in namespace %s", target.name, target.namespace)
-                result = await k8s.delete_pod(target.name, target.namespace)
+                ns = target.namespace or "default"
+                log.info("Killing pod %s in namespace %s", target.name, ns)
+                result = await k8s.delete_pod(target.name, ns)
                 if result.success:
                     target.affected = True
                     target.failure_injected_at = datetime.now(timezone.utc)

@@ -347,7 +347,10 @@ class DigitalTwinSimulator:
             ],
         })
 
-        total_duration = sum(p.get("duration_seconds", 0) for p in phases)
+        total_duration = 0
+        for p in phases:
+            dur = p.get("duration_seconds", 0)
+            total_duration += int(dur) if isinstance(dur, (int, float, str)) else 0
         all_passed = all(p.get("status") == "passed" for p in phases)
 
         return {

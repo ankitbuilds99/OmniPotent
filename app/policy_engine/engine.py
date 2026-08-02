@@ -236,16 +236,22 @@ class PolicyEngine:
             return_exceptions=True,
         )
 
-        opa_result, kyverno_result, window_result, criteria_result = results
+        opa_raw, kyverno_raw, window_raw, criteria_raw = results
+
+        # Convert raw results to proper types
+        opa_result: dict[str, Any] | None = opa_raw if isinstance(opa_raw, dict) else None
+        kyverno_result: dict[str, Any] | None = kyverno_raw if isinstance(kyverno_raw, dict) else None
+        window_result: dict[str, Any] | None = window_raw if isinstance(window_raw, dict) else None
+        criteria_result: dict[str, Any] | None = criteria_raw if isinstance(criteria_raw, dict) else None
 
         # Process OPA result
         opa_allowed = None
-        if isinstance(opa_result, Exception):
-            log.error("OPA evaluation failed: %s", opa_result)
+        if isinstance(opa_raw, Exception):
+            log.error("OPA evaluation failed: %s", opa_raw)
             if self.deny_on_error:
                 violations.append(PolicyViolation(
                     policy_name="opa_error",
-                    message=str(opa_result),
+                    message=str(opa_raw),
                     severity=ViolationSeverity.CRITICAL,
                     source="opa",
                 ))
@@ -271,8 +277,8 @@ class PolicyEngine:
 
         # Process Kyverno result
         kyverno_allowed = None
-        if isinstance(kyverno_result, Exception):
-            log.error("Kyverno evaluation failed: %s", kyverno_result)
+        if isinstance(kyverno_raw, Exception):
+            log.error("Kyverno evaluation failed: %s", kyverno_raw)
             if self.deny_on_error:
                 violations.append(PolicyViolation(
                     policy_name="kyverno_error",
@@ -294,8 +300,8 @@ class PolicyEngine:
 
         # Process window result
         window_allowed = None
-        if isinstance(window_result, Exception):
-            log.error("Window check failed: %s", window_result)
+        if isinstance(window_raw, Exception):
+            log.error("Window check failed: %s", window_raw)
             if self.deny_on_error:
                 violations.append(PolicyViolation(
                     policy_name="window_error",
@@ -318,8 +324,8 @@ class PolicyEngine:
 
         # Process criteria result
         criteria_passed = None
-        if isinstance(criteria_result, Exception):
-            log.error("Criteria evaluation failed: %s", criteria_result)
+        if isinstance(criteria_raw, Exception):
+            log.error("Criteria evaluation failed: %s", criteria_raw)
             if self.deny_on_error:
                 violations.append(PolicyViolation(
                     policy_name="criteria_error",
@@ -682,7 +688,7 @@ class PolicyEngine:
 
     def get_stats(self) -> dict[str, Any]:
         """Get engine statistics."""
-        decisions = {}
+        decisions: dict[str, int] = {}
         for record in self._audit_log:
             key = record.decision.value
             decisions[key] = decisions.get(key, 0) + 1

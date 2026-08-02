@@ -427,8 +427,17 @@ class InfrastructureCloner:
         config: CloneConfig,
     ) -> None:
         """Setup network policies for isolation."""
+        # Build egress rules
+        egress_rules: list[dict[str, Any]] = [
+            {"to": [{"namespaceSelector": {"matchLabels": {"name": namespace}}}]},
+            {"to": [], "ports": [{"protocol": "UDP", "port": 53}]},
+        ]
+
+        for dest in config.allow_egress_to:
+            egress_rules.append({"to": [{"ipBlock": {"cidr": dest}}]})
+
         # Default deny all ingress from outside namespace
-        network_policy = {
+        network_policy: dict[str, Any] = {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
             "metadata": {
@@ -441,19 +450,9 @@ class InfrastructureCloner:
                 "ingress": [{
                     "from": [{"namespaceSelector": {"matchLabels": {"name": namespace}}}]
                 }],
-                "egress": [
-                    {"to": [{"namespaceSelector": {"matchLabels": {"name": namespace}}}]},
-                    # Allow DNS
-                    {"to": [], "ports": [{"protocol": "UDP", "port": 53}]},
-                ],
+                "egress": egress_rules,
             },
         }
-
-        # Add allowed egress destinations
-        for dest in config.allow_egress_to:
-            network_policy["spec"]["egress"].append({
-                "to": [{"ipBlock": {"cidr": dest}}]
-            })
 
         log.info("Setup network isolation for %s", namespace)
 
@@ -476,7 +475,8 @@ class InfrastructureCloner:
             for resource in pending:
                 try:
                     if resource.resource_type == ResourceType.KUBERNETES_DEPLOYMENT:
-                        result = await k8s.get_deployment(resource.name, resource.namespace)
+                        ns = resource.namespace or "default"
+                        result = await k8s.get_deployment(resource.name, ns)
                         if result.success and result.data:
                             ready = result.data.get("ready_replicas", 0)
                             desired = result.data.get("replicas", 1)
@@ -531,7 +531,10 @@ class InfrastructureCloner:
 
         for resource in resources:
             resource_type = resource.get("type")
-            rate = self._cost_rates.get(resource_type, 0.01)
+            if isinstance(resource_type, ResourceType):
+                rate = self._cost_rates.get(resource_type, 0.01)
+            else:
+                rate = 0.01
             # Apply scale factor for compute resources
             if resource_type == ResourceType.KUBERNETES_DEPLOYMENT:
                 rate *= config.scale_factor
