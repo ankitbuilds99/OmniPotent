@@ -11,6 +11,7 @@ Connectors:
 - Jenkins: Build automation
 - ServiceNow: ITSM and incident management
 - Splunk: Log analytics
+- Kubernetes: Cluster operations and resource management
 """
 
 from app.connectors.base import (
@@ -26,6 +27,7 @@ from app.connectors.gitlab import GitLabConnector
 from app.connectors.jenkins import JenkinsConnector
 from app.connectors.servicenow import ServiceNowConnector
 from app.connectors.splunk import SplunkConnector
+from app.connectors.kubernetes import KubernetesConnector
 
 __all__ = [
     "Connector",
@@ -39,4 +41,5 @@ __all__ = [
     "JenkinsConnector",
     "ServiceNowConnector",
     "SplunkConnector",
+    "KubernetesConnector",
 ]

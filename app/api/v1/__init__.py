@@ -9,7 +9,7 @@ in a backwards-compatible manner.
 
 from fastapi import APIRouter
 
-from app.api.v1 import chat, health, config, admin, webhooks
+from app.api.v1 import chat, health, config, admin, webhooks, decision, policy, digital_twin
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -18,5 +18,8 @@ router.include_router(chat.router)
 router.include_router(config.router)
 router.include_router(admin.router)
 router.include_router(webhooks.router)
+router.include_router(decision.router)
+router.include_router(policy.router)
+router.include_router(digital_twin.router)
 
 __all__ = ["router"]

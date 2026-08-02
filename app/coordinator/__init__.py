@@ -23,6 +23,12 @@ from app.coordinator.dag_executor import (
 )
 from app.coordinator.replanner import DynamicReplanner, ReplanStrategy
 from app.coordinator.resource_pool import ResourceAllocation, ResourcePool
+from app.coordinator.decision_integration import (
+    DecisionAwareDAGExecutor,
+    DecisionGate,
+    EnhancedTaskExecution,
+    create_decision_aware_executor,
+)
 
 __all__ = [
     "DAGExecutor",
@@ -38,4 +44,8 @@ __all__ = [
     "ReplanStrategy",
     "ResourcePool",
     "ResourceAllocation",
+    "DecisionAwareDAGExecutor",
+    "DecisionGate",
+    "EnhancedTaskExecution",
+    "create_decision_aware_executor",
 ]
