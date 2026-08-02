@@ -92,6 +92,15 @@ vectors-faiss = [
     "faiss-cpu>=1.7.0",             # FAISS vector store (COPILOT_VECTOR_STORE=faiss)
     "openai>=1.0.0",
 ]
+# Knowledge graph (Neo4j + GraphQL):
+knowledge-graph = [
+    "neo4j>=5.0.0",                 # Neo4j async driver
+    "strawberry-graphql[fastapi]>=0.220.0",  # GraphQL with Strawberry
+]
+# Kubernetes integration:
+kubernetes = [
+    "kubernetes>=28.0.0",           # Official Kubernetes client
+]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

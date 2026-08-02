@@ -741,6 +741,14 @@ app.include_router(event_intelligence_router, prefix="/api")
 from app.model_router.api_router import router as model_router_api  # noqa: E402
 app.include_router(model_router_api, prefix="/api")
 
+# Include knowledge graph router for Neo4j-backed infrastructure knowledge.
+from app.knowledge_graph.api_router import router as knowledge_graph_router  # noqa: E402
+app.include_router(knowledge_graph_router, prefix="/api")
+
+# Include planning layer router for task graph management and execution.
+from app.planning.api_router import router as planning_router  # noqa: E402
+app.include_router(planning_router, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")
