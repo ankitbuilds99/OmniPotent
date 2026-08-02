@@ -6,6 +6,7 @@ REST API for noise reduction, severity prediction, and feature store.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter
@@ -17,6 +18,7 @@ from app.event_intelligence.noise_reduction import (
 )
 from app.event_intelligence.severity_predictor import (
     SeverityPredictor,
+    IncidentContext,
 )
 from app.event_intelligence.feature_store import FeatureStore
 
@@ -52,24 +54,25 @@ def get_feature_store() -> FeatureStore:
 
 
 class NoiseCheckRequest(BaseModel):
-    fingerprint: str
+    alert_id: str
+    source: str
     service: str
     metric_name: str = ""
-    severity: str = "warning"
     value: float = 0.0
     threshold: float = 0.0
-    historical_values: list[float] = []
-    occurrence_count_1h: int = 1
+    environment: str = "production"
+    severity: str = "warning"
     labels: dict[str, str] = {}
 
 
 class SeverityPredictRequest(BaseModel):
+    incident_id: str
     service: str
     alert_type: str = "error"
-    metric_name: str = ""
-    current_value: float = 0.0
-    threshold: float = 0.0
-    original_severity: str = "warning"
+    error_rate: float | None = None
+    latency_p99: float | None = None
+    affected_endpoints: list[str] = []
+    related_alerts_count: int = 0
 
 
 class RecordMetricRequest(BaseModel):
@@ -110,41 +113,55 @@ async def check_noise(req: NoiseCheckRequest) -> dict[str, Any]:
     store = get_feature_store()
 
     signal = NoiseSignal(
-        fingerprint=req.fingerprint,
+        alert_id=req.alert_id,
+        source=req.source,
         service=req.service,
         metric_name=req.metric_name,
-        severity=req.severity,
         value=req.value,
         threshold=req.threshold,
-        historical_values=req.historical_values,
-        occurrence_count_1h=req.occurrence_count_1h,
+        timestamp=datetime.now(timezone.utc),
+        environment=req.environment,
+        severity=req.severity,
         labels=req.labels,
-        is_maintenance_window=store.is_in_maintenance(req.service),
-        is_deployment_window=store.is_deployment_in_progress(req.service),
+        deployment_in_progress=store.is_deployment_in_progress(req.service),
+        maintenance_window_active=store.is_in_maintenance(req.service),
     )
 
     decision = await engine.evaluate(signal)
 
-    return decision.to_dict()
+    return {
+        "alert_id": decision.alert_id,
+        "is_noise": decision.is_noise,
+        "noise_category": decision.noise_category.value if decision.noise_category else None,
+        "confidence": decision.confidence,
+        "reasoning": decision.reasoning,
+        "should_suppress": decision.should_suppress,
+        "suppress_duration_seconds": decision.suppress_duration_seconds,
+        "human_review_recommended": decision.human_review_recommended,
+        "strategy_used": decision.strategy_used,
+    }
 
 
 @router.post("/severity/predict")
 async def predict_severity(req: SeverityPredictRequest) -> dict[str, Any]:
-    """Predict the severity of an alert.
+    """Predict the severity of an incident.
 
     Uses ML-based scoring considering service criticality,
     blast radius, time sensitivity, and historical patterns.
     """
     predictor = get_severity_predictor()
 
-    prediction = await predictor.predict(
+    context = IncidentContext(
+        incident_id=req.incident_id,
         service=req.service,
         alert_type=req.alert_type,
-        metric_name=req.metric_name,
-        current_value=req.current_value,
-        threshold=req.threshold,
-        original_severity=req.original_severity,
+        error_rate=req.error_rate,
+        latency_p99=req.latency_p99,
+        affected_endpoints=req.affected_endpoints,
+        related_alerts_count=req.related_alerts_count,
     )
+
+    prediction = await predictor.predict(context)
 
     return prediction.to_dict()
 
@@ -240,8 +257,6 @@ async def check_deployment(service: str) -> dict[str, Any]:
 @router.post("/maintenance/add")
 async def add_maintenance(req: MaintenanceWindowRequest) -> dict[str, Any]:
     """Add a maintenance window."""
-    from datetime import datetime
-
     store = get_feature_store()
 
     start = datetime.fromisoformat(req.start_iso.replace("Z", "+00:00"))

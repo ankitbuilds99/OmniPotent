@@ -273,9 +273,11 @@ async def list_models() -> dict[str, Any]:
     models = []
     for model_id, config in model_router.MODEL_CONFIGS.items():
         cost_info = optimizer.get_model_cost(model_id)
+        tier = config["tier"]
+        tier_value = tier.value if hasattr(tier, "value") else str(tier)
         models.append({
             "id": model_id,
-            "tier": config["tier"].value,
+            "tier": tier_value,
             "avg_latency_ms": config["avg_latency_ms"],
             "quality_score": config["quality_score"],
             "supports_streaming": config["supports_streaming"],
