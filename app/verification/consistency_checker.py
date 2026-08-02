@@ -231,7 +231,6 @@ class DataConsistencyChecker:
         params: dict[str, Any],
     ) -> None:
         """Check safety of a rollback action."""
-        target_revision = params.get("revision")
         target_version = params.get("version")
         namespace = params.get("namespace", "default")
 
@@ -318,8 +317,10 @@ class DataConsistencyChecker:
         params: dict[str, Any],
     ) -> None:
         """Check safety of a delete action."""
-        namespace = params.get("namespace", "default")
-        resource_type = params.get("resource_type", "deployment")
+        # Delete actions are high-risk and require explicit confirmation
+        # regardless of namespace or resource type
+        _ = params.get("namespace", "default")
+        _ = params.get("resource_type", "deployment")
 
         check.failed_preconditions.append(
             "Delete actions require explicit confirmation"
