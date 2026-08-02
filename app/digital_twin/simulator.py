@@ -10,7 +10,6 @@ Orchestrates all digital twin capabilities:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,12 +29,10 @@ from app.digital_twin.downtime_predictor import (
 )
 from app.digital_twin.rollback_simulator import (
     RollbackSimulator,
-    RollbackScenario,
     RollbackResult,
 )
 from app.digital_twin.chaos_engine import (
     ChaosEngine,
-    ChaosExperiment,
     ChaosResult,
     SafetyLevel,
 )
@@ -409,9 +406,9 @@ class DigitalTwinSimulator:
         if scaling_direction == "up":
             # Check if cluster has capacity
             cpu_required = replica_diff * config.parameters.get("cpu_per_replica", 0.5)
-            memory_required = replica_diff * config.parameters.get("memory_per_replica", 512)
+            _ = replica_diff * config.parameters.get("memory_per_replica", 512)  # For future memory checks
 
-            # Simulated capacity check
+            # Capacity check
             if cpu_required > 10:
                 resources_available = False
                 resource_issues.append("Insufficient CPU capacity")

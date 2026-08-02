@@ -4,16 +4,12 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from app.policy_engine import (
-    PolicyEngine,
     PolicyDecision,
     OPAClient,
     OPAInput,
     KyvernoClient,
-    ChangeWindowManager,
     WindowType,
-    CriteriaEvaluator,
     EntryCriteria,
-    ExitCriteria,
     Criterion,
     CriteriaType,
     CriteriaOperator,
@@ -22,7 +18,6 @@ from app.policy_engine import (
     create_criteria_evaluator,
 )
 from app.policy_engine.change_windows import RecurrencePattern
-from app.policy_engine.engine import ViolationSeverity
 
 
 class TestOPAClient:

@@ -13,9 +13,9 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable
 import uuid
 
 log = logging.getLogger("devcopilot.digital_twin.chaos")
@@ -581,7 +581,7 @@ class ChaosEngine:
     ) -> list[ExperimentTarget]:
         """Inject network latency."""
         latency_ms = failure.parameters.get("latency_ms", 500)
-        jitter_ms = failure.parameters.get("jitter_ms", 100)
+        _ = failure.parameters.get("jitter_ms", 100)  # Reserved for tc command
 
         for target in targets:
             # In production, use tc or iptables

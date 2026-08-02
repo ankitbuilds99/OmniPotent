@@ -11,7 +11,6 @@ Provides endpoints for:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -24,9 +23,6 @@ from app.digital_twin import (
     ChaosEngine,
     CloneConfig,
     CloneStrategy,
-    DowntimeRisk,
-    RollbackStrategy,
-    FailureType,
     SimulationConfig,
     create_digital_twin,
 )

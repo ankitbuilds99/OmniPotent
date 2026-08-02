@@ -34,7 +34,6 @@ from app.decision_engine.option_ranker import (
     RankedOption,
     RankingResult,
     RankingStrategy,
-    RankingCriteria,
 )
 
 log = logging.getLogger("devcopilot.decision_engine")

@@ -534,7 +534,6 @@ class DowntimePredictor:
             return 0.0
 
         # Weighted combination with diminishing returns
-        total_contribution = sum(f.contribution for f in factors)
         weighted_sum = sum(
             f.contribution * self._cause_weights.get(f.cause, 0.5)
             for f in factors

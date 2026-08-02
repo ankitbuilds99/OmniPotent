@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
-import hashlib
 import uuid
 
 log = logging.getLogger("devcopilot.digital_twin.clone")
@@ -303,7 +301,7 @@ class InfrastructureCloner:
         }
 
         try:
-            result = await k8s._post("/api/v1/namespaces", json=namespace_spec)
+            await k8s._post("/api/v1/namespaces", json=namespace_spec)
             log.info("Created namespace: %s", namespace)
         except Exception as e:
             log.warning("Failed to create namespace %s: %s", namespace, e)

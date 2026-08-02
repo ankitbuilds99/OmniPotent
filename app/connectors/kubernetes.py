@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from app.connectors.base import Connector, ConnectorConfig, ConnectorError, QueryResult
@@ -218,7 +218,7 @@ class KubernetesConnector(Connector):
         start = time.time()
 
         try:
-            response = await self._request(
+            await self._request(
                 "DELETE",
                 f"/api/{self._api_version}/namespaces/{namespace}/pods/{name}",
             )
@@ -353,7 +353,7 @@ class KubernetesConnector(Connector):
         }
 
         try:
-            response = await self._request(
+            await self._request(
                 "PATCH",
                 f"/apis/{self._apps_api_version}/namespaces/{namespace}/deployments/{name}",
                 json=patch_body,
@@ -609,7 +609,7 @@ class KubernetesConnector(Connector):
             policy["spec"]["egress"] = egress_rules
 
         try:
-            response = await self._post(
+            await self._post(
                 f"/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies",
                 json=policy,
             )

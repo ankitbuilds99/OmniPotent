@@ -10,9 +10,9 @@ Provides endpoints for:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from app.decision_engine import (
@@ -21,15 +21,12 @@ from app.decision_engine import (
     SuccessPredictor,
     PredictionFeatures,
     OptionRanker,
-    RankingCriteria,
     create_decision_engine,
 )
-from app.decision_engine.success_predictor import ActionType, RiskLevel
+from app.decision_engine.success_predictor import ActionType
 from app.decision_engine.option_ranker import RankingStrategy
 from app.decision_engine.engine import (
     IncidentContext,
-    DecisionConfidence,
-    DecisionOutcome,
 )
 
 log = logging.getLogger("devcopilot.api.decision")

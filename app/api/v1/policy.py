@@ -10,23 +10,20 @@ Provides endpoints for:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.policy_engine import (
     PolicyEngine,
-    PolicyDecision,
     OPAClient,
     OPAInput,
     KyvernoClient,
     ChangeWindowManager,
-    ChangeWindow,
     WindowType,
     CriteriaEvaluator,
     EntryCriteria,
-    ExitCriteria,
     Criterion,
     CriteriaType,
     CriteriaOperator,

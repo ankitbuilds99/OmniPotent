@@ -78,9 +78,6 @@ class ChangeWindow:
 
     def _is_recurring_active(self, now: datetime) -> bool:
         """Check if a recurring window is active."""
-        # Get the duration of the window
-        duration = self.end_time - self.start_time
-
         if self.recurrence == RecurrencePattern.DAILY:
             # Check if current time of day is within window
             window_start_time = self.start_time.time()

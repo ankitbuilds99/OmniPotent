@@ -1,10 +1,8 @@
 """Tests for the Digital Twin / Simulation module."""
 
 import pytest
-from datetime import datetime, timedelta, timezone
 
 from app.digital_twin import (
-    DigitalTwinSimulator,
     InfrastructureCloner,
     DowntimePredictor,
     RollbackSimulator,
@@ -13,7 +11,6 @@ from app.digital_twin import (
     CloneStrategy,
     DowntimeRisk,
     RollbackStrategy,
-    FailureType,
     SimulationConfig,
     create_digital_twin,
 )
@@ -216,7 +213,7 @@ class TestRollbackSimulator:
             ],
         )
 
-        result = await simulator.simulate(scenario.id)
+        await simulator.simulate(scenario.id)
 
         assert scenario.strategy in list(RollbackStrategy)
 
