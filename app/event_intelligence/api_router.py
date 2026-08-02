@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.event_intelligence.noise_reduction import (
@@ -240,7 +240,7 @@ async def check_deployment(service: str) -> dict[str, Any]:
 @router.post("/maintenance/add")
 async def add_maintenance(req: MaintenanceWindowRequest) -> dict[str, Any]:
     """Add a maintenance window."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     store = get_feature_store()
 
