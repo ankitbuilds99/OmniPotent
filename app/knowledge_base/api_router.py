@@ -327,7 +327,7 @@ async def search_documents(req: SearchRequest) -> dict[str, Any]:
     """Search documents using semantic search."""
     kb = get_knowledge_base()
 
-    results = kb.search(req.query, limit=req.limit)
+    results = await kb.search(req.query, limit=req.limit)
 
     # Filter by doc_types if specified
     if req.doc_types:
