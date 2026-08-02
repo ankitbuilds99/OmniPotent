@@ -526,7 +526,7 @@ class AdaptiveModelRouter:
 
         use_case_recs = recommendations.get(use_case, recommendations["analysis"])
         model_id = use_case_recs.get(budget, use_case_recs["balanced"])
-        config = self.MODEL_CONFIGS.get(model_id, {})
+        config: ModelConfig | dict[str, Any] = self.MODEL_CONFIGS.get(model_id, {})
 
         cost_info = None
         if self.cost_optimizer:
