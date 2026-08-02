@@ -280,9 +280,13 @@ class AdaptiveModelRouter:
             customer_tier=customer_tier,
         )
 
+        model_config = self.MODEL_CONFIGS[best_model]
+        model_tier = model_config["tier"]
+        assert isinstance(model_tier, ModelTier)
+
         return RoutingDecision(
             model_id=best_model,
-            model_tier=self.MODEL_CONFIGS[best_model]["tier"],
+            model_tier=model_tier,
             reason=reason,
             complexity=complexity,
             cost_estimate=cost_estimate,
