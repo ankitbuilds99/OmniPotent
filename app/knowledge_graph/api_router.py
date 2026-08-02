@@ -10,7 +10,6 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Depends, BackgroundTasks
 from pydantic import BaseModel
-from strawberry.fastapi import GraphQLRouter
 
 from app.knowledge_graph.neo4j_backend import (
     Neo4jKnowledgeGraph,
@@ -22,7 +21,6 @@ from app.knowledge_graph.neo4j_backend import (
     Relationship,
     RelationType,
 )
-from app.knowledge_graph.graphql_schema import create_schema
 from app.knowledge_graph.sync_engine import ContinuousSyncEngine
 from app.config import get_settings
 
@@ -32,6 +30,7 @@ router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 
 _graph: Neo4jKnowledgeGraph | None = None
 _sync_engine: ContinuousSyncEngine | None = None
+_graphql_app: Any = None
 
 
 async def get_graph() -> Neo4jKnowledgeGraph:
@@ -63,11 +62,25 @@ async def get_graphql_context(request: Request) -> dict[str, Any]:
     return {"graph": await get_graph(), "request": request}
 
 
-graphql_schema = create_schema()
-graphql_app = GraphQLRouter(
-    schema=graphql_schema,
-    context_getter=get_graphql_context,
-)
+def _init_graphql() -> Any:
+    """Initialize GraphQL router if strawberry is available."""
+    global _graphql_app
+    if _graphql_app is not None:
+        return _graphql_app
+
+    try:
+        from strawberry.fastapi import GraphQLRouter
+        from app.knowledge_graph.graphql_schema import create_schema
+
+        graphql_schema = create_schema()
+        _graphql_app = GraphQLRouter(
+            schema=graphql_schema,
+            context_getter=get_graphql_context,
+        )
+        return _graphql_app
+    except ImportError:
+        log.warning("strawberry-graphql not installed, GraphQL endpoint unavailable")
+        return None
 
 
 class ServiceInput(BaseModel):
@@ -480,4 +493,18 @@ async def get_sync_status(
     return engine.get_status()
 
 
-router.include_router(graphql_app, prefix="/graphql")
+@router.get("/graphql/status")
+async def graphql_status() -> dict[str, Any]:
+    """Check if GraphQL is available."""
+    gql = _init_graphql()
+    return {
+        "available": gql is not None,
+        "message": "GraphQL endpoint available at /api/knowledge-graph/graphql" if gql else "Install strawberry-graphql[fastapi] to enable GraphQL",
+    }
+
+
+def include_graphql_router(parent_router: APIRouter) -> None:
+    """Include GraphQL router if available."""
+    gql = _init_graphql()
+    if gql:
+        parent_router.include_router(gql, prefix="/graphql")
