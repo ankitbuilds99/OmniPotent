@@ -2,6 +2,9 @@
 
 Strawberry-based GraphQL API with real-time subscriptions.
 """
+# mypy: disable-error-code="call-arg"
+# Strawberry's @strawberry.type decorator transforms classes in ways mypy can't follow.
+# The decorator generates __init__ from the class attributes, but mypy sees the raw class.
 
 from __future__ import annotations
 
