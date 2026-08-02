@@ -346,6 +346,117 @@ function EscalationPolicyCard({ policy }: { policy: EscalationPolicy }) {
   );
 }
 
+function CreateScheduleModal({ onClose, onCreate }: {
+  onClose: () => void;
+  onCreate: (name: string, timezone: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [timezone, setTimezone] = useState("UTC");
+
+  const timezones = [
+    "UTC",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "Europe/London",
+    "Europe/Paris",
+    "Asia/Tokyo",
+    "Asia/Kolkata",
+    "Australia/Sydney",
+  ];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="fixed inset-0 flex items-center justify-center z-50"
+      style={{ backgroundColor: "rgba(0, 0, 0, 0.7)" }}
+    >
+      <motion.div
+        initial={{ scale: 0.95 }}
+        animate={{ scale: 1 }}
+        className="w-full max-w-md p-6 rounded-xl"
+        style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+      >
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-xl font-semibold" style={{ color: "var(--text)" }}>
+            Create New Schedule
+          </h2>
+          <button onClick={onClose} className="p-1 rounded-lg" style={{ color: "var(--text-2)" }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-2)" }}>
+              Team Name
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g., Platform Engineering"
+              className="w-full px-3 py-2 rounded-lg"
+              style={{
+                backgroundColor: "var(--bg)",
+                border: "1px solid var(--border)",
+                color: "var(--text)",
+              }}
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-2)" }}>
+              Timezone
+            </label>
+            <select
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg"
+              style={{
+                backgroundColor: "var(--bg)",
+                border: "1px solid var(--border)",
+                color: "var(--text)",
+              }}
+            >
+              {timezones.map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="flex gap-3 mt-6">
+          <button
+            onClick={onClose}
+            className="flex-1 px-4 py-2 rounded-lg font-medium"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              if (name.trim()) {
+                onCreate(name.trim(), timezone);
+              }
+            }}
+            disabled={!name.trim()}
+            className="flex-1 px-4 py-2 rounded-lg font-medium"
+            style={{
+              backgroundColor: name.trim() ? "var(--accent)" : "var(--border)",
+              color: name.trim() ? "var(--bg)" : "var(--text-2)",
+            }}
+          >
+            Create Team
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 function OverrideModal({ users, onClose, onCreate }: {
   users: OnCallUser[];
   onClose: () => void;
@@ -461,6 +572,7 @@ export function OnCall({ onBack }: { onBack: () => void }) {
   const [escalationPolicy, setEscalationPolicy] = useState<EscalationPolicy | null>(null);
   const [users, setUsers] = useState<OnCallUser[]>([]);
   const [showOverrideModal, setShowOverrideModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const fetchData = useCallback(async () => {
@@ -568,6 +680,31 @@ export function OnCall({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const handleCreateSchedule = async (name: string, timezone: string) => {
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const res = await fetch(`${API_BASE}/oncall/teams`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          slug,
+          description: `On-call team for ${name}`,
+          timezone,
+        }),
+      });
+      if (res.ok) {
+        setShowCreateModal(false);
+        fetchData();
+      } else {
+        const error = await res.json();
+        console.error("Failed to create team:", error);
+      }
+    } catch (error) {
+      console.error("Failed to create team:", error);
+    }
+  };
+
   return (
     <div className="min-h-screen" style={{ backgroundColor: "var(--bg)" }}>
       <header className="nav">
@@ -602,6 +739,7 @@ export function OnCall({ onBack }: { onBack: () => void }) {
             Create Override
           </button>
           <button
+            onClick={() => setShowCreateModal(true)}
             className="px-4 py-2 rounded-lg font-medium flex items-center gap-2"
             style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
           >
@@ -683,6 +821,13 @@ export function OnCall({ onBack }: { onBack: () => void }) {
           users={users}
           onClose={() => setShowOverrideModal(false)}
           onCreate={handleCreateOverride}
+        />
+      )}
+
+      {showCreateModal && (
+        <CreateScheduleModal
+          onClose={() => setShowCreateModal(false)}
+          onCreate={handleCreateSchedule}
         />
       )}
     </div>
