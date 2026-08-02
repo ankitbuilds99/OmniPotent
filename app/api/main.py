@@ -733,6 +733,14 @@ app.include_router(runbooks_router, prefix="/api")
 from app.knowledge_base.api_router import router as knowledge_router  # noqa: E402
 app.include_router(knowledge_router, prefix="/api")
 
+# Include event intelligence router for noise reduction and severity prediction.
+from app.event_intelligence.api_router import router as event_intelligence_router  # noqa: E402
+app.include_router(event_intelligence_router, prefix="/api")
+
+# Include model router for adaptive model routing and cost optimization.
+from app.model_router.api_router import router as model_router_api  # noqa: E402
+app.include_router(model_router_api, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")
