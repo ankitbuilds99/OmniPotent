@@ -426,7 +426,9 @@ class InfrastructureCloner:
         namespace: str,
         config: CloneConfig,
     ) -> None:
-        """Setup network policies for isolation."""
+        """Setup network policies for isolation using Kubernetes API."""
+        from app.connectors.kubernetes import KubernetesConnector
+
         # Build egress rules
         egress_rules: list[dict[str, Any]] = [
             {"to": [{"namespaceSelector": {"matchLabels": {"name": namespace}}}]},
@@ -436,25 +438,25 @@ class InfrastructureCloner:
         for dest in config.allow_egress_to:
             egress_rules.append({"to": [{"ipBlock": {"cidr": dest}}]})
 
-        # Default deny all ingress from outside namespace
-        network_policy: dict[str, Any] = {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicy",
-            "metadata": {
-                "name": "digital-twin-isolation",
-                "namespace": namespace,
-            },
-            "spec": {
-                "podSelector": {},
-                "policyTypes": ["Ingress", "Egress"],
-                "ingress": [{
-                    "from": [{"namespaceSelector": {"matchLabels": {"name": namespace}}}]
-                }],
-                "egress": egress_rules,
-            },
-        }
+        # Build ingress rules
+        ingress_rules: list[dict[str, Any]] = [
+            {"from": [{"namespaceSelector": {"matchLabels": {"name": namespace}}}]}
+        ]
 
-        log.info("Setup network isolation for %s", namespace)
+        k8s = KubernetesConnector()
+        try:
+            await k8s.create_network_policy(
+                name="digital-twin-isolation",
+                namespace=namespace,
+                pod_selector={},
+                ingress_rules=ingress_rules,
+                egress_rules=egress_rules,
+            )
+            log.info("Setup network isolation for %s", namespace)
+        except Exception as e:
+            log.warning("Failed to setup network isolation for %s: %s", namespace, e)
+        finally:
+            await k8s.close()
 
     async def _wait_for_ready(
         self,
