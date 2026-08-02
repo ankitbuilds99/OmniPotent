@@ -256,9 +256,8 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
 
   const fetchPreferences = useCallback(async () => {
     try {
-      // Fetch teams to check for existing notification configurations
-      const teamsRes = await fetch(`${API_BASE}/oncall/teams`);
-      const teams = teamsRes.ok ? await teamsRes.json() : [];
+      // Verify backend is reachable
+      await fetch(`${API_BASE}/oncall/teams`);
 
       // Default channels based on what the system supports
       const defaultChannels: ChannelConfig[] = [
@@ -284,12 +283,6 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
         { id: "7", event: "ai_action_pending", description: "AI action pending approval", channels: { slack: { enabled: true }, push: { enabled: true } } },
         { id: "8", event: "escalation", description: "Incident escalated", channels: { email: { enabled: true }, pagerduty: { enabled: false }, sms: { enabled: false } } },
       ];
-
-      // If we have teams, adjust some settings
-      if (teams.length > 0) {
-        defaultChannels[0].configFields![0].value = "team@example.com";
-        defaultChannels[1].configFields![0].value = "https://hooks.slack.com/services/...";
-      }
 
       setChannels(defaultChannels);
       setRules(defaultRules);

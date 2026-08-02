@@ -729,6 +729,10 @@ app.include_router(slack_bot_router, prefix="/api")
 from app.runbooks.router import router as runbooks_router  # noqa: E402
 app.include_router(runbooks_router, prefix="/api")
 
+# Include knowledge base router for documentation and runbooks.
+from app.knowledge_base.api_router import router as knowledge_router  # noqa: E402
+app.include_router(knowledge_router, prefix="/api")
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")

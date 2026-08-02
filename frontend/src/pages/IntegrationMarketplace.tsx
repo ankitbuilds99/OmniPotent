@@ -1,5 +1,12 @@
-import { useState } from "react";
+/**
+ * Integration Marketplace - Real API integration
+ * Fetches connected integrations from /admin/integrations and /integrations/status
+ */
+
+import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface Integration {
   id: string;
@@ -12,7 +19,8 @@ interface Integration {
   setupTime: string;
 }
 
-const INTEGRATIONS: Integration[] = [
+// Static catalog of available integrations (metadata only)
+const INTEGRATION_CATALOG: Omit<Integration, "status">[] = [
   // Observability
   {
     id: "prometheus",
@@ -20,7 +28,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Query metrics and alerts from your Prometheus server",
     category: "observability",
     logo: "https://raw.githubusercontent.com/cncf/artwork/master/projects/prometheus/icon/color/prometheus-icon-color.svg",
-    status: "available",
     features: ["Metric queries", "Alert rules", "Recording rules", "Service discovery"],
     setupTime: "5 min",
   },
@@ -30,7 +37,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Full-stack observability with APM, logs, and metrics",
     category: "observability",
     logo: "https://imgix.datadoghq.com/img/dd_logo_n_70x75.png",
-    status: "available",
     features: ["APM traces", "Log search", "Metrics", "Dashboards", "Monitors"],
     setupTime: "10 min",
   },
@@ -40,7 +46,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Query dashboards and visualizations",
     category: "observability",
     logo: "https://raw.githubusercontent.com/grafana/grafana/main/public/img/grafana_icon.svg",
-    status: "available",
     features: ["Dashboard queries", "Annotations", "Alerting", "Data sources"],
     setupTime: "5 min",
   },
@@ -50,7 +55,6 @@ const INTEGRATIONS: Integration[] = [
     description: "AWS native monitoring and observability",
     category: "observability",
     logo: "https://d1.awsstatic.com/product-marketing/CloudWatch/product-page-diagram_Amazon-CloudWatch.5c0c7b56646dff9d2c27f8a2c96e7631f87b85d1.png",
-    status: "available",
     features: ["Metrics", "Logs Insights", "Alarms", "Events"],
     setupTime: "10 min",
   },
@@ -60,7 +64,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Full-stack observability platform",
     category: "observability",
     logo: "https://newrelic.com/themes/flavor/assets/images/logo/logo.svg",
-    status: "coming_soon",
     features: ["APM", "Infrastructure", "Logs", "Synthetics"],
     setupTime: "10 min",
   },
@@ -72,7 +75,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Incident management and on-call scheduling",
     category: "alerting",
     logo: "https://www.pagerduty.com/wp-content/uploads/2022/09/pd-logo-green.svg",
-    status: "available",
     features: ["Incident webhooks", "On-call schedules", "Escalation policies", "Auto-acknowledge"],
     setupTime: "5 min",
   },
@@ -82,7 +84,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Alert management and on-call scheduling",
     category: "alerting",
     logo: "https://www.atlassian.com/dam/jcr:a6df169b-2d56-4035-8c60-36a69291c4de/opsgenie-icon-gradient-blue.svg",
-    status: "available",
     features: ["Alerts", "On-call", "Escalations", "Integrations"],
     setupTime: "5 min",
   },
@@ -92,7 +93,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Prometheus Alertmanager webhooks",
     category: "alerting",
     logo: "https://raw.githubusercontent.com/cncf/artwork/master/projects/prometheus/icon/color/prometheus-icon-color.svg",
-    status: "connected",
     features: ["Webhook receiver", "Alert grouping", "Silences", "Inhibition"],
     setupTime: "3 min",
   },
@@ -104,7 +104,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Repository analysis and deployment correlation",
     category: "code",
     logo: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
-    status: "connected",
     features: ["Commit history", "PR analysis", "Deployment events", "Code search"],
     setupTime: "5 min",
   },
@@ -114,7 +113,6 @@ const INTEGRATIONS: Integration[] = [
     description: "GitLab repository and CI/CD integration",
     category: "code",
     logo: "https://about.gitlab.com/images/press/logo/png/gitlab-icon-rgb.png",
-    status: "available",
     features: ["Commits", "Merge requests", "Pipelines", "Deployments"],
     setupTime: "5 min",
   },
@@ -124,7 +122,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Atlassian Bitbucket repository integration",
     category: "code",
     logo: "https://wac-cdn.atlassian.com/dam/jcr:c942540c-53a6-4e49-9f9a-8f3e9e6c6e5a/bitbucket-icon-gradient-blue.svg",
-    status: "coming_soon",
     features: ["Commits", "Pull requests", "Pipelines"],
     setupTime: "5 min",
   },
@@ -136,7 +133,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Cluster state, pods, deployments, and events",
     category: "infrastructure",
     logo: "https://raw.githubusercontent.com/kubernetes/kubernetes/master/logo/logo.svg",
-    status: "available",
     features: ["Pod status", "Deployments", "Events", "Logs", "Resource usage"],
     setupTime: "15 min",
   },
@@ -146,7 +142,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Amazon Web Services infrastructure",
     category: "infrastructure",
     logo: "https://a0.awsstatic.com/libra-css/images/logos/aws_smile-header-desktop-en-white_59x35.png",
-    status: "available",
     features: ["EC2", "ECS", "Lambda", "RDS", "S3", "CloudFormation"],
     setupTime: "15 min",
   },
@@ -156,7 +151,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Google Cloud Platform services",
     category: "infrastructure",
     logo: "https://www.gstatic.com/devrel-devsite/prod/v1c4b1e8e9e8e0b8e8e9e8e0b8e8e9e8e0b8e8e9e/cloud/images/favicons/onecloud/favicon.ico",
-    status: "coming_soon",
     features: ["GKE", "Cloud Run", "Cloud Functions", "BigQuery"],
     setupTime: "15 min",
   },
@@ -166,8 +160,16 @@ const INTEGRATIONS: Integration[] = [
     description: "Infrastructure as Code state and changes",
     category: "infrastructure",
     logo: "https://www.terraform.io/img/logo-hashicorp.svg",
-    status: "coming_soon",
     features: ["State inspection", "Plan analysis", "Drift detection"],
+    setupTime: "10 min",
+  },
+  {
+    id: "argocd",
+    name: "ArgoCD",
+    description: "GitOps continuous delivery for Kubernetes",
+    category: "infrastructure",
+    logo: "https://raw.githubusercontent.com/argoproj/argoproj/master/docs/assets/argo.png",
+    features: ["App sync", "Rollback", "Health status", "Diff preview"],
     setupTime: "10 min",
   },
 
@@ -178,7 +180,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Chat integration with @mention support",
     category: "chat",
     logo: "https://a.slack-edge.com/80588/marketing/img/icons/icon_slack_hash_colored.png",
-    status: "available",
     features: ["@mention queries", "Alert channels", "Investigation threads", "Slash commands"],
     setupTime: "5 min",
   },
@@ -188,7 +189,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Teams integration for investigation",
     category: "chat",
     logo: "https://img.icons8.com/color/96/microsoft-teams.png",
-    status: "coming_soon",
     features: ["Bot mentions", "Adaptive cards", "Channel alerts"],
     setupTime: "10 min",
   },
@@ -198,7 +198,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Discord bot for team communication",
     category: "chat",
     logo: "https://assets-global.website-files.com/6257adef93867e50d84d30e2/636e0a6a49cf127bf92de1e2_icon_clyde_blurple_RGB.png",
-    status: "coming_soon",
     features: ["Bot commands", "Channel notifications"],
     setupTime: "5 min",
   },
@@ -210,7 +209,6 @@ const INTEGRATIONS: Integration[] = [
     description: "Runbooks and documentation from Confluence",
     category: "knowledge",
     logo: "https://wac-cdn.atlassian.com/dam/jcr:eaa12b67-a29d-467c-b8fa-66f6c915a97f/confluence-icon-gradient-blue.svg",
-    status: "available",
     features: ["Runbook import", "Documentation search", "Knowledge sync"],
     setupTime: "10 min",
   },
@@ -220,9 +218,17 @@ const INTEGRATIONS: Integration[] = [
     description: "Team knowledge and documentation",
     category: "knowledge",
     logo: "https://upload.wikimedia.org/wikipedia/commons/4/45/Notion_app_logo.png",
-    status: "available",
     features: ["Page import", "Database sync", "Knowledge base"],
     setupTime: "10 min",
+  },
+  {
+    id: "sentry",
+    name: "Sentry",
+    description: "Error tracking and performance monitoring",
+    category: "observability",
+    logo: "https://sentry.io/_assets2/static/sentry-logo-black.svg",
+    features: ["Error tracking", "Issue details", "Latest events", "Breadcrumbs"],
+    setupTime: "5 min",
   },
 ];
 
@@ -236,7 +242,14 @@ const CATEGORIES = [
   { id: "knowledge", name: "Knowledge", icon: "book" },
 ];
 
-function IntegrationCard({ integration, onConnect }: { integration: Integration; onConnect: () => void }) {
+// Coming soon integrations (not yet available)
+const COMING_SOON = ["newrelic", "gcp", "bitbucket", "msteams", "discord", "terraform"];
+
+function IntegrationCard({ integration, onConnect, onDisconnect }: {
+  integration: Integration;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}) {
   const statusConfig = {
     connected: { label: "Connected", color: "bg-green-500/20 text-green-400 border-green-500/30" },
     available: { label: "Available", color: "bg-blue-500/20 text-blue-400 border-blue-500/30" },
@@ -288,9 +301,17 @@ function IntegrationCard({ integration, onConnect }: { integration: Integration;
       <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--border)" }}>
         <span className="text-xs text-gray-500">Setup: {integration.setupTime}</span>
         {integration.status === "connected" ? (
-          <button className="text-sm px-3 py-1.5 rounded-lg bg-green-500/20 text-green-400">
-            Manage
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onDisconnect}
+              className="text-sm px-3 py-1.5 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            >
+              Disconnect
+            </button>
+            <button className="text-sm px-3 py-1.5 rounded-lg bg-green-500/20 text-green-400">
+              Manage
+            </button>
+          </div>
         ) : integration.status === "available" ? (
           <button
             onClick={onConnect}
@@ -308,8 +329,35 @@ function IntegrationCard({ integration, onConnect }: { integration: Integration;
   );
 }
 
-function ConnectModal({ integration, onClose }: { integration: Integration; onClose: () => void }) {
+function ConnectModal({ integration, onClose, onSave }: {
+  integration: Integration;
+  onClose: () => void;
+  onSave: (name: string, value: string) => Promise<void>;
+}) {
   const [step, setStep] = useState(1);
+  const [apiKey, setApiKey] = useState("");
+  const [instanceUrl, setInstanceUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConnect = async () => {
+    if (!apiKey.trim()) {
+      setError("API key is required");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      await onSave(integration.id, apiKey);
+      setStep(3);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to connect integration");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -340,6 +388,8 @@ function ConnectModal({ integration, onClose }: { integration: Integration; onCl
                 <label className="block text-sm mb-2">API Token / Key</label>
                 <input
                   type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
                   placeholder="Enter your API token"
                   className="w-full px-4 py-2 rounded-lg border"
                   style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
@@ -349,11 +399,18 @@ function ConnectModal({ integration, onClose }: { integration: Integration; onCl
                 <label className="block text-sm mb-2">Instance URL (optional)</label>
                 <input
                   type="url"
+                  value={instanceUrl}
+                  onChange={(e) => setInstanceUrl(e.target.value)}
                   placeholder="https://your-instance.example.com"
                   className="w-full px-4 py-2 rounded-lg border"
                   style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
                 />
               </div>
+              {error && (
+                <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                  {error}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -386,7 +443,7 @@ function ConnectModal({ integration, onClose }: { integration: Integration; onCl
         )}
 
         <div className="flex items-center justify-between mt-6 pt-6 border-t" style={{ borderColor: "var(--border)" }}>
-          {step > 1 ? (
+          {step > 1 && step < 3 ? (
             <button
               onClick={() => setStep(step - 1)}
               className="px-4 py-2 rounded-lg hover:bg-white/10"
@@ -396,14 +453,25 @@ function ConnectModal({ integration, onClose }: { integration: Integration; onCl
           ) : (
             <div />
           )}
-          {step < 3 ? (
+          {step === 1 && (
             <button
-              onClick={() => setStep(step + 1)}
-              className="px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+              onClick={() => setStep(2)}
+              disabled={!apiKey.trim()}
+              className="px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Continue
             </button>
-          ) : (
+          )}
+          {step === 2 && (
+            <button
+              onClick={handleConnect}
+              disabled={saving}
+              className="px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? "Connecting..." : "Connect"}
+            </button>
+          )}
+          {step === 3 && (
             <button
               onClick={onClose}
               className="px-6 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700"
@@ -421,15 +489,95 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
   const [category, setCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [connectingIntegration, setConnectingIntegration] = useState<Integration | null>(null);
+  const [connectedIntegrations, setConnectedIntegrations] = useState<Set<string>>(new Set());
+  const [integrationStatus, setIntegrationStatus] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
 
-  const filteredIntegrations = INTEGRATIONS.filter((integration) => {
+  // Fetch connected integrations from API
+  const fetchIntegrations = useCallback(async () => {
+    try {
+      // Fetch from /admin/integrations (list of connected integration names)
+      const adminRes = await fetch(`${API_BASE}/admin/integrations`, {
+        credentials: "include",
+      });
+      if (adminRes.ok) {
+        const data = await adminRes.json();
+        setConnectedIntegrations(new Set(data.integrations || []));
+      }
+
+      // Fetch from /integrations/status (individual status per integration)
+      const statusRes = await fetch(`${API_BASE}/integrations/status`, {
+        credentials: "include",
+      });
+      if (statusRes.ok) {
+        const status = await statusRes.json();
+        setIntegrationStatus(status);
+      }
+    } catch (err) {
+      console.error("Failed to fetch integrations:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchIntegrations();
+  }, [fetchIntegrations]);
+
+  // Build integrations list with real status
+  const integrations: Integration[] = INTEGRATION_CATALOG.map((cat) => ({
+    ...cat,
+    status: connectedIntegrations.has(cat.id) || integrationStatus[cat.id]
+      ? "connected"
+      : COMING_SOON.includes(cat.id)
+      ? "coming_soon"
+      : "available",
+  }));
+
+  const filteredIntegrations = integrations.filter((integration) => {
     const matchesCategory = category === "all" || integration.category === category;
     const matchesSearch = integration.name.toLowerCase().includes(search.toLowerCase()) ||
       integration.description.toLowerCase().includes(search.toLowerCase());
     return matchesCategory && matchesSearch;
   });
 
-  const connectedCount = INTEGRATIONS.filter(i => i.status === "connected").length;
+  const connectedCount = integrations.filter(i => i.status === "connected").length;
+
+  // Save integration to API
+  const handleSaveIntegration = async (name: string, value: string) => {
+    const res = await fetch(`${API_BASE}/admin/integrations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ name, value }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to save integration");
+    }
+
+    // Refresh list
+    await fetchIntegrations();
+  };
+
+  // Disconnect integration
+  const handleDisconnect = async (integrationId: string) => {
+    if (!confirm(`Are you sure you want to disconnect ${integrationId}?`)) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/admin/integrations/${integrationId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      if (res.ok) {
+        await fetchIntegrations();
+      }
+    } catch (err) {
+      console.error("Failed to disconnect:", err);
+    }
+  };
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: "var(--bg)" }}>
@@ -442,10 +590,19 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
               </button>
               <div>
                 <h1 className="text-xl font-semibold">Integrations</h1>
-                <p className="text-sm text-gray-400">{connectedCount} connected</p>
+                <p className="text-sm text-gray-400">
+                  {loading ? "Loading..." : `${connectedCount} connected`}
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-3">
+              <button
+                onClick={fetchIntegrations}
+                className="p-2 hover:bg-white/10 rounded-lg"
+                title="Refresh"
+              >
+                <Icon name="refresh-cw" size={18} />
+              </button>
               <div className="relative">
                 <Icon name="search" size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
@@ -482,18 +639,28 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
           ))}
         </div>
 
-        {/* Integration Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredIntegrations.map((integration) => (
-            <IntegrationCard
-              key={integration.id}
-              integration={integration}
-              onConnect={() => setConnectingIntegration(integration)}
-            />
-          ))}
-        </div>
+        {/* Loading State */}
+        {loading && (
+          <div className="flex items-center justify-center py-12">
+            <div className="animate-spin w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full" />
+          </div>
+        )}
 
-        {filteredIntegrations.length === 0 && (
+        {/* Integration Grid */}
+        {!loading && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredIntegrations.map((integration) => (
+              <IntegrationCard
+                key={integration.id}
+                integration={integration}
+                onConnect={() => setConnectingIntegration(integration)}
+                onDisconnect={() => handleDisconnect(integration.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        {!loading && filteredIntegrations.length === 0 && (
           <div className="text-center py-12">
             <Icon name="search" size={48} className="mx-auto text-gray-600 mb-4" />
             <p className="text-gray-400">No integrations found matching your search</p>
@@ -506,6 +673,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
         <ConnectModal
           integration={connectingIntegration}
           onClose={() => setConnectingIntegration(null)}
+          onSave={handleSaveIntegration}
         />
       )}
     </div>

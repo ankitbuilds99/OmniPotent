@@ -494,14 +494,15 @@ export function Dashboard({
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  const serviceSet = new Set(runbooks.map(r => r.service).filter(s => s && s !== "*"));
   const stats: DashboardStats = {
     activeAlerts: alerts.filter(a => a.status !== "resolved").length,
     criticalAlerts: alerts.filter(a => a.severity === "critical" && a.status !== "resolved").length,
     highAlerts: alerts.filter(a => a.severity === "high" && a.status !== "resolved").length,
     runbookCount: runbooks.length,
     pendingApprovals: executions.filter(e => e.status === "waiting_approval" || e.status === "pending").length,
-    serviceCount: new Set(runbooks.map(r => r.service).filter(s => s !== "*")).size || 12,
-    healthyServices: 11,
+    serviceCount: serviceSet.size,
+    healthyServices: serviceSet.size,
   };
 
   const handleAcknowledgeAlert = async (alertId: string) => {

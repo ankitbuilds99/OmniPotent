@@ -463,16 +463,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
         idx++;
       });
 
-      // Add default nodes if none found
-      if (nodes.length === 0) {
-        nodes.push(
-          { id: "api-gateway", name: "API Gateway", type: "service", status: "healthy", metrics: { requests_per_sec: 1250, error_rate: 0.02, latency_p99: 45 }, x: 400, y: 80 },
-          { id: "user-service", name: "User Service", type: "service", status: "healthy", metrics: { requests_per_sec: 450, error_rate: 0.03, latency_p99: 67 }, x: 600, y: 180 },
-          { id: "postgres-main", name: "PostgreSQL", type: "database", status: "healthy", metrics: { requests_per_sec: 2100, error_rate: 0.01, latency_p99: 12 }, x: 400, y: 320 },
-        );
-      }
-
-      // Generate edges between first node and others
+      // Generate edges between first node and others (if services exist)
       if (nodes.length > 1) {
         const gateway = nodes[0];
         nodes.slice(1).forEach((node) => {
