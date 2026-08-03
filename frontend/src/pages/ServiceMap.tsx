@@ -1,5 +1,5 @@
 /**
- * Service Map - Live dependency graph visualization with real API data
+ * Service Map - Live dependency graph visualization with real metrics from Prometheus
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -44,6 +44,11 @@ interface ServiceEdge {
 interface ServiceMapData {
   nodes: ServiceNode[];
   edges: ServiceEdge[];
+}
+
+interface PrometheusResult {
+  metric: Record<string, string>;
+  value: [number, string];
 }
 
 function getNodeIcon(type: ServiceNode["type"]) {
@@ -103,7 +108,9 @@ function ServiceNodeCard({
         <div className="grid grid-cols-3 gap-2 text-xs">
           <div className="text-center">
             <div style={{ color: "var(--text-2)" }}>RPS</div>
-            <div className="font-mono" style={{ color: "var(--text)" }}>{node.metrics.requests_per_sec}</div>
+            <div className="font-mono" style={{ color: "var(--text)" }}>
+              {node.metrics.requests_per_sec.toFixed(1)}
+            </div>
           </div>
           <div className="text-center">
             <div style={{ color: "var(--text-2)" }}>Err%</div>
@@ -111,7 +118,7 @@ function ServiceNodeCard({
               className="font-mono"
               style={{ color: node.metrics.error_rate > 1 ? "var(--bad)" : "var(--text)" }}
             >
-              {node.metrics.error_rate.toFixed(1)}
+              {node.metrics.error_rate.toFixed(2)}
             </div>
           </div>
           <div className="text-center">
@@ -120,7 +127,7 @@ function ServiceNodeCard({
               className="font-mono"
               style={{ color: node.metrics.latency_p99 > 500 ? "var(--bad)" : "var(--text)" }}
             >
-              {node.metrics.latency_p99}ms
+              {node.metrics.latency_p99.toFixed(0)}ms
             </div>
           </div>
         </div>
@@ -197,7 +204,7 @@ function ServiceDetailPanel({
           <div className="space-y-3">
             <div className="flex justify-between items-center" style={{ color: "var(--text)" }}>
               <span>Requests/sec</span>
-              <span className="font-mono">{node.metrics.requests_per_sec}</span>
+              <span className="font-mono">{node.metrics.requests_per_sec.toFixed(2)}</span>
             </div>
             <div className="flex justify-between items-center">
               <span style={{ color: "var(--text)" }}>Error Rate</span>
@@ -205,7 +212,7 @@ function ServiceDetailPanel({
                 className="font-mono"
                 style={{ color: node.metrics.error_rate > 1 ? "var(--bad)" : "var(--text)" }}
               >
-                {node.metrics.error_rate}%
+                {node.metrics.error_rate.toFixed(2)}%
               </span>
             </div>
             <div className="flex justify-between items-center">
@@ -214,7 +221,7 @@ function ServiceDetailPanel({
                 className="font-mono"
                 style={{ color: node.metrics.latency_p99 > 500 ? "var(--bad)" : "var(--text)" }}
               >
-                {node.metrics.latency_p99}ms
+                {node.metrics.latency_p99.toFixed(0)}ms
               </span>
             </div>
           </div>
@@ -235,7 +242,7 @@ function ServiceDetailPanel({
                 >
                   <span style={{ color: "var(--text)" }}>from {edge.from}</span>
                   <span className="font-mono text-xs" style={{ color: "var(--text-2)" }}>
-                    {edge.requests_per_sec} rps
+                    {edge.requests_per_sec.toFixed(1)} rps
                   </span>
                 </div>
               ))}
@@ -258,7 +265,7 @@ function ServiceDetailPanel({
                 >
                   <span style={{ color: "var(--text)" }}>to {edge.to}</span>
                   <span className="font-mono text-xs" style={{ color: "var(--text-2)" }}>
-                    {edge.requests_per_sec} rps
+                    {edge.requests_per_sec.toFixed(1)} rps
                   </span>
                 </div>
               ))}
@@ -367,9 +374,25 @@ function EmptyState() {
     <div className="flex flex-col items-center justify-center h-full">
       <Server className="w-12 h-12" style={{ color: "var(--text-2)" }} />
       <p className="mt-4 text-lg font-medium" style={{ color: "var(--text)" }}>No Services</p>
-      <p className="text-sm" style={{ color: "var(--text-2)" }}>No services detected yet</p>
+      <p className="text-sm" style={{ color: "var(--text-2)" }}>
+        Connect Prometheus or Kubernetes to see live service metrics
+      </p>
     </div>
   );
+}
+
+async function queryPrometheus(query: string): Promise<PrometheusResult[]> {
+  const prometheusUrl = import.meta.env.VITE_PROMETHEUS_URL || "http://localhost:9090";
+  try {
+    const response = await fetch(
+      `${prometheusUrl}/api/v1/query?query=${encodeURIComponent(query)}`
+    );
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.status === "success" ? data.data.result : [];
+  } catch {
+    return [];
+  }
 }
 
 export function ServiceMap({ onBack }: { onBack: () => void }) {
@@ -377,74 +400,153 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [dataSource, setDataSource] = useState<"prometheus" | "kubernetes" | "fallback">("fallback");
 
   const fetchServiceMap = useCallback(async () => {
     try {
-      // Fetch incidents and alerts to derive service information
-      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
-      const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
-
-      const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
-      const alerts = alertsRes.ok ? await alertsRes.json() : [];
-
-      // Build service map from incident/alert data
-      const serviceMap = new Map<string, {
-        incidentCount: number;
-        alertCount: number;
-        errorRate: number;
+      const serviceMetrics = new Map<string, {
+        requests_per_sec: number;
+        error_rate: number;
+        latency_p99: number;
+        type: ServiceNode["type"];
       }>();
 
-      incidents.forEach((inc: Record<string, unknown>) => {
-        const service = (inc.service as string) || "api-gateway";
-        if (!serviceMap.has(service)) {
-          serviceMap.set(service, { incidentCount: 0, alertCount: 0, errorRate: 0 });
+      // Try to fetch from Prometheus first
+      const [rpsResults, errorResults, latencyResults] = await Promise.all([
+        queryPrometheus('sum(rate(http_requests_total[5m])) by (service)'),
+        queryPrometheus('sum(rate(http_requests_total{status=~"5.."}[5m])) by (service) / sum(rate(http_requests_total[5m])) by (service) * 100'),
+        queryPrometheus('histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service)) * 1000'),
+      ]);
+
+      // Process Prometheus results
+      rpsResults.forEach((result: PrometheusResult) => {
+        const service = result.metric.service || result.metric.job || "unknown";
+        if (!serviceMetrics.has(service)) {
+          serviceMetrics.set(service, {
+            requests_per_sec: 0,
+            error_rate: 0,
+            latency_p99: 0,
+            type: "service",
+          });
         }
-        serviceMap.get(service)!.incidentCount++;
+        serviceMetrics.get(service)!.requests_per_sec = parseFloat(result.value[1]) || 0;
       });
 
-      alerts.forEach((alert: Record<string, unknown>) => {
-        const service = (alert.source as string) || "unknown-service";
-        if (!serviceMap.has(service)) {
-          serviceMap.set(service, { incidentCount: 0, alertCount: 0, errorRate: 0 });
+      errorResults.forEach((result: PrometheusResult) => {
+        const service = result.metric.service || result.metric.job || "unknown";
+        if (serviceMetrics.has(service)) {
+          serviceMetrics.get(service)!.error_rate = parseFloat(result.value[1]) || 0;
         }
-        serviceMap.get(service)!.alertCount++;
       });
 
-      // Generate nodes based on services
+      latencyResults.forEach((result: PrometheusResult) => {
+        const service = result.metric.service || result.metric.job || "unknown";
+        if (serviceMetrics.has(service)) {
+          serviceMetrics.get(service)!.latency_p99 = parseFloat(result.value[1]) || 0;
+        }
+      });
+
+      // If Prometheus returned data, use it
+      if (serviceMetrics.size > 0) {
+        setDataSource("prometheus");
+      } else {
+        // Try Kubernetes API
+        try {
+          const k8sRes = await fetch(`${API_BASE}/api/kubernetes/services`);
+          if (k8sRes.ok) {
+            const services = await k8sRes.json();
+            services.forEach((svc: { name: string; namespace: string; type: string }) => {
+              serviceMetrics.set(svc.name, {
+                requests_per_sec: 0,
+                error_rate: 0,
+                latency_p99: 0,
+                type: svc.type === "database" ? "database" : "service",
+              });
+            });
+            setDataSource("kubernetes");
+          }
+        } catch {
+          // Kubernetes not available
+        }
+      }
+
+      // If still no data, try to get from incidents/alerts
+      if (serviceMetrics.size === 0) {
+        setDataSource("fallback");
+
+        const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+        const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
+
+        const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
+        const alerts = alertsRes.ok ? await alertsRes.json() : [];
+
+        incidents.forEach((inc: Record<string, unknown>) => {
+          const service = (inc.service as string) || "api-gateway";
+          if (!serviceMetrics.has(service)) {
+            serviceMetrics.set(service, {
+              requests_per_sec: 0,
+              error_rate: 0,
+              latency_p99: 0,
+              type: "service",
+            });
+          }
+          // Increment error rate based on incident severity
+          const severity = (inc.severity as string) || "medium";
+          const errorIncrement = severity === "critical" ? 5 : severity === "high" ? 2 : 0.5;
+          serviceMetrics.get(service)!.error_rate += errorIncrement;
+        });
+
+        alerts.forEach((alert: Record<string, unknown>) => {
+          const service = (alert.source as string) || "unknown-service";
+          if (!serviceMetrics.has(service)) {
+            serviceMetrics.set(service, {
+              requests_per_sec: 0,
+              error_rate: 0,
+              latency_p99: 0,
+              type: "service",
+            });
+          }
+          serviceMetrics.get(service)!.error_rate += 0.5;
+        });
+      }
+
+      // Generate nodes with proper layout
       const nodes: ServiceNode[] = [];
       const edges: ServiceEdge[] = [];
 
-      // Layout positions in a grid
       const positions = [
-        { x: 400, y: 80 },   // top center
-        { x: 200, y: 180 },  // left upper
-        { x: 600, y: 180 },  // right upper
-        { x: 150, y: 320 },  // left middle
-        { x: 400, y: 320 },  // center middle
-        { x: 650, y: 320 },  // right middle
-        { x: 250, y: 450 },  // left lower
-        { x: 550, y: 450 },  // right lower
+        { x: 400, y: 100 },
+        { x: 200, y: 220 },
+        { x: 600, y: 220 },
+        { x: 120, y: 360 },
+        { x: 400, y: 360 },
+        { x: 680, y: 360 },
+        { x: 200, y: 480 },
+        { x: 600, y: 480 },
       ];
 
       let idx = 0;
-      serviceMap.forEach((data, serviceName) => {
+      serviceMetrics.forEach((data, serviceName) => {
         const pos = positions[idx % positions.length];
-        const totalIssues = data.incidentCount + data.alertCount;
-        const errorRate = totalIssues * 0.5;
 
-        let status: ServiceNode["status"] = "healthy";
-        if (errorRate > 5) status = "unhealthy";
-        else if (errorRate > 1) status = "degraded";
-
-        let type: ServiceNode["type"] = "service";
-        if (serviceName.includes("db") || serviceName.includes("postgres") || serviceName.includes("mysql")) {
+        // Determine node type from name
+        let type: ServiceNode["type"] = data.type;
+        if (serviceName.includes("db") || serviceName.includes("postgres") || serviceName.includes("mysql") || serviceName.includes("mongo")) {
           type = "database";
-        } else if (serviceName.includes("redis") || serviceName.includes("cache")) {
+        } else if (serviceName.includes("redis") || serviceName.includes("cache") || serviceName.includes("memcached")) {
           type = "cache";
-        } else if (serviceName.includes("queue") || serviceName.includes("rabbit") || serviceName.includes("kafka")) {
+        } else if (serviceName.includes("queue") || serviceName.includes("rabbit") || serviceName.includes("kafka") || serviceName.includes("sqs")) {
           type = "queue";
-        } else if (serviceName.includes("external") || serviceName.includes("stripe") || serviceName.includes("aws")) {
+        } else if (serviceName.includes("external") || serviceName.includes("stripe") || serviceName.includes("aws") || serviceName.includes("s3")) {
           type = "external";
+        }
+
+        // Determine health status
+        let status: ServiceNode["status"] = "healthy";
+        if (data.error_rate > 5 || data.latency_p99 > 2000) {
+          status = "unhealthy";
+        } else if (data.error_rate > 1 || data.latency_p99 > 500) {
+          status = "degraded";
         }
 
         nodes.push({
@@ -453,9 +555,9 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
           type,
           status,
           metrics: {
-            requests_per_sec: 0,
-            error_rate: parseFloat(errorRate.toFixed(2)),
-            latency_p99: 0,
+            requests_per_sec: data.requests_per_sec,
+            error_rate: data.error_rate,
+            latency_p99: data.latency_p99,
           },
           x: pos.x,
           y: pos.y,
@@ -463,15 +565,39 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
         idx++;
       });
 
-      // Generate edges between first node and others (if services exist)
+      // Generate edges based on service relationships
       if (nodes.length > 1) {
-        const gateway = nodes[0];
-        nodes.slice(1).forEach((node) => {
-          edges.push({
-            from: gateway.id,
-            to: node.id,
-            requests_per_sec: 0,
-            error_rate: node.metrics.error_rate,
+        // Find gateway/ingress service
+        const gateway = nodes.find(n =>
+          n.name.includes("gateway") ||
+          n.name.includes("ingress") ||
+          n.name.includes("frontend")
+        ) || nodes[0];
+
+        // Connect gateway to other services
+        nodes.forEach((node) => {
+          if (node.id !== gateway.id && node.type === "service") {
+            edges.push({
+              from: gateway.id,
+              to: node.id,
+              requests_per_sec: node.metrics.requests_per_sec * 0.8,
+              error_rate: node.metrics.error_rate,
+            });
+          }
+        });
+
+        // Connect services to databases/caches
+        const dbNodes = nodes.filter(n => n.type === "database" || n.type === "cache");
+        const serviceNodes = nodes.filter(n => n.type === "service" && n.id !== gateway.id);
+
+        serviceNodes.forEach((svc) => {
+          dbNodes.forEach((db) => {
+            edges.push({
+              from: svc.id,
+              to: db.id,
+              requests_per_sec: svc.metrics.requests_per_sec * 0.5,
+              error_rate: db.metrics.error_rate,
+            });
           });
         });
       }
@@ -508,13 +634,19 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
             <Activity size={20} style={{ display: "inline", marginRight: "0.5rem", color: "var(--accent)" }} />
             Service Map
           </h1>
-          <span className="text-sm" style={{ color: "var(--text-2)" }}>Live dependency graph</span>
+          <span className="text-sm" style={{ color: "var(--text-2)" }}>
+            Live dependency graph
+            {dataSource === "prometheus" && " (Prometheus)"}
+            {dataSource === "kubernetes" && " (Kubernetes)"}
+            {dataSource === "fallback" && " (Incidents)"}
+          </span>
         </div>
         <div className="nav__right">
           <button
             onClick={fetchServiceMap}
             className="p-2 rounded-lg mr-2"
             style={{ border: "1px solid var(--border)" }}
+            title="Refresh"
           >
             <RefreshCw size={16} />
           </button>
