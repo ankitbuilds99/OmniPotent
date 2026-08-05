@@ -159,7 +159,7 @@ class PRRiskAnalysis:
             f"**Deployment Strategy:** {self.deployment_strategy}",
             "",
             "---",
-            "*Powered by [OmniPotent](https://devopscopilot.com)*",
+            "*Powered by [OmniPotent](https://github.com/ankit25bcs10610/OmniPotent)*",
         ])
 
         return "\n".join(lines)

@@ -3,7 +3,7 @@
 
 set -e
 
-echo "=== DevOps Copilot Mutation Testing ==="
+echo "=== OmniPotent Mutation Testing ==="
 echo "Running mutation tests to validate test quality..."
 
 # Install mutmut if not present

@@ -1,5 +1,5 @@
 /**
- * K6 Load Testing Suite for DevOps Copilot
+ * K6 Load Testing Suite for OmniPotent
  *
  * Scenarios: smoke, load, stress, spike, soak
  * Run: k6 run tests/load/k6_scenarios.js --env BASE_URL=http://localhost:8000
@@ -331,7 +331,7 @@ export function handleSummary(data) {
 
 function textSummary(data, options) {
   // Built-in k6 text summary
-  let output = '\n=== DevOps Copilot Load Test Summary ===\n\n';
+  let output = '\n=== OmniPotent Load Test Summary ===\n\n';
 
   // Thresholds
   output += 'Thresholds:\n';
@@ -350,7 +350,7 @@ function htmlReport(data) {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>K6 Load Test Results - DevOps Copilot</title>
+  <title>K6 Load Test Results - OmniPotent</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 2rem; }
     .metric { margin: 1rem 0; padding: 1rem; background: #f5f5f5; border-radius: 8px; }
@@ -361,7 +361,7 @@ function htmlReport(data) {
   </style>
 </head>
 <body>
-  <h1>DevOps Copilot Load Test Results</h1>
+  <h1>OmniPotent Load Test Results</h1>
   <p>Generated: ${new Date().toISOString()}</p>
 
   <h2>Thresholds</h2>

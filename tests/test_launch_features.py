@@ -92,7 +92,7 @@ class TestEmailNotifications:
 
         assert msg.to == ["test@example.com"]
         assert msg.subject == "Test Subject"
-        assert msg.from_name == "DevOps Copilot"
+        assert msg.from_name == "OmniPotent"
 
     def test_smtp_provider_configuration(self):
         """Test SMTP provider config check."""

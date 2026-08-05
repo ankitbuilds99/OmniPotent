@@ -409,7 +409,7 @@ class TestRiskAnalyzer:
 
         comment = analysis.to_github_comment()
         assert "Risk Score" in comment
-        assert "DevOps Copilot" in comment
+        assert "OmniPotent" in comment
 
 
 class TestPatternMatcher:
