@@ -47,6 +47,9 @@ def _headers() -> dict:
 
 
 # --- Offline fixtures ---
+LINEAR_WORKSPACE = os.environ.get("LINEAR_WORKSPACE", "your-workspace")
+
+
 def _get_fixture_issues() -> list[dict]:
     return [
         {
@@ -60,7 +63,7 @@ def _get_fixture_issues() -> list[dict]:
             "priority_label": "High",
             "team_name": "Engineering",
             "labels": ["incident", "severity:high"],
-            "url": "https://linear.app/example/issue/ENG-101",
+            "url": f"https://linear.app/{LINEAR_WORKSPACE}/issue/ENG-101",
         },
         {
             "id": "issue-uuid-2",
@@ -73,7 +76,7 @@ def _get_fixture_issues() -> list[dict]:
             "priority_label": "Medium",
             "team_name": "Engineering",
             "labels": ["incident", "severity:medium"],
-            "url": "https://linear.app/example/issue/ENG-100",
+            "url": f"https://linear.app/{LINEAR_WORKSPACE}/issue/ENG-100",
         },
     ]
 
@@ -130,7 +133,7 @@ def create_issue(
             "id": "issue-uuid-demo",
             "identifier": "ENG-999",
             "title": title,
-            "url": "https://linear.app/example/issue/ENG-999",
+            "url": f"https://linear.app/{LINEAR_WORKSPACE}/issue/ENG-999",
         }
 
     import httpx

@@ -53,6 +53,9 @@ def _headers() -> dict:
 
 
 # --- Offline fixtures ---
+DEMO_JIRA_URL = os.environ.get("JIRA_BASE_URL", "https://your-domain.atlassian.net")
+
+
 def _get_fixture_issues() -> list[dict]:
     return [
         {
@@ -64,7 +67,7 @@ def _get_fixture_issues() -> list[dict]:
             "priority": "High",
             "assignee": "oncall-team",
             "labels": ["incident", "severity:high"],
-            "url": "https://example.atlassian.net/browse/INC-101",
+            "url": f"{DEMO_JIRA_URL}/browse/INC-101",
         },
         {
             "key": "INC-100",
@@ -75,7 +78,7 @@ def _get_fixture_issues() -> list[dict]:
             "priority": "Medium",
             "assignee": None,
             "labels": ["incident", "severity:medium"],
-            "url": "https://example.atlassian.net/browse/INC-100",
+            "url": f"{DEMO_JIRA_URL}/browse/INC-100",
         },
     ]
 
@@ -114,7 +117,7 @@ def create_issue(
             "key": "INC-999",
             "id": "10999",
             "summary": summary,
-            "url": "https://example.atlassian.net/browse/INC-999",
+            "url": f"{DEMO_JIRA_URL}/browse/INC-999",
         }
 
     import httpx
