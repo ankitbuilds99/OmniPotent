@@ -189,9 +189,9 @@ class StatusNotifier:
             from app.notifications import send_email
 
             await send_email(
-                to_email=email,
+                to=email,
                 subject=payload.to_email_subject(),
-                body=payload.to_email_body(),
+                body_text=payload.to_email_body(),
             )
             log.info("email sent", extra={"email": email[:20] + "***"})
             return True

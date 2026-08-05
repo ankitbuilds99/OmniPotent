@@ -417,15 +417,18 @@ async def update_component(
 
     # If status changed to non-operational, notify subscribers
     if request.status and request.status != "operational":
+        from app.status_page.notifications import NotificationPayload
         notifier = get_status_notifier()
         subscribers = await store.list_subscribers(component_id=component_id)
-        for subscriber in subscribers:
-            await notifier.send_component_notification(
-                subscriber=subscriber,
-                component=component,
-                old_status="operational",
-                new_status=request.status,
+        if subscribers:
+            payload = NotificationPayload(
+                event_type="component_status_change",
+                title=f"Component Status Change: {component.name}",
+                message=f"{component.name} status changed to {request.status}",
+                severity="warning" if request.status == "degraded_performance" else "critical",
+                affected_components=[component.name],
             )
+            await notifier.notify_subscribers(subscribers, payload)
 
     uptime_30d = await store.calculate_uptime(component.id, days=30)
     uptime_90d = await store.calculate_uptime(component.id, days=90)
