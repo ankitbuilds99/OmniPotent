@@ -61,7 +61,7 @@ supabase = [
     "asyncpg>=0.29.0",                       # Async PostgreSQL for direct DB access
     "sqlalchemy[asyncio]>=2.0.0",            # Async SQLAlchemy ORM
 ]
-secrets = ["cryptography>=42.0"]                     # per-tenant secret vault
+secrets = ["cryptography>=50.0"]                     # per-tenant secret vault
 apm = ["ddtrace>=4.0"]                               # Datadog APM (DD_TRACE_ENABLED=true)
 # Database migrations
 migrations = [
