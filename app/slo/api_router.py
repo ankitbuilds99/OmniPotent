@@ -103,12 +103,13 @@ class BurnRateResponse(BaseModel):
     """Multi-window burn rate response."""
 
     slo_id: str
-    burn_rate_1h: float
-    burn_rate_6h: float
-    burn_rate_24h: float
-    burn_rate_7d: float
+    short_window: str
+    short_window_burn_rate: float
+    long_window: str
+    long_window_burn_rate: float
     is_alerting: bool
-    alert_severity: str | None
+    severity: str
+    message: str
 
 
 def _get_tracker(org_id: str = "default") -> SLOTracker:
@@ -323,10 +324,11 @@ async def get_burn_rate(
 
     return BurnRateResponse(
         slo_id=burn_rates.slo_id,
-        burn_rate_1h=burn_rates.burn_rate_1h,
-        burn_rate_6h=burn_rates.burn_rate_6h,
-        burn_rate_24h=burn_rates.burn_rate_24h,
-        burn_rate_7d=burn_rates.burn_rate_7d,
+        short_window=burn_rates.short_window,
+        short_window_burn_rate=burn_rates.short_window_burn_rate,
+        long_window=burn_rates.long_window,
+        long_window_burn_rate=burn_rates.long_window_burn_rate,
         is_alerting=burn_rates.is_alerting,
-        alert_severity=burn_rates.alert_severity,
+        severity=burn_rates.severity,
+        message=burn_rates.message,
     )
