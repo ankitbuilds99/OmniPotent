@@ -114,7 +114,7 @@ def create_issue(
             "key": "INC-999",
             "id": "10999",
             "summary": summary,
-            "url": f"https://example.atlassian.net/browse/INC-999",
+            "url": "https://example.atlassian.net/browse/INC-999",
         }
 
     import httpx
@@ -136,7 +136,7 @@ def create_issue(
         }
 
     if labels:
-        fields["labels"] = [l.strip() for l in labels.split(",") if l.strip()]
+        fields["labels"] = [label.strip() for label in labels.split(",") if label.strip()]
 
     resp = httpx.post(
         f"{JIRA_BASE_URL}/rest/api/3/issue",
@@ -251,7 +251,7 @@ def update_issue(
     if priority:
         fields["priority"] = {"name": priority}
     if labels:
-        fields["labels"] = [l.strip() for l in labels.split(",") if l.strip()]
+        fields["labels"] = [label.strip() for label in labels.split(",") if label.strip()]
 
     if fields:
         resp = httpx.put(

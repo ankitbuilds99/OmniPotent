@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, EmailStr
 
 from app.status_page.models import (
@@ -419,7 +419,13 @@ async def update_component(
     if request.status and request.status != "operational":
         notifier = get_status_notifier()
         subscribers = await store.list_subscribers(component_id=component_id)
-        # TODO: Send notification about status change
+        for subscriber in subscribers:
+            await notifier.send_component_notification(
+                subscriber=subscriber,
+                component=component,
+                old_status="operational",
+                new_status=request.status,
+            )
 
     uptime_30d = await store.calculate_uptime(component.id, days=30)
     uptime_90d = await store.calculate_uptime(component.id, days=90)

@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone as dt_timezone
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 from uuid import UUID
 
 from zoneinfo import ZoneInfo

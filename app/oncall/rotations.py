@@ -18,7 +18,6 @@ from enum import Enum
 from typing import Any, Iterator
 from uuid import UUID
 
-import pytz
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("omnipotent.oncall.rotations")

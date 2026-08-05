@@ -40,6 +40,8 @@ dependencies = [
     "aiohttp>=3.9.0",  # HTTP client for escalation webhooks
     # Error tracking
     "sentry-sdk>=2.0.0",
+    # iCal calendar export for on-call schedules
+    "icalendar>=6.0.0",
 ]
 
 [project.optional-dependencies]

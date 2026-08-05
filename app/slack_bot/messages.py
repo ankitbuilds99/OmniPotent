@@ -420,7 +420,9 @@ class MessageBuilder:
         severity_emoji = self.SEVERITY_EMOJI.get(incident.severity, ":warning:")
         status_emoji = self.STATUS_EMOJI.get(incident.status, ":question:")
 
-        next_update_time = datetime.now(timezone.utc).strftime('%H:%M UTC')
+        from datetime import timedelta
+        next_update_dt = datetime.now(timezone.utc) + timedelta(minutes=next_update_minutes)
+        next_update_time = next_update_dt.strftime('%H:%M UTC')
 
         blocks: list[dict[str, Any]] = [
             {
@@ -470,7 +472,7 @@ class MessageBuilder:
                     "text": (
                         f"*What we're doing:*\n"
                         f"Our team is actively working to resolve this issue. "
-                        f"Next update expected in ~{next_update_minutes} minutes."
+                        f"Next update expected at ~{next_update_time} (~{next_update_minutes} minutes)."
                     ),
                 },
             })

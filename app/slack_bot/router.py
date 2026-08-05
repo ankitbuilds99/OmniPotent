@@ -593,10 +593,10 @@ async def slash_incident(request: Request, background_tasks: BackgroundTasks):
     text_raw = form_data.get("text", "")
     text = str(text_raw).strip() if text_raw else ""
     user_id = str(form_data.get("user_id", ""))
-    user_name = str(form_data.get("user_name", ""))
-    channel_id = str(form_data.get("channel_id", ""))
-    trigger_id = str(form_data.get("trigger_id", ""))
-    response_url = str(form_data.get("response_url", ""))
+    _ = form_data.get("user_name", "")  # Available for future use
+    _ = form_data.get("channel_id", "")  # Available for future use
+    _ = form_data.get("trigger_id", "")  # Available for future use
+    _ = form_data.get("response_url", "")  # Available for future use
 
     parts = text.split(maxsplit=1)
     subcommand = parts[0].lower() if parts else "help"
@@ -719,7 +719,7 @@ async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
     text_raw = form_data.get("text", "")
     text = str(text_raw).strip() if text_raw else ""
     user_id = str(form_data.get("user_id", ""))
-    channel_id = str(form_data.get("channel_id", ""))
+    _ = form_data.get("channel_id", "")  # Available for future use
 
     parts = text.split(maxsplit=1)
     subcommand = parts[0].lower() if parts else "create"
@@ -1023,7 +1023,7 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
         actions = payload.get("actions", [])
         for action in actions:
             action_id = action.get("action_id", "")
-            action_value = action.get("value", "")
+            _ = action.get("value", "")  # Available for action-specific handlers
 
             # Incident action handlers
             if action_id.startswith("ack_") or action_id.startswith("acknowledge_"):
@@ -1195,7 +1195,7 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
         elif callback_id.startswith("resolve_submit_"):
             incident_id = callback_id.replace("resolve_submit_", "")
             resolution_type = values.get("resolution_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "fixed")
-            summary = values.get("resolution_summary", {}).get("summary_input", {}).get("value", "")
+            resolution_summary = values.get("resolution_summary", {}).get("summary_input", {}).get("value", "")
 
             from app.slack_bot.interactions import get_incident_action_handler
             handler = get_incident_action_handler()
@@ -1205,13 +1205,14 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
                 user_id=user_id,
                 channel_id=channel_id,
                 action_type="resolve",
+                metadata={"resolution_type": resolution_type, "summary": resolution_summary},
             )
 
             return {"response_action": "clear"}
 
         elif callback_id.startswith("snooze_submit_"):
             incident_id = callback_id.replace("snooze_submit_", "")
-            duration = values.get("snooze_duration", {}).get("duration_select", {}).get("selected_option", {}).get("value", "30")
+            snooze_duration = values.get("snooze_duration", {}).get("duration_select", {}).get("selected_option", {}).get("value", "30")
 
             from app.slack_bot.interactions import get_incident_action_handler
             handler = get_incident_action_handler()
@@ -1221,14 +1222,15 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
                 user_id=user_id,
                 channel_id=channel_id,
                 action_type="snooze",
+                metadata={"duration_minutes": int(snooze_duration)},
             )
 
             return {"response_action": "clear"}
 
         elif callback_id.startswith("status_update_"):
             incident_id = callback_id.replace("status_update_", "")
-            update_type = values.get("update_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "update")
-            update_text = values.get("update_text", {}).get("text_input", {}).get("value", "")
+            status_update_type = values.get("update_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "update")
+            status_update_text = values.get("update_text", {}).get("text_input", {}).get("value", "")
 
             from app.slack_bot.interactions import get_incident_action_handler
             handler = get_incident_action_handler()
@@ -1238,6 +1240,7 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
                 user_id=user_id,
                 channel_id=channel_id,
                 action_type="post_update",
+                metadata={"update_type": status_update_type, "message": status_update_text},
             )
 
             return {"response_action": "clear"}

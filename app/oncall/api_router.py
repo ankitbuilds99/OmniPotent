@@ -1615,7 +1615,6 @@ async def create_enhanced_escalation_policy(
         EscalationTarget,
         TargetType,
         NotificationChannel,
-        EscalationUrgency,
     )
     from uuid import uuid4
 
