@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from app.slo.tracker import (
     SLIType,
-    SLOStatus,
     SLOWindow,
     SLOTracker,
 )
