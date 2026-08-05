@@ -166,7 +166,7 @@ class IncidentStore:
                 TimelineEntry(
                     timestamp=now - timedelta(minutes=18),
                     type="acknowledged",
-                    message="Auto-acknowledged by DevOps Copilot",
+                    message="Auto-acknowledged by OmniPotent",
                     user="oncall-bot",
                 ),
                 TimelineEntry(

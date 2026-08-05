@@ -1,4 +1,4 @@
-"""Debug module for DevOps Copilot."""
+"""Debug module for OmniPotent."""
 
 from app.debug.debug_mode import (
     DebugContext,

@@ -116,7 +116,7 @@ class PRRiskAnalysis:
         icon = {"critical": "rotating_light", "high": "warning", "medium": "large_orange_diamond", "low": "white_check_mark"}
 
         lines = [
-            f"## :{icon.get(self.level.value, 'question')}: DevOps Copilot Risk Analysis",
+            f"## :{icon.get(self.level.value, 'question')}: OmniPotent Risk Analysis",
             "",
             f"**Risk Score: {self.overall_score:.1f}/10 ({self.level.value.upper()})**",
             "",
@@ -159,7 +159,7 @@ class PRRiskAnalysis:
             f"**Deployment Strategy:** {self.deployment_strategy}",
             "",
             "---",
-            "*Powered by [DevOps Copilot](https://devopscopilot.com)*",
+            "*Powered by [OmniPotent](https://devopscopilot.com)*",
         ])
 
         return "\n".join(lines)

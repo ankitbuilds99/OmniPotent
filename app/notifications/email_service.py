@@ -234,8 +234,8 @@ async def send_team_invite(
             </div>
             <div class="content">
                 <p>Hi there,</p>
-                <p><strong>{inviter_name}</strong> has invited you to join <strong>{team_name}</strong> on DevOps Copilot as a <strong>{role}</strong>.</p>
-                <p>DevOps Copilot is an AI-powered platform for incident investigation and resolution.</p>
+                <p><strong>{inviter_name}</strong> has invited you to join <strong>{team_name}</strong> on OmniPotent as a <strong>{role}</strong>.</p>
+                <p>OmniPotent is an AI-powered platform for incident investigation and resolution.</p>
                 <a href="{invite_link}" class="button">Accept Invitation</a>
                 <p class="footer">
                     This invitation will expire in 7 days.<br>
@@ -250,7 +250,7 @@ async def send_team_invite(
     text_body = f"""
     You're invited to join {team_name}
 
-    {inviter_name} has invited you to join {team_name} on DevOps Copilot as a {role}.
+    {inviter_name} has invited you to join {team_name} on OmniPotent as a {role}.
 
     Accept the invitation: {invite_link}
 
@@ -259,7 +259,7 @@ async def send_team_invite(
 
     message = EmailMessage(
         to=email,
-        subject=f"You're invited to join {team_name} on DevOps Copilot",
+        subject=f"You're invited to join {team_name} on OmniPotent",
         html_body=html_body,
         text_body=text_body,
     )

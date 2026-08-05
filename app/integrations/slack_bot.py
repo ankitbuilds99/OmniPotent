@@ -1,4 +1,4 @@
-"""Slack bot integration for DevOps Copilot.
+"""Slack bot integration for OmniPotent.
 
 Enables users to interact with the investigation system directly from Slack.
 Supports slash commands, mentions, and interactive messages.
@@ -203,7 +203,7 @@ class SlackBlockBuilder:
 
 
 class SlackBot:
-    """Slack bot for DevOps Copilot."""
+    """Slack bot for OmniPotent."""
 
     def __init__(
         self,
@@ -276,7 +276,7 @@ class SlackBot:
         async def status(cmd: SlackCommand) -> dict[str, Any]:
             blocks = (
                 SlackBlockBuilder()
-                .header("DevOps Copilot Status")
+                .header("OmniPotent Status")
                 .section("*Status:* :white_check_mark: Operational")
                 .section("*Active Investigations:* 0")
                 .section("*Last 24h:* 42 investigations completed")
@@ -287,7 +287,7 @@ class SlackBot:
         async def help_cmd(cmd: SlackCommand) -> dict[str, Any]:
             blocks = (
                 SlackBlockBuilder()
-                .header("DevOps Copilot Help")
+                .header("OmniPotent Help")
                 .section(
                     "*Available Commands:*\n"
                     "• `/investigate <question>` - Start an investigation\n"
@@ -297,7 +297,7 @@ class SlackBot:
                 .divider()
                 .section(
                     "*Tips:*\n"
-                    "• Mention @DevOps Copilot in any channel to ask questions\n"
+                    "• Mention @OmniPotent in any channel to ask questions\n"
                     "• Use threads for follow-up questions\n"
                     "• React with :eyes: to have the bot analyze an error"
                 )

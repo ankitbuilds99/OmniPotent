@@ -29,7 +29,7 @@ class EmailMessage:
     body_text: str
     body_html: str = ""
     from_email: str = ""
-    from_name: str = "DevOps Copilot"
+    from_name: str = "OmniPotent"
     reply_to: str = ""
     cc: list[str] | None = None
     bcc: list[str] | None = None
@@ -289,7 +289,7 @@ Severity: {severity.upper()}
 View the full report: {report_url}
 
 ---
-DevOps Copilot
+OmniPotent
 """
 
     body_html = f"""
@@ -319,7 +319,7 @@ DevOps Copilot
             <a href="{report_url}" class="btn">View Full Report</a>
         </div>
         <div class="footer">
-            <p>Sent by DevOps Copilot</p>
+            <p>Sent by OmniPotent</p>
         </div>
     </div>
 </body>
@@ -354,7 +354,7 @@ Severity: {severity}
 View dashboard: {dashboard_url}
 
 ---
-DevOps Copilot
+OmniPotent
 """
 
     body_html = f"""
@@ -407,7 +407,7 @@ To approve: {approve_url}
 To reject: {reject_url}
 
 ---
-DevOps Copilot
+OmniPotent
 """
 
     body_html = f"""
@@ -437,7 +437,7 @@ DevOps Copilot
 async def send_welcome_email(to: str, name: str, login_url: str) -> bool:
     """Send welcome email to new users."""
     body_text = f"""
-Welcome to DevOps Copilot, {name}!
+Welcome to OmniPotent, {name}!
 
 Your account has been created successfully.
 
@@ -451,7 +451,7 @@ What you can do:
 Need help? Check out our documentation or reach out to support.
 
 ---
-The DevOps Copilot Team
+The OmniPotent Team
 """
 
     body_html = f"""
@@ -471,7 +471,7 @@ The DevOps Copilot Team
 <body>
     <div class="container">
         <div class="card">
-            <h1 style="color: #1f2937;">Welcome to DevOps Copilot! 🎉</h1>
+            <h1 style="color: #1f2937;">Welcome to OmniPotent! 🎉</h1>
             <p style="font-size: 18px; color: #4b5563;">Hi {name},</p>
             <p>Your account is ready. Start investigating incidents with AI-powered assistance.</p>
 
@@ -493,7 +493,7 @@ The DevOps Copilot Team
 
     return await send_email(
         to=to,
-        subject="Welcome to DevOps Copilot! 🚀",
+        subject="Welcome to OmniPotent! 🚀",
         body_text=body_text,
         body_html=body_html,
     )

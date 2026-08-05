@@ -1,4 +1,4 @@
-"""LLM module for DevOps Copilot.
+"""LLM module for OmniPotent.
 
 Provides model routing, semantic caching, and cost optimization.
 """

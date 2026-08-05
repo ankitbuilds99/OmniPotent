@@ -272,7 +272,7 @@ def post_incident_update(
     blocks_data.append({
         "type": "context",
         "elements": [
-            {"type": "mrkdwn", "text": f"Posted by DevOps Copilot • {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"},
+            {"type": "mrkdwn", "text": f"Posted by OmniPotent • {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"},
         ],
     })
 

@@ -1,4 +1,4 @@
-"""Advanced observability infrastructure for DevOps Copilot.
+"""Advanced observability infrastructure for OmniPotent.
 
 Provides:
 - Comprehensive Prometheus metrics registry

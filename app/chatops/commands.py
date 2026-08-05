@@ -273,7 +273,7 @@ class CommandHandler:
         )
 
 
-# Default handlers for integration with DevOps Copilot
+# Default handlers for integration with OmniPotent
 
 async def create_investigate_handler(
     investigation_service: Any,  # ParallelInvestigationCoordinator

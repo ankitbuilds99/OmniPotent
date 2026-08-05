@@ -140,11 +140,11 @@ class OnboardingWizard:
         return [
             OnboardingStep(
                 id="welcome",
-                title="Welcome to DevOps Copilot",
+                title="Welcome to OmniPotent",
                 description="Let's get you set up in just a few minutes",
                 step_type=OnboardingStepType.WELCOME,
                 order=1,
-                help_text="DevOps Copilot helps you investigate incidents faster with AI-powered root cause analysis.",
+                help_text="OmniPotent helps you investigate incidents faster with AI-powered root cause analysis.",
                 is_skippable=False,
             ),
             OnboardingStep(
@@ -357,7 +357,7 @@ class OnboardingWizard:
             OnboardingStep(
                 id="complete",
                 title="You're All Set!",
-                description="Your DevOps Copilot is ready",
+                description="Your OmniPotent is ready",
                 step_type=OnboardingStepType.COMPLETE,
                 order=8,
                 help_text="Start investigating incidents or explore the dashboard.",

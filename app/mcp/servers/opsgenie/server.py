@@ -116,7 +116,7 @@ def create_alert(
     description: str = "",
     priority: str = "P3",
     alias: str = "",
-    source: str = "DevOps Copilot",
+    source: str = "OmniPotent",
     tags: str = "",
     entity: str = "",
     responders: str = "",
@@ -281,7 +281,7 @@ def list_alerts(
 def acknowledge_alert(
     alert_id: str,
     note: str = "",
-    user: str = "DevOps Copilot",
+    user: str = "OmniPotent",
 ) -> dict:
     """Acknowledge an alert.
 
@@ -298,7 +298,7 @@ def acknowledge_alert(
 
     import httpx
 
-    payload = {"user": user, "source": "DevOps Copilot"}
+    payload = {"user": user, "source": "OmniPotent"}
     if note:
         payload["note"] = note
 
@@ -317,7 +317,7 @@ def acknowledge_alert(
 def close_alert(
     alert_id: str,
     note: str = "",
-    user: str = "DevOps Copilot",
+    user: str = "OmniPotent",
 ) -> dict:
     """Close an alert.
 
@@ -334,7 +334,7 @@ def close_alert(
 
     import httpx
 
-    payload = {"user": user, "source": "DevOps Copilot"}
+    payload = {"user": user, "source": "OmniPotent"}
     if note:
         payload["note"] = note
 
@@ -353,7 +353,7 @@ def close_alert(
 def add_note(
     alert_id: str,
     note: str,
-    user: str = "DevOps Copilot",
+    user: str = "OmniPotent",
 ) -> dict:
     """Add a note to an alert.
 
@@ -373,7 +373,7 @@ def add_note(
     resp = httpx.post(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}/notes",
         headers=_headers(),
-        json={"note": note, "user": user, "source": "DevOps Copilot"},
+        json={"note": note, "user": user, "source": "OmniPotent"},
         timeout=30,
     )
     resp.raise_for_status()
@@ -386,7 +386,7 @@ def escalate_alert(
     alert_id: str,
     escalation_id: str,
     note: str = "",
-    user: str = "DevOps Copilot",
+    user: str = "OmniPotent",
 ) -> dict:
     """Escalate an alert to an escalation policy.
 
@@ -408,7 +408,7 @@ def escalate_alert(
     payload = {
         "escalation": {"id": escalation_id},
         "user": user,
-        "source": "DevOps Copilot",
+        "source": "OmniPotent",
     }
     if note:
         payload["note"] = note
@@ -450,8 +450,8 @@ def assign_alert(
 
     payload = {
         "owner": {"id": owner_id, "type": owner_type},
-        "user": "DevOps Copilot",
-        "source": "DevOps Copilot",
+        "user": "OmniPotent",
+        "source": "OmniPotent",
     }
     if note:
         payload["note"] = note

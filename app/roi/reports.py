@@ -328,7 +328,7 @@ class ReportGenerator:
         roi = roi_data.get("roi_multiple", 0)
 
         if value >= 50000:
-            return f"DevOps Copilot delivered ${value:,.0f} in value this month ({roi:.0f}x ROI)"
+            return f"OmniPotent delivered ${value:,.0f} in value this month ({roi:.0f}x ROI)"
         elif value >= 10000:
             return f"Strong month: ${value:,.0f} saved with {roi:.0f}x return on investment"
         else:

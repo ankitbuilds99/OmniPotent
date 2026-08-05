@@ -598,7 +598,7 @@ async def create_incident_issue(
 {description}
 
 ---
-_Created by DevOps Copilot_
+_Created by OmniPotent_
 """
 
     issue = await client.create_issue(
@@ -657,7 +657,7 @@ async def sync_incident_status(
 async def add_investigation_update(
     issue_id: str,
     update_text: str,
-    author: str = "DevOps Copilot",
+    author: str = "OmniPotent",
 ) -> LinearComment | None:
     """Add an investigation update as a Linear comment."""
     client = get_linear_client()

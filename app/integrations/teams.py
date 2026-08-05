@@ -224,7 +224,7 @@ class AdaptiveCard:
                     "content": self.to_dict(),
                 }
             ],
-            "summary": summary or "DevOps Copilot Notification",
+            "summary": summary or "OmniPotent Notification",
         }
 
 

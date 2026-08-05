@@ -145,7 +145,7 @@ class KyvernoResult:
         }
 
 
-# Default Kyverno policies for DevOps Copilot
+# Default Kyverno policies for OmniPotent
 DEFAULT_KYVERNO_POLICIES = [
     KyvernoPolicy(
         name="omnipotent-require-labels",

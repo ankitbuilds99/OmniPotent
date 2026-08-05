@@ -1006,7 +1006,7 @@ class CommandRouter:
                 categories[cat] = []
             categories[cat].append(f"`{name}` - {cmd.description}")
 
-        help_text = "*DevOps Copilot Commands*\n\n"
+        help_text = "*OmniPotent Commands*\n\n"
 
         for cat, cmds in sorted(categories.items()):
             help_text += f"*{cat}:*\n"

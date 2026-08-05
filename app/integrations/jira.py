@@ -463,7 +463,7 @@ async def create_incident_ticket(
 {description}
 
 ----
-_Created by DevOps Copilot_
+_Created by OmniPotent_
 """
 
     return await client.create_issue(
@@ -511,7 +511,7 @@ async def create_action_item_ticket(
 {description}
 
 ----
-_Created by DevOps Copilot from postmortem_
+_Created by OmniPotent from postmortem_
 """
 
     return await client.create_issue(
@@ -547,7 +547,7 @@ async def sync_incident_status(
 async def add_investigation_update(
     jira_key: str,
     update_text: str,
-    author: str = "DevOps Copilot",
+    author: str = "OmniPotent",
 ) -> JiraComment | None:
     """Add an investigation update as a Jira comment."""
     client = get_jira_client()

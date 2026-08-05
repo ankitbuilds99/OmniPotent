@@ -303,7 +303,7 @@ async def link_to_investigation(
 
     Args:
         issue_key: Jira issue key
-        investigation_id: DevOps Copilot investigation ID
+        investigation_id: OmniPotent investigation ID
         investigation_url: URL to the investigation
 
     Returns:
@@ -327,13 +327,13 @@ async def link_to_investigation(
                     "globalId": f"omnipotent:{investigation_id}",
                     "application": {
                         "type": "com.omnipotent",
-                        "name": "DevOps Copilot",
+                        "name": "OmniPotent",
                     },
                     "object": {
                         "url": investigation_url,
                         "title": f"Investigation {investigation_id}",
                         "icon": {
-                            "title": "DevOps Copilot Investigation",
+                            "title": "OmniPotent Investigation",
                         },
                     },
                 },

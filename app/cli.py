@@ -1,4 +1,4 @@
-"""Interactive CLI for DevOps Copilot.
+"""Interactive CLI for OmniPotent.
 
 Usage:
     copilot                       # interactive REPL
@@ -54,7 +54,7 @@ async def _handle(session: CopilotSession, result: TurnResult) -> None:
 
     _show_trace(result)
     console.print()
-    console.print(Panel(Markdown(result.final_text), title="✅ DevOps Copilot", border_style="green"))
+    console.print(Panel(Markdown(result.final_text), title="✅ OmniPotent", border_style="green"))
 
 
 async def _run(question: str | None) -> None:
@@ -74,7 +74,7 @@ async def _run(question: str | None) -> None:
             await _handle(session, result)
             return
 
-        console.print("[bold cyan]DevOps Copilot[/bold cyan] — ask about an incident. Ctrl-C to quit.\n")
+        console.print("[bold cyan]OmniPotent[/bold cyan] — ask about an incident. Ctrl-C to quit.\n")
         while True:
             try:
                 q = console.input("[bold]you ›[/] ").strip()

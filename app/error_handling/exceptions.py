@@ -1,4 +1,4 @@
-"""Custom exception hierarchy for DevOps Copilot.
+"""Custom exception hierarchy for OmniPotent.
 
 All application-specific exceptions inherit from CopilotError.
 This allows consistent error handling and HTTP status mapping.
@@ -10,7 +10,7 @@ from typing import Any
 
 
 class CopilotError(Exception):
-    """Base exception for all DevOps Copilot errors.
+    """Base exception for all OmniPotent errors.
 
     Attributes:
         message: Human-readable error message

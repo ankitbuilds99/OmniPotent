@@ -281,7 +281,7 @@ class ABACPermissionResolver:
         policy = ABACPolicy(
             id="default",
             name="Default Policy",
-            description="Default ABAC policy for DevOps Copilot",
+            description="Default ABAC policy for OmniPotent",
             default_permissions=[Permission.VIEW_INCIDENTS, Permission.VIEW_DASHBOARDS],
         )
 

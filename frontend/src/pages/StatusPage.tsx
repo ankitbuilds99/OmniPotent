@@ -275,7 +275,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
                   className="text-xl font-bold"
                   style={{ color: 'var(--text)' }}
                 >
-                  DevOps Copilot Status
+                  OmniPotent Status
                 </h1>
                 <p className="text-sm" style={{ color: 'var(--text-2)' }}>
                   Real-time service health
@@ -712,7 +712,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
         {/* Footer */}
         <div className="mt-8 text-center">
           <p className="text-sm" style={{ color: 'var(--text-2)' }}>
-            Powered by DevOps Copilot
+            Powered by OmniPotent
           </p>
         </div>
       </main>

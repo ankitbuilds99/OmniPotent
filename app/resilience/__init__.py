@@ -1,4 +1,4 @@
-"""Advanced resilience infrastructure for DevOps Copilot.
+"""Advanced resilience infrastructure for OmniPotent.
 
 Provides:
 - Decorrelated jitter backoff (AWS recommended)

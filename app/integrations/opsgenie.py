@@ -187,7 +187,7 @@ class OpsgenieClient:
         description: str = "",
         priority: str = "P3",
         alias: str = "",
-        source: str = "DevOps Copilot",
+        source: str = "OmniPotent",
         tags: list[str] | None = None,
         entity: str = "",
         responders: list[dict[str, str]] | None = None,
@@ -316,8 +316,8 @@ class OpsgenieClient:
     async def acknowledge_alert(
         self,
         alert_id: str,
-        user: str = "DevOps Copilot",
-        source: str = "DevOps Copilot",
+        user: str = "OmniPotent",
+        source: str = "OmniPotent",
         note: str = "",
     ) -> bool:
         """Acknowledge an alert."""
@@ -337,8 +337,8 @@ class OpsgenieClient:
     async def close_alert(
         self,
         alert_id: str,
-        user: str = "DevOps Copilot",
-        source: str = "DevOps Copilot",
+        user: str = "OmniPotent",
+        source: str = "OmniPotent",
         note: str = "",
     ) -> bool:
         """Close an alert."""
@@ -359,8 +359,8 @@ class OpsgenieClient:
         self,
         alert_id: str,
         note: str,
-        user: str = "DevOps Copilot",
-        source: str = "DevOps Copilot",
+        user: str = "OmniPotent",
+        source: str = "OmniPotent",
     ) -> bool:
         """Add a note to an alert."""
         payload = {
@@ -379,8 +379,8 @@ class OpsgenieClient:
         self,
         alert_id: str,
         escalation_id: str,
-        user: str = "DevOps Copilot",
-        source: str = "DevOps Copilot",
+        user: str = "OmniPotent",
+        source: str = "OmniPotent",
         note: str = "",
     ) -> bool:
         """Escalate an alert to an escalation policy."""
@@ -403,8 +403,8 @@ class OpsgenieClient:
         alert_id: str,
         owner_id: str,
         owner_type: str = "user",  # user or team
-        user: str = "DevOps Copilot",
-        source: str = "DevOps Copilot",
+        user: str = "OmniPotent",
+        source: str = "OmniPotent",
         note: str = "",
     ) -> bool:
         """Assign an alert to a user or team."""
@@ -426,8 +426,8 @@ class OpsgenieClient:
         self,
         alert_id: str,
         tags: list[str],
-        user: str = "DevOps Copilot",
-        source: str = "DevOps Copilot",
+        user: str = "OmniPotent",
+        source: str = "OmniPotent",
         note: str = "",
     ) -> bool:
         """Add tags to an alert."""
@@ -592,7 +592,7 @@ Service: {service or 'N/A'}
 {description}
 
 ---
-Created by DevOps Copilot
+Created by OmniPotent
 """
 
     return await client.create_alert(
@@ -631,7 +631,7 @@ async def sync_incident_status(
 async def add_investigation_update(
     alert_id: str,
     update_text: str,
-    author: str = "DevOps Copilot",
+    author: str = "OmniPotent",
 ) -> bool:
     """Add an investigation update as an Opsgenie alert note."""
     client = get_opsgenie_client()

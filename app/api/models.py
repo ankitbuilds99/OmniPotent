@@ -1,4 +1,4 @@
-"""Pydantic response models with OpenAPI examples for the DevOps Copilot API.
+"""Pydantic response models with OpenAPI examples for the OmniPotent API.
 
 These models provide complete type safety and auto-generated documentation
 for all API endpoints. They include detailed examples for the OpenAPI spec

@@ -1,7 +1,7 @@
 """Agent registry — catalog of available marketplace agents.
 
 The registry maintains a list of community-contributed agents that can be
-installed into DevOps Copilot. Each agent entry includes metadata, version
+installed into OmniPotent. Each agent entry includes metadata, version
 information, and installation requirements.
 """
 
@@ -76,7 +76,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Prometheus Metrics",
         "description": "Query Prometheus metrics, run PromQL, and analyze time series data",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "monitoring",
         "tools": ["query_prometheus", "list_metrics", "get_alerts", "analyze_series"],
         "source": "https://github.com/omnipotent/agent-prometheus",
@@ -88,7 +88,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Grafana Dashboards",
         "description": "Manage Grafana dashboards, query panels, and create alerts",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "monitoring",
         "tools": ["list_dashboards", "get_dashboard", "create_alert", "query_panel"],
         "source": "https://github.com/omnipotent/agent-grafana",
@@ -100,7 +100,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Jenkins CI",
         "description": "Trigger builds, view job status, and analyze build logs",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "cicd",
         "tools": ["list_jobs", "trigger_build", "get_build_log", "get_build_status"],
         "source": "https://github.com/omnipotent/agent-jenkins",
@@ -112,7 +112,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "AWS CloudWatch",
         "description": "Query CloudWatch metrics, logs, and alarms",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "monitoring",
         "tools": ["get_metric_data", "query_logs", "list_alarms", "describe_alarm"],
         "source": "https://github.com/omnipotent/agent-cloudwatch",
@@ -124,7 +124,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Jira Tickets",
         "description": "Create, update, and query Jira tickets and projects",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "ticketing",
         "tools": ["create_ticket", "update_ticket", "search_tickets", "get_ticket"],
         "source": "https://github.com/omnipotent/agent-jira",
@@ -136,7 +136,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "OpsGenie Alerts",
         "description": "Manage OpsGenie alerts, on-call schedules, and escalations",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "alerting",
         "tools": ["list_alerts", "acknowledge_alert", "close_alert", "get_oncall"],
         "source": "https://github.com/omnipotent/agent-opsgenie",
@@ -148,7 +148,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Elasticsearch Logs",
         "description": "Query Elasticsearch indices and analyze log data",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "logging",
         "tools": ["search_logs", "list_indices", "get_mapping", "aggregate_logs"],
         "source": "https://github.com/omnipotent/agent-elasticsearch",
@@ -160,7 +160,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "HashiCorp Vault",
         "description": "Manage secrets in HashiCorp Vault",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "security",
         "tools": ["list_secrets", "get_secret", "rotate_secret", "list_policies"],
         "source": "https://github.com/omnipotent/agent-vault",
@@ -172,7 +172,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Ansible Automation",
         "description": "Run Ansible playbooks and manage inventory",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "automation",
         "tools": ["run_playbook", "list_inventory", "check_syntax", "list_roles"],
         "source": "https://github.com/omnipotent/agent-ansible",
@@ -184,7 +184,7 @@ BUILTIN_AGENTS: list[dict] = [
         "name": "Pulumi IaC",
         "description": "Manage Pulumi stacks and preview/apply changes",
         "version": "1.0.0",
-        "author": "DevOps Copilot Community",
+        "author": "OmniPotent Community",
         "category": "iac",
         "tools": ["list_stacks", "preview", "apply", "get_outputs", "refresh"],
         "source": "https://github.com/omnipotent/agent-pulumi",

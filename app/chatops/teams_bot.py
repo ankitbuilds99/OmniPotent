@@ -31,7 +31,7 @@ class TeamsConfig:
     approvals_channel_id: str | None = None
 
     # Bot settings
-    bot_name: str = "DevOps Copilot"
+    bot_name: str = "OmniPotent"
 
 
 @dataclass

@@ -576,7 +576,7 @@ class NaturalLanguageProcessor:
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        "*DevOps Copilot Commands*\n\n"
+                        "*OmniPotent Commands*\n\n"
                         "*Investigation:*\n"
                         "`@copilot what caused this?` - Investigate root cause\n"
                         "`@copilot is payment-service affected?` - Check service\n\n"

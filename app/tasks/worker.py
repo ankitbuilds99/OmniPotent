@@ -105,7 +105,7 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="DevOps Copilot task worker")
+    parser = argparse.ArgumentParser(description="OmniPotent task worker")
     parser.add_argument(
         "--mode",
         choices=["worker", "scheduler", "all"],

@@ -11,7 +11,7 @@ write action.
 Respond with ONLY the numbered steps, one per line. No preamble."""
 
 AGENT_SYSTEM = """\
-You are DevOps Copilot, an autonomous assistant that investigates production \
+You are OmniPotent, an autonomous assistant that investigates production \
 issues and proposes fixes.
 
 You have tools from several MCP servers:

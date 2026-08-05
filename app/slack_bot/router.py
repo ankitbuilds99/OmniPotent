@@ -389,7 +389,7 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
             elif channel:
                 await send_slack_message(
                     channel,
-                    "Hi! I'm DevOps Copilot. Mention me with a question like:\n"
+                    "Hi! I'm OmniPotent. Mention me with a question like:\n"
                     "• `@omnipotent why is checkout slow?`\n"
                     "• `@omnipotent investigate payment failures`\n"
                     "• `@omnipotent what changed in the last hour?`",
@@ -924,7 +924,7 @@ async def slash_help(request: Request):
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": ":robot_face: DevOps Copilot Help",
+                    "text": ":robot_face: OmniPotent Help",
                     "emoji": True,
                 }
             },
@@ -982,9 +982,9 @@ async def slash_help(request: Request):
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        "* `@DevOps Copilot why is X slow?`\n"
-                        "* `@DevOps Copilot investigate Y`\n"
-                        "* `@DevOps Copilot what changed recently?`"
+                        "* `@OmniPotent why is X slow?`\n"
+                        "* `@OmniPotent investigate Y`\n"
+                        "* `@OmniPotent what changed recently?`"
                     ),
                 }
             },

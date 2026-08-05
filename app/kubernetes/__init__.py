@@ -1,4 +1,4 @@
-"""Kubernetes Operator - Custom Resource Definitions for DevOps Copilot."""
+"""Kubernetes Operator - Custom Resource Definitions for OmniPotent."""
 
 from app.kubernetes.operator import (
     KubernetesOperator,

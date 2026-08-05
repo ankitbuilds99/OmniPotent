@@ -1,6 +1,6 @@
-"""FastAPI surface for DevOps Copilot.
+"""FastAPI surface for OmniPotent.
 
-This module provides the REST API for the DevOps Copilot AI-powered incident
+This module provides the REST API for the OmniPotent AI-powered incident
 investigation system. It supports:
 
 - **Chat/Investigation**: Interactive incident investigation with AI assistance
@@ -611,16 +611,16 @@ OPENAPI_TAGS = [
 ]
 
 app = FastAPI(
-    title="DevOps Copilot API",
+    title="OmniPotent API",
     version="1.0.0",
     description="""
-# DevOps Copilot API
+# OmniPotent API
 
 AI-powered incident investigation and root cause analysis for DevOps teams.
 
 ## Overview
 
-DevOps Copilot is an intelligent assistant that helps SRE and DevOps teams
+OmniPotent is an intelligent assistant that helps SRE and DevOps teams
 investigate incidents faster. It integrates with your observability stack
 (Datadog, PagerDuty, Kubernetes, GitHub) and uses LLMs to:
 
@@ -658,7 +658,7 @@ This OpenAPI spec can generate client SDKs. Use `/openapi.json` with your
 preferred code generator (openapi-generator, swagger-codegen, etc.).
 """,
     contact={
-        "name": "DevOps Copilot Team",
+        "name": "OmniPotent Team",
         "url": "https://github.com/ankit25bcs10610/OmniPotent",
         "email": "support@devopscopilot.dev",
     },
@@ -3308,7 +3308,7 @@ class WaitlistSignupRequest(BaseModel):
     "/waitlist",
     tags=["Waitlist"],
     summary="Join the waitlist",
-    description="Sign up for early access to DevOps Copilot. "
+    description="Sign up for early access to OmniPotent. "
     "Returns your position and referral code.",
     responses={
         200: {

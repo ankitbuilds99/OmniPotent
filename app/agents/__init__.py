@@ -1,4 +1,4 @@
-"""Multi-agent collaboration module for DevOps Copilot.
+"""Multi-agent collaboration module for OmniPotent.
 
 This module provides a multi-agent system with specialized agents:
 - InvestigatorAgent: Analyzes logs, metrics, traces to find root cause

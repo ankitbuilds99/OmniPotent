@@ -1,4 +1,4 @@
-"""Security module for DevOps Copilot.
+"""Security module for OmniPotent.
 
 Provides:
 - API key authentication with rate limiting

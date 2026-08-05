@@ -667,7 +667,7 @@ class NewRelicClient:
         app_id: str,
         revision: str,
         description: str = "",
-        user: str = "DevOps Copilot",
+        user: str = "OmniPotent",
         changelog: str = "",
     ) -> dict[str, Any] | None:
         """Record a deployment marker."""

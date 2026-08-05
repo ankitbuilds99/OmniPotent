@@ -1,6 +1,6 @@
 """Agent Marketplace — discover, install, and manage third-party agents.
 
-The marketplace provides a plugin system for extending DevOps Copilot with
+The marketplace provides a plugin system for extending OmniPotent with
 community-contributed agents, tools, and integrations. Agents are packaged
 as MCP servers that can be installed from a registry or local paths.
 

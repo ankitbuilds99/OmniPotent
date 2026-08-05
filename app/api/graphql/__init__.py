@@ -1,4 +1,4 @@
-"""GraphQL API for DevOps Copilot.
+"""GraphQL API for OmniPotent.
 
 Provides a GraphQL interface for:
 - Investigations (queries, mutations, subscriptions)

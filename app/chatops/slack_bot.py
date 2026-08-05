@@ -40,7 +40,7 @@ class SlackConfig:
     approvals_channel: str = "#approvals"
 
     # Bot settings
-    bot_name: str = "DevOps Copilot"
+    bot_name: str = "OmniPotent"
     bot_emoji: str = ":robot_face:"
 
     # Features

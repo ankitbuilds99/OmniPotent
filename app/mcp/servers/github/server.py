@@ -314,7 +314,7 @@ def create_pull_request(
     In offline mode it returns a simulated PR object.
 
     `patch` (optional): the fix as a unified diff (``--- a/file`` / ``+++ b/file``
-    hunks) over the target repo. When provided, DevOps Copilot can apply it to a
+    hunks) over the target repo. When provided, OmniPotent can apply it to a
     throwaway repo copy and run a reproducer to PROVE the fix resolves the incident
     (sandbox counterfactual). Always include it when you can express the fix as a
     concrete code change — a verified fix is far more trustworthy than a described one.

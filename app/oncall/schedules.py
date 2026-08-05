@@ -578,7 +578,7 @@ class CalendarExporter:
     - Customizable event formatting
     """
 
-    PRODID = "-//DevOps-Copilot//On-Call Schedule//EN"
+    PRODID = "-//OmniPotent//On-Call Schedule//EN"
 
     @classmethod
     def generate_ical(

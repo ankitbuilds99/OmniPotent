@@ -1,4 +1,4 @@
-"""Advanced Slack Bot for DevOps Copilot.
+"""Advanced Slack Bot for OmniPotent.
 
 Best-in-class Slack integration matching incident.io/Rootly quality:
 - Conversational AI with context retention

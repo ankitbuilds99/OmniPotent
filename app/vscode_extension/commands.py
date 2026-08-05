@@ -20,7 +20,7 @@ class VSCodeCommand:
     command_id: str
     title: str
     description: str
-    category: str = "DevOps Copilot"
+    category: str = "OmniPotent"
     keybinding: str | None = None
     when: str = ""
 
@@ -258,7 +258,7 @@ class CommandPalette:
                 "id": "omnipotent.status",
                 "alignment": "right",
                 "priority": 100,
-                "text": "$(shield) DevOps Copilot",
+                "text": "$(shield) OmniPotent",
                 "tooltip": "System status and quick actions",
                 "command": "omnipotent.openInvestigation",
             },

@@ -1,4 +1,4 @@
-"""Performance module for DevOps Copilot."""
+"""Performance module for OmniPotent."""
 
 from app.performance.request_coalescing import (
     BatchCoalescer,

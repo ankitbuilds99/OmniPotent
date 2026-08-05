@@ -1,4 +1,4 @@
-"""Interactive setup wizard for DevOps Copilot.
+"""Interactive setup wizard for OmniPotent.
 
 Usage:
     copilot-setup              # interactive wizard
@@ -252,7 +252,7 @@ def setup_llm(env: dict[str, str]) -> dict[str, str]:
     """Setup LLM provider."""
     console.print(Panel(
         "[bold]Step 1: LLM Provider[/bold]\n\n"
-        "DevOps Copilot needs an AI model to investigate incidents.\n"
+        "OmniPotent needs an AI model to investigate incidents.\n"
         "Choose your preferred provider:",
         border_style="cyan"
     ))
@@ -350,7 +350,7 @@ def run_wizard() -> None:
     console.print(LOGO)
 
     console.print(Panel(
-        "[bold white]Welcome to DevOps Copilot Setup![/bold white]\n\n"
+        "[bold white]Welcome to OmniPotent Setup![/bold white]\n\n"
         "This wizard will help you connect your infrastructure services.\n"
         "You can skip any service to use demo mode instead.\n\n"
         "[dim]Press Ctrl+C at any time to exit.[/dim]",
@@ -430,7 +430,7 @@ def reset_config() -> None:
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="DevOps Copilot Setup Wizard",
+        description="OmniPotent Setup Wizard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

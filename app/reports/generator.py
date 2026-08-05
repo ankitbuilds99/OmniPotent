@@ -48,7 +48,7 @@ class ReportConfig:
 
     title: str
     subtitle: str = ""
-    author: str = "DevOps Copilot"
+    author: str = "OmniPotent"
     logo_url: str = ""
     theme: str = "default"
     page_size: str = "A4"

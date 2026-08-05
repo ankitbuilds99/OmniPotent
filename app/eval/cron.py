@@ -317,7 +317,7 @@ class NightlyEvalCron:
                 for r in regressions:
                     body += f"- **{r.metric_name}**: {r.previous_value:.3f} → {r.current_value:.3f} ({r.change_percent:+.1f}%)\n"
 
-            body += "\n---\n*Created automatically by DevOps Copilot eval cron*"
+            body += "\n---\n*Created automatically by OmniPotent eval cron*"
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(

@@ -1,4 +1,4 @@
-"""Kubernetes Operator - Custom Resource Definition for DevOps Copilot."""
+"""Kubernetes Operator - Custom Resource Definition for OmniPotent."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ class SLOStatus:
 
 
 class KubernetesOperator:
-    """Kubernetes operator for DevOps Copilot CRDs.
+    """Kubernetes operator for OmniPotent CRDs.
 
     Features:
     - Watch and reconcile custom resources

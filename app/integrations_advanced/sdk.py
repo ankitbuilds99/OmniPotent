@@ -378,7 +378,7 @@ class IntegrationSDK:
     def get_sdk_template(self) -> str:
         """Get SDK code template for building integrations."""
         return '''
-// DevOps Copilot Integration SDK
+// OmniPotent Integration SDK
 // TypeScript Example
 
 import { IntegrationSDK, Integration, Query, Action } from "@devopscopilot/sdk";
@@ -445,14 +445,14 @@ class MyToolIntegration implements Integration {
   }
 }
 
-// Register with DevOps Copilot
+// Register with OmniPotent
 IntegrationSDK.register(MyToolIntegration);
 '''
 
     def get_documentation(self) -> dict[str, Any]:
         """Get SDK documentation."""
         return {
-            "overview": "Build custom integrations for DevOps Copilot",
+            "overview": "Build custom integrations for OmniPotent",
             "getting_started": [
                 "Install the SDK: npm install @devopscopilot/sdk",
                 "Create an integration class implementing the Integration interface",

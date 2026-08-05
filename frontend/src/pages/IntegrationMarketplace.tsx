@@ -243,7 +243,7 @@ const CATEGORIES = [
 ];
 
 // Coming soon integrations (not yet available)
-const COMING_SOON = ["newrelic", "gcp", "bitbucket", "msteams", "discord", "terraform"];
+const COMING_SOON = ["gcp", "bitbucket", "msteams", "discord", "terraform"];
 
 function IntegrationCard({ integration, onConnect, onDisconnect }: {
   integration: Integration;
