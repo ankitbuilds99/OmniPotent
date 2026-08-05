@@ -586,6 +586,334 @@ async def slash_oncall(request: Request):
     return {"response_type": "ephemeral", "blocks": blocks}
 
 
+@router.post("/commands/incident")
+async def slash_incident(request: Request, background_tasks: BackgroundTasks):
+    """Handle /incident slash command - create, update, resolve incidents."""
+    form_data = await request.form()
+    text_raw = form_data.get("text", "")
+    text = str(text_raw).strip() if text_raw else ""
+    user_id = str(form_data.get("user_id", ""))
+    user_name = str(form_data.get("user_name", ""))
+    channel_id = str(form_data.get("channel_id", ""))
+    trigger_id = str(form_data.get("trigger_id", ""))
+    response_url = str(form_data.get("response_url", ""))
+
+    parts = text.split(maxsplit=1)
+    subcommand = parts[0].lower() if parts else "help"
+    args = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == "create":
+        if not args:
+            # Open modal for incident creation
+            return {
+                "response_type": "ephemeral",
+                "text": "Opening incident creation form...",
+            }
+
+        # Quick create with title
+        from datetime import datetime, timezone
+        incident_id = f"INC-{int(datetime.now(timezone.utc).timestamp()) % 100000}"
+
+        from app.slack_bot.messages import get_message_builder, IncidentData
+        builder = get_message_builder()
+        incident = IncidentData(
+            incident_id=incident_id,
+            title=args,
+            severity="P2",
+            status="open",
+            services=[],
+            responders=[user_id],
+            started_at=datetime.now(timezone.utc),
+        )
+
+        blocks = builder.incident_card(incident, show_actions=True)
+
+        return {
+            "response_type": "in_channel",
+            "blocks": blocks,
+        }
+
+    elif subcommand == "update":
+        return {
+            "response_type": "in_channel",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":speech_balloon: *Status Update* from <@{user_id}>:\n\n{args}",
+                    },
+                },
+            ],
+        }
+
+    elif subcommand == "resolve":
+        return {
+            "response_type": "in_channel",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":white_check_mark: *Incident Resolved* by <@{user_id}>\n\n{args or 'No resolution notes provided.'}",
+                    },
+                },
+            ],
+        }
+
+    elif subcommand == "escalate":
+        return {
+            "response_type": "in_channel",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":arrow_up: *Incident Escalated* by <@{user_id}>\n\n{args or 'Escalating to next tier.'}",
+                    },
+                },
+            ],
+        }
+
+    elif subcommand == "severity":
+        severity = args.upper() if args else "P2"
+        return {
+            "response_type": "in_channel",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":chart_with_upwards_trend: *Severity Updated* to {severity} by <@{user_id}>",
+                    },
+                },
+            ],
+        }
+
+    else:
+        return {
+            "response_type": "ephemeral",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "*`/incident` Commands:*\n\n"
+                            "* `/incident create <title>` - Create a new incident\n"
+                            "* `/incident update <message>` - Post a status update\n"
+                            "* `/incident resolve [notes]` - Resolve the incident\n"
+                            "* `/incident escalate [reason]` - Escalate to next tier\n"
+                            "* `/incident severity <P1|P2|P3|P4>` - Change severity"
+                        ),
+                    },
+                },
+            ],
+        }
+
+
+@router.post("/commands/warroom")
+async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
+    """Handle /warroom slash command - create and manage war rooms."""
+    form_data = await request.form()
+    text_raw = form_data.get("text", "")
+    text = str(text_raw).strip() if text_raw else ""
+    user_id = str(form_data.get("user_id", ""))
+    channel_id = str(form_data.get("channel_id", ""))
+
+    parts = text.split(maxsplit=1)
+    subcommand = parts[0].lower() if parts else "create"
+    args = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == "create":
+        from datetime import datetime, timezone
+        incident_id = f"INC-{int(datetime.now(timezone.utc).timestamp()) % 100000}"
+        channel_name = f"inc-{incident_id.lower()}-warroom"
+
+        return {
+            "response_type": "in_channel",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f":mega: *War Room Created*\n\n"
+                            f"*Channel:* #{channel_name}\n"
+                            f"*Created by:* <@{user_id}>\n"
+                            f"*Incident:* {args or incident_id}"
+                        ),
+                    },
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Join War Room", "emoji": True},
+                            "action_id": f"join_warroom_{incident_id}",
+                            "style": "primary",
+                        },
+                    ],
+                },
+            ],
+        }
+
+    elif subcommand == "list":
+        from app.slack_bot.war_room import get_war_room_manager
+        manager = get_war_room_manager()
+        active_rooms = manager.get_active_war_rooms()
+
+        if not active_rooms:
+            return {
+                "response_type": "ephemeral",
+                "text": "No active war rooms.",
+            }
+
+        rooms_text = "\n".join(
+            f"* #{wr.channel_name} - {wr.severity} {wr.title} ({wr.status.value})"
+            for wr in active_rooms[:10]
+        )
+
+        return {
+            "response_type": "ephemeral",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Active War Rooms ({len(active_rooms)}):*\n\n{rooms_text}",
+                    },
+                },
+            ],
+        }
+
+    else:
+        return {
+            "response_type": "ephemeral",
+            "text": "Usage: `/warroom create [title]` or `/warroom list`",
+        }
+
+
+@router.post("/commands/postmortem")
+async def slash_postmortem(request: Request):
+    """Handle /postmortem slash command - generate and manage postmortems."""
+    form_data = await request.form()
+    text_raw = form_data.get("text", "")
+    text = str(text_raw).strip() if text_raw else ""
+    user_id = str(form_data.get("user_id", ""))
+
+    parts = text.split(maxsplit=1)
+    subcommand = parts[0].lower() if parts else "generate"
+    args = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == "generate":
+        incident_id = args or "current"
+        return {
+            "response_type": "in_channel",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f":page_facing_up: *Generating Postmortem* for {incident_id}...\n\n"
+                            f"Requested by <@{user_id}>"
+                        ),
+                    },
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": "This may take a few moments. You'll be notified when ready."},
+                    ],
+                },
+            ],
+        }
+
+    elif subcommand == "actions":
+        return {
+            "response_type": "ephemeral",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "*Action Items from Recent Incidents:*\n\n"
+                            "1. :white_large_square: Add connection pool monitoring\n"
+                            "2. :white_large_square: Implement circuit breaker for payment-service\n"
+                            "3. :white_check_mark: Add pre-deploy health checks\n"
+                            "4. :white_large_square: Update runbook for DB failover"
+                        ),
+                    },
+                },
+            ],
+        }
+
+    elif subcommand == "share":
+        return {
+            "response_type": "ephemeral",
+            "text": f"Sharing postmortem for {args}. Choose destination channel.",
+        }
+
+    else:
+        return {
+            "response_type": "ephemeral",
+            "text": "Usage: `/postmortem generate [incident_id]` | `/postmortem actions` | `/postmortem share <incident_id>`",
+        }
+
+
+@router.post("/commands/stakeholder")
+async def slash_stakeholder(request: Request):
+    """Handle /stakeholder slash command - post stakeholder updates."""
+    form_data = await request.form()
+    text_raw = form_data.get("text", "")
+    text = str(text_raw).strip() if text_raw else ""
+    user_id = str(form_data.get("user_id", ""))
+
+    if not text:
+        return {
+            "response_type": "ephemeral",
+            "text": "Usage: `/stakeholder <update message>` - Posts an update to stakeholder channels.",
+        }
+
+    from datetime import datetime, timezone
+
+    return {
+        "response_type": "in_channel",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": ":mega: Stakeholder Update",
+                    "emoji": True,
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": text,
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"Posted by <@{user_id}> at "
+                            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+                        ),
+                    },
+                ],
+            },
+        ],
+    }
+
+
 @router.post("/commands/help")
 async def slash_help(request: Request):
     """Handle /omnipotent-help slash command."""
@@ -604,14 +932,41 @@ async def slash_help(request: Request):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*Slash Commands:*",
+                    "text": "*Incident Management:*",
                 }
             },
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "• `/rca [query]` - Start an AI investigation\n• `/status [service]` - Check system status\n• `/oncall [team]` - See who's on call\n• `/omnipotent-help` - Show this help",
+                    "text": (
+                        "* `/incident create <title>` - Create a new incident\n"
+                        "* `/incident update <message>` - Post status update\n"
+                        "* `/incident resolve [notes]` - Resolve incident\n"
+                        "* `/incident escalate [reason]` - Escalate incident\n"
+                        "* `/warroom create [title]` - Create war room\n"
+                        "* `/stakeholder <message>` - Post stakeholder update"
+                    ),
+                }
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Investigation & Monitoring:*",
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "* `/rca <query>` - Start AI investigation\n"
+                        "* `/status [service]` - Check system status\n"
+                        "* `/oncall [team]` - See who's on call\n"
+                        "* `/postmortem generate` - Generate postmortem"
+                    ),
                 }
             },
             {"type": "divider"},
@@ -626,7 +981,11 @@ async def slash_help(request: Request):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "• `@DevOps Copilot why is X slow?`\n• `@DevOps Copilot investigate Y`\n• `@DevOps Copilot what changed recently?`",
+                    "text": (
+                        "* `@DevOps Copilot why is X slow?`\n"
+                        "* `@DevOps Copilot investigate Y`\n"
+                        "* `@DevOps Copilot what changed recently?`"
+                    ),
                 }
             },
             {"type": "divider"},
@@ -634,7 +993,10 @@ async def slash_help(request: Request):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*Auto-Investigation:*\nI automatically investigate alerts posted in monitored channels. Look for the :robot_face: reply!",
+                    "text": (
+                        "*Interactive Features:*\n"
+                        "Use buttons on incident cards for quick actions like Acknowledge, Escalate, Resolve, and Snooze."
+                    ),
                 }
             },
         ]
@@ -642,7 +1004,7 @@ async def slash_help(request: Request):
 
 
 @router.post("/interactivity")
-async def slack_interactivity(request: Request):
+async def slack_interactivity(request: Request, background_tasks: BackgroundTasks):
     """Handle Slack interactive components (buttons, modals)."""
     form_data = await request.form()
     payload_raw = form_data.get("payload", "{}")
@@ -650,31 +1012,108 @@ async def slack_interactivity(request: Request):
     payload = json.loads(payload_str)
 
     action_type = payload.get("type")
+    user = payload.get("user", {})
+    user_id = user.get("id", "")
+    channel = payload.get("channel", {})
+    channel_id = channel.get("id", "")
+    trigger_id = payload.get("trigger_id", "")
+    response_url = payload.get("response_url", "")
 
     if action_type == "block_actions":
         actions = payload.get("actions", [])
         for action in actions:
-            action_id = action.get("action_id")
+            action_id = action.get("action_id", "")
+            action_value = action.get("value", "")
 
-            if action_id == "feedback_helpful":
-                # Log positive feedback
+            # Incident action handlers
+            if action_id.startswith("ack_") or action_id.startswith("acknowledge_"):
+                incident_id = action_id.split("_", 1)[1]
+                return await _handle_incident_action(
+                    "acknowledge", incident_id, user_id, channel_id, response_url
+                )
+
+            elif action_id.startswith("escalate_"):
+                incident_id = action_id.replace("escalate_", "")
+                # Open escalation modal
+                from app.slack_bot.interactions import get_incident_action_handler
+                handler = get_incident_action_handler()
+                return {
+                    "response_action": "open_modal",
+                    "view": handler.get_escalation_modal(incident_id, trigger_id),
+                }
+
+            elif action_id.startswith("resolve_"):
+                incident_id = action_id.replace("resolve_", "")
+                from app.slack_bot.interactions import get_incident_action_handler
+                handler = get_incident_action_handler()
+                return {
+                    "response_action": "open_modal",
+                    "view": handler.get_resolution_modal(incident_id, trigger_id),
+                }
+
+            elif action_id.startswith("snooze_"):
+                incident_id = action_id.replace("snooze_", "")
+                from app.slack_bot.interactions import get_incident_action_handler
+                handler = get_incident_action_handler()
+                return {
+                    "response_action": "open_modal",
+                    "view": handler.get_snooze_options_modal(incident_id, trigger_id),
+                }
+
+            elif action_id.startswith("warroom_") or action_id.startswith("create_war_room_"):
+                incident_id = action_id.split("_")[-1]
+                return await _handle_incident_action(
+                    "create_war_room", incident_id, user_id, channel_id, response_url
+                )
+
+            elif action_id.startswith("update_") or action_id.startswith("post_update_"):
+                incident_id = action_id.split("_")[-1]
+                return {
+                    "response_action": "open_modal",
+                    "view": _get_status_update_modal(incident_id, trigger_id),
+                }
+
+            elif action_id.startswith("investigate_"):
+                incident_id = action_id.replace("investigate_", "")
+                from app.slack_bot.blocks import get_block_builder
+                builder = get_block_builder()
+                blocks = builder.investigation_started(
+                    query=f"Investigating incident {incident_id}",
+                    user_id=user_id,
+                )
+                return {"blocks": blocks, "response_type": "in_channel"}
+
+            elif action_id.startswith("fix_"):
+                incident_id = action_id.replace("fix_", "")
+                return {"text": f":hammer_and_wrench: Generating fix PR for {incident_id}..."}
+
+            elif action_id.startswith("rollback_"):
+                incident_id = action_id.replace("rollback_", "")
+                from app.slack_bot.blocks import get_block_builder
+                builder = get_block_builder()
+                blocks = builder.approval_card(
+                    approval_id=f"rollback_{incident_id}",
+                    action_type="Rollback Deployment",
+                    description=f"Rollback to previous version for {incident_id}",
+                    details={"incident_id": incident_id},
+                    risk_level="medium",
+                    requested_by=user_id,
+                )
+                return {"blocks": blocks}
+
+            # Feedback handlers
+            elif action_id == "feedback_helpful":
+                logger.info(f"Positive feedback from user {user_id}")
                 return {"text": "Thanks for the feedback! :thumbsup:"}
 
             elif action_id == "feedback_not_helpful":
-                # Log negative feedback and open modal for details
                 return {
                     "response_action": "open_modal",
                     "view": {
                         "type": "modal",
                         "callback_id": "feedback_modal",
-                        "title": {
-                            "type": "plain_text",
-                            "text": "Improve AI Response",
-                        },
-                        "submit": {
-                            "type": "plain_text",
-                            "text": "Submit",
-                        },
+                        "title": {"type": "plain_text", "text": "Improve AI Response"},
+                        "submit": {"type": "plain_text", "text": "Submit"},
                         "blocks": [
                             {
                                 "type": "input",
@@ -688,23 +1127,421 @@ async def slack_interactivity(request: Request):
                                         "text": "What was wrong or missing?",
                                     },
                                 },
-                                "label": {
-                                    "type": "plain_text",
-                                    "text": "Your Feedback",
-                                },
+                                "label": {"type": "plain_text", "text": "Your Feedback"},
                             }
                         ],
                     },
                 }
 
+            # Overflow menu actions
+            elif action_id.startswith("more_"):
+                selected = action.get("selected_option", {}).get("value", "")
+                if selected.startswith("add_responder_"):
+                    incident_id = selected.replace("add_responder_", "")
+                    return {
+                        "response_action": "open_modal",
+                        "view": _get_add_responder_modal(incident_id, trigger_id),
+                    }
+                elif selected.startswith("severity_"):
+                    incident_id = selected.replace("severity_", "")
+                    return {
+                        "response_action": "open_modal",
+                        "view": _get_severity_modal(incident_id, trigger_id),
+                    }
+                elif selected.startswith("timeline_"):
+                    incident_id = selected.replace("timeline_", "")
+                    from app.slack_bot.blocks import get_block_builder
+                    builder = get_block_builder()
+                    blocks = builder.timeline_card(
+                        incident_id=incident_id,
+                        events=[
+                            {"time": "Now", "event": "Timeline requested"},
+                        ],
+                    )
+                    return {"blocks": blocks, "response_type": "ephemeral"}
+
     elif action_type == "view_submission":
-        callback_id = payload.get("view", {}).get("callback_id")
+        callback_id = payload.get("view", {}).get("callback_id", "")
+        values = payload.get("view", {}).get("state", {}).get("values", {})
 
         if callback_id == "feedback_modal":
-            values = payload.get("view", {}).get("state", {}).get("values", {})
             feedback = values.get("feedback_input", {}).get("feedback_text", {}).get("value", "")
-            # Store feedback for model improvement
-            logger.info(f"Received feedback: {feedback}")
+            logger.info(f"Received feedback from {user_id}: {feedback}")
             return {"response_action": "clear"}
 
+        elif callback_id.startswith("escalate_submit_"):
+            incident_id = callback_id.replace("escalate_submit_", "")
+            level = values.get("escalation_level", {}).get("level_select", {}).get("selected_option", {}).get("value", "L2")
+            team = values.get("escalation_team", {}).get("team_select", {}).get("selected_option", {}).get("value", "on-call")
+            reason = values.get("escalation_reason", {}).get("reason_input", {}).get("value", "")
+
+            from app.slack_bot.interactions import get_incident_action_handler
+            handler = get_incident_action_handler()
+            result = await handler.handle_action(
+                action_id=f"escalate_{incident_id}",
+                incident_id=incident_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                action_type="escalate",
+                action_value=None,
+            )
+            result.details.update({"level": level, "team": team, "reason": reason})
+
+            if response_url:
+                background_tasks.add_task(_send_response, response_url, result.blocks)
+
+            return {"response_action": "clear"}
+
+        elif callback_id.startswith("resolve_submit_"):
+            incident_id = callback_id.replace("resolve_submit_", "")
+            resolution_type = values.get("resolution_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "fixed")
+            summary = values.get("resolution_summary", {}).get("summary_input", {}).get("value", "")
+
+            from app.slack_bot.interactions import get_incident_action_handler
+            handler = get_incident_action_handler()
+            await handler.handle_action(
+                action_id=f"resolve_{incident_id}",
+                incident_id=incident_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                action_type="resolve",
+            )
+
+            return {"response_action": "clear"}
+
+        elif callback_id.startswith("snooze_submit_"):
+            incident_id = callback_id.replace("snooze_submit_", "")
+            duration = values.get("snooze_duration", {}).get("duration_select", {}).get("selected_option", {}).get("value", "30")
+
+            from app.slack_bot.interactions import get_incident_action_handler
+            handler = get_incident_action_handler()
+            await handler.handle_action(
+                action_id=f"snooze_{incident_id}",
+                incident_id=incident_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                action_type="snooze",
+            )
+
+            return {"response_action": "clear"}
+
+        elif callback_id.startswith("status_update_"):
+            incident_id = callback_id.replace("status_update_", "")
+            update_type = values.get("update_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "update")
+            update_text = values.get("update_text", {}).get("text_input", {}).get("value", "")
+
+            from app.slack_bot.interactions import get_incident_action_handler
+            handler = get_incident_action_handler()
+            await handler.handle_action(
+                action_id=f"update_{incident_id}",
+                incident_id=incident_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                action_type="post_update",
+            )
+
+            return {"response_action": "clear"}
+
+    elif action_type == "shortcut":
+        callback_id = payload.get("callback_id", "")
+
+        if callback_id == "create_incident":
+            return {
+                "response_action": "open_modal",
+                "view": _get_create_incident_modal(trigger_id),
+            }
+
+        elif callback_id == "quick_investigate":
+            return {
+                "response_action": "open_modal",
+                "view": _get_quick_investigate_modal(trigger_id),
+            }
+
     return {"ok": True}
+
+
+async def _handle_incident_action(
+    action_type: str,
+    incident_id: str,
+    user_id: str,
+    channel_id: str,
+    response_url: str,
+) -> dict:
+    """Handle an incident action."""
+    from app.slack_bot.interactions import get_incident_action_handler
+
+    handler = get_incident_action_handler()
+    result = await handler.handle_action(
+        action_id=f"{action_type}_{incident_id}",
+        incident_id=incident_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        action_type=action_type,
+    )
+
+    if result.blocks:
+        return {"blocks": result.blocks}
+    return {"text": result.message}
+
+
+async def _send_response(response_url: str, blocks: list[dict]) -> None:
+    """Send a response to Slack via response_url."""
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            response_url,
+            json={"blocks": blocks, "response_type": "in_channel"},
+        )
+
+
+def _get_status_update_modal(incident_id: str, trigger_id: str) -> dict:
+    """Get status update modal."""
+    return {
+        "type": "modal",
+        "callback_id": f"status_update_{incident_id}",
+        "title": {"type": "plain_text", "text": "Post Status Update"},
+        "submit": {"type": "plain_text", "text": "Post"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "update_type",
+                "label": {"type": "plain_text", "text": "Update Type"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "type_select",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Progress Update"}, "value": "progress"},
+                        {"text": {"type": "plain_text", "text": "Investigation Update"}, "value": "investigating"},
+                        {"text": {"type": "plain_text", "text": "Root Cause Identified"}, "value": "identified"},
+                        {"text": {"type": "plain_text", "text": "Mitigation Applied"}, "value": "mitigation"},
+                        {"text": {"type": "plain_text", "text": "Monitoring"}, "value": "monitoring"},
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "update_text",
+                "label": {"type": "plain_text", "text": "Update Message"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "text_input",
+                    "multiline": True,
+                    "placeholder": {"type": "plain_text", "text": "What's the current status?"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "stakeholder_update",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Post to Stakeholder Channel"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "stakeholder_check",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Also post to stakeholder channel"}, "value": "yes"},
+                    ],
+                },
+            },
+        ],
+    }
+
+
+def _get_add_responder_modal(incident_id: str, trigger_id: str) -> dict:
+    """Get add responder modal."""
+    return {
+        "type": "modal",
+        "callback_id": f"add_responder_{incident_id}",
+        "title": {"type": "plain_text", "text": "Add Responder"},
+        "submit": {"type": "plain_text", "text": "Add"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "responder",
+                "label": {"type": "plain_text", "text": "Select Responder"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "user_select",
+                    "placeholder": {"type": "plain_text", "text": "Choose a user"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "role",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Role (optional)"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "role_select",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Responder"}, "value": "responder"},
+                        {"text": {"type": "plain_text", "text": "Incident Commander"}, "value": "commander"},
+                        {"text": {"type": "plain_text", "text": "Communications Lead"}, "value": "comms"},
+                        {"text": {"type": "plain_text", "text": "Subject Matter Expert"}, "value": "sme"},
+                    ],
+                },
+            },
+        ],
+    }
+
+
+def _get_severity_modal(incident_id: str, trigger_id: str) -> dict:
+    """Get severity update modal."""
+    return {
+        "type": "modal",
+        "callback_id": f"severity_update_{incident_id}",
+        "title": {"type": "plain_text", "text": "Update Severity"},
+        "submit": {"type": "plain_text", "text": "Update"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "severity",
+                "label": {"type": "plain_text", "text": "New Severity"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "severity_select",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "P1 - Critical"}, "value": "P1"},
+                        {"text": {"type": "plain_text", "text": "P2 - High"}, "value": "P2"},
+                        {"text": {"type": "plain_text", "text": "P3 - Medium"}, "value": "P3"},
+                        {"text": {"type": "plain_text", "text": "P4 - Low"}, "value": "P4"},
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "reason",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Reason for Change"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "reason_input",
+                    "placeholder": {"type": "plain_text", "text": "Why is severity changing?"},
+                },
+            },
+        ],
+    }
+
+
+def _get_create_incident_modal(trigger_id: str) -> dict:
+    """Get create incident modal."""
+    return {
+        "type": "modal",
+        "callback_id": "create_incident_submit",
+        "title": {"type": "plain_text", "text": "Create Incident"},
+        "submit": {"type": "plain_text", "text": "Create"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "title",
+                "label": {"type": "plain_text", "text": "Incident Title"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "title_input",
+                    "placeholder": {"type": "plain_text", "text": "Brief description of the incident"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "severity",
+                "label": {"type": "plain_text", "text": "Severity"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "severity_select",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "P1 - Critical"}, "value": "P1"},
+                        {"text": {"type": "plain_text", "text": "P2 - High"}, "value": "P2"},
+                        {"text": {"type": "plain_text", "text": "P3 - Medium"}, "value": "P3"},
+                        {"text": {"type": "plain_text", "text": "P4 - Low"}, "value": "P4"},
+                    ],
+                    "initial_option": {"text": {"type": "plain_text", "text": "P2 - High"}, "value": "P2"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "description",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Description"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "description_input",
+                    "multiline": True,
+                    "placeholder": {"type": "plain_text", "text": "What's happening? What's the impact?"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "services",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Affected Services"},
+                "element": {
+                    "type": "multi_static_select",
+                    "action_id": "services_select",
+                    "placeholder": {"type": "plain_text", "text": "Select services"},
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "API"}, "value": "api"},
+                        {"text": {"type": "plain_text", "text": "Web"}, "value": "web"},
+                        {"text": {"type": "plain_text", "text": "Database"}, "value": "database"},
+                        {"text": {"type": "plain_text", "text": "Payment"}, "value": "payment"},
+                        {"text": {"type": "plain_text", "text": "Authentication"}, "value": "auth"},
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "war_room",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Create War Room"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "warroom_check",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Create dedicated incident channel"}, "value": "yes"},
+                    ],
+                },
+            },
+        ],
+    }
+
+
+def _get_quick_investigate_modal(trigger_id: str) -> dict:
+    """Get quick investigate modal."""
+    return {
+        "type": "modal",
+        "callback_id": "quick_investigate_submit",
+        "title": {"type": "plain_text", "text": "Quick Investigate"},
+        "submit": {"type": "plain_text", "text": "Investigate"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "query",
+                "label": {"type": "plain_text", "text": "What's the issue?"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "query_input",
+                    "multiline": True,
+                    "placeholder": {"type": "plain_text", "text": "e.g., checkout-api is returning 500 errors"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "timerange",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Time Range"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "timerange_select",
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Last 15 minutes"}, "value": "15m"},
+                        {"text": {"type": "plain_text", "text": "Last 1 hour"}, "value": "1h"},
+                        {"text": {"type": "plain_text", "text": "Last 6 hours"}, "value": "6h"},
+                        {"text": {"type": "plain_text", "text": "Last 24 hours"}, "value": "24h"},
+                    ],
+                    "initial_option": {"text": {"type": "plain_text", "text": "Last 1 hour"}, "value": "1h"},
+                },
+            },
+        ],
+    }

@@ -804,3 +804,970 @@ async def analyze_workload(
     """Analyze workload balance."""
     service = await get_ai_oncall_service(db)
     return await service.analyze_workload_balance(team_id, period_days)
+
+
+# ============================================================================
+# ROTATION TEMPLATES ENDPOINTS
+# ============================================================================
+
+class CreateRotationTemplateRequest(BaseModel):
+    """Request to create a rotation template."""
+    name: str
+    pattern_type: str  # weekly, biweekly, follow_the_sun, custom, business_hours, weekend
+    timezone: str = "UTC"
+    participants: list[UUID] = []
+    handoff_time: str = "09:00"
+    handoff_day: str = "monday"
+    rotation_length_days: int = 7
+    # For follow-the-sun
+    regions: list[dict[str, Any]] | None = None
+    # For layered rotations
+    layers: list[dict[str, Any]] | None = None
+    # For business hours / custom
+    restrictions: list[dict[str, Any]] | None = None
+
+
+class RotationTemplateResponse(BaseModel):
+    """Response model for rotation templates."""
+    template_id: str
+    name: str
+    description: str
+    pattern_type: str
+    timezone: str
+
+
+@router.post("/rotation-templates", response_model=RotationTemplateResponse)
+async def create_rotation_template(
+    request: CreateRotationTemplateRequest,
+):
+    """
+    Create a new rotation template.
+
+    Supported pattern types:
+    - weekly: Standard weekly rotation
+    - biweekly: Two-week rotation cycles
+    - follow_the_sun: Coverage follows working hours across timezones
+    - custom: Custom rotation length with optional restrictions
+    - business_hours: Only active during business hours
+    - weekend: Only active on weekends
+    - layered: Multiple overlapping rotation layers
+    """
+    from app.oncall.rotations import (
+        create_weekly_rotation,
+        create_biweekly_rotation,
+        create_follow_the_sun_rotation,
+        create_custom_rotation,
+        create_business_hours_rotation,
+        create_weekend_rotation,
+        create_layered_rotation,
+    )
+
+    pattern_type = request.pattern_type.lower()
+
+    if pattern_type == "weekly":
+        template = create_weekly_rotation(
+            name=request.name,
+            participants=request.participants,
+            timezone=request.timezone,
+            handoff_day=request.handoff_day,
+            handoff_time_str=request.handoff_time,
+        )
+    elif pattern_type == "biweekly":
+        template = create_biweekly_rotation(
+            name=request.name,
+            participants=request.participants,
+            timezone=request.timezone,
+            handoff_day=request.handoff_day,
+            handoff_time_str=request.handoff_time,
+        )
+    elif pattern_type == "follow_the_sun":
+        if not request.regions:
+            raise HTTPException(status_code=400, detail="Regions required for follow-the-sun rotation")
+        template = create_follow_the_sun_rotation(
+            name=request.name,
+            regions=request.regions,
+        )
+    elif pattern_type == "business_hours":
+        template = create_business_hours_rotation(
+            name=request.name,
+            participants=request.participants,
+            timezone=request.timezone,
+        )
+    elif pattern_type == "weekend":
+        template = create_weekend_rotation(
+            name=request.name,
+            participants=request.participants,
+            timezone=request.timezone,
+        )
+    elif pattern_type == "layered":
+        if not request.layers:
+            raise HTTPException(status_code=400, detail="Layers required for layered rotation")
+        template = create_layered_rotation(
+            name=request.name,
+            layers=request.layers,
+            timezone=request.timezone,
+        )
+    elif pattern_type == "custom":
+        template = create_custom_rotation(
+            name=request.name,
+            participants=request.participants,
+            rotation_length_days=request.rotation_length_days,
+            timezone=request.timezone,
+            handoff_day=request.handoff_day,
+            handoff_time_str=request.handoff_time,
+            restrictions=request.restrictions,
+        )
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown pattern type: {pattern_type}")
+
+    log.info("Created rotation template: %s", template.template_id)
+
+    return RotationTemplateResponse(
+        template_id=template.template_id,
+        name=template.name,
+        description=template.description,
+        pattern_type=template.pattern_type.value,
+        timezone=template.timezone,
+    )
+
+
+@router.post("/rotation-templates/{template_id}/preview")
+async def preview_rotation_shifts(
+    template_id: str,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    participants: list[UUID] = Query(default=[]),
+):
+    """
+    Preview shifts that would be generated from a rotation template.
+
+    This is useful for testing rotation configurations before committing them.
+    """
+    from app.oncall.rotations import create_weekly_rotation
+
+    # For preview, create a temporary template with the given participants
+    # In production, this would look up the template by ID
+    template = create_weekly_rotation(
+        name="Preview",
+        participants=participants,
+    )
+
+    shifts = list(template.generate_shifts(start_date, end_date))
+
+    return {
+        "template_id": template_id,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "shifts_count": len(shifts),
+        "shifts": [
+            {
+                "user_id": str(s["user_id"]),
+                "start_time": s["start_time"].isoformat(),
+                "end_time": s["end_time"].isoformat(),
+                "shift_type": s["shift_type"],
+                "layer": s.get("layer"),
+                "region": s.get("region"),
+            }
+            for s in shifts
+        ],
+    }
+
+
+# ============================================================================
+# OVERRIDE MANAGEMENT ENDPOINTS
+# ============================================================================
+
+class CreateOverrideWithReasonRequest(BaseModel):
+    """Request to create an override with reason tracking."""
+    schedule_id: UUID
+    override_user_id: UUID
+    start_time: datetime
+    end_time: datetime
+    reason: str  # pto, sick, personal, swap, training, coverage, emergency, other
+    reason_details: str | None = None
+    original_user_id: UUID | None = None
+    requires_approval: bool = False
+
+
+class OverrideWithReasonResponse(BaseModel):
+    """Response model for override with reason."""
+    id: UUID
+    schedule_id: UUID
+    override_user_id: UUID
+    original_user_id: UUID | None
+    start_time: datetime
+    end_time: datetime
+    reason: str
+    reason_details: str | None
+    status: str
+    requires_approval: bool
+    approved_by: UUID | None
+    approved_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/overrides/with-reason", response_model=OverrideWithReasonResponse)
+async def create_override_with_reason(
+    request: CreateOverrideWithReasonRequest,
+    db=Depends(get_async_session),
+):
+    """
+    Create a schedule override with reason tracking.
+
+    Supported reasons:
+    - pto: Paid time off
+    - sick: Sick leave
+    - personal: Personal reasons
+    - swap: Shift swap
+    - training: Training/shadowing
+    - coverage: Covering for someone
+    - emergency: Emergency situation
+    - other: Other reasons (provide details)
+    """
+    from app.oncall.schedules import OverrideReason
+
+    try:
+        reason_enum = OverrideReason(request.reason.lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid reason. Valid options: {[r.value for r in OverrideReason]}"
+        )
+
+    override = OncallOverride(
+        schedule_id=request.schedule_id,
+        original_user_id=request.original_user_id,
+        override_user_id=request.override_user_id,
+        start_time=request.start_time,
+        end_time=request.end_time,
+        reason=reason_enum.value,
+        notes=request.reason_details,
+        requires_approval=request.requires_approval,
+        status="pending" if request.requires_approval else "active",
+        created_by=request.override_user_id,
+    )
+    db.add(override)
+    await db.commit()
+    await db.refresh(override)
+
+    log.info("Created override %s with reason: %s", override.id, reason_enum.value)
+
+    return OverrideWithReasonResponse(
+        id=override.id,
+        schedule_id=override.schedule_id,
+        override_user_id=override.override_user_id,
+        original_user_id=override.original_user_id,
+        start_time=override.start_time,
+        end_time=override.end_time,
+        reason=override.reason or "",
+        reason_details=override.notes,
+        status=override.status,
+        requires_approval=override.requires_approval,
+        approved_by=override.approved_by,
+        approved_at=override.approved_at,
+    )
+
+
+@router.post("/overrides/{override_id}/approve")
+async def approve_override(
+    override_id: UUID,
+    approver_id: UUID,
+    db=Depends(get_async_session),
+):
+    """Approve a pending override."""
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(OncallOverride).where(OncallOverride.id == override_id)
+    )
+    override = result.scalar_one_or_none()
+
+    if not override:
+        raise HTTPException(status_code=404, detail="Override not found")
+
+    if override.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Override is already {override.status}")
+
+    override.status = "active"
+    override.approved_by = approver_id
+    override.approved_at = datetime.utcnow()
+
+    await db.commit()
+    log.info("Override %s approved by %s", override_id, approver_id)
+
+    return {"id": override.id, "status": override.status}
+
+
+@router.get("/schedules/{schedule_id}/overrides")
+async def list_schedule_overrides(
+    schedule_id: UUID,
+    status: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db=Depends(get_async_session),
+):
+    """List overrides for a schedule with optional filtering."""
+    from sqlalchemy import select
+
+    query = select(OncallOverride).where(OncallOverride.schedule_id == schedule_id)
+
+    if status:
+        query = query.where(OncallOverride.status == status)
+    if start_date:
+        query = query.where(OncallOverride.end_time >= datetime.combine(start_date, datetime.min.time()))
+    if end_date:
+        query = query.where(OncallOverride.start_time <= datetime.combine(end_date, datetime.max.time()))
+
+    query = query.order_by(OncallOverride.start_time)
+    result = await db.execute(query)
+    overrides = result.scalars().all()
+
+    return [
+        {
+            "id": o.id,
+            "original_user_id": o.original_user_id,
+            "override_user_id": o.override_user_id,
+            "start_time": o.start_time.isoformat(),
+            "end_time": o.end_time.isoformat(),
+            "reason": o.reason,
+            "notes": o.notes,
+            "status": o.status,
+            "requires_approval": o.requires_approval,
+            "approved_by": o.approved_by,
+        }
+        for o in overrides
+    ]
+
+
+# ============================================================================
+# SCHEDULE GAPS DETECTION ENDPOINTS
+# ============================================================================
+
+@router.get("/schedules/{schedule_id}/gaps/analyze")
+async def analyze_schedule_gaps(
+    schedule_id: UUID,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    coverage_type: str = "24x7",
+    db=Depends(get_async_session),
+):
+    """
+    Analyze schedule for coverage gaps.
+
+    Returns detailed gap information including:
+    - Gap start/end times
+    - Gap duration
+    - Severity (critical, high, medium, low)
+    - Summary statistics
+    """
+    from sqlalchemy import select
+    from app.oncall.schedules import GapDetector, ScheduleShift
+
+    # Fetch shifts for the period
+    result = await db.execute(
+        select(OncallShift)
+        .where(
+            OncallShift.schedule_id == schedule_id,
+            OncallShift.status.in_(["scheduled", "active"]),
+            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
+            OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+        )
+        .order_by(OncallShift.start_time)
+    )
+    shifts_db = result.scalars().all()
+
+    # Convert to ScheduleShift objects
+    shifts = [
+        ScheduleShift(
+            shift_id=s.id,
+            schedule_id=s.schedule_id,
+            user_id=s.user_id,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            shift_type=s.shift_type,
+            layer=1,
+            source=s.source,
+        )
+        for s in shifts_db
+    ]
+
+    # Detect gaps
+    start_time = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=None)
+    end_time = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=None)
+
+    gaps = GapDetector.detect_gaps(
+        shifts=shifts,
+        start_time=start_time.replace(tzinfo=None),
+        end_time=end_time.replace(tzinfo=None),
+        schedule_id=schedule_id,
+        coverage_type=coverage_type,
+    )
+
+    summary = GapDetector.get_gap_summary(gaps)
+
+    return {
+        "schedule_id": str(schedule_id),
+        "analysis_period": {
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+        },
+        "coverage_type": coverage_type,
+        "summary": summary,
+        "gaps": [g.to_dict() for g in gaps],
+    }
+
+
+@router.get("/schedules/{schedule_id}/gaps/alert")
+async def check_upcoming_gaps(
+    schedule_id: UUID,
+    lookahead_days: int = 7,
+    db=Depends(get_async_session),
+):
+    """
+    Check for coverage gaps in the upcoming period.
+
+    Used for proactive gap alerting.
+    """
+    start_date = date.today()
+    end_date = start_date + timedelta(days=lookahead_days)
+
+    # Reuse the analysis endpoint logic
+    return await analyze_schedule_gaps(
+        schedule_id=schedule_id,
+        start_date=start_date,
+        end_date=end_date,
+        coverage_type="24x7",
+        db=db,
+    )
+
+
+# ============================================================================
+# TIMEZONE SUPPORT ENDPOINTS
+# ============================================================================
+
+@router.get("/timezones")
+async def list_supported_timezones():
+    """
+    List all supported timezones with common aliases.
+
+    Useful for UI timezone selectors.
+    """
+    from app.oncall.schedules import TimezoneManager
+    from zoneinfo import available_timezones
+
+    common_timezones = [
+        "UTC",
+        "America/New_York",
+        "America/Chicago",
+        "America/Denver",
+        "America/Los_Angeles",
+        "Europe/London",
+        "Europe/Paris",
+        "Europe/Berlin",
+        "Asia/Tokyo",
+        "Asia/Singapore",
+        "Asia/Kolkata",
+        "Australia/Sydney",
+        "Pacific/Auckland",
+    ]
+
+    return {
+        "common": common_timezones,
+        "aliases": TimezoneManager.TIMEZONE_ALIASES,
+        "all": sorted(list(available_timezones())),
+    }
+
+
+@router.post("/timezones/convert")
+async def convert_time_between_timezones(
+    time_str: str = Query(..., description="ISO format datetime"),
+    from_tz: str = Query(...),
+    to_tz: str = Query(...),
+):
+    """Convert a time between timezones."""
+    from app.oncall.schedules import TimezoneManager
+
+    try:
+        dt = datetime.fromisoformat(time_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid datetime format. Use ISO format.")
+
+    try:
+        converted = TimezoneManager.convert_time(dt, from_tz, to_tz)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Timezone conversion error: {e}")
+
+    return {
+        "original": {
+            "datetime": time_str,
+            "timezone": from_tz,
+        },
+        "converted": {
+            "datetime": converted.isoformat(),
+            "timezone": to_tz,
+        },
+    }
+
+
+@router.get("/schedules/{schedule_id}/view-in-timezone")
+async def view_schedule_in_timezone(
+    schedule_id: UUID,
+    timezone: str,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    db=Depends(get_async_session),
+):
+    """
+    View schedule shifts converted to a specific timezone.
+
+    Useful for team members viewing the schedule in their local time.
+    """
+    from sqlalchemy import select
+    from app.oncall.schedules import TimezoneManager
+
+    result = await db.execute(
+        select(OncallShift)
+        .where(
+            OncallShift.schedule_id == schedule_id,
+            OncallShift.status.in_(["scheduled", "active"]),
+            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
+            OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+        )
+        .order_by(OncallShift.start_time)
+    )
+    shifts = result.scalars().all()
+
+    return {
+        "schedule_id": str(schedule_id),
+        "timezone": timezone,
+        "shifts": [
+            {
+                "id": s.id,
+                "user_id": s.user_id,
+                "start_time_utc": s.start_time.isoformat(),
+                "end_time_utc": s.end_time.isoformat(),
+                "start_time_local": TimezoneManager.format_time_for_user(s.start_time, timezone),
+                "end_time_local": TimezoneManager.format_time_for_user(s.end_time, timezone),
+                "shift_type": s.shift_type,
+            }
+            for s in shifts
+        ],
+    }
+
+
+@router.get("/schedules/{schedule_id}/dst-transitions")
+async def get_dst_transitions(
+    schedule_id: UUID,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    db=Depends(get_async_session),
+):
+    """
+    Get DST transitions that may affect the schedule.
+
+    Alerts about potential issues during daylight saving time changes.
+    """
+    from sqlalchemy import select
+    from app.oncall.schedules import TimezoneManager
+    from app.oncall.models import OncallSchedule
+
+    result = await db.execute(
+        select(OncallSchedule).where(OncallSchedule.id == schedule_id)
+    )
+    schedule = result.scalar_one_or_none()
+
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    transitions = TimezoneManager.get_dst_transitions(
+        schedule.timezone,
+        start_date,
+        end_date,
+    )
+
+    return {
+        "schedule_id": str(schedule_id),
+        "timezone": schedule.timezone,
+        "transitions": transitions,
+        "warning": "Schedule handoffs near DST transitions may shift by 1 hour" if transitions else None,
+    }
+
+
+# ============================================================================
+# CALENDAR EXPORT ENDPOINTS
+# ============================================================================
+
+@router.get("/schedules/{schedule_id}/ical")
+async def get_schedule_ical_feed(
+    schedule_id: UUID,
+    user_id: UUID | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db=Depends(get_async_session),
+):
+    """
+    Generate iCal feed for a schedule.
+
+    Can be used to subscribe to on-call schedules in calendar apps.
+    Optionally filter by user to get personal schedule only.
+    """
+    from sqlalchemy import select
+    from fastapi.responses import Response
+    from app.oncall.schedules import CalendarExporter, ScheduleShift
+    from app.oncall.models import OncallSchedule
+
+    # Get schedule
+    result = await db.execute(
+        select(OncallSchedule).where(OncallSchedule.id == schedule_id)
+    )
+    schedule = result.scalar_one_or_none()
+
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    # Default to next 30 days
+    if not start_date:
+        start_date = date.today()
+    if not end_date:
+        end_date = start_date + timedelta(days=30)
+
+    # Get shifts
+    query = select(OncallShift).where(
+        OncallShift.schedule_id == schedule_id,
+        OncallShift.status.in_(["scheduled", "active"]),
+        OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
+        OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+    )
+
+    if user_id:
+        query = query.where(OncallShift.user_id == user_id)
+
+    query = query.order_by(OncallShift.start_time)
+    result = await db.execute(query)
+    shifts_db = result.scalars().all()
+
+    # Convert to ScheduleShift objects
+    shifts = [
+        ScheduleShift(
+            shift_id=s.id,
+            schedule_id=s.schedule_id,
+            user_id=s.user_id,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            shift_type=s.shift_type,
+            layer=1,
+            source=s.source,
+        )
+        for s in shifts_db
+    ]
+
+    # Generate iCal
+    ical_content = CalendarExporter.generate_ical(
+        shifts=shifts,
+        schedule_name=schedule.name,
+        include_reminders=True,
+    )
+
+    return Response(
+        content=ical_content,
+        media_type="text/calendar",
+        headers={
+            "Content-Disposition": f"attachment; filename=oncall-{schedule_id}.ics"
+        },
+    )
+
+
+@router.get("/schedules/{schedule_id}/ical-url")
+async def get_ical_subscription_url(
+    schedule_id: UUID,
+    user_id: UUID | None = None,
+    db=Depends(get_async_session),
+):
+    """
+    Get the subscription URL for the iCal feed.
+
+    Returns a URL that can be added to calendar applications
+    for automatic syncing.
+    """
+    from sqlalchemy import select
+    from app.oncall.models import OncallSchedule
+
+    result = await db.execute(
+        select(OncallSchedule).where(OncallSchedule.id == schedule_id)
+    )
+    schedule = result.scalar_one_or_none()
+
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    # Build subscription URL
+    base_url = "/api/v1/oncall"  # In production, use actual base URL
+    url = f"{base_url}/schedules/{schedule_id}/ical"
+    if user_id:
+        url += f"?user_id={user_id}"
+
+    return {
+        "schedule_id": str(schedule_id),
+        "schedule_name": schedule.name,
+        "subscription_url": url,
+        "instructions": {
+            "google_calendar": "Go to Settings > Add calendar > From URL, then paste the subscription URL",
+            "apple_calendar": "File > New Calendar Subscription, then paste the subscription URL",
+            "outlook": "Add calendar > Subscribe from web, then paste the subscription URL",
+        },
+    }
+
+
+# ============================================================================
+# WORKLOAD ANALYSIS ENDPOINTS
+# ============================================================================
+
+@router.get("/schedules/{schedule_id}/workload-analysis")
+async def analyze_schedule_workload(
+    schedule_id: UUID,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    db=Depends(get_async_session),
+):
+    """
+    Analyze workload distribution for a schedule.
+
+    Returns metrics on fairness of on-call distribution including:
+    - Total hours per user
+    - Weekend hours
+    - Night hours
+    - Fairness score
+    """
+    from sqlalchemy import select
+    from app.oncall.schedules import ScheduleAnalyzer, ScheduleShift
+
+    result = await db.execute(
+        select(OncallShift)
+        .where(
+            OncallShift.schedule_id == schedule_id,
+            OncallShift.status.in_(["scheduled", "active", "completed"]),
+            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
+            OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+        )
+    )
+    shifts_db = result.scalars().all()
+
+    shifts = [
+        ScheduleShift(
+            shift_id=s.id,
+            schedule_id=s.schedule_id,
+            user_id=s.user_id,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            shift_type=s.shift_type,
+            layer=1,
+            source=s.source,
+        )
+        for s in shifts_db
+    ]
+
+    analysis = ScheduleAnalyzer.analyze_workload(shifts, start_date, end_date)
+
+    return {
+        "schedule_id": str(schedule_id),
+        **analysis,
+    }
+
+
+# ============================================================================
+# ENHANCED ESCALATION POLICY ENDPOINTS
+# ============================================================================
+
+class CreateEnhancedEscalationPolicyRequest(BaseModel):
+    """Request to create an enhanced escalation policy."""
+    team_id: UUID
+    name: str
+    description: str = ""
+    steps: list[dict[str, Any]]
+    high_urgency_steps: list[dict[str, Any]] | None = None
+    low_urgency_steps: list[dict[str, Any]] | None = None
+    time_rules: list[dict[str, Any]] | None = None
+    match_conditions: list[dict[str, Any]] | None = None
+    repeat_enabled: bool = True
+    repeat_limit: int = 3
+    is_default: bool = False
+
+
+@router.post("/escalation-policies/enhanced")
+async def create_enhanced_escalation_policy(
+    request: CreateEnhancedEscalationPolicyRequest,
+    db=Depends(get_async_session),
+):
+    """
+    Create an enhanced escalation policy with PagerDuty-level features.
+
+    Features:
+    - Multiple steps with configurable delays
+    - Different paths for high/low urgency
+    - Time-based routing (business hours vs after hours)
+    - Alert matching conditions
+    - Repeat behavior
+    """
+    from app.oncall.escalations import (
+        EscalationPolicyBuilder,
+        EscalationTarget,
+        TargetType,
+        NotificationChannel,
+        EscalationUrgency,
+    )
+    from uuid import uuid4
+
+    policy_id = uuid4()
+    builder = EscalationPolicyBuilder(request.name, policy_id)
+    builder.for_team(request.team_id)
+    builder.with_description(request.description)
+
+    # Add default steps
+    for step_config in request.steps:
+        targets = []
+        for t in step_config.get("targets", []):
+            targets.append(EscalationTarget(
+                target_type=TargetType(t["type"]),
+                target_id=t["id"],
+                target_name=t.get("name"),
+                schedule_layer=t.get("layer"),
+            ))
+
+        channels = [
+            NotificationChannel(c)
+            for c in step_config.get("channels", ["push", "sms"])
+        ]
+
+        builder.add_step(
+            delay_minutes=step_config.get("delay_minutes", 0),
+            targets=targets,
+            channels=channels,
+            repeat_count=step_config.get("repeat_count", 1),
+            description=step_config.get("description"),
+        )
+
+    # Add high urgency steps if provided
+    if request.high_urgency_steps:
+        builder.for_high_urgency()
+        for step_config in request.high_urgency_steps:
+            targets = [
+                EscalationTarget(
+                    target_type=TargetType(t["type"]),
+                    target_id=t["id"],
+                    schedule_layer=t.get("layer"),
+                )
+                for t in step_config.get("targets", [])
+            ]
+            channels = [
+                NotificationChannel(c)
+                for c in step_config.get("channels", ["push", "sms", "phone"])
+            ]
+            builder.add_step(
+                delay_minutes=step_config.get("delay_minutes", 0),
+                targets=targets,
+                channels=channels,
+            )
+
+    builder.with_repeat(enabled=request.repeat_enabled, limit=request.repeat_limit)
+
+    if request.is_default:
+        builder.as_default()
+
+    policy = builder.build()
+
+    # Store in database (using existing escalation service)
+    service = await get_escalation_service(db)
+    db_policy = await service.create_escalation_policy(
+        team_id=request.team_id,
+        name=request.name,
+        description=request.description,
+        steps=[s.to_dict() for s in policy.steps],
+        is_default=request.is_default,
+        repeat_enabled=request.repeat_enabled,
+        repeat_limit=request.repeat_limit,
+    )
+
+    return {
+        "id": db_policy.id,
+        "name": db_policy.name,
+        "steps_count": len(policy.steps),
+        "has_high_urgency_path": policy.high_urgency_steps is not None,
+        "has_low_urgency_path": policy.low_urgency_steps is not None,
+        "time_rules_count": len(policy.time_rules),
+    }
+
+
+@router.post("/escalation-policies/from-template")
+async def create_policy_from_template(
+    template_type: str = Query(..., description="simple, critical, business_hours"),
+    team_id: UUID = Query(...),
+    schedule_id: str = Query(...),
+    slack_channel_id: str | None = None,
+    timezone: str = "UTC",
+    db=Depends(get_async_session),
+):
+    """
+    Create an escalation policy from a predefined template.
+
+    Templates:
+    - simple: Basic 3-level escalation (primary -> secondary -> team)
+    - critical: Aggressive escalation for critical alerts with phone calls
+    - business_hours: Different behavior during business hours vs after hours
+    """
+    from app.oncall.escalations import (
+        create_simple_policy,
+        create_critical_alerts_policy,
+        create_business_hours_policy,
+    )
+    from uuid import uuid4
+
+    policy_id = uuid4()
+
+    if template_type == "simple":
+        policy = create_simple_policy(
+            name=f"Simple Policy - {team_id}",
+            schedule_id=schedule_id,
+            team_id=team_id,
+            policy_id=policy_id,
+        )
+    elif template_type == "critical":
+        if not slack_channel_id:
+            raise HTTPException(status_code=400, detail="slack_channel_id required for critical template")
+        policy = create_critical_alerts_policy(
+            name=f"Critical Alerts Policy - {team_id}",
+            schedule_id=schedule_id,
+            slack_channel_id=slack_channel_id,
+            team_id=team_id,
+            policy_id=policy_id,
+        )
+    elif template_type == "business_hours":
+        policy = create_business_hours_policy(
+            name=f"Business Hours Policy - {team_id}",
+            schedule_id=schedule_id,
+            timezone=timezone,
+            team_id=team_id,
+            policy_id=policy_id,
+        )
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown template type: {template_type}")
+
+    # Store in database
+    service = await get_escalation_service(db)
+    db_policy = await service.create_escalation_policy(
+        team_id=team_id,
+        name=policy.name,
+        description=policy.description,
+        steps=[s.to_dict() for s in policy.steps],
+        is_default=policy.is_default,
+        repeat_enabled=policy.repeat_enabled,
+        repeat_limit=policy.repeat_limit,
+    )
+
+    return {
+        "id": db_policy.id,
+        "name": db_policy.name,
+        "template": template_type,
+        "steps_count": len(policy.steps),
+    }

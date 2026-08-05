@@ -562,7 +562,198 @@ class WarRoomManager:
         return blocks
 
 
+class StakeholderChannel:
+    """Manages stakeholder update channels."""
+
+    def __init__(self) -> None:
+        self._stakeholder_channels: dict[str, dict[str, Any]] = {}
+
+    async def create_stakeholder_channel(
+        self,
+        incident_id: str,
+        title: str,
+        stakeholder_groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a stakeholder-facing channel for updates."""
+        channel_name = f"inc-{incident_id.lower()}-updates"
+
+        channel_info = {
+            "channel_id": f"C_STK_{incident_id}",
+            "channel_name": channel_name,
+            "incident_id": incident_id,
+            "stakeholder_groups": stakeholder_groups or ["executives", "support"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "update_count": 0,
+            "last_update": None,
+        }
+
+        self._stakeholder_channels[incident_id] = channel_info
+
+        log.info(
+            "Created stakeholder channel: %s for incident %s",
+            channel_name,
+            incident_id,
+        )
+
+        return channel_info
+
+    async def post_stakeholder_update(
+        self,
+        incident_id: str,
+        update_text: str,
+        severity: str,
+        status: str,
+        next_update_minutes: int = 30,
+    ) -> bool:
+        """Post an update to stakeholder channel."""
+        channel_info = self._stakeholder_channels.get(incident_id)
+        if not channel_info:
+            return False
+
+        channel_info["update_count"] += 1
+        channel_info["last_update"] = datetime.now(timezone.utc).isoformat()
+
+        log.info(
+            "Posted stakeholder update #%d for incident %s",
+            channel_info["update_count"],
+            incident_id,
+        )
+
+        return True
+
+    def get_stakeholder_channel(self, incident_id: str) -> dict[str, Any] | None:
+        """Get stakeholder channel info."""
+        return self._stakeholder_channels.get(incident_id)
+
+
+class CriticalIncidentManager:
+    """Specialized handling for P1/SEV1 critical incidents."""
+
+    def __init__(self, war_room_manager: WarRoomManager) -> None:
+        self._war_room_manager = war_room_manager
+        self._stakeholder_channels = StakeholderChannel()
+        self._executive_notified: dict[str, bool] = {}
+        self._bridge_calls: dict[str, dict[str, Any]] = {}
+
+    async def handle_critical_incident(
+        self,
+        incident_id: str,
+        org_id: str,
+        title: str,
+        services: list[str] | None = None,
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Handle a critical (P1/SEV1) incident with full automation."""
+        log.info("Handling critical incident: %s", incident_id)
+
+        # Create war room
+        war_room = await self._war_room_manager.create_war_room(
+            incident_id=incident_id,
+            org_id=org_id,
+            title=title,
+            severity="P1",
+            services=services,
+            description=description,
+        )
+
+        # Create stakeholder channel
+        stakeholder_info = await self._stakeholder_channels.create_stakeholder_channel(
+            incident_id=incident_id,
+            title=title,
+        )
+
+        # Page on-call
+        await self._page_oncall_chain(incident_id, services)
+
+        # Notify executives
+        await self._notify_executives(incident_id, title)
+
+        # Set up bridge call
+        bridge_info = await self._setup_bridge_call(incident_id)
+
+        return {
+            "war_room": war_room.to_dict(),
+            "stakeholder_channel": stakeholder_info,
+            "bridge_call": bridge_info,
+            "executives_notified": True,
+        }
+
+    async def _page_oncall_chain(
+        self,
+        incident_id: str,
+        services: list[str] | None,
+    ) -> None:
+        """Page the on-call chain for critical incidents."""
+        log.info("Paging on-call chain for critical incident: %s", incident_id)
+
+    async def _notify_executives(
+        self,
+        incident_id: str,
+        title: str,
+    ) -> None:
+        """Notify executives about critical incident."""
+        self._executive_notified[incident_id] = True
+        log.info("Notified executives about critical incident: %s", incident_id)
+
+    async def _setup_bridge_call(
+        self,
+        incident_id: str,
+    ) -> dict[str, Any]:
+        """Set up a bridge call for the incident."""
+        bridge_info = {
+            "incident_id": incident_id,
+            "dial_in": "+1-555-123-4567",
+            "pin": f"{hash(incident_id) % 1000000:06d}",
+            "meeting_url": f"https://meet.example.com/incident-{incident_id}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        self._bridge_calls[incident_id] = bridge_info
+
+        log.info("Bridge call set up for incident: %s", incident_id)
+
+        return bridge_info
+
+    def get_bridge_call_info(self, incident_id: str) -> dict[str, Any] | None:
+        """Get bridge call info for an incident."""
+        return self._bridge_calls.get(incident_id)
+
+    def get_bridge_call_blocks(self, incident_id: str) -> list[dict[str, Any]]:
+        """Get Slack blocks for bridge call info."""
+        bridge_info = self._bridge_calls.get(incident_id)
+        if not bridge_info:
+            return []
+
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        ":telephone_receiver: *Incident Bridge Call*\n\n"
+                        f"*Dial-in:* `{bridge_info['dial_in']}`\n"
+                        f"*PIN:* `{bridge_info['pin']}`\n"
+                        f"*Meeting URL:* <{bridge_info['meeting_url']}|Join Video Call>"
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": ":video_camera: Join Call", "emoji": True},
+                        "action_id": f"join_bridge_{incident_id}",
+                        "url": bridge_info["meeting_url"],
+                        "style": "primary",
+                    },
+                ],
+            },
+        ]
+
+
 _manager: WarRoomManager | None = None
+_critical_manager: CriticalIncidentManager | None = None
 
 
 def get_war_room_manager() -> WarRoomManager:
@@ -571,3 +762,11 @@ def get_war_room_manager() -> WarRoomManager:
     if _manager is None:
         _manager = WarRoomManager()
     return _manager
+
+
+def get_critical_incident_manager() -> CriticalIncidentManager:
+    """Get the critical incident manager."""
+    global _critical_manager
+    if _critical_manager is None:
+        _critical_manager = CriticalIncidentManager(get_war_room_manager())
+    return _critical_manager

@@ -1,10 +1,13 @@
 """Advanced Slack Bot for DevOps Copilot.
 
-Best-in-class Slack integration featuring:
+Best-in-class Slack integration matching incident.io/Rootly quality:
 - Conversational AI with context retention
 - Incident war rooms with auto-created channels
-- Interactive Block Kit components
-- Comprehensive slash commands
+- Interactive Block Kit components with Acknowledge/Escalate/Resolve/Snooze
+- Comprehensive slash commands (/incident, /oncall, /status, /warroom, /postmortem)
+- Rich message formatting with incident cards
+- Status updates to stakeholder channels
+- Thread management for investigations
 - Natural language understanding
 - Live metrics embedding
 - Workflow automation
@@ -27,6 +30,7 @@ from app.slack_bot.war_room import (
     WarRoomConfig,
     WarRoomManager,
     get_war_room_manager,
+    get_critical_incident_manager,
 )
 from app.slack_bot.blocks import (
     BlockBuilder,
@@ -54,6 +58,18 @@ from app.slack_bot.handlers import (
     get_event_handler,
     get_interaction_handler,
 )
+from app.slack_bot.interactions import (
+    IncidentAction,
+    ActionResult,
+    IncidentActionHandler,
+    get_incident_action_handler,
+)
+from app.slack_bot.messages import (
+    MessageBuilder,
+    MessageType,
+    IncidentData,
+    get_message_builder,
+)
 
 __all__ = [
     # Core
@@ -70,6 +86,7 @@ __all__ = [
     "WarRoomConfig",
     "WarRoomManager",
     "get_war_room_manager",
+    "get_critical_incident_manager",
     # Blocks
     "BlockBuilder",
     "InvestigationCard",
@@ -92,4 +109,14 @@ __all__ = [
     "InteractionHandler",
     "get_event_handler",
     "get_interaction_handler",
+    # Interactions (incident actions)
+    "IncidentAction",
+    "ActionResult",
+    "IncidentActionHandler",
+    "get_incident_action_handler",
+    # Messages (rich formatting)
+    "MessageBuilder",
+    "MessageType",
+    "IncidentData",
+    "get_message_builder",
 ]

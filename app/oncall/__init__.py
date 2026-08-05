@@ -94,6 +94,54 @@ from app.oncall.ai_oncall_service import (
     get_ai_oncall_service,
 )
 
+# Rotation templates (PagerDuty-level)
+from app.oncall.rotations import (
+    RotationTemplate,
+    RotationPatternType,
+    FollowTheSunRegion,
+    RotationLayer,
+    TimeRestriction,
+    HandoffDay,
+    create_weekly_rotation,
+    create_biweekly_rotation,
+    create_follow_the_sun_rotation,
+    create_business_hours_rotation,
+    create_weekend_rotation,
+    create_custom_rotation,
+    create_layered_rotation,
+)
+
+# Enhanced schedules
+from app.oncall.schedules import (
+    OverrideReason,
+    GapSeverity,
+    ScheduleGap,
+    ScheduleOverride,
+    ScheduleShift,
+    TimezoneManager,
+    GapDetector,
+    CalendarExporter,
+    ConflictDetector,
+    ScheduleAnalyzer,
+)
+
+# Enhanced escalations
+from app.oncall.escalations import (
+    TargetType,
+    EscalationUrgency,
+    NotificationChannel,
+    EscalationTarget,
+    EscalationStep,
+    TimeBasedRule,
+    MatchCondition,
+    EscalationPolicy as EnhancedEscalationPolicy,
+    EscalationState,
+    EscalationPolicyBuilder,
+    create_simple_policy,
+    create_critical_alerts_policy,
+    create_business_hours_policy,
+)
+
 # API router
 from app.oncall.api_router import router as oncall_router
 
@@ -142,6 +190,45 @@ __all__ = [
     "get_escalation_service",
     "AIOncallService",
     "get_ai_oncall_service",
+    # Rotation templates
+    "RotationTemplate",
+    "RotationPatternType",
+    "FollowTheSunRegion",
+    "RotationLayer",
+    "TimeRestriction",
+    "HandoffDay",
+    "create_weekly_rotation",
+    "create_biweekly_rotation",
+    "create_follow_the_sun_rotation",
+    "create_business_hours_rotation",
+    "create_weekend_rotation",
+    "create_custom_rotation",
+    "create_layered_rotation",
+    # Enhanced schedules
+    "OverrideReason",
+    "GapSeverity",
+    "ScheduleGap",
+    "ScheduleOverride",
+    "ScheduleShift",
+    "TimezoneManager",
+    "GapDetector",
+    "CalendarExporter",
+    "ConflictDetector",
+    "ScheduleAnalyzer",
+    # Enhanced escalations
+    "TargetType",
+    "EscalationUrgency",
+    "NotificationChannel",
+    "EscalationTarget",
+    "EscalationStep",
+    "TimeBasedRule",
+    "MatchCondition",
+    "EnhancedEscalationPolicy",
+    "EscalationState",
+    "EscalationPolicyBuilder",
+    "create_simple_policy",
+    "create_critical_alerts_policy",
+    "create_business_hours_policy",
     # API router
     "oncall_router",
 ]

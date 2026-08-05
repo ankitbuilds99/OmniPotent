@@ -2,6 +2,10 @@
 
 Provides:
 - Component status monitoring
+- Incident management with timeline
+- Scheduled maintenance windows
+- Subscriber notifications (email/webhook)
+- Uptime metrics (30d, 90d)
 - AI-generated status updates
 - Personalized customer views
 - SLA tracking with burn-down
@@ -10,6 +14,33 @@ Provides:
 - Multi-channel sync
 """
 
+# New production-ready status page models and store
+from app.status_page.models import (
+    Component as StatusComponent,
+    ComponentStatus as StatusComponentStatus,
+    Incident,
+    IncidentStatus,
+    IncidentSeverity,
+    IncidentUpdate as StatusIncidentUpdate,
+    Maintenance,
+    MaintenanceStatus,
+    Subscriber,
+    SubscriptionType,
+)
+from app.status_page.store import (
+    StatusStore,
+    InMemoryStatusStore,
+    get_status_store,
+    set_status_store,
+)
+from app.status_page.notifications import (
+    StatusNotifier,
+    NotificationPayload,
+    get_status_notifier,
+)
+from app.status_page.api_router import router as status_router
+
+# Legacy components (kept for backwards compatibility)
 from app.status_page.components import (
     Component,
     ComponentStatus,
@@ -44,13 +75,32 @@ from app.status_page.widgets import (
 )
 
 __all__ = [
-    # Components
+    # New status page API
+    "status_router",
+    "StatusComponent",
+    "StatusComponentStatus",
+    "Incident",
+    "IncidentStatus",
+    "IncidentSeverity",
+    "StatusIncidentUpdate",
+    "Maintenance",
+    "MaintenanceStatus",
+    "Subscriber",
+    "SubscriptionType",
+    "StatusStore",
+    "InMemoryStatusStore",
+    "get_status_store",
+    "set_status_store",
+    "StatusNotifier",
+    "NotificationPayload",
+    "get_status_notifier",
+    # Legacy Components
     "Component",
     "ComponentStatus",
     "ComponentGroup",
     "StatusRegistry",
     "get_status_registry",
-    # Incidents
+    # Legacy Incidents
     "StatusIncident",
     "IncidentUpdate",
     "IncidentImpact",

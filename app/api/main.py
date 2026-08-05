@@ -763,6 +763,10 @@ app.include_router(verification_router, prefix="/api")
 from app.slo.api_router import router as slo_router  # noqa: E402
 app.include_router(slo_router)
 
+# Include public status page router for component status, incidents, and maintenance.
+from app.status_page.api_router import router as status_page_router  # noqa: E402
+app.include_router(status_page_router)
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")
