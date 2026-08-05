@@ -609,12 +609,14 @@ _Created by OmniPotent_
     )
 
     if issue:
-        # Link to incident page if we have one
-        await client.link_issue_to_url(
-            issue.id,
-            f"https://app.example.com/incidents/{incident_id}",
-            f"Incident {incident_id}",
-        )
+        # Link to incident page if configured
+        app_url = os.environ.get("OMNIPOTENT_APP_URL", "")
+        if app_url:
+            await client.link_issue_to_url(
+                issue.id,
+                f"{app_url}/incidents/{incident_id}",
+                f"Incident {incident_id}",
+            )
 
     return issue
 
