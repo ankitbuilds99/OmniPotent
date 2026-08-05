@@ -10,17 +10,18 @@ import json
 import re
 import logging
 import httpx
+import os
 
 router = APIRouter(prefix="/slack", tags=["slack"])
 logger = logging.getLogger(__name__)
 
 
 class SlackConfig:
-    """Slack app configuration - would be loaded from env in production."""
+    """Slack app configuration - loaded from environment variables."""
 
-    SIGNING_SECRET: str = ""
-    BOT_TOKEN: str = ""
-    APP_TOKEN: str = ""
+    SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
+    BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
+    APP_TOKEN: str = os.getenv("SLACK_APP_TOKEN", "")
 
 
 def verify_slack_signature(
