@@ -1,4 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import "./styles/responsive.css";
 
 @tailwind base;
 @tailwind components;
@@ -653,4 +654,3 @@ body {
 .to-\[\#00FFB3\] {
   --tw-gradient-to: var(--ok) !important;
 }
-@import "./styles/responsive.css";

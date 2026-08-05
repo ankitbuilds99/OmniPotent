@@ -374,15 +374,64 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
 
   const fetchSLOs = useCallback(async () => {
     try {
-      // Fetch incidents and services to derive SLO data
+      // Try to fetch from real SLO API first
+      const sloRes = await fetch(`${API_BASE}/api/slos`);
+      if (sloRes.ok) {
+        const sloData = await sloRes.json();
+        if (sloData.length > 0) {
+          // Fetch error budgets for each SLO
+          const slosWithBudgets: SLO[] = await Promise.all(
+            sloData.map(async (slo: Record<string, unknown>) => {
+              let budget = { remaining: 43.2, total: 43.2, burn_rate: 0.5, status: "healthy" };
+              try {
+                const budgetRes = await fetch(`${API_BASE}/api/slos/${slo.id}/budget`);
+                if (budgetRes.ok) {
+                  const budgetData = await budgetRes.json();
+                  budget = {
+                    remaining: budgetData.remaining * 43.2 / (1 - (slo.target as number)),
+                    total: 43.2,
+                    burn_rate: budgetData.burn_rate,
+                    status: budgetData.status,
+                  };
+                }
+              } catch {
+                // Use defaults
+              }
+
+              let status: SLO["status"] = "healthy";
+              if (budget.status === "breached") status = "exhausted";
+              else if (budget.status === "at_risk") status = "critical";
+              else if (budget.burn_rate > 1) status = "warning";
+
+              return {
+                id: slo.id as string,
+                name: slo.name as string,
+                service: slo.service as string,
+                type: (slo.sli_type as string) || "availability",
+                target: ((slo.target as number) * 100),
+                current: ((slo.target as number) * 100) - (budget.burn_rate * 0.1),
+                window: (slo.window as string)?.replace("rolling_", "") || "30d",
+                budget_total: budget.total,
+                budget_remaining: budget.remaining,
+                budget_burn_rate: budget.burn_rate,
+                status,
+                alerts: [],
+              };
+            })
+          );
+          setSlos(slosWithBudgets);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Fallback: derive SLOs from incidents/alerts
       const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
       const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
-      // Fetch alerts
       const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
       const alerts = alertsRes.ok ? await alertsRes.json() : [];
 
-      // Group by service and calculate SLOs
       const serviceMap = new Map<string, { incidents: number; alerts: Record<string, unknown>[] }>();
 
       incidents.forEach((inc: Record<string, unknown>) => {
@@ -401,7 +450,6 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
         serviceMap.get(service)!.alerts.push(alert);
       });
 
-      // Generate SLOs from services
       const generatedSLOs: SLO[] = [];
       let idx = 0;
       serviceMap.forEach((data, service) => {
@@ -440,12 +488,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
         });
       });
 
-      // If no services found, create some default SLOs
-      if (generatedSLOs.length === 0) {
-        setSlos([]);
-      } else {
-        setSlos(generatedSLOs);
-      }
+      setSlos(generatedSLOs);
     } catch (error) {
       console.error("Failed to fetch SLOs:", error);
     } finally {
@@ -460,21 +503,60 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
   }, [fetchSLOs]);
 
   const handleCreateSLO = async (sloData: Partial<SLO>) => {
-    const newSLO: SLO = {
-      id: `slo-${Date.now()}`,
-      name: sloData.name || "New SLO",
-      service: sloData.service || "unknown",
-      type: sloData.type || "availability",
-      target: sloData.target || 99.9,
-      current: sloData.target || 99.9,
-      window: sloData.window || "30d",
-      budget_total: 43.2,
-      budget_remaining: 43.2,
-      budget_burn_rate: 0.5,
-      status: "healthy",
-      alerts: [],
-    };
-    setSlos([...slos, newSLO]);
+    try {
+      // Call real API to create SLO
+      const response = await fetch(`${API_BASE}/api/slos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: sloData.name || "New SLO",
+          service: sloData.service || "unknown",
+          sli_type: sloData.type || "availability",
+          target: (sloData.target || 99.9) / 100, // Convert percentage to decimal
+          window: `rolling_${sloData.window || "30d"}`,
+        }),
+      });
+
+      if (response.ok) {
+        // Refresh SLOs from API
+        fetchSLOs();
+      } else {
+        // Fallback to local state
+        const newSLO: SLO = {
+          id: `slo-${Date.now()}`,
+          name: sloData.name || "New SLO",
+          service: sloData.service || "unknown",
+          type: sloData.type || "availability",
+          target: sloData.target || 99.9,
+          current: sloData.target || 99.9,
+          window: sloData.window || "30d",
+          budget_total: 43.2,
+          budget_remaining: 43.2,
+          budget_burn_rate: 0.5,
+          status: "healthy",
+          alerts: [],
+        };
+        setSlos([...slos, newSLO]);
+      }
+    } catch (error) {
+      console.error("Failed to create SLO:", error);
+      // Fallback to local state
+      const newSLO: SLO = {
+        id: `slo-${Date.now()}`,
+        name: sloData.name || "New SLO",
+        service: sloData.service || "unknown",
+        type: sloData.type || "availability",
+        target: sloData.target || 99.9,
+        current: sloData.target || 99.9,
+        window: sloData.window || "30d",
+        budget_total: 43.2,
+        budget_remaining: 43.2,
+        budget_burn_rate: 0.5,
+        status: "healthy",
+        alerts: [],
+      };
+      setSlos([...slos, newSLO]);
+    }
     setShowCreateModal(false);
   };
 
