@@ -162,7 +162,7 @@ def create_issue(
     if priority:
         input_data["priority"] = _as_int(priority, 0)
     if labels:
-        input_data["labelIds"] = [l.strip() for l in labels.split(",") if l.strip()]
+        input_data["labelIds"] = [lbl.strip() for lbl in labels.split(",") if lbl.strip()]
 
     resp = httpx.post(
         API_URL,
@@ -248,7 +248,7 @@ def get_issue(issue_id: str) -> dict:
         "priority": issue.get("priority", 0),
         "priority_label": issue.get("priorityLabel", ""),
         "team_name": team.get("name", ""),
-        "labels": [l.get("name", "") for l in labels],
+        "labels": [lbl.get("name", "") for lbl in labels],
         "url": issue.get("url", ""),
     }
 
@@ -408,7 +408,7 @@ def search_issues(
             "priority": item.get("priority", 0),
             "priority_label": item.get("priorityLabel", ""),
             "team_name": team_data.get("name", ""),
-            "labels": [l.get("name", "") for l in labels_data],
+            "labels": [lbl.get("name", "") for lbl in labels_data],
             "url": item.get("url", ""),
         })
 

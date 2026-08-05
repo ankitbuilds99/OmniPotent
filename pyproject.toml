@@ -42,6 +42,8 @@ dependencies = [
     "sentry-sdk>=2.0.0",
     # iCal calendar export for on-call schedules
     "icalendar>=6.0.0",
+    # Email validation for status page subscribers (Pydantic EmailStr)
+    "email-validator>=2.0.0",
 ]
 
 [project.optional-dependencies]

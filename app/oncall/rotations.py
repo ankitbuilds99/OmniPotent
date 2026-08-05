@@ -266,7 +266,7 @@ class RotationTemplate:
     def _get_layered_oncall(self, at_time: datetime) -> UUID | None:
         """Get on-call considering multiple layers (highest priority wins)."""
         # Sort layers by priority (1 = highest)
-        sorted_layers = sorted(self.layers, key=lambda l: l.priority)
+        sorted_layers = sorted(self.layers, key=lambda layer: layer.priority)
 
         for layer in sorted_layers:
             tz = layer.get_layer_tz()
@@ -400,7 +400,7 @@ class RotationTemplate:
         end_date: date,
     ) -> Iterator[dict[str, Any]]:
         """Generate shifts for layered rotations."""
-        for layer in sorted(self.layers, key=lambda l: l.priority):
+        for layer in sorted(self.layers, key=lambda lay: lay.priority):
             if not layer.participants:
                 continue
 
