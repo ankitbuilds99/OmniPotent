@@ -381,7 +381,7 @@ class IntegrationSDK:
 // OmniPotent Integration SDK
 // TypeScript Example
 
-import { IntegrationSDK, Integration, Query, Action } from "@devopscopilot/sdk";
+import { IntegrationSDK, Integration, Query, Action } from "@omnipotent/sdk";
 
 class MyToolIntegration implements Integration {
   name = 'my-tool';
@@ -454,7 +454,7 @@ IntegrationSDK.register(MyToolIntegration);
         return {
             "overview": "Build custom integrations for OmniPotent",
             "getting_started": [
-                "Install the SDK: npm install @devopscopilot/sdk",
+                "Install the SDK: npm install @omnipotent/sdk",
                 "Create an integration class implementing the Integration interface",
                 "Register handlers for your capabilities",
                 "Test locally with the SDK simulator",

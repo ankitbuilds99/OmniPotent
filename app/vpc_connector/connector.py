@@ -477,34 +477,34 @@ def create_connector_from_env() -> VPCConnector:
     """Create a connector from environment variables.
 
     Expected env vars:
-    - DEVCOPILOT_CONNECTOR_ID
-    - DEVCOPILOT_ORGANIZATION_ID
-    - DEVCOPILOT_CONNECTOR_TOKEN
-    - DEVCOPILOT_CONTROL_PLANE_URL
-    - DEVCOPILOT_LOG_SOURCE_TYPE (elasticsearch, loki, cloudwatch)
-    - DEVCOPILOT_LOG_SOURCE_URL
-    - DEVCOPILOT_METRICS_SOURCE_TYPE (prometheus, datadog)
-    - DEVCOPILOT_METRICS_SOURCE_URL
+    - OMNIPOTENT_CONNECTOR_ID
+    - OMNIPOTENT_ORGANIZATION_ID
+    - OMNIPOTENT_CONNECTOR_TOKEN
+    - OMNIPOTENT_CONTROL_PLANE_URL
+    - OMNIPOTENT_LOG_SOURCE_TYPE (elasticsearch, loki, cloudwatch)
+    - OMNIPOTENT_LOG_SOURCE_URL
+    - OMNIPOTENT_METRICS_SOURCE_TYPE (prometheus, datadog)
+    - OMNIPOTENT_METRICS_SOURCE_URL
     """
     import os
 
     config = ConnectorConfig(
-        connector_id=os.environ["DEVCOPILOT_CONNECTOR_ID"],
-        organization_id=os.environ["DEVCOPILOT_ORGANIZATION_ID"],
-        connector_token=os.environ["DEVCOPILOT_CONNECTOR_TOKEN"],
+        connector_id=os.environ["OMNIPOTENT_CONNECTOR_ID"],
+        organization_id=os.environ["OMNIPOTENT_ORGANIZATION_ID"],
+        connector_token=os.environ["OMNIPOTENT_CONNECTOR_TOKEN"],
         control_plane_url=os.environ.get(
-            "DEVCOPILOT_CONTROL_PLANE_URL",
-            "wss://api.omnipotent.com/connector",
+            "OMNIPOTENT_CONTROL_PLANE_URL",
+            "wss://api.omnipotent.dev/connector",
         ),
         logs_config={
-            "type": os.environ.get("DEVCOPILOT_LOG_SOURCE_TYPE", "elasticsearch"),
-            "url": os.environ.get("DEVCOPILOT_LOG_SOURCE_URL", "http://localhost:9200"),
+            "type": os.environ.get("OMNIPOTENT_LOG_SOURCE_TYPE", "elasticsearch"),
+            "url": os.environ.get("OMNIPOTENT_LOG_SOURCE_URL", "http://localhost:9200"),
         },
         metrics_config={
-            "type": os.environ.get("DEVCOPILOT_METRICS_SOURCE_TYPE", "prometheus"),
-            "url": os.environ.get("DEVCOPILOT_METRICS_SOURCE_URL", "http://localhost:9090"),
+            "type": os.environ.get("OMNIPOTENT_METRICS_SOURCE_TYPE", "prometheus"),
+            "url": os.environ.get("OMNIPOTENT_METRICS_SOURCE_URL", "http://localhost:9090"),
         },
-        kubernetes_enabled=os.environ.get("DEVCOPILOT_KUBERNETES_ENABLED", "false").lower() == "true",
+        kubernetes_enabled=os.environ.get("OMNIPOTENT_KUBERNETES_ENABLED", "false").lower() == "true",
     )
 
     return VPCConnector(config)

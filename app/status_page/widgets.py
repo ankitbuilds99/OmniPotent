@@ -175,7 +175,7 @@ class WidgetGenerator:
 
         elif format == "react":
             components_str = "', '".join(widget.components)
-            return f'''import {{ StatusWidget }} from '@devopscopilot/status-widget';
+            return f'''import {{ StatusWidget }} from '@omnipotent/status-widget';
 
 <StatusWidget
     widgetId="{widget_id}"

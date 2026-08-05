@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import secrets
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -411,8 +412,8 @@ def get_saml_service() -> SAMLService:
     global _service
     if _service is None:
         _service = SAMLService(
-            sp_entity_id="https://devopscopilot.com/saml/metadata",
-            sp_acs_url="https://devopscopilot.com/saml/acs",
-            sp_slo_url="https://devopscopilot.com/saml/slo",
+            sp_entity_id=os.environ.get("SAML_SP_ENTITY_ID", "https://omnipotent.dev/saml/metadata"),
+            sp_acs_url=os.environ.get("SAML_SP_ACS_URL", "https://omnipotent.dev/saml/acs"),
+            sp_slo_url=os.environ.get("SAML_SP_SLO_URL", "https://omnipotent.dev/saml/slo"),
         )
     return _service

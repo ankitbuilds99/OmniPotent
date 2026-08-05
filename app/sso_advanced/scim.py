@@ -198,7 +198,7 @@ class SCIMProvider:
         log.info("Configured SCIM for org: org_id=%s", org_id)
 
         return {
-            "scim_endpoint": f"https://api.devopscopilot.io/scim/v2/{org_id}",
+            "scim_endpoint": f"https://api.omnipotent.dev/scim/v2/{org_id}",
             "bearer_token": f"{bearer_token[:8]}...",
             "status": "configured",
         }

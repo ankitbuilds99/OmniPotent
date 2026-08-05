@@ -63,13 +63,13 @@ VERSION_INFO: dict[APIVersion, VersionInfo] = {
         version=APIVersion.V1,
         status="stable",
         released=date(2024, 1, 1),
-        changelog_url="https://docs.devopscopilot.dev/api/v1/changelog",
+        changelog_url="https://docs.omnipotent.dev/api/v1/changelog",
     ),
     APIVersion.V2: VersionInfo(
         version=APIVersion.V2,
         status="beta",
         released=date(2024, 6, 1),
-        changelog_url="https://docs.devopscopilot.dev/api/v2/changelog",
+        changelog_url="https://docs.omnipotent.dev/api/v2/changelog",
     ),
 }
 

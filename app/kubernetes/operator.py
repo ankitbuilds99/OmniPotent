@@ -122,7 +122,7 @@ class KubernetesOperator:
     - Event handling
     """
 
-    API_GROUP = "devopscopilot.io"
+    API_GROUP = "omnipotent.dev"
     API_VERSION = "v1"
 
     def __init__(self):

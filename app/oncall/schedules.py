@@ -641,7 +641,7 @@ class CalendarExporter:
         event = Event()
 
         # Generate unique ID
-        uid = f"{shift.shift_id}@devops-copilot.oncall"
+        uid = f"{shift.shift_id}@omnipotent.oncall"
         event.add("uid", uid)
 
         # Event timing

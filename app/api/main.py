@@ -660,7 +660,7 @@ preferred code generator (openapi-generator, swagger-codegen, etc.).
     contact={
         "name": "OmniPotent Team",
         "url": "https://github.com/ankit25bcs10610/OmniPotent",
-        "email": "support@devopscopilot.dev",
+        "email": "support@omnipotent.dev",
     },
     license_info={
         "name": "MIT License",

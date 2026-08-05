@@ -180,7 +180,7 @@ class SubProcessor:
 class TrustPortal:
     """Customer-facing trust and compliance portal."""
 
-    def __init__(self, portal_url: str = "https://trust.devopscopilot.com") -> None:
+    def __init__(self, portal_url: str = "https://trust.omnipotent.dev") -> None:
         self.portal_url = portal_url
         self._documents: dict[str, TrustDocument] = {}
         self._access_records: list[DocumentAccess] = []
