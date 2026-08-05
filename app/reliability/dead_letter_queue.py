@@ -326,7 +326,7 @@ class DeadLetterQueue:
         limit: int = 100,
     ) -> list[DeadLetterMessage]:
         """List messages in the DLQ."""
-        messages = []
+        messages: list[DeadLetterMessage] = []
         pattern = f"{self.queue_prefix}:msg:*"
 
         async for key in self.redis.scan_iter(pattern):
