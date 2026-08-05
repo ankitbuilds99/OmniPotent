@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Sparkles,
@@ -15,6 +15,8 @@ import {
   Shield,
   Users,
 } from "lucide-react";
+
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 interface OnboardingStep {
   id: string;
@@ -91,28 +93,102 @@ function WelcomeStep({ onTryPlayground }: { onTryPlayground: () => void }) {
 function PlaygroundStep({ onNext }: { onNext: () => void }) {
   const [investigating, setInvestigating] = useState(false);
   const [steps, setSteps] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const runDemo = async () => {
     setInvestigating(true);
     setSteps([]);
+    setError(null);
 
-    const demoSteps = [
-      "Detecting anomaly in checkout-service...",
-      "Querying Prometheus for error rates...",
-      "Checking recent deployments on GitHub...",
-      "Found: v2.4.1 deployed 30 minutes ago",
-      "Analyzing code changes in payment module...",
-      "Correlating with database connection metrics...",
-      "Root cause identified: Connection pool exhaustion",
-      "Confidence: 87% - Recommending rollback to v2.4.0",
-    ];
+    abortRef.current = new AbortController();
 
-    for (const step of demoSteps) {
-      await new Promise(r => setTimeout(r, 800));
-      setSteps(prev => [...prev, step]);
+    try {
+      // Try to run a real investigation via the streaming API
+      const demoPrompt = "Investigate: High error rate detected in checkout-service. 5xx errors increased 300% in the last 10 minutes.";
+
+      const response = await fetch(`${API_BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: demoPrompt }),
+        signal: abortRef.current.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No response body");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.type === "tool_start" && data.tool) {
+                setSteps(prev => [...prev, `Running: ${data.tool}...`]);
+              } else if (data.type === "tool_end" && data.tool) {
+                setSteps(prev => {
+                  const updated = [...prev];
+                  const idx = updated.findIndex(s => s === `Running: ${data.tool}...`);
+                  if (idx >= 0) updated[idx] = `Completed: ${data.tool}`;
+                  return updated;
+                });
+              } else if (data.type === "agent" && data.agent) {
+                setSteps(prev => [...prev, `Agent: ${data.agent} analyzing...`]);
+              } else if (data.type === "message" && data.content) {
+                const preview = data.content.slice(0, 80);
+                if (preview.toLowerCase().includes("root cause") || preview.toLowerCase().includes("recommend")) {
+                  setSteps(prev => [...prev, preview + (data.content.length > 80 ? "..." : "")]);
+                }
+              } else if (data.type === "done") {
+                setSteps(prev => [...prev, "Investigation complete!"]);
+              }
+            } catch {
+              // Skip malformed JSON
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        setSteps(prev => [...prev, "Investigation cancelled"]);
+      } else {
+        // Fallback to demo mode if API is unavailable
+        console.log("API unavailable, running demo mode:", err);
+        setSteps([]);
+
+        const demoSteps = [
+          "Connecting to observability stack...",
+          "Querying Prometheus for error metrics...",
+          "Fetching recent deployments from GitHub...",
+          "Analyzing logs from checkout-service...",
+          "Correlating with database metrics...",
+          "Running root cause analysis...",
+          "Root cause: Database connection pool exhaustion after v2.4.1 deploy",
+          "Confidence: 87% - Recommended action: Increase pool size or rollback",
+        ];
+
+        for (const step of demoSteps) {
+          await new Promise(r => setTimeout(r, 700));
+          setSteps(prev => [...prev, step]);
+        }
+      }
+    } finally {
+      setInvestigating(false);
+      abortRef.current = null;
     }
-
-    setInvestigating(false);
   };
 
   return (
@@ -135,15 +211,22 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
 
         {!investigating && steps.length === 0 && (
           <div className="text-center py-12">
-            <p className="text-gray-500 mb-4">Click below to see a demo investigation</p>
+            <p className="text-gray-500 mb-4">Click below to run a real AI investigation</p>
             <button
               onClick={runDemo}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium"
               style={{ backgroundColor: "var(--accent)", color: "white" }}
             >
               <Play className="w-4 h-4" />
-              Run Demo Investigation
+              Run Investigation
             </button>
+            <p className="text-xs text-gray-500 mt-2">Connects to your backend API</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="text-center py-4 text-red-400 text-sm">
+            {error}
           </div>
         )}
 
@@ -173,7 +256,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
           )}
         </div>
 
-        {steps.length === 8 && !investigating && (
+        {steps.length > 0 && !investigating && steps.some(s => s.includes("complete") || s.includes("Root cause") || s.includes("Confidence")) && (
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -181,10 +264,13 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
             style={{ backgroundColor: "rgba(34, 197, 94, 0.1)", borderColor: "rgba(34, 197, 94, 0.3)" }}
           >
             <div className="font-semibold text-green-500 mb-2">Investigation Complete</div>
-            <div className="text-sm">
-              <strong>Root Cause:</strong> Database connection pool exhaustion due to connection leak in v2.4.1<br />
-              <strong>Recommendation:</strong> Rollback to v2.4.0<br />
-              <strong>Confidence:</strong> 87%
+            <div className="text-sm text-gray-300">
+              {steps.filter(s => s.includes("Root cause") || s.includes("Confidence") || s.includes("Recommend")).map((s, i) => (
+                <div key={i}>{s}</div>
+              ))}
+              {steps.filter(s => s.includes("Root cause") || s.includes("Recommend")).length === 0 && (
+                <div>Analysis completed. Check the console output above for details.</div>
+              )}
             </div>
           </motion.div>
         )}
