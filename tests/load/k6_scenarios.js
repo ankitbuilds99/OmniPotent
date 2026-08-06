@@ -284,6 +284,11 @@ export function soakTest() {
   sleep(randomIntBetween(5, 15));
 }
 
+// Default test function (required when running with --env K6_SCENARIO override)
+export default function() {
+  loadTest();
+}
+
 // WebSocket streaming test
 export function wsStreamTest() {
   const threadId = `ws-${__VU}-${randomString(8)}`;

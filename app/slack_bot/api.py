@@ -109,15 +109,14 @@ async def _handle_message_event(event: dict[str, Any]) -> None:
     channel = event.get("channel", "")
     text = event.get("text", "")
     user = event.get("user", "")
-    thread_ts = event.get("thread_ts")
+    _thread_ts = event.get("thread_ts")  # Available for threaded replies
 
-    log.debug("Message from %s in %s: %s", user, channel, text[:50])
+    log.debug("Message from %s in %s: %s (thread=%s)", user, channel, text[:50], _thread_ts)
 
 
 async def _handle_mention_event(event: dict[str, Any]) -> None:
     """Handle @mention event."""
     channel = event.get("channel", "")
-    text = event.get("text", "")
     user = event.get("user", "")
     ts = event.get("ts", "")
 
@@ -346,10 +345,10 @@ async def _handle_view_submission(payload: dict[str, Any]) -> dict[str, Any]:
     """Handle modal submission."""
     view = payload.get("view", {})
     callback_id = view.get("callback_id", "")
-    values = view.get("state", {}).get("values", {})
+    form_values = view.get("state", {}).get("values", {})
     user = payload.get("user", {})
 
-    log.info("View submission: %s by %s", callback_id, user.get("id"))
+    log.info("View submission: %s by %s (fields=%d)", callback_id, user.get("id"), len(form_values))
 
     if callback_id == "incident_form":
         return {"response_action": "clear"}
@@ -409,10 +408,10 @@ async def _handle_shortcut(payload: dict[str, Any]) -> None:
 async def _handle_message_action(payload: dict[str, Any]) -> None:
     """Handle message action (context menu)."""
     callback_id = payload.get("callback_id", "")
-    message = payload.get("message", {})
+    msg = payload.get("message", {})
     user = payload.get("user", {})
 
-    log.info("Message action: %s by %s", callback_id, user.get("id"))
+    log.info("Message action: %s by %s on msg=%s", callback_id, user.get("id"), msg.get("ts"))
 
 
 @router.get("/oauth/authorize")

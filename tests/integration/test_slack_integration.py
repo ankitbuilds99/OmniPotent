@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import time
 
 import pytest
 from httpx import AsyncClient
