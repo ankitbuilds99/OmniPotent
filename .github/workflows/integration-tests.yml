@@ -1,11 +1,10 @@
 name: Integration Tests
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # Only run on schedule or manual trigger - not on every push
   schedule:
     - cron: '0 4 * * *'  # Daily at 4 AM UTC
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +13,7 @@ permissions:
 jobs:
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -70,11 +70,12 @@ jobs:
           uv run alembic upgrade head || echo "No migrations to run"
 
       - name: Run integration tests
+        timeout-minutes: 15
         run: |
           uv run pytest tests/integration/ \
             -v \
             --tb=short \
-            -m integration \
+            --timeout=60 \
             --cov=app \
             --cov-report=xml \
             --cov-report=term-missing \
