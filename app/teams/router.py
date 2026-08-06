@@ -21,17 +21,44 @@ router = APIRouter(prefix="/teams", tags=["teams"])
 
 
 def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
-    """Extract user info from auth header. In production, verify JWT."""
-    # Simplified: in production, decode and verify Supabase JWT
+    """Extract user info from auth header.
+
+    In production with Supabase, decode and verify the JWT token.
+    For now, extract user info from Bearer token claims.
+    """
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization required")
 
-    # For demo, use a placeholder user
-    # In production: decode JWT, extract user_id, email from Supabase token
-    return {
-        "id": "demo-user-id",
-        "email": "user@example.com",
-    }
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    token = authorization[7:]  # Remove "Bearer " prefix
+
+    # In production: verify JWT signature with Supabase secret
+    # and extract claims. For now, we check if token is present.
+    try:
+        import base64
+        import json
+
+        # JWT has 3 parts: header.payload.signature
+        parts = token.split(".")
+        if len(parts) >= 2:
+            # Decode payload (add padding if needed)
+            payload = parts[1]
+            payload += "=" * (4 - len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            return {
+                "id": claims.get("sub", ""),
+                "email": claims.get("email", ""),
+            }
+    except Exception:
+        pass
+
+    # If JWT parsing fails, require proper authentication
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid or expired token. Please authenticate.",
+    )
 
 
 def _check_team_permission(

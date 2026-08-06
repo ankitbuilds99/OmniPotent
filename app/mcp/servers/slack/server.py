@@ -31,7 +31,8 @@ OFFLINE = not SLACK_BOT_TOKEN
 
 mcp = FastMCP("slack")
 
-# Demo fixtures for offline mode
+# Demo fixtures for offline mode (ONLY used when SLACK_BOT_TOKEN is not set)
+# In production, all data comes from real Slack API calls
 DEMO_CHANNELS: list[dict[str, object]] = [
     {
         "id": "C01INCIDENT",

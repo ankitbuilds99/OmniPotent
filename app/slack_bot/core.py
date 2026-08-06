@@ -1,6 +1,7 @@
 """Core Slack Bot service.
 
 Main entry point for all Slack interactions.
+Uses the enterprise-grade SlackClient for real API calls.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+
+from app.slack_bot.client import SlackClient, SlackClientConfig
 
 log = logging.getLogger("omnipotent.slack_bot.core")
 
@@ -139,7 +142,12 @@ class BotResponse:
 
 
 class SlackBot:
-    """Main Slack bot service."""
+    """Main Slack bot service.
+
+    Uses the enterprise-grade SlackClient for real API calls when
+    SLACK_BOT_TOKEN is configured. Falls back to stub responses
+    for offline development/testing.
+    """
 
     def __init__(self, config: SlackBotConfig) -> None:
         self.config = config
@@ -149,6 +157,18 @@ class SlackBot:
         self._pending_approvals: dict[str, dict[str, Any]] = {}
         self._user_cache: dict[str, dict[str, Any]] = {}
         self._channel_cache: dict[str, dict[str, Any]] = {}
+
+        # Use real client if configured
+        self._use_real_client = bool(config.bot_token and config.bot_token != "")
+        self._client: SlackClient | None = None
+
+        if self._use_real_client:
+            client_config = SlackClientConfig(
+                bot_token=config.bot_token,
+                app_token=config.app_token,
+                signing_secret=config.signing_secret,
+            )
+            self._client = SlackClient(client_config)
 
     async def start(self) -> None:
         """Start the Slack bot."""
@@ -232,6 +252,16 @@ class SlackBot:
         """Send a message to a channel."""
         log.info("Sending message to channel=%s", channel_id)
 
+        if self._client:
+            response = await self._client.send_message(
+                channel=channel_id,
+                text=text,
+                blocks=blocks,
+                thread_ts=thread_ts,
+            )
+            return response.data
+
+        # Fallback for offline mode
         return {
             "ok": True,
             "channel": channel_id,
@@ -249,6 +279,15 @@ class SlackBot:
         """Send an ephemeral message visible only to one user."""
         log.info("Sending ephemeral to user=%s in channel=%s", user_id, channel_id)
 
+        if self._client:
+            response = await self._client.send_ephemeral(
+                channel=channel_id,
+                user=user_id,
+                text=text,
+                blocks=blocks,
+            )
+            return response.data
+
         return {
             "ok": True,
             "message_ts": f"{datetime.now(timezone.utc).timestamp()}",
@@ -264,6 +303,15 @@ class SlackBot:
         """Update an existing message."""
         log.info("Updating message ts=%s in channel=%s", message_ts, channel_id)
 
+        if self._client:
+            response = await self._client.update_message(
+                channel=channel_id,
+                ts=message_ts,
+                text=text,
+                blocks=blocks,
+            )
+            return response.data
+
         return {
             "ok": True,
             "channel": channel_id,
@@ -278,8 +326,14 @@ class SlackBot:
         """Create a new channel."""
         log.info("Creating channel: name=%s private=%s", name, is_private)
 
-        channel_id = f"C{name.upper()[:8]}"
+        if self._client:
+            response = await self._client.create_channel(
+                name=name,
+                is_private=is_private,
+            )
+            return response.data
 
+        channel_id = f"C{name.upper()[:8]}"
         return {
             "ok": True,
             "channel": {
@@ -297,6 +351,13 @@ class SlackBot:
         """Invite users to a channel."""
         log.info("Inviting %d users to channel=%s", len(user_ids), channel_id)
 
+        if self._client:
+            response = await self._client.invite_to_channel(
+                channel=channel_id,
+                users=user_ids,
+            )
+            return response.data
+
         return {"ok": True}
 
     async def set_channel_topic(
@@ -306,6 +367,13 @@ class SlackBot:
     ) -> dict[str, Any]:
         """Set channel topic."""
         log.info("Setting topic for channel=%s", channel_id)
+
+        if self._client:
+            response = await self._client.set_channel_topic(
+                channel=channel_id,
+                topic=topic,
+            )
+            return response.data
 
         return {"ok": True, "topic": topic}
 
@@ -317,6 +385,13 @@ class SlackBot:
         """Pin a message in a channel."""
         log.info("Pinning message ts=%s in channel=%s", message_ts, channel_id)
 
+        if self._client:
+            response = await self._client.pin_message(
+                channel=channel_id,
+                ts=message_ts,
+            )
+            return response.data
+
         return {"ok": True}
 
     async def archive_channel(
@@ -326,6 +401,10 @@ class SlackBot:
         """Archive a channel."""
         log.info("Archiving channel=%s", channel_id)
 
+        if self._client:
+            response = await self._client.archive_channel(channel=channel_id)
+            return response.data
+
         return {"ok": True}
 
     async def get_user_info(self, user_id: str) -> dict[str, Any]:
@@ -333,11 +412,26 @@ class SlackBot:
         if user_id in self._user_cache:
             return self._user_cache[user_id]
 
+        if self._client:
+            response = await self._client.get_user_info(user=user_id)
+            user_data = response.data.get("user", {})
+            user_info = {
+                "id": user_data.get("id", user_id),
+                "name": user_data.get("name", ""),
+                "real_name": user_data.get("real_name", ""),
+                "email": user_data.get("profile", {}).get("email", ""),
+                "is_admin": user_data.get("is_admin", False),
+            }
+            self._user_cache[user_id] = user_info
+            return user_info
+
+        # Offline fallback - return placeholder (logged as warning)
+        log.warning("Using offline fallback for user %s - configure SLACK_BOT_TOKEN for real data", user_id)
         user_info = {
             "id": user_id,
             "name": f"user_{user_id}",
             "real_name": f"User {user_id}",
-            "email": f"user_{user_id}@example.com",
+            "email": "",  # No fake email
             "is_admin": False,
         }
 
@@ -349,9 +443,23 @@ class SlackBot:
         if channel_id in self._channel_cache:
             return self._channel_cache[channel_id]
 
+        if self._client:
+            response = await self._client.get_channel_info(channel=channel_id)
+            channel_data = response.data.get("channel", {})
+            channel_info = {
+                "id": channel_data.get("id", channel_id),
+                "name": channel_data.get("name", ""),
+                "is_private": channel_data.get("is_private", False),
+                "topic": channel_data.get("topic", {"value": ""}),
+            }
+            self._channel_cache[channel_id] = channel_info
+            return channel_info
+
+        # Offline fallback
+        log.warning("Using offline fallback for channel %s - configure SLACK_BOT_TOKEN for real data", channel_id)
         channel_info = {
             "id": channel_id,
-            "name": f"channel_{channel_id}",
+            "name": "",  # No fake name
             "is_private": False,
             "topic": {"value": ""},
         }

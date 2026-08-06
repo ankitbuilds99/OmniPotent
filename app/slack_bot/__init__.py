@@ -1,6 +1,8 @@
 """Advanced Slack Bot for OmniPotent.
 
 Best-in-class Slack integration matching incident.io/Rootly quality:
+- Real Slack API client with httpx
+- FastAPI webhook endpoints
 - Conversational AI with context retention
 - Incident war rooms with auto-created channels
 - Interactive Block Kit components with Acknowledge/Escalate/Resolve/Snooze
@@ -14,6 +16,16 @@ Best-in-class Slack integration matching incident.io/Rootly quality:
 - Collaboration features
 """
 
+from app.slack_bot.client import (
+    SlackClient,
+    SlackClientConfig,
+    SlackResponse,
+    SlackAPIError,
+    SlackRateLimitError,
+    get_slack_client,
+    close_slack_client,
+)
+from app.slack_bot.api import router as slack_router
 from app.slack_bot.core import (
     SlackBot,
     SlackBotConfig,
@@ -72,6 +84,16 @@ from app.slack_bot.messages import (
 )
 
 __all__ = [
+    # Client (Real API)
+    "SlackClient",
+    "SlackClientConfig",
+    "SlackResponse",
+    "SlackAPIError",
+    "SlackRateLimitError",
+    "get_slack_client",
+    "close_slack_client",
+    # API Router
+    "slack_router",
     # Core
     "SlackBot",
     "SlackBotConfig",

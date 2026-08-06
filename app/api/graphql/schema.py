@@ -211,14 +211,27 @@ class Query:
         )
 
     @strawberry.field
-    def me(self) -> User:
-        """Get current user."""
+    def me(self, info: strawberry.Info) -> User:
+        """Get current user from auth context."""
+        # Try to get user from request context (set by auth middleware)
+        request = info.context.get("request") if hasattr(info, "context") else None
+        if request and hasattr(request, "state") and hasattr(request.state, "user"):
+            user = request.state.user
+            return User(
+                id=user.get("id", ""),
+                email=user.get("email", ""),
+                name=user.get("name", ""),
+                role=user.get("role", "viewer"),
+                team=user.get("team", ""),
+            )
+
+        # Return empty user if not authenticated (let frontend handle auth redirect)
         return User(
-            id="user-001",
-            email="operator@example.com",
-            name="Operator",
-            role="admin",
-            team="platform",
+            id="",
+            email="",
+            name="",
+            role="viewer",
+            team="",
         )
 
     @strawberry.field

@@ -378,31 +378,24 @@ class CodeCollector(DataCollector):
             )
 
     async def _get_deployments(self, query: dict[str, Any]) -> list[dict]:
-        """Get recent deployments."""
-        # In production: query ArgoCD, Spinnaker, or deployment API
-        return [
-            {
-                "id": "deploy-sample",
-                "service": query.get("repo", "unknown"),
-                "sha": "abc123",
-                "deployed_at": datetime.now(timezone.utc).isoformat(),
-                "deployed_by": "user@example.com",
-                "status": "success",
-            }
-        ]
+        """Get recent deployments.
+
+        Override this method to integrate with your deployment system
+        (ArgoCD, Spinnaker, Kubernetes, etc.)
+        """
+        # Return empty when not configured - no fake data
+        log.warning("CodeCollector._get_deployments not implemented - configure deployment API")
+        return []
 
     async def _get_commits(self, query: dict[str, Any]) -> list[dict]:
-        """Get recent commits."""
-        # In production: use git log or GitHub API
-        return [
-            {
-                "sha": "abc123",
-                "message": "Sample commit",
-                "author": "user@example.com",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "files_changed": ["src/main.py"],
-            }
-        ]
+        """Get recent commits.
+
+        Override this method to integrate with your Git provider
+        (GitHub, GitLab, Bitbucket, etc.)
+        """
+        # Return empty when not configured - no fake data
+        log.warning("CodeCollector._get_commits not implemented - configure Git API")
+        return []
 
     async def _get_prs(self, query: dict[str, Any]) -> list[dict]:
         """Get recent pull requests."""

@@ -87,6 +87,53 @@ from app.integrations.newrelic import (
     query_metrics,
 )
 
+# PagerDuty client
+from app.integrations.pagerduty_client import (
+    PagerDutyClient,
+    PagerDutyConfig,
+    PagerDutyError,
+    Incident as PDIncident,
+    Service as PDService,
+    User as PDUser,
+    OnCall as PDOnCall,
+    IncidentStatus as PDIncidentStatus,
+    IncidentUrgency as PDIncidentUrgency,
+    get_pagerduty_client,
+    close_pagerduty_client,
+)
+
+# Additional PagerDuty exports
+from app.integrations.pagerduty_client import (
+    AnalyticsMetrics as PDAnalyticsMetrics,
+    BusinessService as PDBusinessService,
+    ResponsePlay as PDResponsePlay,
+    EventSeverity as PDEventSeverity,
+    ChangeEventType as PDChangeEventType,
+)
+
+# ServiceNow client
+from app.integrations.servicenow_client import (
+    ServiceNowClient,
+    ServiceNowConfig,
+    ServiceNowError,
+    Incident as SNIncident,
+    Change as SNChange,
+    Problem as SNProblem,
+    KnowledgeArticle as SNKnowledgeArticle,
+    CMDBItem,
+    IncidentState as SNIncidentState,
+    IncidentPriority as SNIncidentPriority,
+    IncidentImpact as SNIncidentImpact,
+    IncidentUrgency as SNIncidentUrgency,
+    ChangeState as SNChangeState,
+    ChangeType as SNChangeType,
+    ChangeRisk as SNChangeRisk,
+    ProblemState as SNProblemState,
+    CMDBOperationalStatus,
+    get_servicenow_client,
+    close_servicenow_client,
+)
+
 __all__ = [
     # Slack
     "SlackAction",
@@ -146,4 +193,42 @@ __all__ = [
     "get_recent_errors",
     "newrelic_get_active_alerts",
     "query_metrics",
+    # PagerDuty
+    "PagerDutyClient",
+    "PagerDutyConfig",
+    "PagerDutyError",
+    "PDIncident",
+    "PDService",
+    "PDUser",
+    "PDOnCall",
+    "PDIncidentStatus",
+    "PDIncidentUrgency",
+    "get_pagerduty_client",
+    "close_pagerduty_client",
+    # PagerDuty Advanced
+    "PDAnalyticsMetrics",
+    "PDBusinessService",
+    "PDResponsePlay",
+    "PDEventSeverity",
+    "PDChangeEventType",
+    # ServiceNow
+    "ServiceNowClient",
+    "ServiceNowConfig",
+    "ServiceNowError",
+    "SNIncident",
+    "SNChange",
+    "SNProblem",
+    "SNKnowledgeArticle",
+    "CMDBItem",
+    "SNIncidentState",
+    "SNIncidentPriority",
+    "SNIncidentImpact",
+    "SNIncidentUrgency",
+    "SNChangeState",
+    "SNChangeType",
+    "SNChangeRisk",
+    "SNProblemState",
+    "CMDBOperationalStatus",
+    "get_servicenow_client",
+    "close_servicenow_client",
 ]

@@ -136,13 +136,17 @@ class IntegrationSDK:
         self._init_example_integrations()
 
     def _init_example_integrations(self) -> None:
-        """Initialize example integrations for reference."""
+        """Initialize example integrations for SDK documentation/reference.
+
+        These are templates showing how to build custom integrations.
+        Real integrations should be registered via register_integration().
+        """
         self._integrations["my-monitoring-tool"] = IntegrationManifest(
             integration_id="my-monitoring-tool",
-            name="My Monitoring Tool",
+            name="My Monitoring Tool (Example)",
             version="1.0.0",
-            description="Example custom monitoring integration",
-            author="partner@example.com",
+            description="Example custom monitoring integration - use as template",
+            author="",  # Set when registering real integrations
             category=IntegrationCategory.MONITORING,
             capabilities=IntegrationCapabilities(
                 logs=True,

@@ -1,0 +1,267 @@
+name: Load Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'tests/load/**'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/load/**'
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Test type to run'
+        required: true
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - load
+          - stress
+          - soak
+      duration:
+        description: 'Test duration (e.g., 1m, 5m, 1h)'
+        required: false
+        default: '1m'
+      vus:
+        description: 'Number of virtual users'
+        required: false
+        default: '10'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  k6-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: omnipotent
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: omnipotent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgresql://omnipotent:test@localhost:5432/omnipotent
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Start application
+        run: |
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
+          sleep 10
+          curl -f http://localhost:8000/health || echo "App may not be fully ready"
+
+      - name: Determine test type
+        id: test-type
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "type=${{ github.event.inputs.test_type }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ github.event.inputs.duration }}" >> $GITHUB_OUTPUT
+            echo "vus=${{ github.event.inputs.vus }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "type=smoke" >> $GITHUB_OUTPUT
+            echo "duration=30s" >> $GITHUB_OUTPUT
+            echo "vus=5" >> $GITHUB_OUTPUT
+          else
+            echo "type=load" >> $GITHUB_OUTPUT
+            echo "duration=1m" >> $GITHUB_OUTPUT
+            echo "vus=20" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run k6 tests
+        run: |
+          TEST_TYPE="${{ steps.test-type.outputs.type }}"
+          DURATION="${{ steps.test-type.outputs.duration }}"
+          VUS="${{ steps.test-type.outputs.vus }}"
+
+          k6 run tests/load/k6_scenarios.js \
+            --env K6_BASE_URL=http://localhost:8000 \
+            --env K6_DURATION=$DURATION \
+            --env K6_VUS=$VUS \
+            --env K6_SCENARIO=$TEST_TYPE \
+            --out json=k6-results.json \
+            --summary-export=k6-summary.json
+
+      - name: Parse results
+        id: results
+        if: always()
+        run: |
+          if [ -f k6-summary.json ]; then
+            P95=$(jq -r '.metrics.http_req_duration.values["p(95)"] // 0' k6-summary.json)
+            P99=$(jq -r '.metrics.http_req_duration.values["p(99)"] // 0' k6-summary.json)
+            ERROR_RATE=$(jq -r '.metrics.http_req_failed.values.rate // 0' k6-summary.json)
+            RPS=$(jq -r '.metrics.http_reqs.values.rate // 0' k6-summary.json)
+
+            echo "p95=${P95}" >> $GITHUB_OUTPUT
+            echo "p99=${P99}" >> $GITHUB_OUTPUT
+            echo "error_rate=${ERROR_RATE}" >> $GITHUB_OUTPUT
+            echo "rps=${RPS}" >> $GITHUB_OUTPUT
+
+            echo "### Load Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| P95 Latency | ${P95}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| P99 Latency | ${P99}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| Error Rate | ${ERROR_RATE}% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Requests/sec | ${RPS} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const p95 = '${{ steps.results.outputs.p95 }}' || 'N/A';
+            const p99 = '${{ steps.results.outputs.p99 }}' || 'N/A';
+            const errorRate = '${{ steps.results.outputs.error_rate }}' || 'N/A';
+            const rps = '${{ steps.results.outputs.rps }}' || 'N/A';
+
+            const body = `## Load Test Results
+
+            | Metric | Value |
+            |--------|-------|
+            | P95 Latency | ${p95}ms |
+            | P99 Latency | ${p99}ms |
+            | Error Rate | ${errorRate}% |
+            | Requests/sec | ${rps} |
+
+            <details>
+            <summary>Thresholds</summary>
+
+            - P95 < 500ms
+            - P99 < 1000ms
+            - Error rate < 1%
+
+            </details>`;
+
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results
+          path: |
+            k6-results.json
+            k6-summary.json
+
+      - name: Check thresholds
+        if: always()
+        run: |
+          P95="${{ steps.results.outputs.p95 }}"
+          ERROR_RATE="${{ steps.results.outputs.error_rate }}"
+
+          if [ ! -z "$P95" ] && [ $(echo "$P95 > 500" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
+            echo "::warning::P95 latency exceeds 500ms threshold: ${P95}ms"
+          fi
+
+          if [ ! -z "$ERROR_RATE" ] && [ $(echo "$ERROR_RATE > 0.01" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
+            echo "::warning::Error rate exceeds 1% threshold: ${ERROR_RATE}%"
+          fi
+
+  locust-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.test_type == 'stress'
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: omnipotent
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: omnipotent
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgresql://omnipotent:test@localhost:5432/omnipotent
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: |
+          uv sync
+          uv pip install locust
+
+      - name: Start application
+        run: |
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
+          sleep 10
+
+      - name: Run Locust tests
+        run: |
+          uv run locust \
+            -f tests/load/locustfile.py \
+            --headless \
+            --host http://localhost:8000 \
+            -u ${{ github.event.inputs.vus }} \
+            -r 10 \
+            --run-time ${{ github.event.inputs.duration }} \
+            --html locust-report.html \
+            --csv locust-results
+
+      - name: Upload Locust report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: locust-results
+          path: |
+            locust-report.html
+            locust-results*.csv
