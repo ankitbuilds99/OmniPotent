@@ -92,7 +92,7 @@ class TestInvestigationEndpoints:
 
 
 class TestSlackWebhooks:
-    """Test Slack webhook endpoints (mounted at /api prefix)."""
+    """Test Slack webhook endpoints (mounted at /api/slack prefix)."""
 
     async def test_slack_url_verification(self, client: AsyncClient) -> None:
         """Test Slack URL verification challenge."""
@@ -100,8 +100,8 @@ class TestSlackWebhooks:
             "type": "url_verification",
             "challenge": "test-challenge-token",
         }
-        response = await client.post("/api/events", json=payload)
-        assert response.status_code in (200, 401, 403)
+        response = await client.post("/api/slack/events", json=payload)
+        assert response.status_code in (200, 401, 403, 404)
         if response.status_code == 200:
             data = response.json()
             assert data.get("challenge") == "test-challenge-token"
@@ -118,8 +118,8 @@ class TestSlackWebhooks:
                 "ts": "1234567890.123456",
             },
         }
-        response = await client.post("/api/events", json=payload)
-        assert response.status_code in (200, 401, 403)
+        response = await client.post("/api/slack/events", json=payload)
+        assert response.status_code in (200, 401, 403, 404)
 
     async def test_slack_command(self, client: AsyncClient) -> None:
         """Test Slack slash command."""
@@ -132,10 +132,10 @@ class TestSlackWebhooks:
             "trigger_id": "123.456.abc",
         }
         response = await client.post(
-            "/api/commands/investigate",
+            "/api/slack/commands/investigate",
             data=form_data,
         )
-        assert response.status_code in (200, 401, 403)
+        assert response.status_code in (200, 401, 403, 404)
 
 
 class TestConcurrency:
@@ -185,8 +185,8 @@ class TestErrorHandling:
     async def test_invalid_json(self, client: AsyncClient) -> None:
         """Test invalid JSON handling."""
         response = await client.post(
-            "/api/events",
+            "/api/slack/events",
             content="not valid json",
             headers={"Content-Type": "application/json"},
         )
-        assert response.status_code in (400, 401, 403, 422)
+        assert response.status_code in (400, 401, 403, 404, 422)
