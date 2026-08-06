@@ -1673,7 +1673,7 @@ class ServiceNowClient:
         """Execute batch GET requests."""
         client = await self._get_client()
 
-        batch_requests = []
+        batch_requests: list[dict[str, Any]] = []
         for req in requests:
             batch_requests.append({
                 "id": req.get("id", str(len(batch_requests))),

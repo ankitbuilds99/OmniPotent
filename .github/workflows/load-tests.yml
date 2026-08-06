@@ -1,15 +1,7 @@
 name: Load Tests
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'app/**'
-      - 'tests/load/**'
-  pull_request:
-    paths:
-      - 'app/**'
-      - 'tests/load/**'
+  # Only run on manual trigger - load tests require proper env configuration
   workflow_dispatch:
     inputs:
       test_type:

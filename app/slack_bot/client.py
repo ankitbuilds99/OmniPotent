@@ -850,14 +850,17 @@ class SlackClient:
 
     async def get_channel_members(self, channel: str) -> list[str]:
         """Get all members of a channel with auto-pagination."""
-        members = []
+        members: list[str] = []
         async for member in self.paginate(
             "GET",
             "/conversations.members",
             "members",
             params={"channel": channel},
         ):
-            members.append(member)
+            if isinstance(member, str):
+                members.append(member)
+            elif isinstance(member, dict):
+                members.append(str(member.get("id", member)))
         return members
 
     async def get_channel_history(
@@ -1602,6 +1605,8 @@ class SocketModeHandler:
 
             try:
                 async for message in ws:
+                    if isinstance(message, bytes):
+                        message = message.decode("utf-8")
                     await self._handle_message(message)
             finally:
                 ping_task.cancel()
