@@ -10,6 +10,8 @@ from uuid import UUID
 from app.billing.models import (
     BillingCycle,
     MetricType,
+    Subscription,
+    SubscriptionStatus,
 )
 from app.billing.plans import PlanManager
 from app.billing.feature_gate import FeatureGateService
@@ -250,7 +252,24 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe checkout session."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            # Demo mode: create/update subscription in store and redirect to success URL
+            log.info("Stripe not configured - using demo checkout for plan %s", plan_name)
+            plan = self._plan_manager.get_plan(plan_name)
+            if plan:
+                cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
+                sub = Subscription(
+                    org_id=org_id,
+                    plan_id=plan.plan_id,
+                    status=SubscriptionStatus.ACTIVE,
+                    billing_cycle=cycle,
+                )
+                await self._store.save_subscription(sub)
+            # Redirect to success URL or a demo confirmation page
+            redirect_url = success_url or "/?upgrade=success"
+            return {
+                "checkout_url": redirect_url,
+                "session_id": f"demo_session_{org_id}_{plan_name}",
+            }
 
         cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
 
@@ -275,7 +294,9 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe customer portal session."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            # Demo mode: redirect to return URL or billing page
+            log.info("Stripe not configured - using demo portal")
+            return {"portal_url": return_url or "/?portal=demo"}
 
         result = await self._stripe.create_portal_session(org_id, return_url)
         return {"portal_url": result.portal_url}
