@@ -767,6 +767,10 @@ app.include_router(slo_router)
 from app.status_page.api_router import router as status_page_router  # noqa: E402
 app.include_router(status_page_router)
 
+# Register global exception handlers for consistent error responses.
+from app.middleware.error_handler import register_exception_handlers  # noqa: E402
+register_exception_handlers(app)
+
 
 # Supabase OAuth callback handler - serves the SPA for client-side token handling
 @app.get("/auth/callback")
@@ -991,11 +995,22 @@ async def healthz() -> dict:
         orchestration platforms can always check service health.
     """
     from app.api.websocket import get_connection_stats
+    from app.mcp.health import get_health_monitor
     ws_stats = get_connection_stats()
+
+    # Get MCP subprocess health summary
+    mcp_health = await get_health_monitor().check_all()
+
     return {
         "status": "ok",
         "active_sessions": len(_SESSIONS),
         "websocket": ws_stats,
+        "mcp": {
+            "status": mcp_health.overall_status.value,
+            "healthy": mcp_health.healthy_count,
+            "degraded": mcp_health.degraded_count,
+            "unhealthy": mcp_health.unhealthy_count,
+        },
     }
 
 

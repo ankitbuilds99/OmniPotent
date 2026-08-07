@@ -133,19 +133,67 @@ def setup_datadog_apm() -> None:
 
 
 def setup_sentry() -> None:
-    """Enable Sentry error tracking when SENTRY_DSN is set. Sentry's default
-    logging integration captures our `log.exception(...)` calls as events, so no
-    per-handler wiring is needed. No-op (with a warning) if the SDK isn't installed."""
+    """Enable Sentry error tracking and performance monitoring when SENTRY_DSN is set.
+
+    Performance features:
+    - traces_sample_rate: Controls what % of transactions are traced (0.0-1.0)
+    - profiles_sample_rate: Controls profiling sample rate (requires traces)
+    - FastAPI integration auto-instruments endpoints
+
+    Sentry's default logging integration captures our `log.exception(...)` calls
+    as events, so no per-handler wiring is needed. No-op (with a warning) if
+    the SDK isn't installed.
+    """
     s = get_settings()
     if not s.sentry_dsn:
         return
     try:
         import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.httpx import HttpxIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+        from sentry_sdk.integrations.asyncio import AsyncioIntegration
     except ImportError:
         log.warning("SENTRY_DSN is set but sentry-sdk is not installed (pip install sentry-sdk)")
         return
-    sentry_sdk.init(dsn=s.sentry_dsn, environment=s.copilot_env, traces_sample_rate=0.0)
-    log.info("Sentry error tracking enabled (env=%s)", s.copilot_env)
+
+    # Performance sampling rate: 10% in production, 100% in dev for visibility.
+    # Adjust via SENTRY_TRACES_SAMPLE_RATE env var.
+    default_traces_rate = 0.1 if s.is_production else 1.0
+    traces_sample_rate = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", default_traces_rate))
+
+    # Profile sample rate (relative to traces): 10% of traced requests get profiled.
+    profiles_sample_rate = float(os.environ.get("SENTRY_PROFILES_SAMPLE_RATE", 0.1))
+
+    sentry_sdk.init(
+        dsn=s.sentry_dsn,
+        environment=s.copilot_env,
+        traces_sample_rate=traces_sample_rate,
+        profiles_sample_rate=profiles_sample_rate,
+        send_default_pii=False,
+        integrations=[
+            FastApiIntegration(transaction_style="endpoint"),
+            HttpxIntegration(),
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            AsyncioIntegration(),
+        ],
+        before_send_transaction=_filter_health_checks,
+    )
+
+    log.info(
+        "Sentry enabled (env=%s traces=%.0f%% profiles=%.0f%%)",
+        s.copilot_env,
+        traces_sample_rate * 100,
+        profiles_sample_rate * 100,
+    )
+
+
+def _filter_health_checks(event: dict, hint: dict) -> dict | None:
+    """Filter out health check transactions to reduce noise."""
+    transaction_name = event.get("transaction", "")
+    if transaction_name in ("/healthz", "/readyz", "/metrics/slo"):
+        return None
+    return event
 
 
 def init() -> None:

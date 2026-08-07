@@ -1,0 +1,260 @@
+# Vector Configuration for OmniPotent
+# High-performance log collection, transformation, and shipping
+#
+# Vector is a modern alternative to Fluentd with better performance.
+# Deploy as DaemonSet or Sidecar alongside the application.
+# See: https://vector.dev/docs/reference/configuration/
+
+# ============================================================================
+# Data Directory (required)
+# ============================================================================
+data_dir: /var/lib/vector
+
+# ============================================================================
+# API - Health checks and metrics
+# ============================================================================
+api:
+  enabled: true
+  address: "0.0.0.0:8686"
+  playground: false
+
+# ============================================================================
+# SOURCES - Collect logs from various inputs
+# ============================================================================
+sources:
+  # Collect container stdout/stderr logs (Kubernetes)
+  kubernetes_logs:
+    type: kubernetes_logs
+    extra_label_selector: "app=omnipotent"
+    extra_namespace_label_selector: "omnipotent-system"
+    self_node_name: "${VECTOR_SELF_NODE_NAME}"
+    exclude_paths_glob_patterns:
+      - "**/kube-system/**"
+      - "**/vector/**"
+
+  # Collect from file (if not using Kubernetes)
+  file_logs:
+    type: file
+    include:
+      - /app/logs/*.log
+      - /var/log/omnipotent/*.log
+    read_from: "beginning"
+    ignore_older_secs: 86400  # Ignore files older than 24h
+    fingerprint:
+      strategy: "device_and_inode"
+
+  # Forward protocol for direct log shipping
+  vector_forward:
+    type: vector
+    address: "0.0.0.0:6000"
+    version: "2"
+
+  # HTTP endpoint for application to post logs
+  http_logs:
+    type: http_server
+    address: "0.0.0.0:8080"
+    encoding: json
+    path: "/logs"
+    strict_path: true
+
+# ============================================================================
+# TRANSFORMS - Parse, enrich, and filter logs
+# ============================================================================
+transforms:
+  # Parse JSON log messages
+  parse_json:
+    type: remap
+    inputs:
+      - kubernetes_logs
+      - file_logs
+      - http_logs
+    source: |
+      # Try to parse as JSON
+      parsed, err = parse_json(.message)
+      if err == null {
+        . = merge(., parsed)
+        del(.message)
+      }
+
+      # Extract standard fields
+      .timestamp = .ts || .timestamp || .time || now()
+      .level = downcase(.level || .severity || "info")
+      .service = .service || "omnipotent"
+      .environment = get_env_var("COPILOT_ENV") ?? "development"
+      .version = get_env_var("APP_VERSION") ?? "unknown"
+
+  # Enrich with Kubernetes metadata
+  kubernetes_enrich:
+    type: remap
+    inputs:
+      - parse_json
+    source: |
+      # Extract pod/container info from kubernetes metadata
+      if exists(.kubernetes) {
+        .pod_name = .kubernetes.pod_name
+        .namespace = .kubernetes.pod_namespace
+        .container_name = .kubernetes.container_name
+        .node_name = .kubernetes.pod_node_name
+
+        # Extract labels as flat fields
+        .app_label = .kubernetes.pod_labels.app
+        .version_label = .kubernetes.pod_labels.version
+      }
+
+      # Correlation ID for request tracing
+      .correlation_id = .request_id || .trace_id || "-"
+
+  # Redact sensitive data
+  redact_sensitive:
+    type: remap
+    inputs:
+      - kubernetes_enrich
+    source: |
+      # Redact bearer tokens
+      .msg = replace(.msg || "", r'Bearer [A-Za-z0-9\-_.~+/]+=*', "Bearer [REDACTED]") ?? .msg
+
+      # Redact API keys
+      .msg = replace(.msg || "", r'dcp_[A-Za-z0-9]+', "dcp_[REDACTED]") ?? .msg
+      .msg = replace(.msg || "", r'sk-[A-Za-z0-9]+', "sk-[REDACTED]") ?? .msg
+
+      # Redact email addresses in certain contexts
+      if contains(.msg || "", "password") || contains(.msg || "", "credential") {
+        .msg = replace(.msg || "", r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', "[EMAIL_REDACTED]") ?? .msg
+      }
+
+  # Filter out noisy health check logs
+  filter_noise:
+    type: filter
+    inputs:
+      - redact_sensitive
+    condition:
+      type: vrl
+      source: |
+        # Keep logs that are NOT health check spam
+        !match(.msg || "", r'GET /healthz') &&
+        !match(.msg || "", r'GET /readyz') &&
+        !match(.msg || "", r'GET /metrics')
+
+  # Add error classification
+  classify_errors:
+    type: remap
+    inputs:
+      - filter_noise
+    source: |
+      # Classify error types for alerting
+      if .level == "error" || .level == "critical" {
+        if contains(.msg || "", "timeout") {
+          .error_class = "timeout"
+        } else if contains(.msg || "", "connection") {
+          .error_class = "connection"
+        } else if contains(.msg || "", "rate_limit") || contains(.msg || "", "429") {
+          .error_class = "rate_limit"
+        } else if contains(.msg || "", "authentication") || contains(.msg || "", "401") {
+          .error_class = "auth"
+        } else if contains(.msg || "", "permission") || contains(.msg || "", "403") {
+          .error_class = "permission"
+        } else {
+          .error_class = "unknown"
+        }
+      }
+
+  # Aggregate metrics for observability
+  log_metrics:
+    type: log_to_metric
+    inputs:
+      - classify_errors
+    metrics:
+      - type: counter
+        field: level
+        name: omnipotent_logs_total
+        tags:
+          level: "{{ level }}"
+          service: "{{ service }}"
+          environment: "{{ environment }}"
+
+      - type: counter
+        field: error_class
+        name: omnipotent_errors_by_class_total
+        tags:
+          error_class: "{{ error_class }}"
+          service: "{{ service }}"
+
+# ============================================================================
+# SINKS - Ship logs to configured destinations
+# ============================================================================
+sinks:
+  # Primary: Elasticsearch / OpenSearch
+  elasticsearch:
+    type: elasticsearch
+    inputs:
+      - classify_errors
+    endpoints:
+      - "${ELASTICSEARCH_URL:-https://elasticsearch:9200}"
+    auth:
+      strategy: basic
+      user: "${ELASTICSEARCH_USER:-elastic}"
+      password: "${ELASTICSEARCH_PASSWORD}"
+    tls:
+      verify_certificate: "${ELASTICSEARCH_VERIFY_TLS:-true}"
+    bulk:
+      index: "omnipotent-logs-%Y.%m.%d"
+    encoding:
+      codec: json
+    healthcheck:
+      enabled: true
+    buffer:
+      type: disk
+      max_size: 1073741824  # 1GB
+      when_full: drop_newest
+
+  # Datadog (if API key is set)
+  datadog_logs:
+    type: datadog_logs
+    inputs:
+      - classify_errors
+    default_api_key: "${DD_API_KEY}"
+    site: "${DD_SITE:-datadoghq.com}"
+    compression: gzip
+    encoding:
+      codec: json
+
+  # AWS CloudWatch Logs
+  cloudwatch:
+    type: aws_cloudwatch_logs
+    inputs:
+      - classify_errors
+    group_name: "${CLOUDWATCH_LOG_GROUP:-/omnipotent/app}"
+    stream_name: "{{ pod_name }}"
+    region: "${AWS_REGION:-us-east-1}"
+    create_missing_group: true
+    create_missing_stream: true
+    encoding:
+      codec: json
+
+  # GCP Cloud Logging
+  gcp_logging:
+    type: gcp_stackdriver_logs
+    inputs:
+      - classify_errors
+    project_id: "${GCP_PROJECT}"
+    log_id: "omnipotent-logs"
+    credentials_path: "${GOOGLE_APPLICATION_CREDENTIALS}"
+    encoding:
+      codec: json
+
+  # Prometheus metrics endpoint
+  prometheus:
+    type: prometheus_exporter
+    inputs:
+      - log_metrics
+    address: "0.0.0.0:9598"
+    default_namespace: omnipotent
+
+  # Console output for debugging (disabled in production)
+  console:
+    type: console
+    inputs:
+      - classify_errors
+    target: stdout
+    encoding:
+      codec: json

@@ -306,6 +306,11 @@ class AlertEngine:
     ) -> dict[str, bool]:
         """Send alert notifications to configured channels.
 
+        Supported channels:
+        - slack: Slack webhook/bot notification
+        - pagerduty: PagerDuty Events API v2
+        - opsgenie: Atlassian OpsGenie alerts
+
         Returns dict of channel -> success status.
         """
         results: dict[str, bool] = {}
@@ -316,6 +321,8 @@ class AlertEngine:
                     results["slack"] = await self._notify_slack(alert)
                 elif channel == "pagerduty":
                     results["pagerduty"] = await self._notify_pagerduty(alert)
+                elif channel == "opsgenie":
+                    results["opsgenie"] = await self._notify_opsgenie(alert)
                 else:
                     log.warning("Unknown notification channel: %s", channel)
                     results[channel] = False
@@ -408,6 +415,88 @@ class AlertEngine:
                 timeout=_settings.http_timeout_default,
             )
             return resp.status_code == 202
+
+    async def _notify_opsgenie(self, alert: AlertEvent) -> bool:
+        """Send alert to OpsGenie.
+
+        Uses the OpsGenie REST API v2 to create/close alerts with full metadata.
+        """
+        import os
+
+        from app.integrations.opsgenie_client import (
+            OpsGenieClient,
+            OpsGenieConfig,
+            AlertPriority,
+        )
+
+        api_key = os.getenv("OPSGENIE_API_KEY", "")
+        if not api_key:
+            log.debug("OpsGenie not configured (OPSGENIE_API_KEY not set), skipping notification")
+            return False
+
+        severity_map = {
+            AlertSeverity.CRITICAL: AlertPriority.P1,
+            AlertSeverity.HIGH: AlertPriority.P2,
+            AlertSeverity.MEDIUM: AlertPriority.P3,
+            AlertSeverity.LOW: AlertPriority.P4,
+            AlertSeverity.INFO: AlertPriority.P5,
+        }
+
+        priority = severity_map.get(alert.severity, AlertPriority.P3)
+        alias = f"omnipotent-{alert.rule_id}-{alert.service}"
+
+        config = OpsGenieConfig(api_key=api_key)
+        client = OpsGenieClient(config)
+
+        try:
+            await client.connect()
+
+            if alert.status == "firing":
+                rule = self._rules.get(alert.rule_id)
+                runbook_url = rule.annotations.get("runbook_url") if rule else None
+
+                description = (
+                    f"Alert: {alert.rule_name}\n"
+                    f"Service: {alert.service}\n"
+                    f"Message: {alert.message}\n"
+                    f"Value: {alert.value:.2f} (threshold: {alert.threshold})\n"
+                    f"Started: {alert.started_at.isoformat()}"
+                )
+
+                if runbook_url:
+                    description += f"\n\nRunbook: {runbook_url}"
+
+                await client.create_alert(
+                    message=f"[{alert.severity.value.upper()}] {alert.rule_name} on {alert.service}",
+                    priority=priority,
+                    alias=alias,
+                    description=description,
+                    tags=[alert.severity.value, alert.service, "omnipotent"],
+                    details={
+                        "rule_id": alert.rule_id,
+                        "service": alert.service,
+                        "value": str(alert.value),
+                        "threshold": str(alert.threshold),
+                        "runbook_url": runbook_url or "",
+                    },
+                    source="omnipotent",
+                )
+                log.info("OpsGenie alert created: %s", alias)
+            else:
+                await client.close_alert(
+                    identifier=alias,
+                    identifier_type="alias",
+                    note=f"Alert resolved: {alert.message}",
+                )
+                log.info("OpsGenie alert closed: %s", alias)
+
+            return True
+
+        except Exception as e:
+            log.error("OpsGenie notification failed: %s", e)
+            return False
+        finally:
+            await client.close()
 
     async def start(self, eval_interval: int = 60) -> None:
         """Start the alert evaluation loop."""

@@ -32,6 +32,7 @@ groups:
         annotations:
           summary: "High P95 latency"
           description: "P95 latency is {{ $value | humanizeDuration }} (threshold: 2s)"
+          runbook_url: "https://docs.omnipotent.com/runbooks/high-latency"
 
       - alert: HighLatencyP99
         expr: |
@@ -158,6 +159,7 @@ groups:
         annotations:
           summary: "Circuit breaker is open"
           description: "Circuit breaker for {{ $labels.provider }} is open"
+          runbook_url: "https://docs.omnipotent.com/runbooks/circuit-breaker"
 
   # ============================================================================
   # SAFETY GATE ALERTS
@@ -199,6 +201,7 @@ groups:
         annotations:
           summary: "Database connection pool exhausted"
           description: "Only {{ $value }} connections available"
+          runbook_url: "https://docs.omnipotent.com/runbooks/database-connections"
 
       - alert: DatabaseQuerySlow
         expr: |
