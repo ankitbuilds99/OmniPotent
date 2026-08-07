@@ -2,30 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-from typing import AsyncGenerator, Generator
+from typing import AsyncGenerator
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-# Skip if required services aren't available
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    """Create event loop for session-scoped fixtures."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest.fixture(scope="session")
 def database_url() -> str:
     """Get database URL from environment."""
-    url = os.getenv("DATABASE_URL")
+    url = os.getenv("COPILOT_DATABASE_URL") or os.getenv("DATABASE_URL")
     if not url:
         pytest.skip("DATABASE_URL not set - skipping integration tests")
     return url
@@ -40,15 +30,15 @@ def redis_url() -> str:
     return url
 
 
-@pytest_asyncio.fixture(scope="session")
-async def app(database_url: str, redis_url: str):
+@pytest.fixture
+def app(database_url: str, redis_url: str):
     """Create application with real database."""
-    os.environ["DATABASE_URL"] = database_url
+    os.environ["COPILOT_DATABASE_URL"] = database_url
     os.environ["REDIS_URL"] = redis_url
     os.environ["TESTING"] = "true"
 
     from app.api.main import app as _app
-    yield _app
+    return _app
 
 
 @pytest_asyncio.fixture
@@ -66,38 +56,31 @@ async def auth_client(client: AsyncClient) -> AsyncClient:
     return client
 
 
-@pytest_asyncio.fixture(scope="session")
-async def db_pool(database_url: str):
-    """Create database connection pool."""
+@pytest_asyncio.fixture
+async def db_conn(database_url: str):
+    """Get database connection."""
     import asyncpg
 
-    pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
-    yield pool
-    await pool.close()
+    conn = await asyncpg.connect(database_url)
+    yield conn
+    await conn.close()
 
 
 @pytest_asyncio.fixture
-async def db_conn(db_pool):
-    """Get database connection."""
-    async with db_pool.acquire() as conn:
-        yield conn
-
-
-@pytest_asyncio.fixture(scope="session")
 async def redis_client(redis_url: str):
-    """Create Redis client."""
-    import redis.asyncio as redis
+    """Create Redis client for each test."""
+    import redis.asyncio as aioredis
 
-    client = redis.from_url(redis_url)
+    client = aioredis.from_url(redis_url, decode_responses=False)
     yield client
-    await client.close()
-
-
-@pytest_asyncio.fixture(autouse=True)
-async def cleanup_redis(redis_client):
-    """Clean up Redis between tests."""
-    yield
-    await redis_client.flushdb()
+    try:
+        await client.flushdb()
+    except Exception:
+        pass
+    try:
+        await client.aclose()
+    except Exception:
+        pass
 
 
 @pytest_asyncio.fixture
