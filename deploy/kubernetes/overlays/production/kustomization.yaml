@@ -1,0 +1,98 @@
+# Kustomize overlay for production environment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: omnipotent-production
+
+namePrefix: prod-
+
+commonLabels:
+  environment: production
+  app.kubernetes.io/instance: production
+
+commonAnnotations:
+  config.kubernetes.io/managed-by: argocd
+
+resources:
+  - ../../
+  # Production-specific resources
+  - pdb.yaml
+  - poddisruptionbudget.yaml
+
+# Production-specific patches
+patches:
+  # Higher replicas for production
+  - target:
+      kind: Deployment
+      name: omnipotent-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+
+  # Production resource limits
+  - target:
+      kind: Deployment
+      name: omnipotent-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "1000m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "1Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "4000m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "4Gi"
+
+  # Production HPA settings
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: omnipotent-api
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
+
+  # Stricter pod anti-affinity for production
+  - target:
+      kind: Deployment
+      name: omnipotent-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/affinity/podAntiAffinity/requiredDuringSchedulingIgnoredDuringExecution
+        value:
+          - labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - omnipotent-api
+            topologyKey: topology.kubernetes.io/zone
+
+# ConfigMap generator for production-specific config
+configMapGenerator:
+  - name: omnipotent-config
+    behavior: merge
+    literals:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - ENABLE_DEBUG_ENDPOINTS=false
+      - RATE_LIMIT_MULTIPLIER=1
+
+# Secret generator (references external secrets)
+secretGenerator:
+  - name: omnipotent-secrets
+    behavior: merge
+    literals:
+      - SENTRY_ENVIRONMENT=production
+
+images:
+  - name: omnipotent-api
+    newTag: v1.0.0

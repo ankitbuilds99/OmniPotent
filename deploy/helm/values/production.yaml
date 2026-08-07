@@ -1,0 +1,395 @@
+# Helm values for production environment
+# OmniPotent DevOps Copilot
+
+global:
+  environment: production
+  domain: api.omnipotent.example.com
+  imageRegistry: ""  # Uses default registry
+
+# Application configuration
+app:
+  name: omnipotent-api
+  version: v1.0.0
+
+  image:
+    repository: omnipotent-api
+    tag: v1.0.0
+    pullPolicy: IfNotPresent
+
+  replicaCount: 3
+
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 1Gi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 60
+    targetMemoryUtilizationPercentage: 70
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 10
+            periodSeconds: 60
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+          - type: Pods
+            value: 4
+            periodSeconds: 15
+
+  env:
+    ENVIRONMENT: production
+    LOG_LEVEL: INFO
+    ENABLE_DEBUG_ENDPOINTS: "false"
+    RATE_LIMIT_MULTIPLIER: "1"
+    OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+    OTEL_SERVICE_NAME: omnipotent-api-production
+    SENTRY_ENVIRONMENT: production
+
+  secrets:
+    - name: omnipotent-secrets
+      keys:
+        - DATABASE_URL
+        - REDIS_URL
+        - JWT_SECRET
+        - OPENAI_API_KEY
+        - SENTRY_DSN
+
+  health:
+    liveness:
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health/ready
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+    startup:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 30
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  terminationGracePeriodSeconds: 60
+
+# Database migrations
+migrations:
+  enabled: true
+  image:
+    repository: omnipotent-api
+    tag: v1.0.0
+  runOnDeploy: true
+  timeout: 1800
+  backoffLimit: 2
+  preDeployBackup: true
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/limit-connections: "100"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+  hosts:
+    - host: api.omnipotent.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: omnipotent-production-tls
+      hosts:
+        - api.omnipotent.example.com
+
+# PostgreSQL (using external managed database)
+postgresql:
+  enabled: false
+  external:
+    host: ""  # Set via secret
+    port: 5432
+    database: omnipotent_production
+    existingSecret: omnipotent-db-credentials
+    ssl: true
+    sslMode: require
+
+# Redis
+redis:
+  enabled: false
+  external:
+    host: ""  # Set via secret
+    port: 6379
+    tls: true
+    existingSecret: omnipotent-redis-credentials
+
+# Monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    labels:
+      release: prometheus
+
+  podMonitor:
+    enabled: false
+
+  prometheusRule:
+    enabled: true
+    rules:
+      - alert: OmnipotentHighErrorRate
+        expr: rate(http_requests_total{job="omnipotent-api",status=~"5.."}[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          environment: production
+        annotations:
+          summary: High error rate in production
+          description: Error rate is {{ $value | humanizePercentage }}
+          runbook_url: https://runbooks.omnipotent.example.com/high-error-rate
+
+      - alert: OmnipotentHighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="omnipotent-api"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          environment: production
+        annotations:
+          summary: High latency in production
+          description: P95 latency is {{ $value | humanizeDuration }}
+          runbook_url: https://runbooks.omnipotent.example.com/high-latency
+
+      - alert: OmnipotentPodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total{namespace="omnipotent-production"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          environment: production
+        annotations:
+          summary: Pod crash looping
+          description: Pod {{ $labels.pod }} is crash looping
+
+      - alert: OmnipotentHighMemoryUsage
+        expr: container_memory_usage_bytes{namespace="omnipotent-production"} / container_spec_memory_limit_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          environment: production
+        annotations:
+          summary: High memory usage
+          description: Memory usage is above 90%
+
+      - alert: OmnipotentDatabaseConnectionPoolExhausted
+        expr: omnipotent_db_pool_available{environment="production"} < 5
+        for: 2m
+        labels:
+          severity: critical
+          environment: production
+        annotations:
+          summary: Database connection pool exhausted
+          description: Only {{ $value }} connections available
+
+# Network policies
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8  # Internal network only
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+
+# Pod security
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Node selection
+nodeSelector:
+  workload: production
+
+tolerations:
+  - key: production
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values:
+                - omnipotent-api
+        topologyKey: topology.kubernetes.io/zone
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - omnipotent-api
+          topologyKey: kubernetes.io/hostname
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node.kubernetes.io/instance-type
+              operator: In
+              values:
+                - m5.xlarge
+                - m5.2xlarge
+                - m6i.xlarge
+                - m6i.2xlarge
+
+# Topology spread constraints
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: omnipotent-api
+  - maxSkew: 2
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: omnipotent-api
+
+# Service account
+serviceAccount:
+  create: true
+  annotations:
+    # AWS
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/omnipotent-production
+    # GCP
+    # iam.gke.io/gcp-service-account: omnipotent-production@PROJECT.iam.gserviceaccount.com
+    # Azure
+    # azure.workload.identity/client-id: CLIENT_ID
+
+# Init containers
+initContainers:
+  - name: wait-for-db
+    image: postgres:15-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        until pg_isready -h $DB_HOST -p $DB_PORT; do
+          echo "Waiting for database..."
+          sleep 2
+        done
+    env:
+      - name: DB_HOST
+        valueFrom:
+          secretKeyRef:
+            name: omnipotent-db-credentials
+            key: host
+      - name: DB_PORT
+        valueFrom:
+          secretKeyRef:
+            name: omnipotent-db-credentials
+            key: port
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+
+# Priority class
+priorityClassName: high-priority
+
+# Extra volumes
+extraVolumes:
+  - name: tmp
+    emptyDir: {}
+  - name: cache
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+  - name: cache
+    mountPath: /app/.cache

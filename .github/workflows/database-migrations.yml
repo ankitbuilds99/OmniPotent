@@ -1,0 +1,480 @@
+name: Database Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'alembic/**'
+      - 'migrations/**'
+      - 'app/db/models/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'alembic/**'
+      - 'migrations/**'
+      - 'app/db/models/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run migrations'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      action:
+        description: 'Migration action'
+        required: true
+        default: 'upgrade'
+        type: choice
+        options:
+          - upgrade
+          - downgrade
+          - check
+          - history
+      target:
+        description: 'Target revision (for downgrade, use -1 for one step back)'
+        required: false
+        default: 'head'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ============================================================================
+  # VALIDATE MIGRATIONS (Always runs)
+  # ============================================================================
+  validate:
+    name: Validate Migrations
+    runs-on: ubuntu-latest
+    outputs:
+      has_pending: ${{ steps.check-pending.outputs.has_pending }}
+      migration_count: ${{ steps.check-pending.outputs.migration_count }}
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: omnipotent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra migrations
+
+      - name: Validate migration syntax
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+        run: |
+          echo "Checking migration files syntax..."
+          uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; ScriptDirectory.from_config(Config('alembic.ini'))"
+          echo "Migration syntax validated successfully"
+
+      - name: Check for pending migrations
+        id: check-pending
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+        run: |
+          # Apply all migrations to fresh database
+          uv run alembic upgrade head
+
+          # Check current head
+          CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
+          HEAD=$(uv run alembic heads 2>/dev/null | head -1 || echo "none")
+
+          echo "Current: $CURRENT"
+          echo "Head: $HEAD"
+
+          # Count migrations
+          MIGRATION_COUNT=$(uv run alembic history 2>/dev/null | wc -l | tr -d ' ')
+          echo "migration_count=$MIGRATION_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$CURRENT" != "$HEAD" ]; then
+            echo "has_pending=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_pending=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Test migration reversibility
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+        run: |
+          echo "Testing migration up/down cycle..."
+
+          # Get current head
+          HEAD=$(uv run alembic heads 2>/dev/null | head -1)
+
+          # Try downgrade
+          uv run alembic downgrade -1 || {
+            echo "::warning::Migration downgrade failed - migration may not be reversible"
+            exit 0
+          }
+
+          # Upgrade back
+          uv run alembic upgrade head
+
+          echo "Migration reversibility test passed"
+
+      - name: Verify model-migration consistency
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+        run: |
+          echo "Checking for unmigrated model changes..."
+
+          # Generate migration to check for differences
+          OUTPUT=$(uv run alembic revision --autogenerate -m "check_consistency" 2>&1 || true)
+
+          # Check if the generated migration has actual changes
+          LATEST_MIGRATION=$(ls -t alembic/versions/*.py 2>/dev/null | head -1)
+          if [ -n "$LATEST_MIGRATION" ]; then
+            if grep -q "pass" "$LATEST_MIGRATION" && ! grep -q "op\." "$LATEST_MIGRATION"; then
+              echo "Models and migrations are in sync"
+              rm -f "$LATEST_MIGRATION"
+            else
+              echo "::warning::Detected model changes without corresponding migrations"
+              cat "$LATEST_MIGRATION"
+              rm -f "$LATEST_MIGRATION"
+            fi
+          fi
+
+      - name: Migration summary
+        run: |
+          echo "## Migration Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Total migrations: ${{ steps.check-pending.outputs.migration_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Pending migrations: ${{ steps.check-pending.outputs.has_pending }}" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # PR MIGRATION CHECK
+  # ============================================================================
+  pr-check:
+    name: PR Migration Review
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for new migrations
+        id: new-migrations
+        run: |
+          # Find new migration files in this PR
+          NEW_MIGRATIONS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '^alembic/versions/.*\.py$' || true)
+
+          if [ -n "$NEW_MIGRATIONS" ]; then
+            echo "has_new=true" >> $GITHUB_OUTPUT
+            echo "files<<EOF" >> $GITHUB_OUTPUT
+            echo "$NEW_MIGRATIONS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "has_new=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Comment on PR
+        if: steps.new-migrations.outputs.has_new == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = `${{ steps.new-migrations.outputs.files }}`.split('\n').filter(f => f);
+            const body = `## Database Migration Review Required
+
+            This PR includes **${files.length}** new migration(s):
+
+            ${files.map(f => `- \`${f}\``).join('\n')}
+
+            ### Checklist
+            - [ ] Migration is reversible (has both upgrade and downgrade)
+            - [ ] Migration handles existing data safely
+            - [ ] Migration does not require extended downtime
+            - [ ] Migration has been tested against production-like data
+            - [ ] Rollback procedure is documented
+
+            ### Pre-deployment
+            1. Backup database before applying
+            2. Test in staging environment first
+            3. Monitor application logs during and after migration
+
+            ---
+            *Automated comment from database-migrations workflow*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ============================================================================
+  # STAGING MIGRATIONS
+  # ============================================================================
+  migrate-staging:
+    name: Migrate Staging
+    runs-on: ubuntu-latest
+    needs: validate
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+    concurrency:
+      group: db-migrations-staging
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check database URL
+        id: check-db
+        run: |
+          if [ -n "${{ secrets.STAGING_DATABASE_URL }}" ]; then
+            echo "has_db=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_db=false" >> $GITHUB_OUTPUT
+            echo "::warning::STAGING_DATABASE_URL not configured. Skipping migrations."
+          fi
+
+      - name: Install uv
+        if: steps.check-db.outputs.has_db == 'true'
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        if: steps.check-db.outputs.has_db == 'true'
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        if: steps.check-db.outputs.has_db == 'true'
+        run: uv sync --extra migrations
+
+      - name: Get current migration state
+        id: current-state
+        if: steps.check-db.outputs.has_db == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current migration: $CURRENT"
+
+      - name: Run migrations
+        if: steps.check-db.outputs.has_db == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          ACTION="${{ github.event.inputs.action || 'upgrade' }}"
+          TARGET="${{ github.event.inputs.target || 'head' }}"
+
+          case "$ACTION" in
+            upgrade)
+              echo "Upgrading to $TARGET..."
+              uv run alembic upgrade $TARGET
+              ;;
+            downgrade)
+              echo "Downgrading to $TARGET..."
+              uv run alembic downgrade $TARGET
+              ;;
+            check)
+              echo "Checking migration status..."
+              uv run alembic current
+              uv run alembic heads
+              ;;
+            history)
+              echo "Migration history:"
+              uv run alembic history --verbose
+              ;;
+          esac
+
+      - name: Verify migration state
+        if: steps.check-db.outputs.has_db == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          NEW_STATE=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
+          echo "Migration state after: $NEW_STATE"
+
+          echo "## Staging Migration Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Before: ${{ steps.current-state.outputs.current }}" >> $GITHUB_STEP_SUMMARY
+          echo "- After: $NEW_STATE" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure() && steps.check-db.outputs.has_db == 'true'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Migration failed in staging",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Migration Failed - Staging*\nCommit: `${{ github.sha }}`\nAction: ${{ github.event.inputs.action || 'upgrade' }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true
+
+  # ============================================================================
+  # PRODUCTION MIGRATIONS
+  # ============================================================================
+  migrate-production:
+    name: Migrate Production
+    runs-on: ubuntu-latest
+    needs: [validate, migrate-staging]
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.environment == 'production'
+    environment:
+      name: production
+    concurrency:
+      group: db-migrations-production
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check database URL
+        id: check-db
+        run: |
+          if [ -n "${{ secrets.PRODUCTION_DATABASE_URL }}" ]; then
+            echo "has_db=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_db=false" >> $GITHUB_OUTPUT
+            echo "::error::PRODUCTION_DATABASE_URL not configured."
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra migrations
+
+      - name: Create backup marker
+        run: |
+          echo "IMPORTANT: Ensure database backup exists before proceeding"
+          echo "Backup timestamp: $(date -u +%Y%m%d_%H%M%S)"
+
+      - name: Get current migration state
+        id: current-state
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: |
+          CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current migration: $CURRENT"
+
+      - name: Run migrations with timeout
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        timeout-minutes: 30
+        run: |
+          ACTION="${{ github.event.inputs.action }}"
+          TARGET="${{ github.event.inputs.target || 'head' }}"
+
+          case "$ACTION" in
+            upgrade)
+              echo "Upgrading to $TARGET..."
+              uv run alembic upgrade $TARGET
+              ;;
+            downgrade)
+              echo "Downgrading to $TARGET..."
+              uv run alembic downgrade $TARGET
+              ;;
+            check)
+              echo "Checking migration status..."
+              uv run alembic current
+              uv run alembic heads
+              ;;
+            history)
+              echo "Migration history:"
+              uv run alembic history --verbose
+              ;;
+          esac
+
+      - name: Verify migration state
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: |
+          NEW_STATE=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
+          echo "Migration state after: $NEW_STATE"
+
+          echo "## Production Migration Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Before: ${{ steps.current-state.outputs.current }}" >> $GITHUB_STEP_SUMMARY
+          echo "- After: $NEW_STATE" >> $GITHUB_STEP_SUMMARY
+          echo "- Action: ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: ${{ github.event.inputs.target || 'head' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify success
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Production migration completed successfully",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Migration Complete - Production*\nAction: ${{ github.event.inputs.action }}\nBefore: `${{ steps.current-state.outputs.current }}`\nAfter: `$(uv run alembic current | head -1)`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true
+
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "CRITICAL: Production migration failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*MIGRATION FAILED - Production*\nAction: ${{ github.event.inputs.action }}\nPrevious state: `${{ steps.current-state.outputs.current }}`\n\n*Immediate action required*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true

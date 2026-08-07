@@ -1,0 +1,15 @@
+# PodDisruptionBudget for production high availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: omnipotent-api-pdb
+  labels:
+    app.kubernetes.io/name: omnipotent-api
+    app.kubernetes.io/component: api
+    environment: production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omnipotent-api
+      environment: production

@@ -1,0 +1,371 @@
+---
+# ArgoCD ApplicationSet for OmniPotent DevOps Copilot
+# Manages deployments across multiple environments using GitOps
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: omnipotent
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: omnipotent
+    app.kubernetes.io/part-of: omnipotent-platform
+spec:
+  # Generator: Creates applications for each environment
+  generators:
+    - matrix:
+        generators:
+          # Environment generator
+          - list:
+              elements:
+                - env: staging
+                  cluster: https://staging.k8s.example.com
+                  namespace: omnipotent-staging
+                  replicaCount: "2"
+                  autoscaling: "true"
+                  minReplicas: "2"
+                  maxReplicas: "5"
+                  cpuRequest: "500m"
+                  memoryRequest: "512Mi"
+                  cpuLimit: "2000m"
+                  memoryLimit: "2Gi"
+                - env: production
+                  cluster: https://production.k8s.example.com
+                  namespace: omnipotent-production
+                  replicaCount: "3"
+                  autoscaling: "true"
+                  minReplicas: "3"
+                  maxReplicas: "20"
+                  cpuRequest: "1000m"
+                  memoryRequest: "1Gi"
+                  cpuLimit: "4000m"
+                  memoryLimit: "4Gi"
+          # Component generator
+          - list:
+              elements:
+                - component: api
+                  path: deploy/helm/devops-copilot
+                - component: worker
+                  path: deploy/helm/devops-copilot
+                  valuesFile: values-worker.yaml
+
+  # Sync policy for progressive delivery
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - key: env
+              operator: In
+              values:
+                - staging
+        - matchExpressions:
+            - key: env
+              operator: In
+              values:
+                - production
+
+  # Application template
+  template:
+    metadata:
+      name: 'omnipotent-{{component}}-{{env}}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/name: omnipotent
+        app.kubernetes.io/component: '{{component}}'
+        app.kubernetes.io/instance: '{{env}}'
+        environment: '{{env}}'
+      annotations:
+        notifications.argoproj.io/subscribe.on-sync-succeeded.slack: omnipotent-deploys
+        notifications.argoproj.io/subscribe.on-sync-failed.slack: omnipotent-alerts
+        notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: omnipotent-oncall
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: omnipotent
+
+      # Source configuration
+      source:
+        repoURL: https://github.com/ankit25bcs10610/OmniPotent.git
+        targetRevision: '{{#if (eq env "production")}}HEAD{{else}}main{{/if}}'
+        path: '{{path}}'
+        helm:
+          releaseName: 'omnipotent-{{component}}-{{env}}'
+          valueFiles:
+            - values.yaml
+            - 'values-{{env}}.yaml'
+          parameters:
+            - name: replicaCount
+              value: '{{replicaCount}}'
+            - name: autoscaling.enabled
+              value: '{{autoscaling}}'
+            - name: autoscaling.minReplicas
+              value: '{{minReplicas}}'
+            - name: autoscaling.maxReplicas
+              value: '{{maxReplicas}}'
+            - name: resources.requests.cpu
+              value: '{{cpuRequest}}'
+            - name: resources.requests.memory
+              value: '{{memoryRequest}}'
+            - name: resources.limits.cpu
+              value: '{{cpuLimit}}'
+            - name: resources.limits.memory
+              value: '{{memoryLimit}}'
+            - name: environment
+              value: '{{env}}'
+            - name: image.tag
+              value: '{{revision}}'
+
+      # Destination cluster and namespace
+      destination:
+        server: '{{cluster}}'
+        namespace: '{{namespace}}'
+
+      # Sync policy
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: false
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+          - PruneLast=true
+          - RespectIgnoreDifferences=true
+          - ApplyOutOfSyncOnly=true
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+
+      # Health checks
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+        - group: autoscaling
+          kind: HorizontalPodAutoscaler
+          jsonPointers:
+            - /spec/minReplicas
+            - /spec/maxReplicas
+
+      # Revision history limit
+      revisionHistoryLimit: 10
+
+---
+# ArgoCD Project for OmniPotent
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: omnipotent
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: omnipotent
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: OmniPotent DevOps Copilot Platform
+
+  # Source repositories
+  sourceRepos:
+    - https://github.com/ankit25bcs10610/OmniPotent.git
+    - https://charts.bitnami.com/bitnami
+
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: omnipotent-staging
+      server: https://staging.k8s.example.com
+    - namespace: omnipotent-production
+      server: https://production.k8s.example.com
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+
+  # Cluster resource whitelist
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: networking.k8s.io
+      kind: IngressClass
+
+  # Namespace resource blacklist (security)
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: LimitRange
+
+  # Roles for RBAC
+  roles:
+    - name: admin
+      description: Full access to all resources
+      policies:
+        - p, proj:omnipotent:admin, applications, *, omnipotent/*, allow
+        - p, proj:omnipotent:admin, repositories, *, omnipotent/*, allow
+      groups:
+        - platform-admins
+
+    - name: developer
+      description: Read access and sync for staging
+      policies:
+        - p, proj:omnipotent:developer, applications, get, omnipotent/*, allow
+        - p, proj:omnipotent:developer, applications, sync, omnipotent/*-staging, allow
+      groups:
+        - developers
+
+    - name: viewer
+      description: Read-only access
+      policies:
+        - p, proj:omnipotent:viewer, applications, get, omnipotent/*, allow
+      groups:
+        - viewers
+
+  # Orphaned resources monitoring
+  orphanedResources:
+    warn: true
+    ignore:
+      - group: ''
+        kind: ConfigMap
+        name: kube-root-ca.crt
+
+  # Sync windows for production
+  syncWindows:
+    - kind: allow
+      schedule: '0 6-22 * * 1-5'
+      duration: 16h
+      applications:
+        - '*-production'
+      namespaces:
+        - omnipotent-production
+      clusters:
+        - https://production.k8s.example.com
+      manualSync: true
+    - kind: deny
+      schedule: '0 22 * * 5'
+      duration: 60h
+      applications:
+        - '*-production'
+      namespaces:
+        - omnipotent-production
+
+---
+# ArgoCD Notifications ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # Slack template
+  template.app-sync-succeeded: |
+    message: |
+      :white_check_mark: Application {{.app.metadata.name}} sync succeeded
+      Revision: {{.app.status.sync.revision}}
+      Environment: {{index .app.metadata.labels "environment"}}
+    slack:
+      attachments: |
+        [{
+          "color": "#18be52",
+          "title": "{{.app.metadata.name}}",
+          "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "fields": [
+            {"title": "Sync Status", "value": "{{.app.status.sync.status}}", "short": true},
+            {"title": "Health Status", "value": "{{.app.status.health.status}}", "short": true},
+            {"title": "Revision", "value": "{{.app.status.sync.revision}}", "short": true},
+            {"title": "Environment", "value": "{{index .app.metadata.labels \"environment\"}}", "short": true}
+          ]
+        }]
+
+  template.app-sync-failed: |
+    message: |
+      :x: Application {{.app.metadata.name}} sync failed
+      Error: {{.app.status.operationState.message}}
+    slack:
+      attachments: |
+        [{
+          "color": "#E96D76",
+          "title": "{{.app.metadata.name}} - Sync Failed",
+          "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "fields": [
+            {"title": "Error", "value": "{{.app.status.operationState.message}}", "short": false},
+            {"title": "Environment", "value": "{{index .app.metadata.labels \"environment\"}}", "short": true}
+          ]
+        }]
+
+  template.app-health-degraded: |
+    message: |
+      :warning: Application {{.app.metadata.name}} health degraded
+      Status: {{.app.status.health.status}}
+    slack:
+      attachments: |
+        [{
+          "color": "#f4c030",
+          "title": "{{.app.metadata.name}} - Health Degraded",
+          "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "fields": [
+            {"title": "Health Status", "value": "{{.app.status.health.status}}", "short": true},
+            {"title": "Environment", "value": "{{index .app.metadata.labels \"environment\"}}", "short": true}
+          ]
+        }]
+
+  # Triggers
+  trigger.on-sync-succeeded: |
+    - when: app.status.operationState.phase in ['Succeeded']
+      send: [app-sync-succeeded]
+
+  trigger.on-sync-failed: |
+    - when: app.status.operationState.phase in ['Error', 'Failed']
+      send: [app-sync-failed]
+
+  trigger.on-health-degraded: |
+    - when: app.status.health.status == 'Degraded'
+      send: [app-health-degraded]
+
+  # Services
+  service.slack: |
+    token: $slack-token
+
+  service.pagerduty: |
+    serviceKeys:
+      omnipotent-oncall: $pagerduty-key
+
+---
+# ArgoCD Image Updater Config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-image-updater-config
+  namespace: argocd
+data:
+  registries.conf: |
+    registries:
+      - name: ECR
+        prefix: <account-id>.dkr.ecr.us-east-1.amazonaws.com
+        api_url: https://<account-id>.dkr.ecr.us-east-1.amazonaws.com
+        credentials: ext:/scripts/ecr-login.sh
+        default: true
+      - name: GHCR
+        prefix: ghcr.io
+        api_url: https://ghcr.io
+        credentials: secret:argocd/ghcr-credentials#token
+      - name: DockerHub
+        prefix: docker.io
+        api_url: https://registry-1.docker.io
+        credentials: secret:argocd/dockerhub-credentials#token
+
+  applications.conf: |
+    # Auto-update staging from latest tag
+    omnipotent-api-staging.image-list: omnipotent-api
+    omnipotent-api-staging.update-strategy: latest
+    omnipotent-api-staging.allow-tags: regexp:^sha-[a-f0-9]+$
+
+    # Production uses semver tags only
+    omnipotent-api-production.image-list: omnipotent-api
+    omnipotent-api-production.update-strategy: semver
+    omnipotent-api-production.allow-tags: regexp:^v[0-9]+\.[0-9]+\.[0-9]+$

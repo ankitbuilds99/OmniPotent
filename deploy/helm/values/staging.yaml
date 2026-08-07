@@ -1,0 +1,256 @@
+# Helm values for staging environment
+# OmniPotent DevOps Copilot
+
+global:
+  environment: staging
+  domain: staging.omnipotent.example.com
+  imageRegistry: ""  # Uses default registry
+
+# Application configuration
+app:
+  name: omnipotent-api
+  version: latest
+
+  image:
+    repository: omnipotent-api
+    tag: latest
+    pullPolicy: Always
+
+  replicaCount: 2
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  env:
+    ENVIRONMENT: staging
+    LOG_LEVEL: DEBUG
+    ENABLE_DEBUG_ENDPOINTS: "true"
+    RATE_LIMIT_MULTIPLIER: "2"
+    OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+    OTEL_SERVICE_NAME: omnipotent-api-staging
+
+  secrets:
+    - name: omnipotent-secrets
+      keys:
+        - DATABASE_URL
+        - REDIS_URL
+        - JWT_SECRET
+        - OPENAI_API_KEY
+
+  health:
+    liveness:
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health/ready
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# Database migrations
+migrations:
+  enabled: true
+  image:
+    repository: omnipotent-api
+    tag: latest
+  runOnDeploy: true
+  timeout: 600
+  backoffLimit: 3
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+  hosts:
+    - host: staging-api.omnipotent.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: omnipotent-staging-tls
+      hosts:
+        - staging-api.omnipotent.example.com
+
+# PostgreSQL (using external managed database)
+postgresql:
+  enabled: false
+  external:
+    host: ""  # Set via secret
+    port: 5432
+    database: omnipotent_staging
+    existingSecret: omnipotent-db-credentials
+
+# Redis
+redis:
+  enabled: false
+  external:
+    host: ""  # Set via secret
+    port: 6379
+    existingSecret: omnipotent-redis-credentials
+
+# Monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      release: prometheus
+
+  podMonitor:
+    enabled: false
+
+  prometheusRule:
+    enabled: true
+    rules:
+      - alert: OmnipotentHighErrorRate
+        expr: rate(http_requests_total{job="omnipotent-api",status=~"5.."}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          environment: staging
+        annotations:
+          summary: High error rate in staging
+          description: Error rate is {{ $value | humanizePercentage }}
+
+      - alert: OmnipotentHighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="omnipotent-api"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          environment: staging
+        annotations:
+          summary: High latency in staging
+          description: P95 latency is {{ $value | humanizeDuration }}
+
+# Network policies
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+
+# Pod security
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Node selection
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - omnipotent-api
+          topologyKey: kubernetes.io/hostname
+
+# Service account
+serviceAccount:
+  create: true
+  annotations:
+    # AWS
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/omnipotent-staging
+    # GCP
+    # iam.gke.io/gcp-service-account: omnipotent-staging@PROJECT.iam.gserviceaccount.com
+    # Azure
+    # azure.workload.identity/client-id: CLIENT_ID
+
+# Init containers
+initContainers:
+  - name: wait-for-db
+    image: postgres:15-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        until pg_isready -h $DB_HOST -p $DB_PORT; do
+          echo "Waiting for database..."
+          sleep 2
+        done
+    env:
+      - name: DB_HOST
+        valueFrom:
+          secretKeyRef:
+            name: omnipotent-db-credentials
+            key: host
+      - name: DB_PORT
+        valueFrom:
+          secretKeyRef:
+            name: omnipotent-db-credentials
+            key: port
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
