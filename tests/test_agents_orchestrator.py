@@ -6,11 +6,8 @@ agent team management, and status reporting.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agents.orchestrator import InvestigationPhase, OrchestratorAgent
 from app.agents.protocol import (
