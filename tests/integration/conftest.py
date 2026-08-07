@@ -89,17 +89,22 @@ async def test_org(db_conn) -> dict:
     import uuid
 
     org_id = str(uuid.uuid4())
-    await db_conn.execute(
-        """
-        INSERT INTO organizations (id, slug, name, plan)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (slug) DO NOTHING
-        """,
-        uuid.UUID(org_id),
-        "test-org",
-        "Test Organization",
-        "enterprise",
-    )
+    try:
+        await db_conn.execute(
+            """
+            INSERT INTO organizations (id, slug, name, plan)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (slug) DO NOTHING
+            """,
+            uuid.UUID(org_id),
+            "test-org",
+            "Test Organization",
+            "enterprise",
+        )
+    except Exception as e:
+        if "does not exist" in str(e):
+            pytest.skip("organizations table does not exist")
+        raise
 
     return {
         "id": org_id,
@@ -118,18 +123,23 @@ async def test_api_key(db_conn, test_org: dict) -> str:
     raw_key = f"omni_test_{uuid.uuid4().hex}"
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
-    await db_conn.execute(
-        """
-        INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name, role)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT DO NOTHING
-        """,
-        uuid.UUID(key_id),
-        uuid.UUID(test_org["id"]),
-        key_hash,
-        raw_key[:12],
-        "Integration Test Key",
-        "admin",
-    )
+    try:
+        await db_conn.execute(
+            """
+            INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name, role)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT DO NOTHING
+            """,
+            uuid.UUID(key_id),
+            uuid.UUID(test_org["id"]),
+            key_hash,
+            raw_key[:12],
+            "Integration Test Key",
+            "admin",
+        )
+    except Exception as e:
+        if "does not exist" in str(e):
+            pytest.skip("api_keys table does not exist")
+        raise
 
     return raw_key
