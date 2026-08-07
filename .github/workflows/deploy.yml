@@ -280,6 +280,8 @@ jobs:
     environment:
       name: production
       url: https://api.omnipotent.com
+    outputs:
+      previous_task_def: ${{ steps.save-previous.outputs.task_def_arn }}
 
     steps:
       - uses: actions/checkout@v4
@@ -290,6 +292,17 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Save previous task definition for rollback
+        id: save-previous
+        run: |
+          CURRENT_TASK=$(aws ecs describe-services \
+            --cluster omnipotent-prod \
+            --services omnipotent-api \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          echo "task_def_arn=$CURRENT_TASK" >> $GITHUB_OUTPUT
+          echo "Previous task definition: $CURRENT_TASK"
 
       - name: Download task definition
         run: |
@@ -306,6 +319,7 @@ jobs:
           image: ${{ needs.build-push.outputs.image_tag }}
 
       - name: Deploy to ECS
+        id: deploy
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
@@ -314,9 +328,10 @@ jobs:
           wait-for-service-stability: true
 
       - name: Run smoke tests
+        id: smoke-test
         run: |
           for i in {1..30}; do
-            if curl -sf https://api.omnipotent.com/health; then
+            if curl -sf https://api.omnipotent.com/healthz; then
               echo "Health check passed"
               exit 0
             fi
@@ -326,19 +341,103 @@ jobs:
           echo "Health check failed"
           exit 1
 
+      - name: Rollback on failure
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          echo "Deployment failed smoke tests. Rolling back to previous version..."
+          aws ecs update-service \
+            --cluster omnipotent-prod \
+            --service omnipotent-api \
+            --task-definition ${{ steps.save-previous.outputs.task_def_arn }} \
+            --force-new-deployment
+          aws ecs wait services-stable \
+            --cluster omnipotent-prod \
+            --services omnipotent-api
+          echo "Rollback completed"
+
       - name: Notify Slack - Production Deploy
         if: always() && env.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@v1
         with:
           payload: |
             {
-              "text": "${{ job.status == 'success' && '🚀' || '🚨' }} Production deploy ${{ job.status }}: ${{ github.ref_name }}",
+              "text": "${{ job.status == 'success' && ':rocket:' || ':rotating_light:' }} Production deploy ${{ job.status }}: ${{ github.ref_name }}",
               "blocks": [
                 {
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*Production Deploy*\nVersion: `${{ github.ref_name }}`\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<https://api.omnipotent.com|View Production>"
+                    "text": "*Production Deploy*\nVersion: `${{ github.ref_name }}`\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}${{ job.status == 'failure' && '\n:warning: Automatic rollback initiated' || '' }}\n<https://api.omnipotent.com|View Production>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ============================================================================
+  # MANUAL ROLLBACK
+  # ============================================================================
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment != ''
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get previous task definition
+        id: previous
+        run: |
+          CLUSTER=${{ github.event.inputs.environment == 'production' && 'omnipotent-prod' || 'omnipotent-staging' }}
+          TASK_DEF=${{ github.event.inputs.environment == 'production' && 'omnipotent-api-prod' || 'omnipotent-api-staging' }}
+
+          # Get previous task definition revision
+          CURRENT=$(aws ecs describe-task-definition \
+            --task-definition $TASK_DEF \
+            --query 'taskDefinition.revision' \
+            --output text)
+          PREVIOUS=$((CURRENT - 1))
+
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "previous=$PREVIOUS" >> $GITHUB_OUTPUT
+          echo "cluster=$CLUSTER" >> $GITHUB_OUTPUT
+          echo "task_def=$TASK_DEF" >> $GITHUB_OUTPUT
+          echo "Rolling back from revision $CURRENT to $PREVIOUS"
+
+      - name: Rollback to previous version
+        run: |
+          aws ecs update-service \
+            --cluster ${{ steps.previous.outputs.cluster }} \
+            --service omnipotent-api \
+            --task-definition ${{ steps.previous.outputs.task_def }}:${{ steps.previous.outputs.previous }} \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster ${{ steps.previous.outputs.cluster }} \
+            --services omnipotent-api
+
+          echo "Rollback completed successfully"
+
+      - name: Notify Slack - Rollback
+        if: always() && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": ":rewind: ${{ github.event.inputs.environment }} rollback ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Rollback*\nEnvironment: `${{ github.event.inputs.environment }}`\nFrom revision: `${{ steps.previous.outputs.current }}`\nTo revision: `${{ steps.previous.outputs.previous }}`\nStatus: ${{ job.status }}\nTriggered by: ${{ github.actor }}"
                   }
                 }
               ]

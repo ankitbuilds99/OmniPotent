@@ -1,13 +1,33 @@
+default_language_version:
+  python: python3.11
+  node: "20.10.0"
+
 repos:
-  # Ruff linter and formatter
+  # ==========================================================================
+  # PYTHON HOOKS
+  # ==========================================================================
+
+  # Ruff linter and formatter (fast, replaces black + isort + flake8)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.7.0
     hooks:
       - id: ruff
-        args: [--fix]
+        args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
-  # Bandit security scanner
+  # Type checking with mypy
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.0
+    hooks:
+      - id: mypy
+        args: [--config-file=pyproject.toml, --ignore-missing-imports]
+        files: ^app/
+        exclude: ^tests/
+        additional_dependencies:
+          - types-PyYAML
+          - types-pytz
+
+  # Security scanning with Bandit
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.10
     hooks:
@@ -16,29 +36,106 @@ repos:
         files: ^(app|evals|migrations)/.*\.py$
         exclude: ^tests/
 
+  # ==========================================================================
+  # SECRETS & SECURITY
+  # ==========================================================================
+
   # Detect secrets (gitleaks)
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
     hooks:
       - id: gitleaks
 
-  # Type checking
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.0
+  # Detect hardcoded AWS credentials
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
     hooks:
-      - id: mypy
-        args: [--config-file=pyproject.toml, --ignore-missing-imports]
-        files: ^app/
-        exclude: ^tests/
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+      - id: detect-private-key
 
-  # Standard pre-commit hooks
+  # ==========================================================================
+  # FRONTEND HOOKS
+  # ==========================================================================
+
+  # ESLint for TypeScript/React
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint
+        entry: bash -c 'cd frontend && npm run lint -- --max-warnings=0'
+        language: system
+        files: ^frontend/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
+
+      - id: frontend-typecheck
+        name: TypeScript
+        entry: bash -c 'cd frontend && npm run typecheck'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+
+  # ==========================================================================
+  # GENERAL HOOKS
+  # ==========================================================================
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^(.*\.md|.*\.lock)$
       - id: end-of-file-fixer
+        exclude: ^(.*\.lock)$
       - id: check-yaml
+        args: [--unsafe]  # Allow custom tags
+      - id: check-json
+      - id: check-toml
       - id: check-added-large-files
         args: ['--maxkb=1000']
       - id: check-merge-conflict
-      - id: detect-private-key
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
+
+  # ==========================================================================
+  # COMMIT MESSAGE
+  # ==========================================================================
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v3.29.0
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  # ==========================================================================
+  # DOCKERFILE LINTING
+  # ==========================================================================
+
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        args: [--ignore, DL3008, --ignore, DL3013]  # Allow unpinned apt/pip versions
+
+  # ==========================================================================
+  # YAML/JSON SCHEMA VALIDATION
+  # ==========================================================================
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.29.2
+    hooks:
+      - id: check-github-workflows
+      - id: check-dependabot
+
+ci:
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit hooks
+  autofix_prs: true
+  autoupdate_branch: ''
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
+  autoupdate_schedule: weekly
+  skip: [eslint, frontend-typecheck]  # Skip in CI (run separately)
+  submodules: false

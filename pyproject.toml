@@ -147,6 +147,27 @@ markers = [
     "contract: marks tests as contract tests (may require external services)",
 ]
 
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    "app/__main__.py",
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "@abstractmethod",
+]
+
 [tool.bandit]
 targets = ["app", "evals", "migrations"]
 exclude_dirs = [".venv", ".git", "__pycache__", "tests", "node_modules"]

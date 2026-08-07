@@ -1,0 +1,141 @@
+version: 2
+
+registries:
+  npm-npmjs:
+    type: npm-registry
+    url: https://registry.npmjs.org
+    replaces-base: true
+
+updates:
+  # Python dependencies (uv/pip)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(python)"
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      langchain:
+        patterns:
+          - "langchain*"
+          - "langgraph*"
+        update-types:
+          - "minor"
+          - "patch"
+      mcp:
+        patterns:
+          - "mcp*"
+          - "langchain-mcp*"
+      fastapi:
+        patterns:
+          - "fastapi*"
+          - "uvicorn*"
+          - "starlette*"
+      testing:
+        patterns:
+          - "pytest*"
+          - "ruff"
+          - "mypy"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Ignore major version bumps for core dependencies (manual review)
+      - dependency-name: "langchain*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "langgraph*"
+        update-types: ["version-update:semver-major"]
+
+  # Frontend npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(frontend)"
+    labels:
+      - "dependencies"
+      - "frontend"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react*"
+        update-types:
+          - "minor"
+          - "patch"
+      three:
+        patterns:
+          - "three"
+          - "@react-three/*"
+      testing:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+          - "@playwright/*"
+          - "playwright"
+        update-types:
+          - "minor"
+          - "patch"
+      eslint:
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+          - "typescript-eslint"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Ignore major version bumps for React (manual review)
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(actions)"
+    labels:
+      - "dependencies"
+      - "ci"
+    groups:
+      aws-actions:
+        patterns:
+          - "aws-actions/*"
+      github-actions:
+        patterns:
+          - "actions/*"
+
+  # Docker dependencies
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    commit-message:
+      prefix: "deps(docker)"
+    labels:
+      - "dependencies"
+      - "docker"

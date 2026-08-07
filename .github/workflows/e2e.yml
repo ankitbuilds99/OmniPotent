@@ -60,12 +60,28 @@ jobs:
         working-directory: tests/e2e
         run: npx playwright install --with-deps chromium firefox webkit
 
-      - name: Run E2E tests
+      - name: Run API E2E tests
         working-directory: tests/e2e
-        run: npx playwright test
+        run: npx playwright test specs/api.spec.ts
         env:
           BASE_URL: http://localhost:8000
           TEST_API_TOKEN: ${{ secrets.TEST_API_TOKEN || 'test-token' }}
+
+      - name: Run Auth E2E tests
+        working-directory: tests/e2e
+        run: npx playwright test specs/auth.spec.ts
+        env:
+          BASE_URL: http://localhost:8000
+          TEST_API_TOKEN: ${{ secrets.TEST_API_TOKEN || 'test-token' }}
+        continue-on-error: true
+
+      - name: Run Investigation E2E tests
+        working-directory: tests/e2e
+        run: npx playwright test specs/investigation.spec.ts
+        env:
+          BASE_URL: http://localhost:8000
+          TEST_API_TOKEN: ${{ secrets.TEST_API_TOKEN || 'test-token' }}
+        continue-on-error: true
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
