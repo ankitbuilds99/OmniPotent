@@ -2067,6 +2067,88 @@ async def cache_stats() -> dict:
     return get_cache().stats()
 
 
+@app.get(
+    "/investigations",
+    tags=["Investigations"],
+    summary="List investigations",
+    description="List investigation history with optional filtering by status. "
+    "Returns investigations from the in-memory store (or Supabase if configured).",
+    responses={
+        200: {
+            "description": "List of investigations",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "investigations": [
+                            {
+                                "id": "inv-abc123",
+                                "thread_id": "thread-xyz",
+                                "query": "Why is API latency high?",
+                                "summary": "Root cause: Database connection pool exhaustion",
+                                "status": "completed",
+                                "tokens_used": 15000,
+                                "latency_ms": 45000,
+                                "feedback_rating": None,
+                                "created_at": "2024-03-15T10:00:00Z",
+                                "completed_at": "2024-03-15T10:01:30Z",
+                                "report": {}
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    },
+)
+async def list_investigations(
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List investigations with optional filtering.
+
+    Args:
+        status: Filter by status (completed, active, error).
+        limit: Maximum number of investigations to return.
+        offset: Number of investigations to skip.
+
+    Returns:
+        dict: List of investigations.
+    """
+    from app.api.graphql.schema import _investigations
+
+    results = list(_investigations.values())
+
+    if status:
+        results = [r for r in results if r.get("status") == status]
+
+    results.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+
+    investigations = []
+    for r in results[offset:offset + limit]:
+        investigations.append({
+            "id": r.get("id", ""),
+            "thread_id": r.get("thread_id", ""),
+            "query": r.get("incident_summary", ""),
+            "summary": r.get("root_cause"),
+            "status": r.get("status", "unknown"),
+            "tokens_used": r.get("tokens_used", 0),
+            "latency_ms": None,
+            "feedback_rating": None,
+            "created_at": r.get("started_at"),
+            "completed_at": r.get("completed_at"),
+            "report": {
+                "root_cause": r.get("root_cause"),
+                "confidence": r.get("confidence"),
+                "hypotheses": r.get("hypotheses", []),
+                "evidence": r.get("evidence", []),
+                "affected_services": r.get("affected_services", []),
+            } if r.get("root_cause") else None,
+        })
+
+    return {"investigations": investigations}
+
+
 @app.post(
     "/feedback",
     tags=["Feedback"],
