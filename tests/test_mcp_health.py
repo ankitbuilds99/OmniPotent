@@ -1,9 +1,6 @@
 """Tests for MCP health monitoring module."""
 
 import pytest
-import asyncio
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.mcp.health import (
     MCPServerStatus,
