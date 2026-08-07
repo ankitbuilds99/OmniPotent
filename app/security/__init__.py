@@ -77,6 +77,27 @@ from app.security.zero_trust import (
     MicroSegmentationPolicy,
     create_zero_trust_engine,
 )
+from app.security.mfa import (
+    MFAMethod,
+    MFAStatus,
+    MFAEnrollment,
+    MFAVerificationResult,
+    TOTPEnrollmentResult,
+    TOTP,
+    RecoveryCodes,
+    MFAManager,
+    get_mfa_manager,
+)
+from app.security.session_security import (
+    SessionTimeoutStrategy,
+    SessionSecurityConfig,
+    SecureSession,
+    SessionValidationResult,
+    SecureSessionStore,
+    get_secure_session_store,
+    ROLE_SECURITY_CONFIGS,
+    SENSITIVE_OPERATIONS,
+)
 
 __all__ = [
     # API Auth
@@ -139,4 +160,23 @@ __all__ = [
     "JITPrivilege",
     "MicroSegmentationPolicy",
     "create_zero_trust_engine",
+    # Native MFA
+    "MFAMethod",
+    "MFAStatus",
+    "MFAEnrollment",
+    "MFAVerificationResult",
+    "TOTPEnrollmentResult",
+    "TOTP",
+    "RecoveryCodes",
+    "MFAManager",
+    "get_mfa_manager",
+    # Session Security
+    "SessionTimeoutStrategy",
+    "SessionSecurityConfig",
+    "SecureSession",
+    "SessionValidationResult",
+    "SecureSessionStore",
+    "get_secure_session_store",
+    "ROLE_SECURITY_CONFIGS",
+    "SENSITIVE_OPERATIONS",
 ]

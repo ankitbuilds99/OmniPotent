@@ -146,3 +146,8 @@ pythonpath = ["."]
 markers = [
     "contract: marks tests as contract tests (may require external services)",
 ]
+
+[tool.bandit]
+targets = ["app", "evals", "migrations"]
+exclude_dirs = [".venv", ".git", "__pycache__", "tests", "node_modules"]
+skips = ["B101"]  # assert_used acceptable in tests

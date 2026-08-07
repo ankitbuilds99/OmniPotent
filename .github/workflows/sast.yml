@@ -1,0 +1,160 @@
+name: SAST Security Scanning
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'evals/**'
+      - 'migrations/**'
+      - '*.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'evals/**'
+      - 'migrations/**'
+      - '*.py'
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6 AM UTC
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  bandit:
+    name: Bandit Python SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-bandit-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-bandit-
+
+      - name: Install Bandit
+        run: pip install bandit bandit-sarif-formatter
+
+      - name: Run Bandit (SARIF output)
+        run: |
+          bandit -r app evals migrations \
+            -c pyproject.toml \
+            -f sarif \
+            -o bandit-results.sarif \
+            --severity-level medium \
+            --confidence-level medium \
+            || true
+
+      - name: Upload Bandit SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: bandit-results.sarif
+          category: bandit
+        continue-on-error: true
+
+      - name: Run Bandit (fail on high severity)
+        run: |
+          bandit -r app evals migrations \
+            -c pyproject.toml \
+            --severity-level high \
+            --confidence-level high \
+            -f txt
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Semgrep rules
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/semgrep
+          key: ${{ runner.os }}-semgrep-v1
+
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --sarif \
+            --output=semgrep-results.sarif \
+            --config=auto \
+            --config=p/python \
+            --config=p/security-audit \
+            --config=p/owasp-top-ten \
+            --config=p/sqlalchemy \
+            --config=p/jwt \
+            --error \
+            --severity=ERROR \
+            app evals migrations || true
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep
+        continue-on-error: true
+
+      - name: Run Semgrep (strict mode)
+        run: |
+          semgrep scan \
+            --config=p/python \
+            --config=p/security-audit \
+            --error \
+            --severity=ERROR \
+            --exclude='tests/' \
+            app
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [bandit, semgrep]
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Generate PR Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const banditStatus = '${{ needs.bandit.result }}' === 'success' ? '✅ Passed' : '❌ Issues Found';
+            const semgrepStatus = '${{ needs.semgrep.result }}' === 'success' ? '✅ Passed' : '❌ Issues Found';
+
+            const body = `## 🔒 Security Scan Results
+
+            | Tool | Status |
+            |------|--------|
+            | Bandit (Python SAST) | ${banditStatus} |
+            | Semgrep (Pattern Matching) | ${semgrepStatus} |
+
+            📊 View detailed findings in the [Security tab](/${context.repo.owner}/${context.repo.repo}/security/code-scanning)
+
+            ---
+            *Automated security scan from SAST workflow*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+        continue-on-error: true

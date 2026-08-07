@@ -1,0 +1,151 @@
+rules:
+  # SQL Injection via f-string in SQLAlchemy
+  - id: sqlalchemy-fstring-injection
+    patterns:
+      - pattern-either:
+          - pattern: $SESSION.execute(f"...")
+          - pattern: $SESSION.execute(text(f"..."))
+          - pattern: $ENGINE.execute(f"...")
+          - pattern: text(f"...")
+    message: "SQL injection risk: use parameterized queries instead of f-strings"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-89
+      owasp: A03:2021
+      category: security
+
+  # Hardcoded JWT secrets
+  - id: hardcoded-jwt-secret
+    patterns:
+      - pattern-either:
+          - pattern: jwt.encode(..., "...", ...)
+          - pattern: jwt.decode(..., "...", ...)
+      - pattern-not: jwt.encode(..., $VAR, ...)
+      - pattern-not: jwt.decode(..., $VAR, ...)
+    message: "Hardcoded JWT secret detected. Use environment variables."
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-798
+      category: security
+
+  # Missing rate limiting on sensitive endpoints
+  - id: sensitive-endpoint-no-ratelimit
+    patterns:
+      - pattern: |
+          @$ROUTER.$METHOD("/api/.../auth/...", ...)
+          async def $FUNC(...):
+            ...
+      - pattern-not-inside: |
+          @$ROUTER.$METHOD(..., dependencies=[..., Depends($LIMITER), ...], ...)
+          ...
+    message: "Auth endpoint should have rate limiting"
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: security
+
+  # Subprocess with shell=True
+  - id: subprocess-shell-true
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+    message: "subprocess with shell=True is vulnerable to command injection"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-78
+      owasp: A03:2021
+      category: security
+
+  # Unsafe YAML loading
+  - id: unsafe-yaml-load
+    patterns:
+      - pattern-either:
+          - pattern: yaml.load(...)
+          - pattern: yaml.unsafe_load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=yaml.FullLoader, ...)
+    message: "Use yaml.safe_load() to prevent arbitrary code execution"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-502
+      category: security
+
+  # Pickle deserialization
+  - id: unsafe-pickle
+    patterns:
+      - pattern-either:
+          - pattern: pickle.load(...)
+          - pattern: pickle.loads(...)
+    message: "pickle deserialization can execute arbitrary code. Use JSON instead."
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-502
+      category: security
+
+  # Hardcoded IP addresses (potential bypass)
+  - id: hardcoded-internal-ip
+    patterns:
+      - pattern-regex: '(127\.0\.0\.1|0\.0\.0\.0|localhost)'
+    paths:
+      include:
+        - "*.py"
+      exclude:
+        - "*test*"
+        - "conftest.py"
+    message: "Hardcoded localhost/IP may cause issues in production"
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: security
+
+  # Missing input validation on path parameters
+  - id: path-param-file-access
+    patterns:
+      - pattern: |
+          @$ROUTER.$METHOD(".../{$PATH}...")
+          async def $FUNC(..., $PATH: str, ...):
+            ...
+            open($PATH, ...)
+            ...
+    message: "Path parameter used directly in file operations - validate first"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-22
+      category: security
+
+  # Debug mode in production
+  - id: debug-mode-enabled
+    patterns:
+      - pattern-either:
+          - pattern: uvicorn.run(..., reload=True, ...)
+          - pattern: app.debug = True
+          - pattern: DEBUG = True
+    paths:
+      exclude:
+        - "*test*"
+        - "conftest.py"
+    message: "Debug mode should not be enabled in production"
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: security
+
+  # Secrets in error messages
+  - id: secrets-in-logs
+    patterns:
+      - pattern-either:
+          - pattern: log.$LEVEL(..., password=..., ...)
+          - pattern: log.$LEVEL(..., api_key=..., ...)
+          - pattern: log.$LEVEL(..., secret=..., ...)
+          - pattern: log.$LEVEL(..., token=..., ...)
+    message: "Potential secret exposure in logs"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: CWE-532
+      category: security
