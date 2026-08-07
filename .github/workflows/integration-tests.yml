@@ -67,14 +67,28 @@ jobs:
 
       - name: Wait for services
         run: |
-          until pg_isready -h localhost -p 5432 -U ${{ env.POSTGRES_USER }}; do
-            echo "Waiting for PostgreSQL..."
+          # Wait for PostgreSQL using nc (netcat)
+          for i in {1..30}; do
+            if nc -z localhost 5432; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            echo "Waiting for PostgreSQL... ($i/30)"
             sleep 2
           done
-          until redis-cli -h localhost ping; do
-            echo "Waiting for Redis..."
+
+          # Wait for Redis using nc
+          for i in {1..30}; do
+            if nc -z localhost 6379; then
+              echo "Redis is ready"
+              break
+            fi
+            echo "Waiting for Redis... ($i/30)"
             sleep 2
           done
+
+          # Give services a moment to fully initialize
+          sleep 3
           echo "All services are ready"
 
       - name: Run database migrations
