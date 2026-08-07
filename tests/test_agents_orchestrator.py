@@ -766,7 +766,7 @@ class TestRouteMessage:
             content={"task": "Fix"},
         )
 
-        result = orch.route_message(message, context)
+        orch.route_message(message, context)
 
         mock_rem.process.assert_called_once()
 
@@ -786,7 +786,7 @@ class TestRouteMessage:
             content={"task": "Review"},
         )
 
-        result = orch.route_message(message, context)
+        orch.route_message(message, context)
 
         mock_rev.process.assert_called_once()
 

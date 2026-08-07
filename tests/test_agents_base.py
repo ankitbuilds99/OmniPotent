@@ -604,7 +604,7 @@ class TestBaseAgentBuildSystemPrompt:
         context = SharedContext(session_id="test")
         context.incident_summary = "Test incident"
 
-        result = agent._build_system_prompt(context, "")
+        agent._build_system_prompt(context, "")
 
         # Verify that context was appended to the system prompt
         call_args = mock_cached_system.call_args[0]
@@ -617,7 +617,7 @@ class TestBaseAgentBuildSystemPrompt:
 
         agent = ConcreteTestAgent()
 
-        result = agent._build_system_prompt(None, "volatile content")
+        agent._build_system_prompt(None, "volatile content")
 
         mock_cached_system.assert_called_once()
         call_args = mock_cached_system.call_args[0]
