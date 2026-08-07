@@ -377,17 +377,21 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_create_checkout_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """create_checkout should raise without Stripe."""
-        with pytest.raises(ValueError, match="Stripe not configured"):
-            await api_no_stripe.create_checkout(org_id, "team")
+        """create_checkout should return demo checkout when Stripe not configured."""
+        result = await api_no_stripe.create_checkout(org_id, "team")
+
+        assert "checkout_url" in result
+        assert "session_id" in result
+        assert "demo_session" in result["session_id"]
 
     # Create portal tests
 
     @pytest.mark.asyncio
     async def test_create_portal_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """create_portal should raise without Stripe."""
-        with pytest.raises(ValueError, match="Stripe not configured"):
-            await api_no_stripe.create_portal(org_id)
+        """create_portal should return demo portal when Stripe not configured."""
+        result = await api_no_stripe.create_portal(org_id)
+
+        assert "portal_url" in result
 
     # Change plan tests
 
