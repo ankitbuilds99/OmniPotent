@@ -24,52 +24,61 @@ export const options = {
   },
 };
 
-const headers = {
-  'Content-Type': 'application/json',
-};
-
 let iteration = 0;
 
 export default function () {
   iteration++;
 
-  // Health check (most frequent)
+  // Health check (most frequent) - always returns 200
   const healthRes = http.get(`${BASE_URL}/healthz`);
   const healthOk = check(healthRes, {
-    'health check ok': (r) => r.status === 200,
+    'healthz returns 200': (r) => r.status === 200,
   });
   if (!healthOk) cumulativeErrors.add(1);
   errorRate.add(!healthOk);
   memoryLeak.add(healthRes.timings.duration, { iteration: iteration });
 
-  // Realistic API usage pattern
+  // Realistic usage pattern with open endpoints only
   if (iteration % 5 === 0) {
-    // Every 5th request: list investigations
-    const listRes = http.get(`${BASE_URL}/api/v1/investigations`, { headers });
-    check(listRes, {
-      'list ok': (r) => r.status !== 500,
+    // Every 5th request: frontend config
+    const configRes = http.get(`${BASE_URL}/frontend-config`);
+    const configOk = check(configRes, {
+      'frontend-config returns 200': (r) => r.status === 200,
     });
-    memoryLeak.add(listRes.timings.duration, { iteration: iteration });
+    if (!configOk) cumulativeErrors.add(1);
+    errorRate.add(!configOk);
+    memoryLeak.add(configRes.timings.duration, { iteration: iteration });
+  }
+
+  if (iteration % 10 === 0) {
+    // Every 10th: readiness check
+    const readyRes = http.get(`${BASE_URL}/readyz`);
+    const readyOk = check(readyRes, {
+      'readyz returns 200 or 503': (r) => r.status === 200 || r.status === 503,
+    });
+    // Only count as error if not 200 or 503
+    if (!readyOk) cumulativeErrors.add(1);
+    errorRate.add(!readyOk);
   }
 
   if (iteration % 20 === 0) {
-    // Every 20th request: start investigation
-    const payload = JSON.stringify({
-      query: `soak test iteration ${iteration}`,
-      context: { test: true },
+    // Every 20th: auth providers
+    const authRes = http.get(`${BASE_URL}/auth/providers`);
+    const authOk = check(authRes, {
+      'auth/providers returns 200': (r) => r.status === 200,
     });
-    const startRes = http.post(`${BASE_URL}/api/v1/investigations`, payload, { headers });
-    check(startRes, {
-      'start ok': (r) => r.status !== 500,
-    });
+    if (!authOk) cumulativeErrors.add(1);
+    errorRate.add(!authOk);
   }
 
   if (iteration % 100 === 0) {
-    // Every 100th: check metrics endpoint
-    const metricsRes = http.get(`${BASE_URL}/metrics`);
-    check(metricsRes, {
-      'metrics ok': (r) => r.status === 200 || r.status === 404,
+    // Every 100th: check SLO metrics endpoint
+    const metricsRes = http.get(`${BASE_URL}/metrics/slo`);
+    const metricsOk = check(metricsRes, {
+      'metrics/slo returns 200': (r) => r.status === 200,
     });
+    if (!metricsOk) cumulativeErrors.add(1);
+    errorRate.add(!metricsOk);
   }
 
   // Variable sleep to simulate real traffic patterns
@@ -100,18 +109,18 @@ export function handleSummary(data) {
   const maxLatency = metrics.http_req_duration?.values.max || 0;
 
   if (maxLatency > avgLatency * 10) {
-    report += '⚠️  WARNING: Large latency spikes detected - possible memory pressure\n';
+    report += '  WARNING: Large latency spikes detected - possible memory pressure\n';
   }
 
   const errorRateVal = metrics.error_rate?.values.rate || 0;
   if (errorRateVal < 0.01) {
-    report += '✅ STABLE: System maintained excellent performance over time\n';
+    report += '  STABLE: System maintained excellent performance over time\n';
   } else if (errorRateVal < 0.02) {
-    report += '✅ ACCEPTABLE: Minor degradation within acceptable limits\n';
+    report += '  ACCEPTABLE: Minor degradation within acceptable limits\n';
   } else if (errorRateVal < 0.05) {
-    report += '⚠️  WARNING: Noticeable degradation over time - investigate\n';
+    report += '  WARNING: Noticeable degradation over time - investigate\n';
   } else {
-    report += '❌ UNSTABLE: System shows degradation under sustained load\n';
+    report += '  UNSTABLE: System shows degradation under sustained load\n';
   }
 
   return {

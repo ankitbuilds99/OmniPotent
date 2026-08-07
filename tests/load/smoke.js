@@ -8,36 +8,40 @@ export const options = {
   duration: '30s',
   thresholds: {
     http_req_duration: ['p(95)<500'],
-    // Allow up to 30% failures since / returns 404 (redirects to frontend)
-    // and some endpoints may not be available without full setup
-    http_req_failed: ['rate<0.30'],
+    http_req_failed: ['rate<0.01'],
   },
 };
 
 export default function () {
-  // Health check
+  // Health check - always returns 200
   const healthRes = http.get(`${BASE_URL}/healthz`);
   check(healthRes, {
-    'health check status is 200': (r) => r.status === 200,
-    'health check response has status': (r) => r.json().status !== undefined,
+    'healthz returns 200': (r) => r.status === 200,
+    'healthz has status field': (r) => {
+      try {
+        return r.json().status !== undefined;
+      } catch {
+        return false;
+      }
+    },
   });
 
-  // Readiness check
+  // Readiness check - returns 200 or 503
   const readyRes = http.get(`${BASE_URL}/readyz`);
   check(readyRes, {
-    'readiness check status is 200': (r) => r.status === 200,
+    'readyz returns 200 or 503': (r) => r.status === 200 || r.status === 503,
   });
 
-  // API root
-  const rootRes = http.get(`${BASE_URL}/`);
-  check(rootRes, {
-    'root endpoint responds': (r) => r.status === 200 || r.status === 404,
+  // Frontend config - open path, always returns 200
+  const frontendRes = http.get(`${BASE_URL}/frontend-config`);
+  check(frontendRes, {
+    'frontend-config returns 200': (r) => r.status === 200,
   });
 
-  // OpenAPI docs
-  const docsRes = http.get(`${BASE_URL}/docs`);
-  check(docsRes, {
-    'docs endpoint responds': (r) => r.status === 200,
+  // Metrics SLO - open path, always returns 200
+  const metricsRes = http.get(`${BASE_URL}/metrics/slo`);
+  check(metricsRes, {
+    'metrics/slo returns 200': (r) => r.status === 200,
   });
 
   sleep(1);

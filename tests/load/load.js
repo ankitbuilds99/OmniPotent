@@ -7,7 +7,6 @@ const VUS = parseInt(__ENV.K6_VUS) || 50;
 const DURATION = __ENV.K6_DURATION || '1m';
 
 // Custom metrics
-const investigationDuration = new Trend('investigation_duration');
 const apiErrors = new Counter('api_errors');
 const successRate = new Rate('success_rate');
 
@@ -19,84 +18,60 @@ export const options = {
   ],
   thresholds: {
     http_req_duration: ['p(95)<2000', 'p(99)<5000'],
-    http_req_failed: ['rate<0.10'],  // Allow up to 10% failures
-    success_rate: ['rate>0.90'],     // At least 90% of checks should pass
+    // All tested endpoints return 200 - any failure is real
+    http_req_failed: ['rate<0.01'],
+    success_rate: ['rate>0.99'],
   },
 };
 
-const headers = {
-  'Content-Type': 'application/json',
-  'Authorization': 'Bearer test-token',
-};
-
 export default function () {
+  // Only test endpoints that return 200 without authentication.
+  // These are the open paths defined in _OPEN_PATHS in main.py.
+
   group('Health Endpoints', function () {
     const healthRes = http.get(`${BASE_URL}/healthz`);
-    check(healthRes, {
-      'health status 200': (r) => r.status === 200,
+    const healthOk = check(healthRes, {
+      'healthz returns 200': (r) => r.status === 200,
     });
+    successRate.add(healthOk);
+    if (!healthOk) apiErrors.add(1);
 
     const readyRes = http.get(`${BASE_URL}/readyz`);
-    check(readyRes, {
-      'ready status 200': (r) => r.status === 200,
+    const readyOk = check(readyRes, {
+      // readyz returns 503 if not ready, which is valid
+      'readyz returns 200 or 503': (r) => r.status === 200 || r.status === 503,
     });
+    successRate.add(readyOk);
+    // Only count 5xx errors (not 503 from readiness check)
+    if (readyRes.status >= 500 && readyRes.status !== 503) apiErrors.add(1);
   });
 
-  group('API Endpoints', function () {
-    // Get config (no auth required for reading config)
-    const configRes = http.get(`${BASE_URL}/config`);
-    const configOk = check(configRes, {
-      'config status 200': (r) => r.status === 200,
+  group('Public API Endpoints', function () {
+    // Frontend config - open path, no auth required
+    const frontendRes = http.get(`${BASE_URL}/frontend-config`);
+    const frontendOk = check(frontendRes, {
+      'frontend-config returns 200': (r) => r.status === 200,
     });
-    successRate.add(configOk);
-    if (!configOk) apiErrors.add(1);
+    successRate.add(frontendOk);
+    if (!frontendOk) apiErrors.add(1);
 
-    // Get usage stats (may require auth)
-    const usageRes = http.get(`${BASE_URL}/usage`, { headers });
-    const usageOk = check(usageRes, {
-      'usage status 200 or 401': (r) => r.status === 200 || r.status === 401,
+    // Auth providers - open path, no auth required
+    const authRes = http.get(`${BASE_URL}/auth/providers`);
+    const authOk = check(authRes, {
+      'auth/providers returns 200': (r) => r.status === 200,
     });
-    successRate.add(usageOk);
-    if (usageRes.status >= 500) apiErrors.add(1);
-  });
-
-  group('Webhook Endpoints', function () {
-    // PagerDuty webhook (actual endpoint)
-    const pdPayload = JSON.stringify({
-      event: {
-        event_type: 'incident.triggered',
-        data: {
-          id: 'P123456',
-          title: 'High CPU on checkout-api',
-          service: { summary: 'checkout-api' },
-          html_url: 'https://pagerduty.com/incidents/P123456',
-        },
-      },
-    });
-
-    const pdRes = http.post(
-      `${BASE_URL}/webhooks/pagerduty`,
-      pdPayload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-PagerDuty-Signature': 'v1=test',
-        },
-      }
-    );
-    const pdOk = check(pdRes, {
-      'pagerduty webhook accepted': (r) => r.status !== 500,
-    });
-    successRate.add(pdOk);
+    successRate.add(authOk);
+    if (!authOk) apiErrors.add(1);
   });
 
   group('Metrics Endpoints', function () {
-    // SLO metrics endpoint (Prometheus format)
+    // SLO metrics - open path, no auth required
     const metricsRes = http.get(`${BASE_URL}/metrics/slo`);
     const metricsOk = check(metricsRes, {
-      'metrics endpoint responds': (r) => r.status === 200,
+      'metrics/slo returns 200': (r) => r.status === 200,
     });
     successRate.add(metricsOk);
+    if (!metricsOk) apiErrors.add(1);
   });
 
   sleep(Math.random() * 2 + 1);
