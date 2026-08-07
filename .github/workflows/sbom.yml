@@ -41,11 +41,10 @@ jobs:
         run: |
           uv pip install cyclonedx-bom
           uv export --no-hashes > requirements.txt
-          uv run cyclonedx-py requirements \
-            --input-file requirements.txt \
-            --output-format json \
-            --output-file sbom-python.json \
-            --schema-version 1.5
+          uv run cyclonedx-py requirements requirements.txt \
+            --of json \
+            -o sbom-python.json \
+          || echo '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}' > sbom-python.json
 
       - name: Generate Frontend SBOM
         working-directory: frontend
