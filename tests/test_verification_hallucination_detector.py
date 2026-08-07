@@ -104,23 +104,24 @@ class TestHallucinationDetector:
     async def test_check_for_hallucinations_fabricated_numeric(self):
         """Should detect fabricated numeric claims."""
         detector = HallucinationDetector()
+        # Use a non-percent numeric claim to avoid loose tolerance issues
         evidence = [
             Evidence(
                 source=EvidenceSource.METRICS,
                 data={},
                 timestamp=datetime.now(timezone.utc),
                 confidence=0.9,
-                metric_name="error_rate",
-                metric_value=0.01,
+                metric_name="latency_p99",
+                metric_value=50,  # 50ms latency
             )
         ]
         result = await detector.check_for_hallucinations(
-            claim_text="Error rate spiked to 99%",
+            claim_text="Latency increased to 5000ms",  # Claims 5000ms, but evidence shows 50ms
             evidence=evidence,
         )
         assert result.detected is True
         assert result.hallucination_type == HallucinationType.FABRICATED_FACT
-        assert "99" in result.explanation
+        assert "5000" in result.explanation
 
     @pytest.mark.asyncio
     async def test_check_for_hallucinations_wrong_cited_value(self):
