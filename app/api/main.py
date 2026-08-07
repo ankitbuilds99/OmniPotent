@@ -2068,7 +2068,7 @@ async def cache_stats() -> dict:
 
 
 @app.get(
-    "/investigations",
+    "/api/investigations",
     tags=["Investigations"],
     summary="List investigations",
     description="List investigation history with optional filtering by status. "
