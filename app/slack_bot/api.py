@@ -313,7 +313,6 @@ async def _get_options(
         ]
 
     elif action_id == "incident_select":
-        from app.slack_bot.core import get_slack_bot
 
         return [
             {"text": {"type": "plain_text", "text": "INC-1234"}, "value": "INC-1234"},
@@ -356,7 +355,6 @@ async def slack_oauth_callback(
 
         team_id = result.get("team", {}).get("id")
         team_name = result.get("team", {}).get("name")
-        access_token = result.get("access_token")
         bot_user_id = result.get("bot_user_id")
 
         log.info(

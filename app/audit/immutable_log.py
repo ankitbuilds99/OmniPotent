@@ -21,8 +21,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, AsyncIterator, Protocol
-import base64
+from typing import Any, Protocol
 
 import httpx
 

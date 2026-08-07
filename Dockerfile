@@ -17,6 +17,7 @@ RUN npm run build   # -> /web/dist
 FROM python:3.12-slim AS runtime
 
 # git: repo MCP server's git_log tool. curl: container HEALTHCHECK.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends git curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -50,4 +51,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:${PORT:-8000}/healthz || exit 1
 
 # Use PORT env variable for Render compatibility (defaults to 8000)
-CMD uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD ["sh", "-c", "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

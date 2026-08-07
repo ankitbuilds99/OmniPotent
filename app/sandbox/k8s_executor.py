@@ -12,15 +12,11 @@ Production-ready implementation for safe command execution:
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 import os
-import secrets
-import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncIterator
 

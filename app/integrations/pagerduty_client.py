@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -365,8 +365,6 @@ class PagerDutyClient:
                 "status": "acknowledged",
             }
         }
-
-        headers = {"From": user_email}
 
         if self._client:
             self._client.headers["From"] = user_email
