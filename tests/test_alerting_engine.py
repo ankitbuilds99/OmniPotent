@@ -1,8 +1,6 @@
 """Tests for alerting engine module."""
 
-import pytest
-from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock, AsyncMock
+from datetime import datetime
 
 from app.alerting.engine import AlertEngine
 from app.alerting.rules import (

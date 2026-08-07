@@ -18,7 +18,6 @@ import asyncio
 import os
 import signal
 import sys
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
