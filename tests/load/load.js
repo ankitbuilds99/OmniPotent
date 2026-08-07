@@ -122,22 +122,23 @@ function textSummary(data, options) {
 
   let summary = '\n=== Load Test Summary ===\n\n';
 
-  if (metrics.http_req_duration) {
+  if (metrics.http_req_duration && metrics.http_req_duration.values) {
+    const duration = metrics.http_req_duration.values;
     summary += `HTTP Request Duration:\n`;
-    summary += `  avg: ${metrics.http_req_duration.values.avg.toFixed(2)}ms\n`;
-    summary += `  p95: ${metrics.http_req_duration.values['p(95)'].toFixed(2)}ms\n`;
-    summary += `  p99: ${metrics.http_req_duration.values['p(99)'].toFixed(2)}ms\n\n`;
+    summary += `  avg: ${(duration.avg || 0).toFixed(2)}ms\n`;
+    summary += `  p95: ${(duration.p95 || duration['p(95)'] || 0).toFixed(2)}ms\n`;
+    summary += `  p99: ${(duration.p99 || duration['p(99)'] || 0).toFixed(2)}ms\n\n`;
   }
 
-  if (metrics.http_reqs) {
+  if (metrics.http_reqs && metrics.http_reqs.values) {
     summary += `Requests:\n`;
-    summary += `  total: ${metrics.http_reqs.values.count}\n`;
-    summary += `  rate: ${metrics.http_reqs.values.rate.toFixed(2)}/s\n\n`;
+    summary += `  total: ${metrics.http_reqs.values.count || 0}\n`;
+    summary += `  rate: ${(metrics.http_reqs.values.rate || 0).toFixed(2)}/s\n\n`;
   }
 
-  if (metrics.http_req_failed) {
+  if (metrics.http_req_failed && metrics.http_req_failed.values) {
     summary += `Failures:\n`;
-    summary += `  rate: ${(metrics.http_req_failed.values.rate * 100).toFixed(2)}%\n\n`;
+    summary += `  rate: ${((metrics.http_req_failed.values.rate || 0) * 100).toFixed(2)}%\n\n`;
   }
 
   return summary;

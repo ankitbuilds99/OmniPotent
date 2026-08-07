@@ -16,6 +16,7 @@ import contextvars
 import json
 import logging
 import os
+from typing import Any
 
 from app.config import get_settings
 
@@ -188,9 +189,9 @@ def setup_sentry() -> None:
     )
 
 
-def _filter_health_checks(event: dict, hint: dict) -> dict | None:
+def _filter_health_checks(event: Any, hint: dict[str, Any]) -> Any:
     """Filter out health check transactions to reduce noise."""
-    transaction_name = event.get("transaction", "")
+    transaction_name = event.get("transaction", "") if isinstance(event, dict) else ""
     if transaction_name in ("/healthz", "/readyz", "/metrics/slo"):
         return None
     return event

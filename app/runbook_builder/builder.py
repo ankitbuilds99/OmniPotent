@@ -696,7 +696,7 @@ class RunbookExecutor:
         script = config.get("script", "")
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S602  # nosec B602 - Intentional: runbook scripts require shell execution
                 script,
                 shell=True,
                 capture_output=True,
