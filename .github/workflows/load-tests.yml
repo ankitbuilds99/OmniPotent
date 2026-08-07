@@ -114,7 +114,7 @@ jobs:
 
       - name: Run migrations
         run: |
-          uv sync --extra dev
+          uv sync --extra dev --extra migrations
           uv run alembic upgrade head
         env:
           DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
@@ -238,7 +238,7 @@ jobs:
 
       - name: Run migrations
         run: |
-          uv sync --extra dev
+          uv sync --extra dev --extra migrations
           uv run alembic upgrade head
         env:
           DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
@@ -307,7 +307,7 @@ jobs:
 
       - name: Run migrations
         run: |
-          uv sync --extra dev
+          uv sync --extra dev --extra migrations
           uv run alembic upgrade head
         env:
           DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test

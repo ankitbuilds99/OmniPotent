@@ -63,7 +63,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra test
+        run: uv sync --extra dev --extra test --extra migrations
 
       - name: Wait for services
         run: |

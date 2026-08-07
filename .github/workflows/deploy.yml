@@ -379,7 +379,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
-          uv sync
+          uv sync --extra migrations
           uv run alembic upgrade head
 
   # ============================================================================
