@@ -405,7 +405,7 @@ class GPUTracker:
 
     async def scan_aws_instances(self) -> list[GPUInstance]:
         """Scan AWS for GPU instances."""
-        instances = []
+        instances: list[GPUInstance] = []
         ec2 = self._get_aws_client("ec2")
         if not ec2:
             return instances
@@ -485,7 +485,7 @@ class GPUTracker:
         gpu_types: list[GPUType] | None = None,
     ) -> list[GPUAvailability]:
         """Get current AWS spot prices for GPU instances."""
-        availability = []
+        availability: list[GPUAvailability] = []
         ec2 = self._get_aws_client("ec2")
         if not ec2:
             return availability
@@ -543,7 +543,7 @@ class GPUTracker:
 
     async def scan_gcp_instances(self) -> list[GPUInstance]:
         """Scan GCP for GPU instances."""
-        instances = []
+        instances: list[GPUInstance] = []
         if not self.gcp_project:
             return instances
 
@@ -676,18 +676,18 @@ class GPUTracker:
 
         underutilized = [
             i for i in self._instances.values()
-            if i.utilization is not None and i.utilization < 0.3
+            if i.utilization is not None and i.utilization < 0.3 and i.monthly_cost is not None
         ]
 
         for instance in underutilized:
-            waste = instance.monthly_cost * (1 - instance.utilization)
+            waste = (instance.monthly_cost or 0) * (1 - (instance.utilization or 0))
             if waste > 50:
                 rec_id += 1
                 recommendations.append(CostOptimizationRecommendation(
                     id=f"rec_{rec_id}",
                     category="rightsizing",
                     title=f"Rightsize underutilized {instance.instance_id}",
-                    description=f"GPU utilization is only {instance.utilization*100:.0f}%. Consider smaller instance or workload consolidation",
+                    description=f"GPU utilization is only {(instance.utilization or 0)*100:.0f}%. Consider smaller instance or workload consolidation",
                     estimated_savings_monthly=waste * 0.7,
                     estimated_savings_percentage=70,
                     effort="medium",
@@ -765,37 +765,42 @@ class GPUTracker:
 
     def get_inventory_summary(self) -> dict[str, Any]:
         """Get GPU inventory summary across all clouds."""
-        summary = {
-            "total_gpus": 0,
-            "total_monthly_cost": 0,
-            "by_provider": {},
-            "by_gpu_type": {},
-            "by_instance_type": {},
-        }
+        total_gpus = 0
+        total_monthly_cost = 0.0
+        by_provider: dict[str, dict[str, float]] = {}
+        by_gpu_type: dict[str, dict[str, float]] = {}
+        by_instance_type: dict[str, dict[str, float]] = {}
 
         for instance in self._instances.values():
-            summary["total_gpus"] += instance.gpu_count
-            summary["total_monthly_cost"] += instance.monthly_cost
+            cost = instance.monthly_cost or 0.0
+            total_gpus += instance.gpu_count
+            total_monthly_cost += cost
 
-            provider = instance.provider.value
-            if provider not in summary["by_provider"]:
-                summary["by_provider"][provider] = {"gpus": 0, "cost": 0}
-            summary["by_provider"][provider]["gpus"] += instance.gpu_count
-            summary["by_provider"][provider]["cost"] += instance.monthly_cost
+            prov = instance.provider.value
+            if prov not in by_provider:
+                by_provider[prov] = {"gpus": 0, "cost": 0.0}
+            by_provider[prov]["gpus"] += instance.gpu_count
+            by_provider[prov]["cost"] += cost
 
-            gpu_type = instance.gpu_type.value
-            if gpu_type not in summary["by_gpu_type"]:
-                summary["by_gpu_type"][gpu_type] = {"gpus": 0, "cost": 0}
-            summary["by_gpu_type"][gpu_type]["gpus"] += instance.gpu_count
-            summary["by_gpu_type"][gpu_type]["cost"] += instance.monthly_cost
+            gtype = instance.gpu_type.value
+            if gtype not in by_gpu_type:
+                by_gpu_type[gtype] = {"gpus": 0, "cost": 0.0}
+            by_gpu_type[gtype]["gpus"] += instance.gpu_count
+            by_gpu_type[gtype]["cost"] += cost
 
-            inst_type = instance.instance_type.value
-            if inst_type not in summary["by_instance_type"]:
-                summary["by_instance_type"][inst_type] = {"gpus": 0, "cost": 0}
-            summary["by_instance_type"][inst_type]["gpus"] += instance.gpu_count
-            summary["by_instance_type"][inst_type]["cost"] += instance.monthly_cost
+            itype = instance.instance_type.value
+            if itype not in by_instance_type:
+                by_instance_type[itype] = {"gpus": 0, "cost": 0.0}
+            by_instance_type[itype]["gpus"] += instance.gpu_count
+            by_instance_type[itype]["cost"] += cost
 
-        return summary
+        return {
+            "total_gpus": total_gpus,
+            "total_monthly_cost": total_monthly_cost,
+            "by_provider": by_provider,
+            "by_gpu_type": by_gpu_type,
+            "by_instance_type": by_instance_type,
+        }
 
     def list_instances(
         self,

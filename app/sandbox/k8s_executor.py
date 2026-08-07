@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -232,7 +231,8 @@ class K8sSandboxExecutor:
         Returns:
             ExecutionResult with output and status
         """
-        request_id = f"exec_{secrets.token_hex(6)}" if not secrets else f"exec_{os.urandom(6).hex()}"
+        import secrets as secrets_mod
+        request_id = f"exec_{secrets_mod.token_hex(6)}"
 
         if not self._validate_image(image):
             return ExecutionResult(
@@ -395,12 +395,12 @@ class K8sSandboxExecutor:
         limits: ResourceLimits,
     ) -> dict[str, Any]:
         """Build Kubernetes pod specification."""
-        env_vars = [
+        env_vars: list[dict[str, Any]] = [
             {"name": k, "value": v}
             for k, v in request.environment.items()
         ]
 
-        for secret_name, secret_value in request.secrets.items():
+        for secret_name, _secret_value in request.secrets.items():
             env_vars.append({
                 "name": secret_name,
                 "valueFrom": {
@@ -479,7 +479,32 @@ class K8sSandboxExecutor:
         if not request.network_enabled:
             annotations["omnipotent.io/network-policy"] = "deny-all"
 
-        pod_spec = {
+        spec_dict: dict[str, Any] = {
+            "restartPolicy": "Never",
+            "serviceAccountName": self.config.service_account,
+            "automountServiceAccountToken": False,
+            "securityContext": {
+                "runAsNonRoot": True,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+            "containers": [container],
+            "volumes": volumes,
+            "activeDeadlineSeconds": request.timeout_seconds,
+            "terminationGracePeriodSeconds": 10,
+        }
+
+        if self.config.node_selector:
+            spec_dict["nodeSelector"] = self.config.node_selector
+
+        if self.config.tolerations:
+            spec_dict["tolerations"] = self.config.tolerations
+
+        if self.config.image_pull_secrets:
+            spec_dict["imagePullSecrets"] = [
+                {"name": s} for s in self.config.image_pull_secrets
+            ]
+
+        pod_spec: dict[str, Any] = {
             "apiVersion": "v1",
             "kind": "Pod",
             "metadata": {
@@ -488,31 +513,8 @@ class K8sSandboxExecutor:
                 "labels": labels,
                 "annotations": annotations,
             },
-            "spec": {
-                "restartPolicy": "Never",
-                "serviceAccountName": self.config.service_account,
-                "automountServiceAccountToken": False,
-                "securityContext": {
-                    "runAsNonRoot": True,
-                    "seccompProfile": {"type": "RuntimeDefault"},
-                },
-                "containers": [container],
-                "volumes": volumes,
-                "activeDeadlineSeconds": request.timeout_seconds,
-                "terminationGracePeriodSeconds": 10,
-            },
+            "spec": spec_dict,
         }
-
-        if self.config.node_selector:
-            pod_spec["spec"]["nodeSelector"] = self.config.node_selector
-
-        if self.config.tolerations:
-            pod_spec["spec"]["tolerations"] = self.config.tolerations
-
-        if self.config.image_pull_secrets:
-            pod_spec["spec"]["imagePullSecrets"] = [
-                {"name": s} for s in self.config.image_pull_secrets
-            ]
 
         return pod_spec
 

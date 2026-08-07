@@ -656,8 +656,9 @@ class ZeroTrustEngine:
                     return False
             else:
                 return False
+            return False
 
-        if datetime.now(timezone.utc) >= decision.expires_at:
+        if decision.expires_at and datetime.now(timezone.utc) >= decision.expires_at:
             log.info("Session %s expired", session_id)
             return False
 
@@ -803,7 +804,7 @@ class ZeroTrustEngine:
 
     async def check_ip_reputation(self, ip_address: str) -> dict[str, Any]:
         """Check IP reputation against threat intelligence feeds."""
-        result = {
+        result: dict[str, Any] = {
             "ip": ip_address,
             "is_malicious": False,
             "threat_types": [],

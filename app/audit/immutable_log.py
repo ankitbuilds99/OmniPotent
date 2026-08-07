@@ -317,6 +317,8 @@ class ImmutableAuditLog:
         if not self.signing_key or not entry.signature:
             return True  # No signature to verify
         expected = self._sign_entry(entry.entry_hash)
+        if expected is None:
+            return False
         return hmac.compare_digest(entry.signature, expected)
 
     async def log(
@@ -509,7 +511,7 @@ class ImmutableAuditLog:
                 details=["No entries found in range"],
             )
 
-        invalid_entries = []
+        invalid_entries: list[dict[str, Any]] = []
         previous_hash = self.GENESIS_HASH if start_seq == 1 else None
 
         for entry in entries:
@@ -545,7 +547,7 @@ class ImmutableAuditLog:
             status=status,
             entries_verified=len(entries),
             entries_invalid=len(invalid_entries),
-            first_invalid_sequence=invalid_entries[0]["sequence"] if invalid_entries else None,
+            first_invalid_sequence=int(invalid_entries[0]["sequence"]) if invalid_entries else None,
             merkle_root=merkle_root,
             verification_time_ms=int((time.time() - start_time) * 1000),
             details=[f"Sequence {e['sequence']}: {e['reason']}" for e in invalid_entries],
@@ -826,7 +828,7 @@ class ImmutableAuditLog:
             rows = await self.db.fetch(query, *params)
             return [self._row_to_entry(row) for row in rows]
 
-        results = []
+        results: list[AuditEntry] = []
         for entry in reversed(self._entries):
             if len(results) >= limit:
                 break

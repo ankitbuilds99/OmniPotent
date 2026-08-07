@@ -122,12 +122,12 @@ async def slack_commands(
     """Handle Slack slash commands."""
     form_data = await request.form()
 
-    command = form_data.get("command", "")
-    text = form_data.get("text", "")
-    user_id = form_data.get("user_id", "")
-    channel_id = form_data.get("channel_id", "")
-    response_url = form_data.get("response_url", "")
-    trigger_id = form_data.get("trigger_id", "")
+    command = str(form_data.get("command", ""))
+    text = str(form_data.get("text", ""))
+    user_id = str(form_data.get("user_id", ""))
+    channel_id = str(form_data.get("channel_id", ""))
+    response_url = str(form_data.get("response_url", ""))
+    trigger_id = str(form_data.get("trigger_id", ""))
 
     log.info(
         "Slack command received: command=%s text=%s user=%s channel=%s",
@@ -204,12 +204,12 @@ async def slack_interactions(
 ) -> dict[str, Any] | Response:
     """Handle Slack interactive components."""
     form_data = await request.form()
-    payload_str = form_data.get("payload", "")
+    payload_raw = form_data.get("payload", "")
 
-    if not payload_str:
+    if not payload_raw:
         raise HTTPException(status_code=400, detail="Missing payload")
 
-    payload = json.loads(payload_str)
+    payload = json.loads(str(payload_raw))
     interaction_type = payload.get("type")
 
     log.info("Slack interaction received: type=%s", interaction_type)
@@ -274,12 +274,12 @@ async def _process_view_submission(payload: dict[str, Any]) -> dict[str, Any] | 
 async def slack_options(request: Request) -> dict[str, Any]:
     """Handle Slack options loading (for dynamic selects)."""
     form_data = await request.form()
-    payload_str = form_data.get("payload", "")
+    payload_raw = form_data.get("payload", "")
 
-    if not payload_str:
+    if not payload_raw:
         raise HTTPException(status_code=400, detail="Missing payload")
 
-    payload = json.loads(payload_str)
+    payload = json.loads(str(payload_raw))
     action_id = payload.get("action_id", "")
     value = payload.get("value", "")
 
