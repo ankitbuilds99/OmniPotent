@@ -105,7 +105,7 @@ async def validation_error_handler(
     )
 
     return _error_response(
-        status_code=400,
+        status_code=422,
         error="VALIDATION_ERROR",
         message="Request validation failed. Check the details for specific errors.",
         details=details,
@@ -130,7 +130,7 @@ async def pydantic_error_handler(
         })
 
     return _error_response(
-        status_code=400,
+        status_code=422,
         error="VALIDATION_ERROR",
         message="Data validation failed.",
         details=details,
