@@ -117,7 +117,7 @@ jobs:
           uv sync --extra dev --extra migrations
           uv run alembic upgrade head
         env:
-          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Start application
         run: |
@@ -125,7 +125,7 @@ jobs:
           sleep 15
         env:
           REDIS_URL: redis://localhost:6379
-          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Install k6
         run: |
@@ -241,7 +241,7 @@ jobs:
           uv sync --extra dev --extra migrations
           uv run alembic upgrade head
         env:
-          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Start application
         run: |
@@ -249,7 +249,7 @@ jobs:
           sleep 15
         env:
           REDIS_URL: redis://localhost:6379
-          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Install k6
         run: |
@@ -310,7 +310,7 @@ jobs:
           uv sync --extra dev --extra migrations
           uv run alembic upgrade head
         env:
-          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Start application
         run: |
@@ -318,7 +318,7 @@ jobs:
           sleep 15
         env:
           REDIS_URL: redis://localhost:6379
-          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Install k6
         run: |

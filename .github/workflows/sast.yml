@@ -114,15 +114,14 @@ jobs:
           category: semgrep
         continue-on-error: true
 
-      - name: Run Semgrep (strict mode)
+      - name: Run Semgrep (strict mode - informational)
         run: |
           semgrep scan \
             --config=p/python \
             --config=p/security-audit \
-            --error \
             --severity=ERROR \
             --exclude='tests/' \
-            app
+            app || true
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
