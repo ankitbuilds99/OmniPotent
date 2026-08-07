@@ -32,6 +32,17 @@ from app.cost_optimizer.roi_tracker import (
     CostSaving,
     ROIReport,
 )
+from app.cost_optimizer.gpu_tracker import (
+    GPUTracker,
+    GPUInstance,
+    GPUAvailability,
+    GPUReservation,
+    GPUType,
+    CloudProvider,
+    InstanceType,
+    CostOptimizationRecommendation,
+    create_gpu_tracker,
+)
 
 __all__ = [
     "TokenOptimizer",
@@ -50,4 +61,14 @@ __all__ = [
     "AutomationROI",
     "CostSaving",
     "ROIReport",
+    # GPU Tracker
+    "GPUTracker",
+    "GPUInstance",
+    "GPUAvailability",
+    "GPUReservation",
+    "GPUType",
+    "CloudProvider",
+    "InstanceType",
+    "CostOptimizationRecommendation",
+    "create_gpu_tracker",
 ]

@@ -1,21 +1,22 @@
 """Advanced Slack Bot for OmniPotent.
 
-Best-in-class Slack integration matching incident.io/Rootly quality:
+Best-in-class Slack integration featuring:
 - Real Slack API client with httpx
-- FastAPI webhook endpoints
 - Conversational AI with context retention
 - Incident war rooms with auto-created channels
-- Interactive Block Kit components with Acknowledge/Escalate/Resolve/Snooze
-- Comprehensive slash commands (/incident, /oncall, /status, /warroom, /postmortem)
-- Rich message formatting with incident cards
-- Status updates to stakeholder channels
-- Thread management for investigations
+- Interactive Block Kit components
+- Comprehensive slash commands
 - Natural language understanding
 - Live metrics embedding
 - Workflow automation
 - Collaboration features
 """
 
+from app.slack_bot.core import (
+    SlackBot,
+    SlackBotConfig,
+    get_slack_bot,
+)
 from app.slack_bot.client import (
     SlackClient,
     SlackClientConfig,
@@ -24,12 +25,6 @@ from app.slack_bot.client import (
     SlackRateLimitError,
     get_slack_client,
     close_slack_client,
-)
-from app.slack_bot.api import router as slack_router
-from app.slack_bot.core import (
-    SlackBot,
-    SlackBotConfig,
-    get_slack_bot,
 )
 from app.slack_bot.commands import (
     SlashCommand,
@@ -42,7 +37,6 @@ from app.slack_bot.war_room import (
     WarRoomConfig,
     WarRoomManager,
     get_war_room_manager,
-    get_critical_incident_manager,
 )
 from app.slack_bot.blocks import (
     BlockBuilder,
@@ -70,20 +64,13 @@ from app.slack_bot.handlers import (
     get_event_handler,
     get_interaction_handler,
 )
-from app.slack_bot.interactions import (
-    IncidentAction,
-    ActionResult,
-    IncidentActionHandler,
-    get_incident_action_handler,
-)
-from app.slack_bot.messages import (
-    MessageBuilder,
-    MessageType,
-    IncidentData,
-    get_message_builder,
-)
+from app.slack_bot.api import router as slack_router
 
 __all__ = [
+    # Core
+    "SlackBot",
+    "SlackBotConfig",
+    "get_slack_bot",
     # Client (Real API)
     "SlackClient",
     "SlackClientConfig",
@@ -92,12 +79,6 @@ __all__ = [
     "SlackRateLimitError",
     "get_slack_client",
     "close_slack_client",
-    # API Router
-    "slack_router",
-    # Core
-    "SlackBot",
-    "SlackBotConfig",
-    "get_slack_bot",
     # Commands
     "SlashCommand",
     "CommandRouter",
@@ -108,7 +89,6 @@ __all__ = [
     "WarRoomConfig",
     "WarRoomManager",
     "get_war_room_manager",
-    "get_critical_incident_manager",
     # Blocks
     "BlockBuilder",
     "InvestigationCard",
@@ -131,14 +111,6 @@ __all__ = [
     "InteractionHandler",
     "get_event_handler",
     "get_interaction_handler",
-    # Interactions (incident actions)
-    "IncidentAction",
-    "ActionResult",
-    "IncidentActionHandler",
-    "get_incident_action_handler",
-    # Messages (rich formatting)
-    "MessageBuilder",
-    "MessageType",
-    "IncidentData",
-    "get_message_builder",
+    # API Router
+    "slack_router",
 ]

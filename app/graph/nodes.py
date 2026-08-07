@@ -158,13 +158,24 @@ def make_agent_node(tools):
     with unexecuted tool_calls (which would corrupt history / 400 on Anthropic).
     """
     settings = get_settings()
-    # Build both tiers up front so the agent can triage per request (model routing):
-    # the main reasoning model for real incidents, the cheap fast model for simple
-    # informational lookups. Falls back to main on any doubt (see app/routing.py).
-    llm_tools = get_llm().bind_tools(tools)
-    llm_plain = get_llm()  # no tools — used to force a final answer at the cap
-    llm_tools_fast = get_llm(fast=True).bind_tools(tools)
-    llm_plain_fast = get_llm(fast=True)
+
+    # Chat-only mode: when no tools are available (e.g., Groq free tier),
+    # run as a pure conversational assistant without tool binding.
+    chat_only = not tools
+
+    if chat_only:
+        llm_tools = get_llm()
+        llm_plain = get_llm()
+        llm_tools_fast = get_llm(fast=True)
+        llm_plain_fast = get_llm(fast=True)
+    else:
+        # Build both tiers up front so the agent can triage per request (model routing):
+        # the main reasoning model for real incidents, the cheap fast model for simple
+        # informational lookups. Falls back to main on any doubt (see app/routing.py).
+        llm_tools = get_llm().bind_tools(tools)
+        llm_plain = get_llm()  # no tools — used to force a final answer at the cap
+        llm_tools_fast = get_llm(fast=True).bind_tools(tools)
+        llm_plain_fast = get_llm(fast=True)
 
     def agent_node(state: AgentState) -> dict:
         iteration = state.get("iteration", 0) + 1
@@ -185,7 +196,17 @@ def make_agent_node(tools):
         # across this run's loop iterations); per-iteration text (cap notice or
         # reviewer feedback) goes after the cache breakpoint so it never busts it.
         stable = AGENT_SYSTEM.format(plan=plan_text)
-        if at_cap:
+
+        # Chat-only mode: always use plain LLM, never attempt tool calls
+        if chat_only:
+            volatile = (
+                "You are running in chat-only mode without access to external tools. "
+                "Answer the user's question directly based on your knowledge. "
+                "If they ask about specific incidents or data you don't have, "
+                "explain that tool access is not available with the current LLM provider."
+            )
+            resp = plain_llm.invoke([cached_system(stable, volatile), *state["messages"]])
+        elif at_cap:
             limit = "token budget" if over_budget else "investigation step limit"
             volatile = (
                 f"You have reached the {limit}. Do NOT call any tools. "
@@ -878,6 +899,8 @@ def make_report_node():
     # avoids the adaptive-thinking + forced-tool conflict on the main model.
     llm = get_llm(fast=True)
     settings = get_settings()
+    # Groq doesn't support structured output reliably - skip it
+    skip_structured = settings.copilot_provider == "groq"
 
     def report_node(state: AgentState) -> dict:
         request = _last_user_text(state)
@@ -902,7 +925,8 @@ def make_report_node():
         # with_structured_output(), so recording it would be invisible and replay
         # would miss the key. On any failure it also falls back, so this is a strict
         # upgrade in production and record/replay-symmetric for the golden gate.
-        if replay.mode() == "off":
+        # Skip for Groq: it doesn't support structured output reliably.
+        if replay.mode() == "off" and not skip_structured:
             try:
                 structured = llm.with_structured_output(_RcaSchema, include_raw=True)
                 out = structured.invoke(msgs)

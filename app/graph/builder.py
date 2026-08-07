@@ -129,6 +129,24 @@ def _build_single_agent_graph(tools, checkpointer):
     """Build the original single-agent graph (legacy mode)."""
     g = StateGraph(AgentState)
 
+    # Chat-only mode: simplified graph with no tools, no reflect loop
+    # This is much faster and uses fewer LLM calls (important for rate-limited providers)
+    chat_only = not tools
+
+    if chat_only:
+        # Minimal graph: plan -> agent -> report -> END
+        g.add_node("plan", make_plan_node())
+        g.add_node("agent", make_agent_node(tools))
+        g.add_node("report", make_report_node())
+
+        g.add_edge(START, "plan")
+        g.add_edge("plan", "agent")
+        g.add_edge("agent", "report")
+        g.add_edge("report", END)
+
+        return g.compile(checkpointer=checkpointer)
+
+    # Full graph with tools
     g.add_node("plan", make_plan_node())
     g.add_node("agent", make_agent_node(tools))
     # Executes read tools + approved writes, then provenance-boxes & injection-scans

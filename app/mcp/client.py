@@ -246,9 +246,24 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
     tools spawn and tear down a fresh subprocess on *every* tool call — a stdio
     handshake per call that dominated latency in a multi-tool investigation.
     """
+    settings = get_settings()
     client = MultiServerMCPClient(_server_config())
     tools: list[BaseTool] = []
+
+    # Groq free tier has severe limitations:
+    # - 6K tokens/min TPM limit (tool definitions alone can exceed this)
+    # - 128 tool limit
+    # - Model hallucinates tool calls not in the request
+    # For Groq, run in "chat-only" mode with no tools to avoid these issues.
+    if settings.copilot_provider == "groq":
+        # No tools for Groq - avoids hallucination and rate limits
+        return [], client
+
     for name in _SERVERS:
-        session = await stack.enter_async_context(client.session(name))
-        tools.extend(await _load_session_tools(session))
+        try:
+            session = await stack.enter_async_context(client.session(name))
+            tools.extend(await _load_session_tools(session))
+        except Exception:
+            pass  # Server not configured or failed to start
+
     return tools, client

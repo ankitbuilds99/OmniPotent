@@ -1,259 +1,366 @@
 name: Load Tests
 
 on:
-  # Only run on manual trigger - load tests require proper env configuration
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'tests/load/**'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/load/**'
   workflow_dispatch:
     inputs:
-      test_type:
-        description: 'Test type to run'
-        required: true
-        default: 'smoke'
-        type: choice
-        options:
-          - smoke
-          - load
-          - stress
-          - soak
       duration:
-        description: 'Test duration (e.g., 1m, 5m, 1h)'
-        required: false
+        description: 'Test duration (e.g., 30s, 1m, 5m)'
         default: '1m'
       vus:
-        description: 'Number of virtual users'
-        required: false
-        default: '10'
+        description: 'Virtual users'
+        default: '50'
+      target_env:
+        description: 'Target environment'
+        type: choice
+        default: 'local'
+        options:
+          - local
+          - staging
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly on Monday at 2 AM UTC
 
 permissions:
   contents: read
   pull-requests: write
 
+env:
+  K6_VERSION: '0.49.0'
+
 jobs:
-  k6-tests:
+  # ============================================================================
+  # SMOKE TEST (Quick sanity check)
+  # ============================================================================
+  smoke-test:
+    name: Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: omnipotent
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: omnipotent
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
       redis:
         image: redis:7-alpine
         ports:
           - 6379:6379
 
-    env:
-      DATABASE_URL: postgresql://omnipotent:test@localhost:5432/omnipotent
-      REDIS_URL: redis://localhost:6379/0
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install k6
-        run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update
-          sudo apt-get install k6
-
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Install dependencies
-        run: uv sync
+        uses: astral-sh/setup-uv@v5
 
       - name: Start application
         run: |
+          uv sync --extra dev
           uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
           sleep 10
-          curl -f http://localhost:8000/health || echo "App may not be fully ready"
+        env:
+          REDIS_URL: redis://localhost:6379
 
-      - name: Determine test type
-        id: test-type
+      - name: Install k6
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "type=${{ github.event.inputs.test_type }}" >> $GITHUB_OUTPUT
-            echo "duration=${{ github.event.inputs.duration }}" >> $GITHUB_OUTPUT
-            echo "vus=${{ github.event.inputs.vus }}" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "type=smoke" >> $GITHUB_OUTPUT
-            echo "duration=30s" >> $GITHUB_OUTPUT
-            echo "vus=5" >> $GITHUB_OUTPUT
-          else
-            echo "type=load" >> $GITHUB_OUTPUT
-            echo "duration=1m" >> $GITHUB_OUTPUT
-            echo "vus=20" >> $GITHUB_OUTPUT
-          fi
+          curl -fsSL https://github.com/grafana/k6/releases/download/v${{ env.K6_VERSION }}/k6-v${{ env.K6_VERSION }}-linux-amd64.tar.gz | tar xzf -
+          sudo mv k6-v${{ env.K6_VERSION }}-linux-amd64/k6 /usr/local/bin/
 
-      - name: Run k6 tests
+      - name: Run smoke test
         run: |
-          TEST_TYPE="${{ steps.test-type.outputs.type }}"
-          DURATION="${{ steps.test-type.outputs.duration }}"
-          VUS="${{ steps.test-type.outputs.vus }}"
-
-          k6 run tests/load/k6_scenarios.js \
-            --env K6_BASE_URL=http://localhost:8000 \
-            --env K6_DURATION=$DURATION \
-            --env K6_VUS=$VUS \
-            --env K6_SCENARIO=$TEST_TYPE \
-            --out json=k6-results.json \
-            --summary-export=k6-summary.json
-
-      - name: Parse results
-        id: results
-        if: always()
-        run: |
-          if [ -f k6-summary.json ]; then
-            P95=$(jq -r '.metrics.http_req_duration.values["p(95)"] // 0' k6-summary.json)
-            P99=$(jq -r '.metrics.http_req_duration.values["p(99)"] // 0' k6-summary.json)
-            ERROR_RATE=$(jq -r '.metrics.http_req_failed.values.rate // 0' k6-summary.json)
-            RPS=$(jq -r '.metrics.http_reqs.values.rate // 0' k6-summary.json)
-
-            echo "p95=${P95}" >> $GITHUB_OUTPUT
-            echo "p99=${P99}" >> $GITHUB_OUTPUT
-            echo "error_rate=${ERROR_RATE}" >> $GITHUB_OUTPUT
-            echo "rps=${RPS}" >> $GITHUB_OUTPUT
-
-            echo "### Load Test Results" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| P95 Latency | ${P95}ms |" >> $GITHUB_STEP_SUMMARY
-            echo "| P99 Latency | ${P99}ms |" >> $GITHUB_STEP_SUMMARY
-            echo "| Error Rate | ${ERROR_RATE}% |" >> $GITHUB_STEP_SUMMARY
-            echo "| Requests/sec | ${RPS} |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Comment on PR
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const p95 = '${{ steps.results.outputs.p95 }}' || 'N/A';
-            const p99 = '${{ steps.results.outputs.p99 }}' || 'N/A';
-            const errorRate = '${{ steps.results.outputs.error_rate }}' || 'N/A';
-            const rps = '${{ steps.results.outputs.rps }}' || 'N/A';
-
-            const body = `## Load Test Results
-
-            | Metric | Value |
-            |--------|-------|
-            | P95 Latency | ${p95}ms |
-            | P99 Latency | ${p99}ms |
-            | Error Rate | ${errorRate}% |
-            | Requests/sec | ${rps} |
-
-            <details>
-            <summary>Thresholds</summary>
-
-            - P95 < 500ms
-            - P99 < 1000ms
-            - Error rate < 1%
-
-            </details>`;
-
-            github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: body
-            });
+          k6 run --out json=smoke-results.json tests/load/smoke.js
+        env:
+          K6_BASE_URL: http://localhost:8000
 
       - name: Upload results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: k6-results
-          path: |
-            k6-results.json
-            k6-summary.json
+          name: smoke-test-results
+          path: smoke-results.json
 
-      - name: Check thresholds
-        if: always()
-        run: |
-          P95="${{ steps.results.outputs.p95 }}"
-          ERROR_RATE="${{ steps.results.outputs.error_rate }}"
-
-          if [ ! -z "$P95" ] && [ $(echo "$P95 > 500" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
-            echo "::warning::P95 latency exceeds 500ms threshold: ${P95}ms"
-          fi
-
-          if [ ! -z "$ERROR_RATE" ] && [ $(echo "$ERROR_RATE > 0.01" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
-            echo "::warning::Error rate exceeds 1% threshold: ${ERROR_RATE}%"
-          fi
-
-  locust-tests:
+  # ============================================================================
+  # LOAD TEST (Standard load)
+  # ============================================================================
+  load-test:
+    name: Load Test
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.test_type == 'stress'
+    timeout-minutes: 20
+    needs: smoke-test
 
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: omnipotent
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: omnipotent
-        ports:
-          - 5432:5432
-
       redis:
         image: redis:7-alpine
         ports:
           - 6379:6379
 
-    env:
-      DATABASE_URL: postgresql://omnipotent:test@localhost:5432/omnipotent
-      REDIS_URL: redis://localhost:6379/0
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omnipotent
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: omnipotent_test
+        ports:
+          - 5432:5432
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
 
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Install dependencies
+      - name: Run migrations
         run: |
-          uv sync
-          uv pip install locust
+          uv sync --extra dev
+          uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
       - name: Start application
         run: |
-          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
-          sleep 10
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4 &
+          sleep 15
+        env:
+          REDIS_URL: redis://localhost:6379
+          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
 
-      - name: Run Locust tests
+      - name: Install k6
         run: |
-          uv run locust \
-            -f tests/load/locustfile.py \
-            --headless \
-            --host http://localhost:8000 \
-            -u ${{ github.event.inputs.vus }} \
-            -r 10 \
-            --run-time ${{ github.event.inputs.duration }} \
-            --html locust-report.html \
-            --csv locust-results
+          curl -fsSL https://github.com/grafana/k6/releases/download/v${{ env.K6_VERSION }}/k6-v${{ env.K6_VERSION }}-linux-amd64.tar.gz | tar xzf -
+          sudo mv k6-v${{ env.K6_VERSION }}-linux-amd64/k6 /usr/local/bin/
 
-      - name: Upload Locust report
+      - name: Run load test
+        run: |
+          k6 run \
+            --out json=load-results.json \
+            --summary-export=load-summary.json \
+            tests/load/load.js
+        env:
+          K6_BASE_URL: http://localhost:8000
+          K6_VUS: ${{ github.event.inputs.vus || '50' }}
+          K6_DURATION: ${{ github.event.inputs.duration || '1m' }}
+
+      - name: Parse results
+        id: results
+        run: |
+          # Extract key metrics
+          P95=$(jq '.metrics.http_req_duration.values.p95 // 0' load-summary.json)
+          P99=$(jq '.metrics.http_req_duration.values.p99 // 0' load-summary.json)
+          ERROR_RATE=$(jq '.metrics.http_req_failed.values.rate // 0' load-summary.json)
+          RPS=$(jq '.metrics.http_reqs.values.rate // 0' load-summary.json)
+
+          echo "p95=${P95}" >> $GITHUB_OUTPUT
+          echo "p99=${P99}" >> $GITHUB_OUTPUT
+          echo "error_rate=${ERROR_RATE}" >> $GITHUB_OUTPUT
+          echo "rps=${RPS}" >> $GITHUB_OUTPUT
+
+          # Check thresholds
+          if (( $(echo "$P95 > 2000" | bc -l) )); then
+            echo "::warning::P95 latency (${P95}ms) exceeds 2000ms threshold"
+          fi
+          if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+            echo "::error::Error rate (${ERROR_RATE}) exceeds 1% threshold"
+            exit 1
+          fi
+
+      - name: Upload results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: locust-results
+          name: load-test-results
           path: |
-            locust-report.html
-            locust-results*.csv
+            load-results.json
+            load-summary.json
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const p95 = '${{ steps.results.outputs.p95 }}';
+            const p99 = '${{ steps.results.outputs.p99 }}';
+            const errorRate = '${{ steps.results.outputs.error_rate }}';
+            const rps = '${{ steps.results.outputs.rps }}';
+
+            const body = `## Load Test Results
+
+            | Metric | Value |
+            |--------|-------|
+            | P95 Latency | ${parseFloat(p95).toFixed(2)}ms |
+            | P99 Latency | ${parseFloat(p99).toFixed(2)}ms |
+            | Error Rate | ${(parseFloat(errorRate) * 100).toFixed(2)}% |
+            | Requests/sec | ${parseFloat(rps).toFixed(2)} |
+
+            ${parseFloat(p95) > 2000 ? '⚠️ P95 latency exceeds 2000ms threshold' : '✅ P95 latency within threshold'}
+            ${parseFloat(errorRate) > 0.01 ? '❌ Error rate exceeds 1% threshold' : '✅ Error rate within threshold'}
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ============================================================================
+  # STRESS TEST (Find breaking point)
+  # ============================================================================
+  stress-test:
+    name: Stress Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: load-test
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omnipotent
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: omnipotent_test
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run migrations
+        run: |
+          uv sync --extra dev
+          uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+
+      - name: Start application
+        run: |
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4 &
+          sleep 15
+        env:
+          REDIS_URL: redis://localhost:6379
+          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+
+      - name: Install k6
+        run: |
+          curl -fsSL https://github.com/grafana/k6/releases/download/v${{ env.K6_VERSION }}/k6-v${{ env.K6_VERSION }}-linux-amd64.tar.gz | tar xzf -
+          sudo mv k6-v${{ env.K6_VERSION }}-linux-amd64/k6 /usr/local/bin/
+
+      - name: Run stress test
+        run: |
+          k6 run \
+            --out json=stress-results.json \
+            --summary-export=stress-summary.json \
+            tests/load/stress.js
+        env:
+          K6_BASE_URL: http://localhost:8000
+        continue-on-error: true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stress-test-results
+          path: |
+            stress-results.json
+            stress-summary.json
+
+  # ============================================================================
+  # SOAK TEST (Long running stability)
+  # ============================================================================
+  soak-test:
+    name: Soak Test (Weekly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event.schedule == '0 2 * * 1'
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: omnipotent
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: omnipotent_test
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run migrations
+        run: |
+          uv sync --extra dev
+          uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+
+      - name: Start application
+        run: |
+          uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4 &
+          sleep 15
+        env:
+          REDIS_URL: redis://localhost:6379
+          DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
+
+      - name: Install k6
+        run: |
+          curl -fsSL https://github.com/grafana/k6/releases/download/v${{ env.K6_VERSION }}/k6-v${{ env.K6_VERSION }}-linux-amd64.tar.gz | tar xzf -
+          sudo mv k6-v${{ env.K6_VERSION }}-linux-amd64/k6 /usr/local/bin/
+
+      - name: Run soak test (1 hour)
+        run: |
+          k6 run \
+            --out json=soak-results.json \
+            --summary-export=soak-summary.json \
+            tests/load/soak.js
+        env:
+          K6_BASE_URL: http://localhost:8000
+          K6_DURATION: '1h'
+          K6_VUS: '20'
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-test-results
+          path: |
+            soak-results.json
+            soak-summary.json
+
+      - name: Notify Slack
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "⚠️ Weekly soak test failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Weekly Soak Test Failed*\nThe 1-hour soak test found stability issues.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Results>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

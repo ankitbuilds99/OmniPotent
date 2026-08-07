@@ -62,6 +62,21 @@ from app.security.session_binding import (
     SessionBindingManager,
     get_session_binding_manager,
 )
+from app.security.zero_trust import (
+    ZeroTrustEngine,
+    TrustLevel,
+    AccessContext,
+    DevicePosture,
+    DeviceStatus,
+    NetworkContext,
+    UserContext,
+    ResourceContext,
+    AccessRequest,
+    AccessDecision,
+    JITPrivilege,
+    MicroSegmentationPolicy,
+    create_zero_trust_engine,
+)
 
 __all__ = [
     # API Auth
@@ -110,4 +125,18 @@ __all__ = [
     "DeviceFingerprint",
     "SessionBindingManager",
     "get_session_binding_manager",
+    # Zero Trust Security
+    "ZeroTrustEngine",
+    "TrustLevel",
+    "AccessContext",
+    "DevicePosture",
+    "DeviceStatus",
+    "NetworkContext",
+    "UserContext",
+    "ResourceContext",
+    "AccessRequest",
+    "AccessDecision",
+    "JITPrivilege",
+    "MicroSegmentationPolicy",
+    "create_zero_trust_engine",
 ]

@@ -33,6 +33,17 @@ from app.audit.logger import (
     export_audit_logs,
     get_audit_summary,
 )
+from app.audit.immutable_log import (
+    ImmutableAuditLog,
+    AuditEntry as ImmutableAuditEntry,
+    AuditAction as ImmutableAuditAction,
+    AuditSeverity as ImmutableAuditSeverity,
+    VerificationResult,
+    VerificationStatus,
+    ArchiveMetadata,
+    MerkleNode,
+    create_immutable_audit_log,
+)
 
 __all__ = [
     # Legacy functions (for backwards compatibility)
@@ -55,4 +66,14 @@ __all__ = [
     "search_audit_logs",
     "export_audit_logs",
     "get_audit_summary",
+    # Immutable Audit Log (tamper-proof with hash chains)
+    "ImmutableAuditLog",
+    "ImmutableAuditEntry",
+    "ImmutableAuditAction",
+    "ImmutableAuditSeverity",
+    "VerificationResult",
+    "VerificationStatus",
+    "ArchiveMetadata",
+    "MerkleNode",
+    "create_immutable_audit_log",
 ]

@@ -869,7 +869,7 @@ def _friendly_error(exc: Exception) -> str:
     """Turn a raw exception into a message safe to show in the UI.
     Never expose raw exception text to avoid leaking internal details."""
     text = str(exc).lower()
-    if "rate_limit" in text or "429" in text:
+    if "rate_limit" in text or "429" in text or "too many requests" in text:
         return (
             "The LLM provider's rate limit was reached. Please try again later "
             "or check your plan/quota."
@@ -883,6 +883,21 @@ def _friendly_error(exc: Exception) -> str:
         return "The request timed out. Please try again."
     if "connection" in text or "network" in text:
         return "A network error occurred. Please check your connection and try again."
+    if "tool_use_failed" in text or "not in request.tools" in text:
+        return (
+            "The AI model tried to use a tool that isn't available. "
+            "This can happen with Groq's free tier. Try using Anthropic or OpenAI instead."
+        )
+    if "413" in text or "payload too large" in text or "tokens per minute" in text:
+        return (
+            "Request too large for your LLM provider's limits. "
+            "Consider upgrading your plan or switching to a provider with higher limits."
+        )
+    if "maximum number of" in text and "tools" in text:
+        return (
+            "Too many tools for your LLM provider. Groq has a 128 tool limit. "
+            "Switch to Anthropic or OpenAI for full tool support."
+        )
     # Log the actual error for debugging, but don't expose it to the client
     log.warning("Agent error (not exposed to client): %s", exc)
     return "Something went wrong while running the agent. Please try again."

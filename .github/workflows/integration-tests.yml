@@ -1,31 +1,43 @@
 name: Integration Tests
 
 on:
-  # Only run on schedule or manual trigger - not on every push
+  push:
+    branches: [main]
+  pull_request:
   schedule:
     - cron: '0 4 * * *'  # Daily at 4 AM UTC
-  workflow_dispatch:
 
 permissions:
   contents: read
+  checks: write
   pull-requests: write
 
+env:
+  POSTGRES_USER: omnipotent
+  POSTGRES_PASSWORD: test_password_ci
+  POSTGRES_DB: omnipotent_test
+  REDIS_URL: redis://localhost:6379
+
 jobs:
-  integration:
+  # ============================================================================
+  # INTEGRATION TESTS WITH REAL DATABASE
+  # ============================================================================
+  integration-tests:
+    name: Integration Tests (PostgreSQL + Redis)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16-alpine
         env:
-          POSTGRES_USER: omnipotent
-          POSTGRES_PASSWORD: test_password
-          POSTGRES_DB: omnipotent_test
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U $POSTGRES_USER"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -40,54 +52,46 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-    env:
-      DATABASE_URL: postgresql://omnipotent:test_password@localhost:5432/omnipotent_test
-      REDIS_URL: redis://localhost:6379/0
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
+        uses: astral-sh/setup-uv@v5
 
       - name: Set up Python
-        run: uv python install 3.13
+        run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --extra dev --extra test
 
       - name: Wait for services
         run: |
-          until pg_isready -h localhost -p 5432; do sleep 1; done
-          until redis-cli -h localhost ping; do sleep 1; done
+          until pg_isready -h localhost -p 5432 -U ${{ env.POSTGRES_USER }}; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+          until redis-cli -h localhost ping; do
+            echo "Waiting for Redis..."
+            sleep 2
+          done
+          echo "All services are ready"
 
       - name: Run database migrations
+        env:
+          DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: |
-          uv run alembic upgrade head || echo "No migrations to run"
+          uv run alembic upgrade head
 
       - name: Run integration tests
-        timeout-minutes: 15
+        env:
+          DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          REDIS_URL: ${{ env.REDIS_URL }}
+          TESTING: "true"
         run: |
-          uv run pytest tests/integration/ \
-            -v \
+          uv run pytest tests/integration/ -v \
             --tb=short \
-            --timeout=60 \
-            --cov=app \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            --junitxml=integration-results.xml
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          files: ./coverage.xml
-          flags: integration
-          token: ${{ secrets.CODECOV_TOKEN }}
+            --junitxml=integration-results.xml \
+            -x
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -96,90 +100,187 @@ jobs:
           name: integration-test-results
           path: integration-results.xml
 
-  api-contract:
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: integration-results.xml
+          check_name: Integration Test Results
+
+  # ============================================================================
+  # API CONTRACT TESTS
+  # ============================================================================
+  api-contract-tests:
+    name: API Contract Tests
     runs-on: ubuntu-latest
-    needs: integration
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.13
+        uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --extra dev
 
-      - name: Generate OpenAPI spec
+      - name: Generate OpenAPI schema
         run: |
           uv run python -c "
           from app.api.main import app
           import json
-          spec = app.openapi()
+          schema = app.openapi()
           with open('openapi.json', 'w') as f:
-              json.dump(spec, f, indent=2)
+              json.dump(schema, f, indent=2)
           "
 
-      - name: Validate OpenAPI spec
+      - name: Validate OpenAPI schema
         run: |
-          npx @redocly/cli lint openapi.json --skip-rule=no-server-example.com
+          npx @apidevtools/swagger-cli validate openapi.json
 
       - name: Check for breaking changes
         if: github.event_name == 'pull_request'
         run: |
-          git fetch origin ${{ github.base_ref }}
-          git checkout origin/${{ github.base_ref }} -- openapi.json 2>/dev/null && \
-            mv openapi.json openapi-base.json || echo "No previous spec"
+          git fetch origin main
+          git show origin/main:openapi.json > openapi-main.json 2>/dev/null || echo '{}' > openapi-main.json
 
-          if [ -f openapi-base.json ]; then
-            npx oasdiff breaking openapi-base.json openapi.json || true
-          fi
+          # Use oasdiff to check for breaking changes
+          npx oasdiff breaking openapi-main.json openapi.json --fail-on ERR || {
+            echo "::warning::Potential breaking API changes detected. Please review."
+          }
 
+      - name: Upload OpenAPI schema
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-schema
+          path: openapi.json
+
+  # ============================================================================
+  # COVERAGE ENFORCEMENT
+  # ============================================================================
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests with coverage
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: |
+          uv run pytest tests/ \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term-missing \
+            --cov-fail-under=60 \
+            -v
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+      - name: Coverage comment on PR
+        uses: py-cov-action/python-coverage-comment-action@v3
+        if: github.event_name == 'pull_request'
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINIMUM_GREEN: 80
+          MINIMUM_ORANGE: 60
+
+  # ============================================================================
+  # DEPENDENCY SCANNING
+  # ============================================================================
   dependency-scan:
+    name: Dependency Security Scan
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
 
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Run safety check
+      - name: Export requirements
         run: |
-          uv pip list --format=freeze > requirements.txt
-          pip install safety
-          safety check -r requirements.txt --full-report || true
+          uv export --no-hashes > requirements.txt
 
       - name: Run pip-audit
         run: |
+          uv venv .audit-venv
+          source .audit-venv/bin/activate
           pip install pip-audit
-          pip-audit -r requirements.txt --progress-spinner=off || true
+          pip-audit -r requirements.txt --desc --format json > pip-audit-results.json || true
+          cat pip-audit-results.json
 
-      - name: OWASP Dependency Check
-        uses: dependency-check/Dependency-Check_Action@main
+      - name: Run Safety check
+        run: |
+          source .audit-venv/bin/activate
+          pip install safety
+          safety check -r requirements.txt --json > safety-results.json || true
+          cat safety-results.json
+
+      - name: Run Snyk (if token available)
+        if: env.SNYK_TOKEN != ''
+        uses: snyk/actions/python@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          project: 'OmniPotent'
-          path: '.'
-          format: 'HTML'
-          out: 'reports'
-        continue-on-error: true
+          args: --file=requirements.txt --severity-threshold=high
 
-      - name: Upload OWASP report
+      - name: Upload scan results
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: dependency-check-report
-          path: reports/
+          name: dependency-scan-results
+          path: |
+            pip-audit-results.json
+            safety-results.json
 
-  docker-build:
+      - name: Check for critical vulnerabilities
+        run: |
+          CRITICAL=$(jq '[.dependencies[]?.vulns[]? | select(.severity == "critical")] | length' pip-audit-results.json 2>/dev/null || echo "0")
+          if [ "$CRITICAL" -gt "0" ]; then
+            echo "::error::Found $CRITICAL critical vulnerabilities"
+            exit 1
+          fi
+          echo "No critical vulnerabilities found"
+
+  # ============================================================================
+  # DOCKER BUILD VALIDATION
+  # ============================================================================
+  docker-validation:
+    name: Docker Build Validation
     runs-on: ubuntu-latest
 
     steps:
@@ -188,50 +289,56 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: Build image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
-          tags: omnipotent:test
+          tags: omnipotent-api:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/image.tar
 
-      - name: Run container smoke test
-        run: |
-          docker run -d --name omnipotent-test \
-            -p 8000:8000 \
-            -e DATABASE_URL=sqlite:///./test.db \
-            -e REDIS_URL=redis://localhost:6379 \
-            omnipotent:test || exit 0
-
-          sleep 5
-
-          curl -f http://localhost:8000/health || echo "Health check skipped (no DB)"
-
-          docker logs omnipotent-test || true
-          docker stop omnipotent-test || true
-
-  coverage-gate:
-    runs-on: ubuntu-latest
-    needs: integration
-    if: github.event_name == 'pull_request'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download coverage artifact
-        uses: actions/download-artifact@v4
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
         with:
-          name: integration-test-results
+          input: /tmp/image.tar
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
 
-      - name: Check coverage threshold
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Test container startup
         run: |
-          COVERAGE=$(grep -oP 'line-rate="\K[^"]+' coverage.xml 2>/dev/null | head -1 || echo "0")
-          COVERAGE_PCT=$(echo "$COVERAGE * 100" | bc 2>/dev/null || echo "0")
+          docker load --input /tmp/image.tar
+          docker run -d --name test-container \
+            -e REDIS_URL=redis://host.docker.internal:6379 \
+            -e DATABASE_URL=sqlite:///test.db \
+            -p 8000:8000 \
+            omnipotent-api:test
 
-          echo "Coverage: ${COVERAGE_PCT}%"
+          # Wait for health check
+          for i in {1..30}; do
+            if docker exec test-container curl -sf http://localhost:8000/healthz; then
+              echo "Container is healthy"
+              docker stop test-container
+              exit 0
+            fi
+            echo "Waiting for container... ($i/30)"
+            sleep 2
+          done
 
-          if (( $(echo "$COVERAGE_PCT < 70" | bc -l 2>/dev/null || echo "0") )); then
-            echo "::warning::Coverage below 70% threshold"
-          fi
+          docker logs test-container
+          docker stop test-container
+          exit 1

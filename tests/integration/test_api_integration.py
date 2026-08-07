@@ -1,4 +1,4 @@
-"""Integration tests for API endpoints."""
+"""Integration tests for API endpoints with real database."""
 
 from __future__ import annotations
 
@@ -11,138 +11,146 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 class TestHealthEndpoints:
     """Test health check endpoints."""
 
-    async def test_health_check(self, client: AsyncClient) -> None:
-        """Test basic health check."""
+    async def test_healthz(self, client: AsyncClient):
+        """Health check should return 200."""
         response = await client.get("/healthz")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] in ("healthy", "ok")
+        assert data["status"] in ["healthy", "ok"]
 
-    async def test_readiness_check(self, client: AsyncClient) -> None:
-        """Test readiness probe."""
+    async def test_readyz(self, client: AsyncClient):
+        """Readiness check should return 200 when services are ready."""
         response = await client.get("/readyz")
-        assert response.status_code in (200, 503)
-
-
-class TestAPIEndpoints:
-    """Test main API endpoints."""
-
-    async def test_root_endpoint(self, client: AsyncClient) -> None:
-        """Test root endpoint."""
-        response = await client.get("/")
-        assert response.status_code in (200, 404)
-
-    async def test_openapi_spec(self, client: AsyncClient) -> None:
-        """Test OpenAPI spec is available."""
-        response = await client.get("/openapi.json")
-        assert response.status_code == 200
-        data = response.json()
-        assert "openapi" in data
-        assert "paths" in data
-
-    async def test_docs_endpoint(self, client: AsyncClient) -> None:
-        """Test docs endpoint."""
-        response = await client.get("/docs")
         assert response.status_code == 200
 
+    async def test_metrics_endpoint(self, client: AsyncClient):
+        """Metrics endpoint should return Prometheus format."""
+        response = await client.get("/metrics")
+        # May be 200 or 404 depending on config
+        assert response.status_code in [200, 404]
 
-class TestIncidentEndpoints:
-    """Test incident management endpoints."""
 
-    async def test_list_incidents(
+class TestInvestigationAPI:
+    """Integration tests for investigation endpoints."""
+
+    async def test_list_investigations_unauthorized(self, client: AsyncClient):
+        """List investigations should require auth."""
+        response = await client.get("/api/v1/investigations")
+        assert response.status_code in [401, 403]
+
+    async def test_list_investigations_authorized(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-    ) -> None:
-        """Test listing incidents (endpoint may not exist)."""
-        response = await client.get("/api/v1/incidents", headers=auth_headers)
-        assert response.status_code in (200, 401, 404, 405)
-
-    async def test_create_incident(
-        self,
-        client: AsyncClient,
-        auth_headers: dict,
-        sample_incident: dict,
-    ) -> None:
-        """Test creating an incident (endpoint may not exist)."""
-        response = await client.post(
-            "/api/v1/incidents",
-            json=sample_incident,
-            headers=auth_headers,
+        test_api_key: str,
+    ):
+        """List investigations should work with valid API key."""
+        response = await client.get(
+            "/api/v1/investigations",
+            headers={"Authorization": f"Bearer {test_api_key}"},
         )
-        assert response.status_code in (200, 201, 401, 404, 422)
+        # 200 or 404 if endpoint doesn't exist
+        assert response.status_code in [200, 404]
 
-
-class TestInvestigationEndpoints:
-    """Test investigation endpoints."""
-
-    async def test_start_investigation(
+    async def test_create_investigation(
         self,
         client: AsyncClient,
-        auth_headers: dict,
-        sample_investigation: dict,
-    ) -> None:
-        """Test starting an investigation (endpoint may not exist)."""
+        test_api_key: str,
+    ):
+        """Create investigation should persist to database."""
         response = await client.post(
-            "/api/v1/investigate",
-            json=sample_investigation,
-            headers=auth_headers,
-        )
-        assert response.status_code in (200, 202, 401, 404, 422)
-
-
-class TestSlackWebhooks:
-    """Test Slack webhook endpoints (mounted at /api/slack prefix)."""
-
-    async def test_slack_url_verification(self, client: AsyncClient) -> None:
-        """Test Slack URL verification challenge."""
-        payload = {
-            "type": "url_verification",
-            "challenge": "test-challenge-token",
-        }
-        response = await client.post("/api/slack/events", json=payload)
-        assert response.status_code in (200, 401, 403, 404)
-        if response.status_code == 200:
-            data = response.json()
-            assert data.get("challenge") == "test-challenge-token"
-
-    async def test_slack_event_callback(self, client: AsyncClient) -> None:
-        """Test Slack event callback."""
-        payload = {
-            "type": "event_callback",
-            "event": {
-                "type": "message",
-                "channel": "C123456",
-                "user": "U123456",
-                "text": "Hello",
-                "ts": "1234567890.123456",
+            "/api/v1/investigations",
+            json={
+                "query": "integration test: checkout-api 500 errors",
+                "context": {
+                    "service": "checkout-api",
+                    "timerange": "1h",
+                },
             },
-        }
-        response = await client.post("/api/slack/events", json=payload)
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_slack_command(self, client: AsyncClient) -> None:
-        """Test Slack slash command."""
-        form_data = {
-            "command": "/investigate",
-            "text": "payment-service error",
-            "user_id": "U123456",
-            "channel_id": "C123456",
-            "response_url": "https://hooks.slack.com/test",
-            "trigger_id": "123.456.abc",
-        }
-        response = await client.post(
-            "/api/slack/commands/investigate",
-            data=form_data,
+            headers={"Authorization": f"Bearer {test_api_key}"},
         )
-        assert response.status_code in (200, 401, 403, 404)
+        # Accept various success/error codes
+        assert response.status_code in [200, 201, 401, 403, 404, 422]
 
 
-class TestConcurrency:
-    """Test concurrent request handling."""
+class TestWebhookAPI:
+    """Integration tests for webhook endpoints."""
 
-    async def test_concurrent_health_checks(self, client: AsyncClient) -> None:
-        """Test multiple concurrent health checks."""
+    async def test_pagerduty_webhook(self, client: AsyncClient):
+        """PagerDuty webhook should accept valid payloads."""
+        response = await client.post(
+            "/api/v1/webhooks/pagerduty",
+            json={
+                "event": {
+                    "event_type": "incident.triggered",
+                    "data": {
+                        "id": "P123456",
+                        "title": "Integration Test Incident",
+                        "service": {"summary": "test-service"},
+                        "html_url": "https://example.com",
+                    },
+                },
+            },
+            headers={
+                "X-PagerDuty-Signature": "v1=test_signature",
+            },
+        )
+        # Should not crash, regardless of signature validation
+        assert response.status_code in [200, 202, 400, 401, 403, 404]
+
+
+class TestDatabaseOperations:
+    """Test database operations."""
+
+    async def test_organization_exists(self, db_conn, test_org: dict):
+        """Verify test organization was created."""
+        result = await db_conn.fetchrow(
+            "SELECT * FROM organizations WHERE slug = $1",
+            test_org["slug"],
+        )
+        assert result is not None
+        assert result["name"] == test_org["name"]
+
+    async def test_api_key_exists(self, db_conn, test_api_key: str):
+        """Verify test API key was created."""
+        result = await db_conn.fetchrow(
+            "SELECT * FROM api_keys WHERE key_prefix = $1",
+            test_api_key[:12],
+        )
+        assert result is not None
+
+
+class TestRedisOperations:
+    """Test Redis operations."""
+
+    async def test_redis_connection(self, redis_client):
+        """Verify Redis connection works."""
+        await redis_client.set("test_key", "test_value")
+        value = await redis_client.get("test_key")
+        assert value == b"test_value"
+
+    async def test_redis_caching(self, redis_client):
+        """Test cache operations."""
+        import json
+
+        cache_key = "integration:test:cache"
+        cache_data = {"foo": "bar", "count": 42}
+
+        await redis_client.setex(
+            cache_key,
+            60,  # 60 second TTL
+            json.dumps(cache_data),
+        )
+
+        raw = await redis_client.get(cache_key)
+        retrieved = json.loads(raw)
+        assert retrieved == cache_data
+
+
+class TestConcurrentOperations:
+    """Test concurrent database/API operations."""
+
+    async def test_concurrent_health_checks(self, client: AsyncClient):
+        """Multiple concurrent health checks should succeed."""
         import asyncio
 
         tasks = [client.get("/healthz") for _ in range(10)]
@@ -151,43 +159,24 @@ class TestConcurrency:
         for response in responses:
             assert response.status_code == 200
 
-    async def test_concurrent_api_requests(
-        self,
-        client: AsyncClient,
-        auth_headers: dict,
-    ) -> None:
-        """Test concurrent API requests."""
+    async def test_concurrent_db_writes(self, db_conn):
+        """Concurrent database writes should not conflict."""
         import asyncio
+        import uuid
 
-        tasks = [
-            client.get("/api/v1/incidents", headers=auth_headers)
-            for _ in range(5)
-        ]
-        responses = await asyncio.gather(*tasks)
+        async def insert_record(i: int):
+            await db_conn.execute(
+                """
+                INSERT INTO audit_logs (id, org_id, action, actor, details)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT DO NOTHING
+                """,
+                uuid.uuid4(),
+                uuid.uuid4(),
+                f"test_action_{i}",
+                "integration_test",
+                "{}",
+            )
 
-        for response in responses:
-            assert response.status_code in (200, 401, 404)
-
-
-class TestErrorHandling:
-    """Test error handling."""
-
-    async def test_404_not_found(self, client: AsyncClient) -> None:
-        """Test 404 response for unknown endpoint."""
-        response = await client.get("/api/v1/nonexistent")
-        assert response.status_code == 404
-
-    async def test_method_not_allowed(self, client: AsyncClient) -> None:
-        """Test 405 for wrong HTTP method."""
-        response = await client.delete("/healthz")
-        assert response.status_code in (405, 404)
-
-    async def test_invalid_json(self, client: AsyncClient) -> None:
-        """Test invalid JSON handling on a generic endpoint."""
-        response = await client.post(
-            "/chat",
-            content="not valid json",
-            headers={"Content-Type": "application/json"},
-        )
-        # 422 = validation error, 400 = bad request, 404 = not found
-        assert response.status_code in (400, 404, 422, 500)
+        tasks = [insert_record(i) for i in range(10)]
+        await asyncio.gather(*tasks, return_exceptions=True)

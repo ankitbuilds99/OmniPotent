@@ -1,314 +1,245 @@
-"""Integration tests for Slack functionality."""
+"""Integration tests for Slack bot functionality."""
 
 from __future__ import annotations
-
-import hashlib
-import hmac
-import json
 
 import pytest
 from httpx import AsyncClient
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.asyncio,
-    pytest.mark.skip(reason="Slack integration tests require full environment setup"),
-]
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
-def generate_slack_signature(
-    body: bytes,
-    timestamp: str,
-    signing_secret: str = "test-secret",
-) -> str:
-    """Generate valid Slack signature for testing."""
-    sig_basestring = f"v0:{timestamp}:{body.decode()}"
-    signature = hmac.new(
-        signing_secret.encode(),
-        sig_basestring.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"v0={signature}"
+class TestSlackWebhooks:
+    """Test Slack webhook endpoints."""
 
-
-class TestSlackEvents:
-    """Test Slack Events API integration."""
-
-    async def test_url_verification(self, client: AsyncClient) -> None:
-        """Test URL verification challenge-response."""
-        payload = {
-            "type": "url_verification",
-            "challenge": "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P",
-            "token": "test-token",
-        }
-
-        response = await client.post("/api/slack/events", json=payload)
-
-        # 200 = success, 401/403 = signature verification, 404 = route not mounted
-        assert response.status_code in (200, 401, 403, 404)
+    async def test_slack_events_url_verification(self, client: AsyncClient):
+        """Slack URL verification challenge should work."""
+        response = await client.post(
+            "/slack/events",
+            json={
+                "type": "url_verification",
+                "token": "test_token",
+                "challenge": "test_challenge_string",
+            },
+        )
+        # Should return the challenge
         if response.status_code == 200:
             data = response.json()
-            assert data["challenge"] == payload["challenge"]
+            assert data.get("challenge") == "test_challenge_string"
 
-    async def test_message_event(self, client: AsyncClient) -> None:
-        """Test handling message events."""
-        payload = {
-            "type": "event_callback",
-            "team_id": "T123456",
-            "event": {
-                "type": "message",
-                "channel": "C123456",
-                "user": "U123456",
-                "text": "Hello bot!",
-                "ts": "1234567890.123456",
+    async def test_slack_events_message(self, client: AsyncClient):
+        """Slack message events should be accepted."""
+        response = await client.post(
+            "/slack/events",
+            json={
+                "type": "event_callback",
+                "event": {
+                    "type": "message",
+                    "channel": "C12345",
+                    "user": "U12345",
+                    "text": "Hello bot",
+                    "ts": "1234567890.123456",
+                },
+                "team_id": "T12345",
+                "event_id": "Ev12345",
             },
-        }
+        )
+        assert response.status_code in [200, 404]
 
-        response = await client.post("/api/slack/events", json=payload)
-
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_app_mention_event(self, client: AsyncClient) -> None:
-        """Test handling app mention events."""
-        payload = {
-            "type": "event_callback",
-            "team_id": "T123456",
-            "event": {
-                "type": "app_mention",
-                "channel": "C123456",
-                "user": "U123456",
-                "text": "<@U_BOT_ID> investigate payment errors",
-                "ts": "1234567890.123456",
+    async def test_slack_commands(self, client: AsyncClient):
+        """Slack slash commands should be processed."""
+        response = await client.post(
+            "/slack/commands",
+            data={
+                "command": "/copilot",
+                "text": "help",
+                "user_id": "U12345",
+                "channel_id": "C12345",
+                "response_url": "https://hooks.slack.com/commands/test",
+                "trigger_id": "12345.67890",
             },
-        }
+        )
+        assert response.status_code in [200, 404]
 
-        response = await client.post("/api/slack/events", json=payload)
+    async def test_slack_interactions(self, client: AsyncClient):
+        """Slack interactive components should be handled."""
+        import json
 
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_app_home_opened_event(self, client: AsyncClient) -> None:
-        """Test handling App Home opened events."""
-        payload = {
-            "type": "event_callback",
-            "team_id": "T123456",
-            "event": {
-                "type": "app_home_opened",
-                "user": "U123456",
-                "channel": "D123456",
-                "tab": "home",
-            },
-        }
-
-        response = await client.post("/api/slack/events", json=payload)
-
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_ignores_bot_messages(self, client: AsyncClient) -> None:
-        """Test that bot messages are ignored."""
-        payload = {
-            "type": "event_callback",
-            "team_id": "T123456",
-            "event": {
-                "type": "message",
-                "channel": "C123456",
-                "user": "U123456",
-                "text": "Bot message",
-                "ts": "1234567890.123456",
-                "bot_id": "B123456",
-            },
-        }
-
-        response = await client.post("/api/slack/events", json=payload)
-
-        assert response.status_code in (200, 401, 403, 404)
-
-
-class TestSlackCommands:
-    """Test Slack slash commands."""
-
-    async def test_investigate_command(self, client: AsyncClient) -> None:
-        """Test /investigate command."""
-        form_data = {
-            "command": "/investigate",
-            "text": "payment-service 500 errors",
-            "user_id": "U123456",
-            "user_name": "testuser",
-            "channel_id": "C123456",
-            "channel_name": "incidents",
-            "team_id": "T123456",
-            "response_url": "https://hooks.slack.com/test",
-            "trigger_id": "123.456.abc",
-        }
-
-        response = await client.post("/api/slack/commands/investigate", data=form_data)
-
-        assert response.status_code in (200, 401, 403, 404)
-        if response.status_code == 200:
-            data = response.json()
-            assert "response_type" in data
-            assert "text" in data
-
-    async def test_oncall_command(self, client: AsyncClient) -> None:
-        """Test /oncall command."""
-        form_data = {
-            "command": "/oncall",
-            "text": "",
-            "user_id": "U123456",
-            "channel_id": "C123456",
-            "response_url": "https://hooks.slack.com/test",
-            "trigger_id": "123.456.abc",
-        }
-
-        response = await client.post("/api/slack/commands/oncall", data=form_data)
-
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_status_command(self, client: AsyncClient) -> None:
-        """Test /status command."""
-        form_data = {
-            "command": "/status",
-            "text": "",
-            "user_id": "U123456",
-            "channel_id": "C123456",
-            "response_url": "https://hooks.slack.com/test",
-            "trigger_id": "123.456.abc",
-        }
-
-        response = await client.post("/api/slack/commands/status", data=form_data)
-
-        assert response.status_code in (200, 401, 403, 404)
-
-
-class TestSlackInteractions:
-    """Test Slack interactive components."""
-
-    async def test_block_action(self, client: AsyncClient) -> None:
-        """Test block action interaction."""
-        payload = {
+        payload = json.dumps({
             "type": "block_actions",
-            "user": {"id": "U123456", "username": "testuser"},
-            "channel": {"id": "C123456"},
+            "user": {"id": "U12345", "name": "testuser"},
+            "channel": {"id": "C12345"},
             "actions": [
                 {
-                    "action_id": "start_investigation",
-                    "block_id": "actions_block",
+                    "action_id": "investigate_INC123",
                     "type": "button",
-                    "value": "start",
+                    "value": "clicked",
                 }
             ],
-            "response_url": "https://hooks.slack.com/test",
-            "trigger_id": "123.456.abc",
-        }
-
-        response = await client.post(
-            "/api/slack/interactions",
-            data={"payload": json.dumps(payload)},
-        )
-
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_view_submission(self, client: AsyncClient) -> None:
-        """Test modal submission."""
-        payload = {
-            "type": "view_submission",
-            "user": {"id": "U123456"},
-            "view": {
-                "callback_id": "incident_form",
-                "state": {
-                    "values": {
-                        "title_block": {
-                            "title": {"value": "Test Incident"},
-                        },
-                        "severity_block": {
-                            "severity": {"selected_option": {"value": "high"}},
-                        },
-                    },
-                },
-            },
-        }
-
-        response = await client.post(
-            "/api/slack/interactions",
-            data={"payload": json.dumps(payload)},
-        )
-
-        assert response.status_code in (200, 401, 403, 404)
-
-    async def test_shortcut(self, client: AsyncClient) -> None:
-        """Test global shortcut."""
-        payload = {
-            "type": "shortcut",
-            "callback_id": "create_incident",
-            "user": {"id": "U123456"},
-            "trigger_id": "123.456.abc",
-        }
-
-        response = await client.post(
-            "/api/slack/interactions",
-            data={"payload": json.dumps(payload)},
-        )
-
-        assert response.status_code in (200, 401, 403, 404)
-
-
-class TestSlackOAuth:
-    """Test Slack OAuth flow."""
-
-    async def test_oauth_authorize_redirect(self, client: AsyncClient) -> None:
-        """Test OAuth authorize redirects to Slack."""
-        response = await client.get("/api/slack/oauth/authorize", follow_redirects=False)
-
-        # 302/307 = redirect, 404 = route not mounted, 500 = missing config
-        assert response.status_code in (302, 307, 404, 500)
-        if response.status_code in (302, 307):
-            location = response.headers.get("location", "")
-            assert "slack.com/oauth" in location
-
-
-class TestSlackHealth:
-    """Test Slack health endpoint."""
-
-    async def test_slack_health(self, client: AsyncClient) -> None:
-        """Test Slack service health check."""
-        response = await client.get("/api/slack/health")
-
-        assert response.status_code in (200, 404)
-        if response.status_code == 200:
-            data = response.json()
-            assert data["status"] == "ok"
-            assert data["service"] == "slack"
-
-
-class TestSlackBlockKit:
-    """Test Slack Block Kit message building."""
-
-    async def test_incident_modal_structure(self) -> None:
-        """Test incident modal has correct structure."""
-        from app.slack_bot.blocks import SlackBlockBuilder
-
-        builder = SlackBlockBuilder()
-        blocks = builder.build_incident_blocks({
-            "id": "INC-001",
-            "title": "Test Incident",
-            "severity": "high",
-            "status": "investigating",
-            "service": "api-gateway",
+            "response_url": "https://hooks.slack.com/actions/test",
+            "trigger_id": "12345.67890",
         })
 
-        assert isinstance(blocks, list)
+        response = await client.post(
+            "/slack/interactions",
+            data={"payload": payload},
+        )
+        assert response.status_code in [200, 404]
+
+
+class TestSlackClient:
+    """Test Slack client functionality (mocked)."""
+
+    async def test_slack_client_initialization(self):
+        """Slack client should initialize without errors."""
+        from app.slack_bot.client import SlackClientConfig, SlackClient
+
+        config = SlackClientConfig(
+            bot_token="xoxb-test-token",
+            signing_secret="test_secret",
+        )
+        client = SlackClient(config)
+        assert client.config.bot_token == "xoxb-test-token"
+
+    async def test_signature_verification(self):
+        """Signature verification should work correctly."""
+        import hashlib
+        import hmac
+        import time
+
+        from app.slack_bot.client import SlackClientConfig, SlackClient
+
+        secret = "test_signing_secret"
+        config = SlackClientConfig(
+            bot_token="xoxb-test",
+            signing_secret=secret,
+        )
+        client = SlackClient(config)
+
+        # Create valid signature
+        timestamp = str(int(time.time()))
+        body = b'{"test": "data"}'
+        sig_basestring = f"v0:{timestamp}:{body.decode()}"
+        signature = "v0=" + hmac.new(
+            secret.encode(),
+            sig_basestring.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+        assert client.verify_signature(signature, timestamp, body) is True
+
+    async def test_signature_verification_invalid(self):
+        """Invalid signatures should be rejected."""
+        from app.slack_bot.client import SlackClientConfig, SlackClient
+
+        config = SlackClientConfig(
+            bot_token="xoxb-test",
+            signing_secret="test_secret",
+        )
+        client = SlackClient(config)
+
+        # Invalid signature
+        assert client.verify_signature(
+            "v0=invalid",
+            str(int(__import__('time').time())),
+            b'{"test": "data"}',
+        ) is False
+
+
+class TestSlackBlockBuilder:
+    """Test Slack Block Kit builder."""
+
+    async def test_investigation_card(self):
+        """Build investigation card blocks."""
+        from app.slack_bot.blocks import get_block_builder
+
+        builder = get_block_builder()
+        blocks = builder.investigation_card(
+            incident_id="INC-123",
+            title="Test Incident",
+            status="Investigating",
+            duration="5m",
+            severity="P2",
+            responders=["user1", "user2"],
+            services=["checkout-api"],
+            root_cause="Connection leak",
+            confidence=0.85,
+            evidence_count=5,
+        )
+
         assert len(blocks) > 0
-        assert all("type" in block for block in blocks)
+        assert any(b["type"] == "header" for b in blocks)
 
-    async def test_investigation_message_structure(self) -> None:
-        """Test investigation message has correct structure."""
-        from app.slack_bot.blocks import SlackBlockBuilder
+    async def test_approval_card(self):
+        """Build approval request card."""
+        from app.slack_bot.blocks import get_block_builder
 
-        builder = SlackBlockBuilder()
-        blocks = builder.build_investigation_blocks({
-            "id": "INV-001",
-            "status": "running",
-            "findings": ["Finding 1", "Finding 2"],
-        })
+        builder = get_block_builder()
+        blocks = builder.approval_card(
+            approval_id="apr_123",
+            action_type="Rollback",
+            description="Rollback checkout-api to v1.2.3",
+            details={"service": "checkout-api", "version": "v1.2.3"},
+            risk_level="medium",
+            requested_by="user123",
+        )
 
-        assert isinstance(blocks, list)
         assert len(blocks) > 0
+        # Should have approve/reject buttons
+        actions = [b for b in blocks if b["type"] == "actions"]
+        assert len(actions) > 0
+
+    async def test_timeline_card(self):
+        """Build timeline card."""
+        from app.slack_bot.blocks import get_block_builder
+
+        builder = get_block_builder()
+        blocks = builder.timeline_card(
+            incident_id="INC-123",
+            events=[
+                {"time": "14:00", "event": "Alert fired"},
+                {"time": "14:05", "event": "Investigation started"},
+                {"time": "14:10", "event": "Root cause identified"},
+            ],
+        )
+
+        assert len(blocks) > 0
+
+
+class TestWarRoom:
+    """Test war room management."""
+
+    async def test_create_war_room(self):
+        """Create a war room."""
+        from app.slack_bot.war_room import get_war_room_manager
+
+        manager = get_war_room_manager()
+        war_room = await manager.create_war_room(
+            incident_id="INC-123",
+            org_id="org_test",
+            title="Test Incident",
+            severity="P2",
+            services=["checkout-api"],
+        )
+
+        assert war_room.incident_id == "INC-123"
+        assert war_room.severity == "P2"
+        assert "checkout-api" in war_room.services
+
+    async def test_war_room_lookup(self):
+        """Look up war room by incident."""
+        from app.slack_bot.war_room import get_war_room_manager
+
+        manager = get_war_room_manager()
+
+        # Create first
+        await manager.create_war_room(
+            incident_id="INC-456",
+            org_id="org_test",
+            title="Another Incident",
+            severity="P1",
+        )
+
+        # Look up
+        found = manager.get_by_incident("INC-456")
+        assert found is not None
+        assert found.incident_id == "INC-456"
