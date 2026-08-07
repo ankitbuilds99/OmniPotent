@@ -20,7 +20,7 @@ export default function () {
     'healthz has status field': (r) => {
       try {
         return r.json().status !== undefined;
-      } catch {
+      } catch (e) {
         return false;
       }
     },

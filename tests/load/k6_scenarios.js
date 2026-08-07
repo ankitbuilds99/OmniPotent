@@ -117,7 +117,7 @@ export function smokeTest() {
       'healthz response valid': (r) => {
         try {
           return r.json('status') === 'healthy';
-        } catch {
+        } catch (e) {
           return false;
         }
       },
