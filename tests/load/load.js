@@ -19,10 +19,8 @@ export const options = {
   ],
   thresholds: {
     http_req_duration: ['p(95)<2000', 'p(99)<5000'],
-    // Note: http_req_failed includes expected 401s from unauthenticated requests
-    // In CI without real auth tokens, we only check health endpoints work
-    http_req_failed: ['rate<0.60'],  // Allow up to 60% failures (auth-required endpoints)
-    success_rate: ['rate>0.40'],     // At least health endpoints should succeed
+    http_req_failed: ['rate<0.10'],  // Allow up to 10% failures
+    success_rate: ['rate>0.90'],     // At least 90% of checks should pass
   },
 };
 
@@ -45,37 +43,25 @@ export default function () {
   });
 
   group('API Endpoints', function () {
-    // List investigations
-    const listRes = http.get(`${BASE_URL}/api/v1/investigations`, { headers });
-    const listOk = check(listRes, {
-      'list status 200 or 401': (r) => r.status === 200 || r.status === 401,
+    // Get config (no auth required for reading config)
+    const configRes = http.get(`${BASE_URL}/config`);
+    const configOk = check(configRes, {
+      'config status 200': (r) => r.status === 200,
     });
-    successRate.add(listOk);
-    if (!listOk) apiErrors.add(1);
+    successRate.add(configOk);
+    if (!configOk) apiErrors.add(1);
 
-    // Start investigation (mock)
-    const startPayload = JSON.stringify({
-      query: 'checkout-api 500 errors',
-      context: {
-        service: 'checkout-api',
-        timerange: '1h',
-      },
+    // Get usage stats (may require auth)
+    const usageRes = http.get(`${BASE_URL}/usage`, { headers });
+    const usageOk = check(usageRes, {
+      'usage status 200 or 401': (r) => r.status === 200 || r.status === 401,
     });
-
-    const startRes = http.post(
-      `${BASE_URL}/api/v1/investigations`,
-      startPayload,
-      { headers }
-    );
-    const startOk = check(startRes, {
-      'start investigation status': (r) => r.status === 200 || r.status === 201 || r.status === 401 || r.status === 422,
-    });
-    successRate.add(startOk);
-    if (startRes.status >= 500) apiErrors.add(1);
+    successRate.add(usageOk);
+    if (usageRes.status >= 500) apiErrors.add(1);
   });
 
   group('Webhook Endpoints', function () {
-    // PagerDuty webhook
+    // PagerDuty webhook (actual endpoint)
     const pdPayload = JSON.stringify({
       event: {
         event_type: 'incident.triggered',
@@ -89,7 +75,7 @@ export default function () {
     });
 
     const pdRes = http.post(
-      `${BASE_URL}/api/v1/webhooks/pagerduty`,
+      `${BASE_URL}/webhooks/pagerduty`,
       pdPayload,
       {
         headers: {
@@ -98,16 +84,19 @@ export default function () {
         },
       }
     );
-    check(pdRes, {
+    const pdOk = check(pdRes, {
       'pagerduty webhook accepted': (r) => r.status !== 500,
     });
+    successRate.add(pdOk);
   });
 
   group('Metrics Endpoints', function () {
-    const metricsRes = http.get(`${BASE_URL}/metrics`);
-    check(metricsRes, {
-      'metrics endpoint responds': (r) => r.status === 200 || r.status === 404,
+    // SLO metrics endpoint (Prometheus format)
+    const metricsRes = http.get(`${BASE_URL}/metrics/slo`);
+    const metricsOk = check(metricsRes, {
+      'metrics endpoint responds': (r) => r.status === 200,
     });
+    successRate.add(metricsOk);
   });
 
   sleep(Math.random() * 2 + 1);
