@@ -624,7 +624,7 @@ class SemanticSimilarityEngine:
         embedding = [0.0] * 128
 
         for i, word in enumerate(words):
-            word_hash = int(hashlib.md5(word.encode()).hexdigest()[:8], 16)
+            word_hash = int(hashlib.md5(word.encode(), usedforsecurity=False).hexdigest()[:8], 16)
             for j in range(128):
                 if (word_hash >> (j % 32)) & 1:
                     embedding[j] += 1.0 / (i + 1)

@@ -18,7 +18,6 @@ import hashlib
 import json
 import logging
 import os
-from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import String, Text
@@ -393,7 +392,7 @@ async def rotate_encrypted_field(
     Returns:
         Number of records updated
     """
-    from sqlalchemy import select, update
+    from sqlalchemy import select
 
     count = 0
     offset = 0

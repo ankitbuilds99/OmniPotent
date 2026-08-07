@@ -93,7 +93,7 @@ class MigrationManager:
     async def _acquire_lock(self, session: Any, migration_id: str) -> bool:
         from sqlalchemy import text
 
-        lock_key = int(hashlib.md5(migration_id.encode()).hexdigest()[:8], 16)
+        lock_key = int(hashlib.md5(migration_id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
 
         try:
             result = await session.execute(
@@ -123,7 +123,7 @@ class MigrationManager:
         if self._current_lock is None:
             return
 
-        lock_key = int(hashlib.md5(migration_id.encode()).hexdigest()[:8], 16)
+        lock_key = int(hashlib.md5(migration_id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
 
         try:
             await session.execute(text(f"SELECT pg_advisory_unlock({lock_key})"))

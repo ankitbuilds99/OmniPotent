@@ -102,7 +102,7 @@ class JSONFormatter(logging.Formatter):
 
             # Create error fingerprint for grouping similar errors
             fingerprint_source = f"{exc_type}:{record.pathname}:{record.lineno}"
-            fingerprint = hashlib.md5(fingerprint_source.encode()).hexdigest()[:12]
+            fingerprint = hashlib.md5(fingerprint_source.encode(), usedforsecurity=False).hexdigest()[:12]
 
             log_obj["exception"] = {
                 "type": exc_type,

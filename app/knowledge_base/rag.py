@@ -124,7 +124,7 @@ class KnowledgeBase:
 
     def _generate_id(self, content: str) -> str:
         """Generate a document ID."""
-        return hashlib.md5(content.encode()).hexdigest()[:12]
+        return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def _generate_embedding(self, text: str) -> list[float]:
         """Generate text embedding.

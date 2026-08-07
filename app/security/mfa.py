@@ -21,11 +21,8 @@ import secrets
 import struct
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
-
-from app.config import get_settings
 
 log = logging.getLogger("omnipotent.security.mfa")
 

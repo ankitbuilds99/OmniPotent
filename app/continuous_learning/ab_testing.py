@@ -359,7 +359,8 @@ class ABTestFramework:
         # Check if entity should be in experiment
         if experiment.target_percentage < 100:
             hash_val = int(hashlib.md5(
-                f"{experiment_id}:{entity_id}:bucket".encode()
+                f"{experiment_id}:{entity_id}:bucket".encode(),
+                usedforsecurity=False
             ).hexdigest(), 16)
             if (hash_val % 100) >= experiment.target_percentage:
                 return None
@@ -372,7 +373,8 @@ class ABTestFramework:
 
         # Deterministic assignment
         hash_val = int(hashlib.md5(
-            f"{experiment_id}:{entity_id}".encode()
+            f"{experiment_id}:{entity_id}".encode(),
+            usedforsecurity=False
         ).hexdigest(), 16)
         bucket = hash_val % 100
 

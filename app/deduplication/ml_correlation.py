@@ -396,7 +396,7 @@ class AnomalyClusterer:
         words = text.lower().split()
 
         for i, word in enumerate(words):
-            h = int(hashlib.md5(word.encode()).hexdigest()[:8], 16)
+            h = int(hashlib.md5(word.encode(), usedforsecurity=False).hexdigest()[:8], 16)
             for j in range(dim):
                 if (h >> (j % 32)) & 1:
                     embedding[j] += 1.0 / (i + 1)

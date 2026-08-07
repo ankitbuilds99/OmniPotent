@@ -78,7 +78,7 @@ class FeatureFlag:
     def _get_bucket(self, context: "EvaluationContext") -> int:
         """Get consistent bucket (0-99) for percentage rollout."""
         key = f"{self.key}:{context.user_id or context.org_id or 'anonymous'}"
-        hash_value = hashlib.md5(key.encode()).hexdigest()
+        hash_value = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
         return int(hash_value[:8], 16) % 100
 
 

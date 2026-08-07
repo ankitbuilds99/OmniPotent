@@ -715,7 +715,8 @@ class PrometheusSyncer(BaseSyncer):
                     fingerprint = alert.get("fingerprint", "")
                     if not fingerprint:
                         fingerprint = hashlib.md5(
-                            json.dumps(labels, sort_keys=True).encode()
+                            json.dumps(labels, sort_keys=True).encode(),
+                            usedforsecurity=False
                         ).hexdigest()[:16]
 
                     events.append(SyncEvent(
