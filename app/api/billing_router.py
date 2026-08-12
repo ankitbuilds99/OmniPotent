@@ -15,6 +15,7 @@ from app.billing import (
     StripeBillingService,
 )
 from app.config import get_settings
+from app.runtime_defaults import DEFAULT_FRONTEND_URL
 from app import tenant_context
 
 log = logging.getLogger("omnipotent.api.billing")
@@ -45,7 +46,7 @@ def _get_stripe_service() -> StripeBillingService | None:
                 store=_get_store(),
                 stripe_client=stripe,
                 webhook_secret=s.stripe_webhook_secret or "",
-                frontend_url=s.frontend_url or "http://localhost:3000",
+                frontend_url=s.frontend_url or DEFAULT_FRONTEND_URL,
             )
         except Exception as e:
             log.warning("Failed to initialize Stripe: %s", e)

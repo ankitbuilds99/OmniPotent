@@ -22,6 +22,7 @@ from app.billing.models import (
     InvoiceStatus,
 )
 from app.billing.plans import PlanManager
+from app.runtime_defaults import DEFAULT_FRONTEND_URL
 
 log = logging.getLogger("omnipotent.billing.stripe")
 
@@ -98,7 +99,7 @@ class StripeBillingService:
         store: BillingStore,
         stripe_client: StripeClient,
         webhook_secret: str,
-        frontend_url: str = "http://localhost:3000",
+        frontend_url: str = DEFAULT_FRONTEND_URL,
     ):
         self._store = store
         self._stripe = stripe_client

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Sparkles, Menu, X, ArrowRight, Code, Palette } from 'lucide-react'
 import { THEMES, DEFAULT_THEME } from '../../themes'
+import { resolveApiBaseUrl } from '../../lib/runtime'
 
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
@@ -10,8 +11,6 @@ const NAV_LINKS = [
   { label: 'Blog', href: '#blog' },
   { label: 'Pricing', href: '#pricing' }
 ]
-
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 export function Navbar({ onLaunch }: { onLaunch: () => void }) {
   const [isScrolled, setIsScrolled] = useState(false)
@@ -23,6 +22,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
     }
     return DEFAULT_THEME
   })
+  const [apiBaseUrl, setApiBaseUrl] = useState<string>('')
 
   useEffect(() => {
     const handleScroll = () => {
@@ -37,6 +37,10 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
     document.documentElement.dataset.theme = currentTheme
     localStorage.setItem('copilot-theme', currentTheme)
   }, [currentTheme])
+
+  useEffect(() => {
+    void resolveApiBaseUrl().then(setApiBaseUrl).catch(() => setApiBaseUrl(''))
+  }, [])
 
   const handleThemeChange = (themeId: string) => {
     setCurrentTheme(themeId)
@@ -82,7 +86,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
               </a>
             ))}
             <a
-              href={`${API_BASE_URL}/docs`}
+              href={apiBaseUrl ? `${apiBaseUrl}/docs` : '/docs'}
               target="_blank"
               rel="noreferrer"
               className="px-4 py-2 text-white/70 hover:text-white font-medium text-sm transition-colors relative group flex items-center gap-1.5"

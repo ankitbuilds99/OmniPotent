@@ -7,6 +7,8 @@
  * env vars aren't available at build time).
  */
 
+import { getFrontendRuntimeConfig } from "./runtime";
+
 // Build-time env vars (available in dev, may be empty in Docker builds)
 let supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
 let supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
@@ -30,9 +32,8 @@ async function fetchRuntimeConfig(): Promise<void> {
 
   configPromise = (async () => {
     try {
-      const res = await fetch('/frontend-config')
-      if (res.ok) {
-        const config = await res.json()
+      const config = await getFrontendRuntimeConfig()
+      if (config) {
         if (config.supabase_url) supabaseUrl = config.supabase_url
         if (config.supabase_anon_key) supabaseAnonKey = config.supabase_anon_key
         console.log('Supabase config loaded:', { url: supabaseUrl, hasKey: !!supabaseAnonKey })

@@ -1,8 +1,8 @@
 // Thin, typed client for the OmniPotent backend.
 
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
+import { resolveApiBaseUrl } from "./lib/runtime";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 // Optional bearer token (set VITE_API_TOKEN when the backend has COPILOT_API_TOKEN).
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
@@ -11,7 +11,8 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const baseUrl = await resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
@@ -24,13 +25,15 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
+  const baseUrl = await resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${path} ${res.status}`);
   return res.json() as Promise<T>;
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, { method: "DELETE", headers: authHeaders() });
+  const baseUrl = await resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, { method: "DELETE", headers: authHeaders() });
   if (!res.ok) throw new Error(`${path} ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -44,7 +47,8 @@ async function streamPost(
   onEvent: (ev: StreamEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const baseUrl = await resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
@@ -225,7 +229,8 @@ export function signup(orgName: string, email: string): Promise<SignupResult> {
 /** Liveness check used by the header status dot. */
 export async function health(): Promise<boolean> {
   try {
-    const res = await fetch(`${BASE_URL}/healthz`);
+    const baseUrl = await resolveApiBaseUrl();
+    const res = await fetch(`${baseUrl}/healthz`);
     return res.ok;
   } catch {
     return false;
@@ -238,7 +243,8 @@ export async function health(): Promise<boolean> {
 
 /** Get the WebSocket base URL (converts http(s) to ws(s)). */
 export function getWebSocketUrl(): string {
-  const url = new URL(BASE_URL);
+  const baseUrl = import.meta.env.VITE_API_URL ?? window.location.origin;
+  const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString().replace(/\/$/, "");
 }

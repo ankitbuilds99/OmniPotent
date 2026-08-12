@@ -24,10 +24,11 @@ import re
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from app.runtime_defaults import DEFAULT_REPO_PATH
 
 mcp = FastMCP("security")
 
-REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", "./sample_repo")).resolve()
+REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", DEFAULT_REPO_PATH)).resolve()
 
 SECRET_PATTERNS: list[tuple[str, str, str]] = [
     (r"AKIA[0-9A-Z]{16}", "AWS Access Key ID", "high"),

@@ -17,8 +17,8 @@ import {
   Activity,
   ArrowLeft
 } from 'lucide-react'
-
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+import { PROJECT_REPO_URL } from '../lib/project'
+import { resolveApiBaseUrl } from '../lib/runtime'
 
 interface EndpointGroup {
   name: string
@@ -182,6 +182,14 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
+function useApiBaseUrl() {
+  const [baseUrl, setBaseUrl] = useState('')
+  useEffect(() => {
+    void resolveApiBaseUrl().then(setBaseUrl).catch(() => setBaseUrl(''))
+  }, [])
+  return baseUrl
+}
+
 function EndpointCard({ group }: { group: EndpointGroup }) {
   const [expanded, setExpanded] = useState(false)
   const Icon = group.icon
@@ -245,12 +253,14 @@ function EndpointCard({ group }: { group: EndpointGroup }) {
 
 export function ApiDocs({ onBack }: { onBack?: () => void }) {
   const [apiHealth, setApiHealth] = useState<'checking' | 'online' | 'offline'>('checking')
+  const apiBaseUrl = useApiBaseUrl()
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/healthz`)
+    if (!apiBaseUrl) return
+    fetch(`${apiBaseUrl}/healthz`)
       .then((res) => setApiHealth(res.ok ? 'online' : 'offline'))
       .catch(() => setApiHealth('offline'))
-  }, [])
+  }, [apiBaseUrl])
 
   return (
     <div className="min-h-screen bg-background">
@@ -290,7 +300,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
               </span>
             </div>
             <a
-              href={`${API_BASE_URL}/docs`}
+              href={apiBaseUrl ? `${apiBaseUrl}/docs` : '/docs'}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-lg text-primary text-sm font-medium transition-colors"
@@ -300,7 +310,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
               <ExternalLink className="w-3 h-3" />
             </a>
             <a
-              href={`${API_BASE_URL}/redoc`}
+              href={apiBaseUrl ? `${apiBaseUrl}/redoc` : '/redoc'}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70 text-sm font-medium transition-colors"
@@ -326,7 +336,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
           {/* Quick Links */}
           <div className="flex flex-wrap gap-3">
             <a
-              href={`${API_BASE_URL}/openapi.json`}
+              href={apiBaseUrl ? `${apiBaseUrl}/openapi.json` : '/openapi.json'}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70 text-sm transition-colors"
@@ -336,7 +346,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
               <ExternalLink className="w-3 h-3" />
             </a>
             <a
-              href="https://github.com/ankit25bcs10610/OmniPotent"
+              href={PROJECT_REPO_URL}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70 text-sm transition-colors"

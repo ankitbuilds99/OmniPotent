@@ -21,10 +21,11 @@ import re
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from app.runtime_defaults import DEFAULT_REPO_PATH
 
 mcp = FastMCP("architect")
 
-REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", "./sample_repo")).resolve()
+REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", DEFAULT_REPO_PATH)).resolve()
 
 ARCHITECTURE_PATTERNS: dict[str, dict] = {
     "microservices": {

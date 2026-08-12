@@ -5,6 +5,8 @@ Analyzes pull requests for risk factors and generates risk scores.
 
 from __future__ import annotations
 
+from app.config import get_settings
+
 import logging
 import re
 from dataclasses import dataclass, field
@@ -159,7 +161,7 @@ class PRRiskAnalysis:
             f"**Deployment Strategy:** {self.deployment_strategy}",
             "",
             "---",
-            "*Powered by [OmniPotent](https://github.com/ankit25bcs10610/OmniPotent)*",
+            f"*Powered by [OmniPotent]({get_settings().project_repo_url})*",
         ])
 
         return "\n".join(lines)

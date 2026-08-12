@@ -24,10 +24,12 @@ import subprocess
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from app.config import get_settings
+from app.runtime_defaults import DEFAULT_REPO_PATH
 
 mcp = FastMCP("docs")
 
-REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", "./sample_repo")).resolve()
+REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", DEFAULT_REPO_PATH)).resolve()
 
 
 def _safe_path(relative: str) -> Path:
@@ -280,12 +282,13 @@ go build ./...
 
     usage_section = "## Usage\n\n"
     if info["framework"] == "FastAPI":
-        usage_section += """```bash
+        backend_url = get_settings().backend_url.rstrip("/")
+        usage_section += f"""```bash
 # Start the development server
 uvicorn app.main:app --reload
 
 # Access the API documentation
-open http://localhost:8000/docs
+open {backend_url}/docs
 ```
 """
     elif info["framework"] in ("React", "Next.js"):

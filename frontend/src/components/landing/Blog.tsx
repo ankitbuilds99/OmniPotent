@@ -10,6 +10,12 @@ import {
   GitMerge,
   Lightbulb
 } from 'lucide-react'
+import {
+  PROJECT_REPO_FEATURES_URL,
+  PROJECT_REPO_HITL_URL,
+  PROJECT_REPO_MCP_URL,
+  PROJECT_REPO_README_URL,
+} from '../../lib/project'
 
 const BLOG_POSTS = [
   {
@@ -24,7 +30,7 @@ const BLOG_POSTS = [
     color: '#00E7FF',
     featured: true,
     tags: ['AI', 'LangGraph', 'DevOps', 'Python'],
-    url: 'https://github.com/ankit25bcs10610/OmniPotent#readme'
+    url: PROJECT_REPO_README_URL
   },
   {
     id: 2,
@@ -38,7 +44,7 @@ const BLOG_POSTS = [
     color: '#00FFB3',
     featured: false,
     tags: ['Incident Response', 'Automation', 'Metrics'],
-    url: 'https://github.com/ankit25bcs10610/OmniPotent#features'
+    url: PROJECT_REPO_FEATURES_URL
   },
   {
     id: 3,
@@ -52,7 +58,7 @@ const BLOG_POSTS = [
     color: '#FF9900',
     featured: false,
     tags: ['AI Safety', 'Best Practices', 'Security'],
-    url: 'https://github.com/ankit25bcs10610/OmniPotent#human-in-the-loop-approval'
+    url: PROJECT_REPO_HITL_URL
   },
   {
     id: 4,
@@ -66,7 +72,7 @@ const BLOG_POSTS = [
     color: '#7C3AED',
     featured: false,
     tags: ['Integration', 'API', 'Tutorial'],
-    url: 'https://github.com/ankit25bcs10610/OmniPotent/tree/main/app/mcp'
+    url: PROJECT_REPO_MCP_URL
   }
 ]
 

@@ -18,8 +18,8 @@ import type {
   BillingCycle,
   MetricType,
 } from '../types/billing';
+import { resolveApiBaseUrl } from '../lib/runtime';
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? '';
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -27,7 +27,8 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
+  const baseUrl = await resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, { headers: authHeaders() });
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`${res.status} ${res.statusText}: ${detail}`);
@@ -36,7 +37,8 @@ async function get<T>(path: string): Promise<T> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const baseUrl = await resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),

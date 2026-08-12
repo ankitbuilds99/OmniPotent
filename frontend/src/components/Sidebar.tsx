@@ -3,6 +3,7 @@ import { GithubConnect } from "./GithubConnect";
 import { Icon } from "./Icon";
 import { ModelConfig } from "./ModelConfig";
 import { SourceConnect } from "./SourceConnect";
+import { PROJECT_REPO_README_URL } from "../lib/project";
 
 // Per-server glyphs (keyed by backend server name).
 const SERVER_ICON: Record<string, string> = {
@@ -75,7 +76,7 @@ export function Sidebar() {
 
       <a
         className="side-help"
-        href="https://github.com/ankit25bcs10610/OmniPotent#readme"
+        href={PROJECT_REPO_README_URL}
         target="_blank"
         rel="noopener noreferrer"
       >

@@ -12,6 +12,15 @@ from pathlib import Path
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.runtime_defaults import (
+    DEFAULT_BACKEND_URL,
+    DEFAULT_DEV_ORIGINS,
+    DEFAULT_FRONTEND_URL,
+    DEFAULT_LOGS_DATA_PATH,
+    DEFAULT_REPO_PATH,
+    DEFAULT_PROJECT_REPO_URL,
+)
+
 # Project root = two levels up from this file (app/config.py -> app -> root)
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,8 +55,8 @@ class Settings(BaseSettings):
     llm_circuit_reset_timeout: float = 30.0
 
     # --- MCP servers ---
-    target_repo_path: str = "./sample_repo"
-    logs_data_path: str = "./app/mcp/servers/logs_metrics/sample_data"
+    target_repo_path: str = DEFAULT_REPO_PATH
+    logs_data_path: str = DEFAULT_LOGS_DATA_PATH
     github_token: str = ""
     # "owner/repo" — required only when github_token is set (real GitHub mode).
     github_repo: str = ""
@@ -140,13 +149,15 @@ class Settings(BaseSettings):
 
     # --- URLs (configurable for different environments) ---
     # Frontend URL for redirects (Stripe, OAuth, etc.)
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = DEFAULT_FRONTEND_URL
     # Backend API URL (for internal references)
-    backend_url: str = "http://localhost:8000"
+    backend_url: str = DEFAULT_BACKEND_URL
     # Status page base URL
     status_page_url: str = ""
     # Documentation URL
     docs_url: str = ""
+    # Public repository URL used in docs and generated links.
+    project_repo_url: str = DEFAULT_PROJECT_REPO_URL
 
     # --- Production safety limits (enforced by the API layer) ---
     # Per-client (IP) POST cap per minute; 0 disables rate limiting.
@@ -517,7 +528,7 @@ class Settings(BaseSettings):
                 origins.append(self.frontend_url)
             return origins
         # In development, allow localhost
-        base = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+        base = list(DEFAULT_DEV_ORIGINS)
         extra = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
         return base + extra
 

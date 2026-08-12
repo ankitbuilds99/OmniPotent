@@ -10,13 +10,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "../types";
+import { resolveApiBaseUrl } from "../lib/runtime";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
 // Convert HTTP URL to WebSocket URL
-function getWsUrl(): string {
-  const url = new URL(BASE_URL);
+async function getWsUrl(): Promise<string> {
+  const baseUrl = await resolveApiBaseUrl();
+  const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString().replace(/\/$/, "");
 }
@@ -140,8 +141,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const params = new URLSearchParams();
     if (sessionId) params.set("session_id", sessionId);
     const queryString = params.toString();
-    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`;
-
     // Use subprotocol for auth token (not logged in access logs)
     // Format: ["copilot-v1", "auth-<token>"] or just ["copilot-v1"] if no token
     const protocols: string[] = ["copilot-v1"];
@@ -149,82 +148,79 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       protocols.push(`auth-${TOKEN}`);
     }
 
-    try {
-      const ws = new WebSocket(wsUrl, protocols);
-      wsRef.current = ws;
+    void (async () => {
+      try {
+        const wsUrl = `${await getWsUrl()}/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`;
+        const ws = new WebSocket(wsUrl, protocols);
+        wsRef.current = ws;
 
-      ws.onopen = () => {
-        reconnectAttempts.current = 0;
-        updateStatus("connected");
+        ws.onopen = () => {
+          reconnectAttempts.current = 0;
+          updateStatus("connected");
 
-        // Start ping interval (every 25 seconds, server pings at 30)
-        pingTimer.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "ping" }));
+          // Start ping interval (every 25 seconds, server pings at 30)
+          pingTimer.current = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ping" }));
+            }
+          }, 25000);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data) as StreamEvent & { session_id?: string };
+
+            if (data.type === "connected" && data.session_id) {
+              setSessionId(data.session_id);
+              return;
+            }
+
+            if (data.type === "pong") {
+              return;
+            }
+
+            if (data.type === "ping") {
+              ws.send(JSON.stringify({ type: "pong" }));
+              return;
+            }
+
+            onMessage?.(data as StreamEvent);
+          } catch {
+            // Ignore non-JSON messages (keep-alives, etc.)
           }
-        }, 25000);
-      };
+        };
 
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data) as StreamEvent & { session_id?: string };
+        ws.onerror = () => {
+          updateStatus("error");
+        };
 
-          // Handle connection confirmation
-          if (data.type === "connected" && data.session_id) {
-            setSessionId(data.session_id);
-            return;
-          }
+        ws.onclose = (event) => {
+          wsRef.current = null;
+          clearTimers();
 
-          // Handle pong
-          if (data.type === "pong") {
-            return;
-          }
-
-          // Handle server ping
-          if (data.type === "ping") {
-            ws.send(JSON.stringify({ type: "pong" }));
-            return;
-          }
-
-          // Forward to message handler
-          onMessage?.(data as StreamEvent);
-        } catch {
-          // Ignore non-JSON messages (keep-alives, etc.)
-        }
-      };
-
-      ws.onerror = () => {
-        updateStatus("error");
-      };
-
-      ws.onclose = (event) => {
-        wsRef.current = null;
-        clearTimers();
-
-        // Check if server rejected WebSocket (disabled)
-        if (event.code === 4000) {
-          setAvailable(false);
-          updateStatus("disconnected");
-          return;
-        }
-
-        // Attempt reconnection if not a clean close
-        if (event.code !== 1000 && event.code !== 1001) {
-          if (maxReconnectAttempts === 0 || reconnectAttempts.current < maxReconnectAttempts) {
-            const delay = getReconnectDelay();
-            reconnectAttempts.current++;
+          if (event.code === 4000) {
+            setAvailable(false);
             updateStatus("disconnected");
-            reconnectTimer.current = setTimeout(connect, delay);
             return;
           }
-        }
 
-        updateStatus("disconnected");
-      };
-    } catch {
-      setAvailable(false);
-      updateStatus("error");
-    }
+          if (event.code !== 1000 && event.code !== 1001) {
+            if (maxReconnectAttempts === 0 || reconnectAttempts.current < maxReconnectAttempts) {
+              const delay = getReconnectDelay();
+              reconnectAttempts.current++;
+              updateStatus("disconnected");
+              reconnectTimer.current = setTimeout(connect, delay);
+              return;
+            }
+          }
+
+          updateStatus("disconnected");
+        };
+      } catch {
+        setAvailable(false);
+        updateStatus("error");
+      }
+    })();
   }, [
     threadId,
     sessionId,

@@ -58,6 +58,7 @@ from app.tenancy import models as tn_models
 # Activate logging + LangSmith tracing before any model/graph is built.
 observability.init()
 log = logging.getLogger("omnipotent.api")
+PROJECT_REPO_URL = get_settings().project_repo_url
 
 # Static catalog of the MCP servers + their tools, surfaced to the UI sidebar.
 # Mirrors app/mcp/client.py — kept here so /config needs no server subprocesses.
@@ -659,7 +660,7 @@ preferred code generator (openapi-generator, swagger-codegen, etc.).
 """,
     contact={
         "name": "OmniPotent Team",
-        "url": "https://github.com/ankit25bcs10610/OmniPotent",
+        "url": PROJECT_REPO_URL,
         "email": "support@omnipotent.dev",
     },
     license_info={

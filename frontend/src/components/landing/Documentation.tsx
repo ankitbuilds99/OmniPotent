@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Book,
@@ -17,6 +17,11 @@ import {
   ExternalLink,
   X
 } from 'lucide-react'
+import {
+  PROJECT_REPO_URL,
+  PROJECT_REPO_README_URL,
+} from '../../lib/project'
+import { resolveApiBaseUrl } from '../../lib/runtime'
 
 const DOCS_SECTIONS = [
   {
@@ -29,7 +34,7 @@ const DOCS_SECTIONS = [
       steps: [
         {
           title: 'Clone the repository',
-          code: 'git clone https://github.com/ankit25bcs10610/OmniPotent.git\ncd OmniPotent'
+          code: `git clone ${PROJECT_REPO_URL}.git\ncd OmniPotent`
         },
         {
           title: 'Install dependencies',
@@ -187,7 +192,7 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
               {section.content.links.map((link: { label: string; url: string; desc: string }, i: number) => (
                 <a
                   key={i}
-                  href={`${import.meta.env.VITE_API_URL ?? 'http://localhost:8000'}${link.url}`}
+                  href={apiBaseUrl ? `${apiBaseUrl}${link.url}` : link.url}
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-2 px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-lg text-primary text-sm font-medium transition-colors"
@@ -262,9 +267,18 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
   )
 }
 
+function useApiBaseUrl() {
+  const [baseUrl, setBaseUrl] = useState('')
+  useEffect(() => {
+    void resolveApiBaseUrl().then(setBaseUrl).catch(() => setBaseUrl(''))
+  }, [])
+  return baseUrl
+}
+
 export function Documentation() {
   const [isOpen, setIsOpen] = useState(false)
   const [activeSection, setActiveSection] = useState('quickstart')
+  const apiBaseUrl = useApiBaseUrl()
 
   return (
     <section id="docs" className="relative py-32 overflow-hidden">
@@ -382,7 +396,7 @@ export function Documentation() {
 
                     {/* GitHub link */}
                     <a
-                      href="https://github.com/ankit25bcs10610/OmniPotent"
+                      href={PROJECT_REPO_README_URL}
                       target="_blank"
                       rel="noreferrer"
                       className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white hover:bg-white/10 transition-all mt-4"

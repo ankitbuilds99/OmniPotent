@@ -11,6 +11,11 @@ import {
 } from 'lucide-react'
 import * as THREE from 'three'
 import { useThemeColors, type ThemeColors } from '../../hooks/useThemeColors'
+import {
+  PROJECT_REPO_COMMITS_URL,
+  PROJECT_REPO_ISSUES_URL,
+  PROJECT_REPO_URL,
+} from '../../lib/project'
 
 // Cyber city buildings
 function CityBuilding({ position, height, width, colors }: {
@@ -179,14 +184,14 @@ const FOOTER_LINKS = {
   Resources: [
     { label: 'Documentation', href: '#docs' },
     { label: 'Blog', href: '#blog' },
-    { label: 'GitHub Repo', href: 'https://github.com/ankit25bcs10610/OmniPotent', external: true },
-    { label: 'Changelog', href: 'https://github.com/ankit25bcs10610/OmniPotent/commits/main', external: true }
+    { label: 'GitHub Repo', href: PROJECT_REPO_URL, external: true },
+    { label: 'Changelog', href: PROJECT_REPO_COMMITS_URL, external: true }
   ],
   Connect: [
     { label: 'Contact Me', href: 'mailto:ankit25bcs10610@gmail.com' },
     { label: 'LinkedIn', href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', external: true },
     { label: 'GitHub Profile', href: 'https://github.com/ankit25bcs10610', external: true },
-    { label: 'Report Issue', href: 'https://github.com/ankit25bcs10610/OmniPotent/issues', external: true }
+    { label: 'Report Issue', href: PROJECT_REPO_ISSUES_URL, external: true }
   ]
 }
 
