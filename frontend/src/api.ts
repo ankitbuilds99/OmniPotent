@@ -1,7 +1,7 @@
 // Thin, typed client for the OmniPotent backend.
 
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
-import { resolveApiBaseUrl } from "./lib/runtime";
+import { getFallbackApiBaseUrl, resolveApiBaseUrl } from "./lib/runtime";
 
 // Optional bearer token (set VITE_API_TOKEN when the backend has COPILOT_API_TOKEN).
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
@@ -243,7 +243,7 @@ export async function health(): Promise<boolean> {
 
 /** Get the WebSocket base URL (converts http(s) to ws(s)). */
 export function getWebSocketUrl(): string {
-  const baseUrl = import.meta.env.VITE_API_URL ?? window.location.origin;
+  const baseUrl = getFallbackApiBaseUrl();
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString().replace(/\/$/, "");
@@ -267,7 +267,8 @@ export interface HealthResponse {
 /** Extended health check that includes WebSocket status. */
 export async function healthExtended(): Promise<HealthResponse | null> {
   try {
-    const res = await fetch(`${BASE_URL}/healthz`);
+    const baseUrl = await resolveApiBaseUrl();
+    const res = await fetch(`${baseUrl}/healthz`);
     if (!res.ok) return null;
     return res.json() as Promise<HealthResponse>;
   } catch {

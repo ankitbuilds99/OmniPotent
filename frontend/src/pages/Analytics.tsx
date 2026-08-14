@@ -4,8 +4,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface MetricCard {
   title: string;
@@ -350,6 +349,7 @@ function LoadingState() {
 }
 
 export function Analytics({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [timeRange, setTimeRange] = useState<"7d" | "30d" | "90d">("30d");
   const [loading, setLoading] = useState(true);
   const [metrics, setMetrics] = useState<MetricCard[]>([]);
@@ -369,15 +369,15 @@ export function Analytics({ onBack }: { onBack: () => void }) {
     setLoading(true);
     try {
       // Fetch incidents for metrics
-      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+      const incidentsRes = await fetch(`${apiBaseUrl}/api/incidents`);
       const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
       // Fetch alerts for additional data
-      const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=100`);
+      const alertsRes = await fetch(`${apiBaseUrl}/oncall/alerts?limit=100`);
       const alerts = alertsRes.ok ? await alertsRes.json() : [];
 
       // Fetch teams for team metrics
-      const teamsRes = await fetch(`${API_BASE}/oncall/teams`);
+      const teamsRes = await fetch(`${apiBaseUrl}/oncall/teams`);
       const teamsData = teamsRes.ok ? await teamsRes.json() : [];
 
       // Calculate metrics from real data
@@ -504,7 +504,7 @@ export function Analytics({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchData();

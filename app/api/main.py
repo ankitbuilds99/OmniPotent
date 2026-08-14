@@ -1221,6 +1221,7 @@ async def frontend_config() -> dict:
     return {
         "supabase_url": s.supabase_url or "",
         "supabase_anon_key": s.supabase_anon_key or "",
+        "project_repo_url": s.project_repo_url or "",
         "api_url": "",  # Empty = same-origin
     }
 

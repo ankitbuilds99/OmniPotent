@@ -12,9 +12,8 @@ import {
 import * as THREE from 'three'
 import { useThemeColors, type ThemeColors } from '../../hooks/useThemeColors'
 import {
-  PROJECT_REPO_COMMITS_URL,
-  PROJECT_REPO_ISSUES_URL,
-  PROJECT_REPO_URL,
+  buildProjectRepoLinks,
+  useProjectRepoUrl,
 } from '../../lib/project'
 
 // Cyber city buildings
@@ -174,27 +173,6 @@ function FooterScene({ colors }: { colors: ThemeColors }) {
   )
 }
 
-const FOOTER_LINKS = {
-  Product: [
-    { label: 'Features', href: '#features' },
-    { label: 'Pipeline', href: '#pipeline' },
-    { label: 'Dashboard', href: '#dashboard' },
-    { label: 'Pricing', href: '#pricing' }
-  ],
-  Resources: [
-    { label: 'Documentation', href: '#docs' },
-    { label: 'Blog', href: '#blog' },
-    { label: 'GitHub Repo', href: PROJECT_REPO_URL, external: true },
-    { label: 'Changelog', href: PROJECT_REPO_COMMITS_URL, external: true }
-  ],
-  Connect: [
-    { label: 'Contact Me', href: 'mailto:ankit25bcs10610@gmail.com' },
-    { label: 'LinkedIn', href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', external: true },
-    { label: 'GitHub Profile', href: 'https://github.com/ankit25bcs10610', external: true },
-    { label: 'Report Issue', href: PROJECT_REPO_ISSUES_URL, external: true }
-  ]
-}
-
 const SOCIAL_LINKS = [
   { icon: Github, href: 'https://github.com/ankit25bcs10610', label: 'GitHub' },
   { icon: Linkedin, href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', label: 'LinkedIn' },
@@ -203,6 +181,29 @@ const SOCIAL_LINKS = [
 
 export function Footer({ onLaunch }: { onLaunch: () => void }) {
   const colors = useThemeColors()
+  const repoUrl = useProjectRepoUrl()
+  const links = buildProjectRepoLinks(repoUrl)
+
+  const footerLinks = {
+    Product: [
+      { label: 'Features', href: '#features' },
+      { label: 'Pipeline', href: '#pipeline' },
+      { label: 'Dashboard', href: '#dashboard' },
+      { label: 'Pricing', href: '#pricing' }
+    ],
+    Resources: [
+      { label: 'Documentation', href: '#docs' },
+      { label: 'Blog', href: '#blog' },
+      { label: 'GitHub Repo', href: links.repo, external: true },
+      { label: 'Changelog', href: links.commits, external: true }
+    ],
+    Connect: [
+      { label: 'Contact Me', href: 'mailto:ankit25bcs10610@gmail.com' },
+      { label: 'LinkedIn', href: 'https://www.linkedin.com/in/ankit-pandey-5a28b9379/', external: true },
+      { label: 'GitHub Profile', href: 'https://github.com/ankit25bcs10610', external: true },
+      { label: 'Report Issue', href: links.issues, external: true }
+    ]
+  }
 
   return (
     <footer className="relative overflow-hidden" style={{ backgroundColor: colors.bg }}>
@@ -287,7 +288,7 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
             </div>
 
             {/* Links */}
-            {Object.entries(FOOTER_LINKS).map(([category, links]) => (
+            {Object.entries(footerLinks).map(([category, links]) => (
               <div key={category}>
                 <h4 className="font-display font-semibold text-white mb-4">
                   {category}

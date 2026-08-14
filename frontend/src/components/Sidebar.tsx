@@ -3,7 +3,7 @@ import { GithubConnect } from "./GithubConnect";
 import { Icon } from "./Icon";
 import { ModelConfig } from "./ModelConfig";
 import { SourceConnect } from "./SourceConnect";
-import { PROJECT_REPO_README_URL } from "../lib/project";
+import { buildProjectRepoLinks, useProjectRepoUrl } from "../lib/project";
 
 // Per-server glyphs (keyed by backend server name).
 const SERVER_ICON: Record<string, string> = {
@@ -14,6 +14,8 @@ const SERVER_ICON: Record<string, string> = {
 
 export function Sidebar() {
   const { config: cfg, failed } = useConfig();
+  const projectRepoUrl = useProjectRepoUrl();
+  const { readme } = buildProjectRepoLinks(projectRepoUrl);
   const placeholder = failed ? "Backend offline — start the API" : "Connecting…";
 
   const sourceFor = (name: string) =>
@@ -76,7 +78,7 @@ export function Sidebar() {
 
       <a
         className="side-help"
-        href={PROJECT_REPO_README_URL}
+        href={readme}
         target="_blank"
         rel="noopener noreferrer"
       >

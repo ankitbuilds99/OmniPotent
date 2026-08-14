@@ -4,8 +4,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface PostmortemSection {
   id: string;
@@ -302,6 +301,7 @@ function EmptyState({ onSelectIncident }: { onSelectIncident: () => void }) {
 }
 
 export function Postmortem({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [postmortem, setPostmortem] = useState<PostmortemData | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -310,7 +310,7 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
   const fetchPostmortem = useCallback(async () => {
     try {
       // Fetch the most recent resolved incident to generate postmortem from
-      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+      const incidentsRes = await fetch(`${apiBaseUrl}/api/incidents`);
       const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
       // Find a resolved incident to base postmortem on
@@ -413,7 +413,7 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchPostmortem();

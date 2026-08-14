@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Book,
@@ -18,91 +18,93 @@ import {
   X
 } from 'lucide-react'
 import {
-  PROJECT_REPO_URL,
-  PROJECT_REPO_README_URL,
+  buildProjectRepoLinks,
+  useProjectRepoUrl,
 } from '../../lib/project'
-import { resolveApiBaseUrl } from '../../lib/runtime'
+import { useApiBaseUrl } from '../../lib/runtime'
 
-const DOCS_SECTIONS = [
-  {
-    id: 'quickstart',
-    title: 'Quick Start',
-    icon: Rocket,
-    color: '#00E7FF',
-    description: 'Get up and running in under 5 minutes',
-    content: {
-      steps: [
-        {
-          title: 'Clone the repository',
-          code: `git clone ${PROJECT_REPO_URL}.git\ncd OmniPotent`
-        },
-        {
-          title: 'Install dependencies',
-          code: '# Backend\nuv sync\n\n# Frontend\ncd frontend && npm install'
-        },
-        {
-          title: 'Configure environment',
-          code: 'cp .env.example .env\n# Add your API keys to .env'
-        },
-        {
-          title: 'Start the application',
-          code: '# Start backend\nuv run uvicorn app.api.main:app --reload\n\n# Start frontend (new terminal)\ncd frontend && npm run dev'
-        }
-      ]
+function getDocsSections(repoUrl: string) {
+  return [
+    {
+      id: 'quickstart',
+      title: 'Quick Start',
+      icon: Rocket,
+      color: '#00E7FF',
+      description: 'Get up and running in under 5 minutes',
+      content: {
+        steps: [
+          {
+            title: 'Clone the repository',
+            code: `git clone ${repoUrl}.git\ncd OmniPotent`
+          },
+          {
+            title: 'Install dependencies',
+            code: '# Backend\nuv sync\n\n# Frontend\ncd frontend && npm install'
+          },
+          {
+            title: 'Configure environment',
+            code: 'cp .env.example .env\n# Add your API keys to .env'
+          },
+          {
+            title: 'Start the application',
+            code: '# Start backend\nuv run uvicorn app.api.main:app --reload\n\n# Start frontend (new terminal)\ncd frontend && npm run dev'
+          }
+        ]
+      }
+    },
+    {
+      id: 'api',
+      title: 'API Reference',
+      icon: Code,
+      color: '#7C3AED',
+      description: 'Complete API documentation with OpenAPI spec',
+      content: {
+        endpoints: [
+          { method: 'POST', path: '/chat', desc: 'Start or continue an AI investigation' },
+          { method: 'POST', path: '/chat/stream', desc: 'Stream investigation progress (SSE)' },
+          { method: 'POST', path: '/approve', desc: 'Approve or reject a pending action' },
+          { method: 'GET', path: '/healthz', desc: 'Liveness probe' },
+          { method: 'GET', path: '/config', desc: 'Get agent configuration' }
+        ],
+        links: [
+          { label: 'Swagger UI', url: '/docs', desc: 'Interactive API explorer' },
+          { label: 'ReDoc', url: '/redoc', desc: 'Beautiful API documentation' },
+          { label: 'OpenAPI Spec', url: '/openapi.json', desc: 'Generate client SDKs' }
+        ]
+      }
+    },
+    {
+      id: 'cli',
+      title: 'CLI Usage',
+      icon: Terminal,
+      color: '#00FFB3',
+      description: 'Command-line interface guide',
+      content: {
+        commands: [
+          { cmd: 'copilot investigate "Why is API slow?"', desc: 'Start investigation' },
+          { cmd: 'copilot deploy --env production', desc: 'Deploy to production' },
+          { cmd: 'copilot logs --service api --tail', desc: 'Stream service logs' },
+          { cmd: 'copilot status', desc: 'Check system status' }
+        ]
+      }
+    },
+    {
+      id: 'config',
+      title: 'Configuration',
+      icon: Settings,
+      color: '#FF9900',
+      description: 'Environment and settings',
+      content: {
+        vars: [
+          { name: 'COPILOT_PROVIDER', desc: 'LLM provider (anthropic, openai, groq)', default: 'groq' },
+          { name: 'DD_API_KEY', desc: 'Datadog API key for metrics', default: '' },
+          { name: 'GITHUB_TOKEN', desc: 'GitHub token for PR creation', default: '' },
+          { name: 'SLACK_BOT_TOKEN', desc: 'Slack bot for notifications', default: '' }
+        ]
+      }
     }
-  },
-  {
-    id: 'api',
-    title: 'API Reference',
-    icon: Code,
-    color: '#7C3AED',
-    description: 'Complete API documentation with OpenAPI spec',
-    content: {
-      endpoints: [
-        { method: 'POST', path: '/chat', desc: 'Start or continue an AI investigation' },
-        { method: 'POST', path: '/chat/stream', desc: 'Stream investigation progress (SSE)' },
-        { method: 'POST', path: '/approve', desc: 'Approve or reject a pending action' },
-        { method: 'GET', path: '/healthz', desc: 'Liveness probe' },
-        { method: 'GET', path: '/config', desc: 'Get agent configuration' }
-      ],
-      links: [
-        { label: 'Swagger UI', url: '/docs', desc: 'Interactive API explorer' },
-        { label: 'ReDoc', url: '/redoc', desc: 'Beautiful API documentation' },
-        { label: 'OpenAPI Spec', url: '/openapi.json', desc: 'Generate client SDKs' }
-      ]
-    }
-  },
-  {
-    id: 'cli',
-    title: 'CLI Usage',
-    icon: Terminal,
-    color: '#00FFB3',
-    description: 'Command-line interface guide',
-    content: {
-      commands: [
-        { cmd: 'copilot investigate "Why is API slow?"', desc: 'Start investigation' },
-        { cmd: 'copilot deploy --env production', desc: 'Deploy to production' },
-        { cmd: 'copilot logs --service api --tail', desc: 'Stream service logs' },
-        { cmd: 'copilot status', desc: 'Check system status' }
-      ]
-    }
-  },
-  {
-    id: 'config',
-    title: 'Configuration',
-    icon: Settings,
-    color: '#FF9900',
-    description: 'Environment and settings',
-    content: {
-      vars: [
-        { name: 'COPILOT_PROVIDER', desc: 'LLM provider (anthropic, openai, groq)', default: 'groq' },
-        { name: 'DD_API_KEY', desc: 'Datadog API key for metrics', default: '' },
-        { name: 'GITHUB_TOKEN', desc: 'GitHub token for PR creation', default: '' },
-        { name: 'SLACK_BOT_TOKEN', desc: 'Slack bot for notifications', default: '' }
-      ]
-    }
-  }
-]
+  ]
+}
 
 const FEATURES_DOCS = [
   { icon: Zap, title: 'AI-Powered RCA', desc: 'Automatic root cause analysis using LLMs' },
@@ -139,8 +141,9 @@ function CodeBlock({ code }: { code: string }) {
   )
 }
 
-function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; isActive: boolean }) {
+function DocSection({ section, isActive }: { section: any; isActive: boolean }) {
   const Icon = section.icon
+  const apiBaseUrl = useApiBaseUrl()
 
   if (!isActive) return null
 
@@ -167,7 +170,7 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
 
       {section.id === 'quickstart' && section.content.steps && (
         <div className="space-y-6">
-          {section.content.steps.map((step, i) => (
+          {section.content.steps.map((step: any, i: number) => (
             <div key={i}>
               <div className="flex items-center gap-2 mb-2">
                 <span
@@ -228,7 +231,7 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
 
       {section.id === 'cli' && section.content.commands && (
         <div className="space-y-3">
-          {section.content.commands.map((cmd, i) => (
+          {section.content.commands.map((cmd: any, i: number) => (
             <div key={i} className="p-4 bg-white/5 rounded-lg border border-white/10">
               <CodeBlock code={cmd.cmd} />
               <p className="text-white/50 text-sm mt-2">{cmd.desc}</p>
@@ -248,7 +251,7 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
               </tr>
             </thead>
             <tbody>
-              {section.content.vars.map((v, i) => (
+              {section.content.vars.map((v: any, i: number) => (
                 <tr key={i} className="border-b border-white/5">
                   <td className="py-3 px-4">
                     <code className="text-primary font-mono">{v.name}</code>
@@ -267,18 +270,12 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
   )
 }
 
-function useApiBaseUrl() {
-  const [baseUrl, setBaseUrl] = useState('')
-  useEffect(() => {
-    void resolveApiBaseUrl().then(setBaseUrl).catch(() => setBaseUrl(''))
-  }, [])
-  return baseUrl
-}
-
 export function Documentation() {
   const [isOpen, setIsOpen] = useState(false)
   const [activeSection, setActiveSection] = useState('quickstart')
-  const apiBaseUrl = useApiBaseUrl()
+  const repoUrl = useProjectRepoUrl()
+  const links = buildProjectRepoLinks(repoUrl)
+  const docsSections = getDocsSections(repoUrl)
 
   return (
     <section id="docs" className="relative py-32 overflow-hidden">
@@ -369,7 +366,7 @@ export function Documentation() {
                 {/* Sidebar */}
                 <div className="lg:col-span-1">
                   <nav className="space-y-2 sticky top-24">
-                    {DOCS_SECTIONS.map((section) => {
+                    {docsSections.map((section) => {
                       const Icon = section.icon
                       const isActive = activeSection === section.id
                       return (
@@ -396,7 +393,7 @@ export function Documentation() {
 
                     {/* GitHub link */}
                     <a
-                      href={PROJECT_REPO_README_URL}
+                      href={links.readme}
                       target="_blank"
                       rel="noreferrer"
                       className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white/60 hover:text-white hover:bg-white/10 transition-all mt-4"
@@ -419,7 +416,7 @@ export function Documentation() {
 
                 {/* Content */}
                 <div className="lg:col-span-3 bg-white/[0.02] rounded-2xl border border-white/10 p-6 md:p-8 min-h-[500px]">
-                  {DOCS_SECTIONS.map((section) => (
+                  {docsSections.map((section) => (
                     <DocSection
                       key={section.id}
                       section={section}

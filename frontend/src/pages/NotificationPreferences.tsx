@@ -18,8 +18,7 @@ import {
   RefreshCw,
   type LucideIcon
 } from "lucide-react";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface ChannelConfig {
   id: string;
@@ -248,6 +247,7 @@ function LoadingState() {
 }
 
 export function NotificationPreferences({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
   const [rules, setRules] = useState<NotificationRule[]>([]);
   const [configuring, setConfiguring] = useState<ChannelConfig | null>(null);
@@ -257,7 +257,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
   const fetchPreferences = useCallback(async () => {
     try {
       // Verify backend is reachable
-      await fetch(`${API_BASE}/oncall/teams`);
+      await fetch(`${apiBaseUrl}/oncall/teams`);
 
       // Default channels based on what the system supports
       const defaultChannels: ChannelConfig[] = [
@@ -301,7 +301,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchPreferences();

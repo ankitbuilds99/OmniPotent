@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
+
 type RuntimeFrontendConfig = {
   api_url?: string;
   supabase_url?: string;
   supabase_anon_key?: string;
+  project_repo_url?: string;
 };
 
 const FALLBACK_BASE_URL =
@@ -37,6 +40,30 @@ export async function resolveApiBaseUrl(): Promise<string> {
   return FALLBACK_BASE_URL.replace(/\/$/, "");
 }
 
+export function getFallbackApiBaseUrl(): string {
+  return FALLBACK_BASE_URL.replace(/\/$/, "");
+}
+
 export async function getFrontendRuntimeConfig(): Promise<RuntimeFrontendConfig> {
   return fetchRuntimeConfig();
+}
+
+export function useApiBaseUrl(): string {
+  const [baseUrl, setBaseUrl] = useState(getFallbackApiBaseUrl());
+
+  useEffect(() => {
+    let active = true;
+    void resolveApiBaseUrl()
+      .then((url) => {
+        if (active) setBaseUrl(url);
+      })
+      .catch(() => {
+        if (active) setBaseUrl(getFallbackApiBaseUrl());
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return baseUrl;
 }

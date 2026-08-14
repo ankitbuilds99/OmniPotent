@@ -11,72 +11,26 @@ import {
   Lightbulb
 } from 'lucide-react'
 import {
-  PROJECT_REPO_FEATURES_URL,
-  PROJECT_REPO_HITL_URL,
-  PROJECT_REPO_MCP_URL,
-  PROJECT_REPO_README_URL,
+  buildProjectRepoLinks,
+  useProjectRepoUrl,
 } from '../../lib/project'
 
-const BLOG_POSTS = [
-  {
-    id: 1,
-    title: 'Building an AI-Powered OmniPotent with LangGraph',
-    excerpt: 'Learn how we built an intelligent agent that can investigate incidents, analyze logs, and even create pull requests - all powered by LLMs and a graph-based workflow engine.',
-    author: 'Ankit Pandey',
-    date: '2024-07-20',
-    readTime: '8 min read',
-    category: 'Engineering',
-    icon: Cpu,
-    color: '#00E7FF',
-    featured: true,
-    tags: ['AI', 'LangGraph', 'DevOps', 'Python'],
-    url: PROJECT_REPO_README_URL
-  },
-  {
-    id: 2,
-    title: 'From 4 Hours to 4 Minutes: Automating Incident Response',
-    excerpt: 'How AI-driven root cause analysis reduced our mean time to resolution (MTTR) by 98%. A deep dive into the architecture and lessons learned.',
-    author: 'Ankit Pandey',
-    date: '2024-07-15',
-    readTime: '6 min read',
-    category: 'Case Study',
-    icon: TrendingUp,
-    color: '#00FFB3',
-    featured: false,
-    tags: ['Incident Response', 'Automation', 'Metrics'],
-    url: PROJECT_REPO_FEATURES_URL
-  },
-  {
-    id: 3,
-    title: 'Human-in-the-Loop: Why AI Needs Guardrails',
-    excerpt: 'Exploring the importance of human oversight in AI-powered DevOps automation. How we designed approval workflows that balance speed with safety.',
-    author: 'Ankit Pandey',
-    date: '2024-07-10',
-    readTime: '5 min read',
-    category: 'Best Practices',
-    icon: Lightbulb,
-    color: '#FF9900',
-    featured: false,
-    tags: ['AI Safety', 'Best Practices', 'Security'],
-    url: PROJECT_REPO_HITL_URL
-  },
-  {
-    id: 4,
-    title: 'Integrating LLMs with Datadog, PagerDuty, and GitHub',
-    excerpt: 'A technical guide to building integrations that let your AI agent read logs, acknowledge alerts, and submit code changes across your DevOps toolchain.',
-    author: 'Ankit Pandey',
-    date: '2024-07-05',
-    readTime: '10 min read',
-    category: 'Tutorial',
-    icon: GitMerge,
-    color: '#7C3AED',
-    featured: false,
-    tags: ['Integration', 'API', 'Tutorial'],
-    url: PROJECT_REPO_MCP_URL
-  }
-]
+interface BlogPost {
+  id: number;
+  title: string;
+  excerpt: string;
+  author: string;
+  date: string;
+  readTime: string;
+  category: string;
+  icon: React.ComponentType<any>;
+  color: string;
+  featured: boolean;
+  tags: string[];
+  url: string;
+}
 
-function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
+function FeaturedPost({ post }: { post: BlogPost }) {
   const Icon = post.icon
 
   return (
@@ -164,7 +118,7 @@ function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
   )
 }
 
-function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }) {
+function BlogCard({ post, index }: { post: BlogPost; index: number }) {
   const Icon = post.icon
 
   return (
@@ -245,8 +199,70 @@ function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }
 }
 
 export function Blog() {
-  const featuredPost = BLOG_POSTS.find(p => p.featured)
-  const otherPosts = BLOG_POSTS.filter(p => !p.featured)
+  const repoUrl = useProjectRepoUrl()
+  const links = buildProjectRepoLinks(repoUrl)
+
+  const blogPosts: BlogPost[] = [
+    {
+      id: 1,
+      title: 'Building an AI-Powered OmniPotent with LangGraph',
+      excerpt: 'Learn how we built an intelligent agent that can investigate incidents, analyze logs, and even create pull requests - all powered by LLMs and a graph-based workflow engine.',
+      author: 'Ankit Pandey',
+      date: '2024-07-20',
+      readTime: '8 min read',
+      category: 'Engineering',
+      icon: Cpu,
+      color: '#00E7FF',
+      featured: true,
+      tags: ['AI', 'LangGraph', 'DevOps', 'Python'],
+      url: links.readme
+    },
+    {
+      id: 2,
+      title: 'From 4 Hours to 4 Minutes: Automating Incident Response',
+      excerpt: 'How AI-driven root cause analysis reduced our mean time to resolution (MTTR) by 98%. A deep dive into the architecture and lessons learned.',
+      author: 'Ankit Pandey',
+      date: '2024-07-15',
+      readTime: '6 min read',
+      category: 'Case Study',
+      icon: TrendingUp,
+      color: '#00FFB3',
+      featured: false,
+      tags: ['Incident Response', 'Automation', 'Metrics'],
+      url: links.features
+    },
+    {
+      id: 3,
+      title: 'Human-in-the-Loop: Why AI Needs Guardrails',
+      excerpt: 'Exploring the importance of human oversight in AI-powered DevOps automation. How we designed approval workflows that balance speed with safety.',
+      author: 'Ankit Pandey',
+      date: '2024-07-10',
+      readTime: '5 min read',
+      category: 'Best Practices',
+      icon: Lightbulb,
+      color: '#FF9900',
+      featured: false,
+      tags: ['AI Safety', 'Best Practices', 'Security'],
+      url: links.hitl
+    },
+    {
+      id: 4,
+      title: 'Integrating LLMs with Datadog, PagerDuty, and GitHub',
+      excerpt: 'A technical guide to building integrations that let your AI agent read logs, acknowledge alerts, and submit code changes across your DevOps toolchain.',
+      author: 'Ankit Pandey',
+      date: '2024-07-05',
+      readTime: '10 min read',
+      category: 'Tutorial',
+      icon: GitMerge,
+      color: '#7C3AED',
+      featured: false,
+      tags: ['Integration', 'API', 'Tutorial'],
+      url: links.mcp
+    }
+  ]
+
+  const featuredPost = blogPosts.find(p => p.featured)
+  const otherPosts = blogPosts.filter(p => !p.featured)
 
   return (
     <section id="blog" className="relative py-32 overflow-hidden">

@@ -17,8 +17,7 @@ import {
   Loader2,
   RefreshCw
 } from "lucide-react";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface ServiceNode {
   id: string;
@@ -396,6 +395,7 @@ async function queryPrometheus(query: string): Promise<PrometheusResult[]> {
 }
 
 export function ServiceMap({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [mapData, setMapData] = useState<ServiceMapData>({ nodes: [], edges: [] });
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -452,7 +452,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
       } else {
         // Try Kubernetes API
         try {
-          const k8sRes = await fetch(`${API_BASE}/api/kubernetes/services`);
+          const k8sRes = await fetch(`${apiBaseUrl}/api/kubernetes/services`);
           if (k8sRes.ok) {
             const services = await k8sRes.json();
             services.forEach((svc: { name: string; namespace: string; type: string }) => {
@@ -474,10 +474,10 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
       if (serviceMetrics.size === 0) {
         setDataSource("fallback");
 
-        const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+        const incidentsRes = await fetch(`${apiBaseUrl}/api/incidents`);
         const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
-        const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
+        const alertsRes = await fetch(`${apiBaseUrl}/oncall/alerts?limit=50`);
         const alerts = alertsRes.ok ? await alertsRes.json() : [];
 
         incidents.forEach((inc: Record<string, unknown>) => {
@@ -608,7 +608,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchServiceMap();

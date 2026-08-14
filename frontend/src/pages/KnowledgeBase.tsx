@@ -27,8 +27,7 @@ import {
   Loader2,
   Trash2,
 } from "lucide-react";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface KnowledgeArticle {
   id: string;
@@ -443,6 +442,7 @@ function CreateArticleModal({
 }
 
 export function KnowledgeBase({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [articles, setArticles] = useState<KnowledgeArticle[]>([]);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
@@ -460,7 +460,7 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
       if (category !== "all") params.set("doc_type", category);
       if (search) params.set("search", search);
 
-      const res = await fetch(`${API_BASE}/api/knowledge/documents?${params}`, {
+      const res = await fetch(`${apiBaseUrl}/api/knowledge/documents?${params}`, {
         credentials: "include",
       });
 
@@ -477,7 +477,7 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, [category, search, starredIds]);
+  }, [apiBaseUrl, category, search, starredIds]);
 
   useEffect(() => {
     fetchArticles();
@@ -521,7 +521,7 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
   }) => {
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/api/knowledge/documents`, {
+      const res = await fetch(`${apiBaseUrl}/api/knowledge/documents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -543,7 +543,7 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
     if (!confirm("Are you sure you want to delete this article?")) return;
 
     try {
-      const res = await fetch(`${API_BASE}/api/knowledge/documents/${id}`, {
+      const res = await fetch(`${apiBaseUrl}/api/knowledge/documents/${id}`, {
         method: "DELETE",
         credentials: "include",
       });

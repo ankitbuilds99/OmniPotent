@@ -4,8 +4,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { Icon } from "../components/Icon";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface RunbookStep {
   id: string;
@@ -451,6 +450,7 @@ function EmptyRunbook(): Runbook {
 }
 
 export function RunbookBuilder({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [runbook, setRunbook] = useState<Runbook | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -459,12 +459,12 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
   const fetchRunbook = useCallback(async () => {
     try {
       // Fetch existing runbooks
-      const res = await fetch(`${API_BASE}/api/runbooks`);
+      const res = await fetch(`${apiBaseUrl}/api/runbooks`);
       if (res.ok) {
         const runbooks = await res.json();
         if (runbooks.length > 0) {
           // Load the first runbook for editing
-          const detailRes = await fetch(`${API_BASE}/api/runbooks/${runbooks[0].id}`);
+          const detailRes = await fetch(`${apiBaseUrl}/api/runbooks/${runbooks[0].id}`);
           if (detailRes.ok) {
             const detail = await detailRes.json();
             const loadedRunbook: Runbook = {
@@ -501,7 +501,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchRunbook();
@@ -528,7 +528,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
       };
 
       const isNew = runbook.id.startsWith("rb-") && !runbook.id.includes("-");
-      const url = isNew ? `${API_BASE}/api/runbooks` : `${API_BASE}/api/runbooks/${runbook.id}`;
+      const url = isNew ? `${apiBaseUrl}/api/runbooks` : `${apiBaseUrl}/api/runbooks/${runbook.id}`;
       const method = isNew ? "POST" : "PUT";
 
       const res = await fetch(url, {

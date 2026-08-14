@@ -17,8 +17,8 @@ import {
   Activity,
   ArrowLeft
 } from 'lucide-react'
-import { PROJECT_REPO_URL } from '../lib/project'
-import { resolveApiBaseUrl } from '../lib/runtime'
+import { buildProjectRepoLinks, useProjectRepoUrl } from '../lib/project'
+import { useApiBaseUrl } from '../lib/runtime'
 
 interface EndpointGroup {
   name: string
@@ -182,17 +182,10 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-function useApiBaseUrl() {
-  const [baseUrl, setBaseUrl] = useState('')
-  useEffect(() => {
-    void resolveApiBaseUrl().then(setBaseUrl).catch(() => setBaseUrl(''))
-  }, [])
-  return baseUrl
-}
-
 function EndpointCard({ group }: { group: EndpointGroup }) {
   const [expanded, setExpanded] = useState(false)
   const Icon = group.icon
+  const apiBaseUrl = useApiBaseUrl()
 
   return (
     <motion.div
@@ -241,7 +234,7 @@ function EndpointCard({ group }: { group: EndpointGroup }) {
                 </span>
                 <code className="text-primary font-mono text-sm flex-1">{endpoint.path}</code>
                 <span className="text-white/50 text-sm hidden md:block">{endpoint.summary}</span>
-                <CopyButton text={`${API_BASE_URL}${endpoint.path}`} />
+                <CopyButton text={`${apiBaseUrl}${endpoint.path}`} />
               </div>
             )
           })}
@@ -254,6 +247,8 @@ function EndpointCard({ group }: { group: EndpointGroup }) {
 export function ApiDocs({ onBack }: { onBack?: () => void }) {
   const [apiHealth, setApiHealth] = useState<'checking' | 'online' | 'offline'>('checking')
   const apiBaseUrl = useApiBaseUrl()
+  const projectRepoUrl = useProjectRepoUrl()
+  const { repo } = buildProjectRepoLinks(projectRepoUrl)
 
   useEffect(() => {
     if (!apiBaseUrl) return
@@ -346,7 +341,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
               <ExternalLink className="w-3 h-3" />
             </a>
             <a
-              href={PROJECT_REPO_URL}
+              href={repo}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70 text-sm transition-colors"
@@ -381,8 +376,8 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
             Base URL
           </h3>
           <div className="flex items-center gap-3 bg-[#0d1117] rounded-lg p-4">
-            <code className="font-mono text-sm text-primary flex-1">{API_BASE_URL}</code>
-            <CopyButton text={API_BASE_URL} />
+            <code className="font-mono text-sm text-primary flex-1">{apiBaseUrl}</code>
+            <CopyButton text={apiBaseUrl} />
           </div>
         </div>
 
@@ -399,7 +394,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
           <p>
             For interactive documentation, visit{' '}
             <a
-              href={`${API_BASE_URL}/docs`}
+              href={`${apiBaseUrl}/docs`}
               target="_blank"
               rel="noreferrer"
               className="text-primary hover:underline"
@@ -408,7 +403,7 @@ export function ApiDocs({ onBack }: { onBack?: () => void }) {
             </a>{' '}
             or{' '}
             <a
-              href={`${API_BASE_URL}/redoc`}
+              href={`${apiBaseUrl}/redoc`}
               target="_blank"
               rel="noreferrer"
               className="text-primary hover:underline"

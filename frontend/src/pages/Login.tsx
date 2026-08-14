@@ -14,6 +14,7 @@ import {
   User
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { useApiBaseUrl } from '../lib/runtime'
 
 type AuthMode = 'login' | 'signup' | 'forgot'
 
@@ -28,9 +29,8 @@ interface AuthProvider {
   icon: string
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || ''
-
 export function Login({ onBack, onSuccess }: LoginProps) {
+  const apiBaseUrl = useApiBaseUrl()
   const [mode, setMode] = useState<AuthMode>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -60,7 +60,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
   useEffect(() => {
     const checkProviders = async () => {
       try {
-        const res = await fetch(`${API_BASE}/auth/providers`)
+        const res = await fetch(`${apiBaseUrl}/auth/providers`)
         if (res.ok) {
           const providers = await res.json()
           setBackendProviders(providers)
@@ -72,7 +72,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
       }
     }
     checkProviders()
-  }, [])
+  }, [apiBaseUrl])
 
   // Check for token in URL (from OAuth callback)
   useEffect(() => {
@@ -100,7 +100,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
 
   const handleBackendOAuth = (provider: string) => {
     const redirectUri = encodeURIComponent(window.location.origin + '/auth/callback')
-    window.location.href = `${API_BASE}/auth/${provider}/login?redirect_uri=${redirectUri}`
+    window.location.href = `${apiBaseUrl}/auth/${provider}/login?redirect_uri=${redirectUri}`
   }
 
   const handleOAuthLogin = async (provider: 'github' | 'google') => {

@@ -20,8 +20,7 @@ import {
   Plus,
   Loader2
 } from "lucide-react";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface AgentResult {
   agent_type: "knowledge" | "reasoning" | "action" | "learning" | "collaboration" | "ambient";
@@ -526,6 +525,7 @@ function IncidentDetail({
 }
 
 export function Incidents({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("active");
@@ -533,7 +533,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
 
   const fetchIncidents = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/incidents`);
+      const res = await fetch(`${apiBaseUrl}/api/incidents`);
       if (res.ok) {
         const data = await res.json();
         const transformed: Incident[] = data.map((inc: Record<string, unknown>) => ({
@@ -561,7 +561,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchIncidents();
@@ -571,7 +571,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
 
   const handleAcknowledge = async (incidentId: string) => {
     try {
-      await fetch(`${API_BASE}/api/incidents/${incidentId}/acknowledge`, { method: "POST" });
+      await fetch(`${apiBaseUrl}/api/incidents/${incidentId}/acknowledge`, { method: "POST" });
       fetchIncidents();
       setSelectedIncident(null);
     } catch (error) {
@@ -581,7 +581,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
 
   const handleResolve = async (incidentId: string) => {
     try {
-      await fetch(`${API_BASE}/api/incidents/${incidentId}/resolve`, { method: "POST" });
+      await fetch(`${apiBaseUrl}/api/incidents/${incidentId}/resolve`, { method: "POST" });
       fetchIncidents();
       setSelectedIncident(null);
     } catch (error) {

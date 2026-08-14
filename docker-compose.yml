@@ -32,8 +32,9 @@ services:
       # --- data sources ---
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_REPO: ${GITHUB_REPO:-}
-      TARGET_REPO_PATH: ./sample_repo
-      LOGS_DATA_PATH: ./app/mcp/servers/logs_metrics/sample_data
+      TARGET_REPO_PATH: ${TARGET_REPO_PATH:-./sample_repo}
+      LOGS_DATA_PATH: ${LOGS_DATA_PATH:-./app/mcp/servers/logs_metrics/sample_data}
+      PROJECT_REPO_URL: ${PROJECT_REPO_URL:-https://github.com/ankit25bcs10610/OmniPotent}
       # --- agent + state ---
       COPILOT_MAX_ITERATIONS: ${COPILOT_MAX_ITERATIONS:-8}
       COPILOT_CHECKPOINT_DB: /data/copilot_checkpoints.sqlite

@@ -5,8 +5,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface Integration {
   id: string;
@@ -486,6 +485,7 @@ function ConnectModal({ integration, onClose, onSave }: {
 }
 
 export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [category, setCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [connectingIntegration, setConnectingIntegration] = useState<Integration | null>(null);
@@ -497,7 +497,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
   const fetchIntegrations = useCallback(async () => {
     try {
       // Fetch from /admin/integrations (list of connected integration names)
-      const adminRes = await fetch(`${API_BASE}/admin/integrations`, {
+      const adminRes = await fetch(`${apiBaseUrl}/admin/integrations`, {
         credentials: "include",
       });
       if (adminRes.ok) {
@@ -506,7 +506,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
       }
 
       // Fetch from /integrations/status (individual status per integration)
-      const statusRes = await fetch(`${API_BASE}/integrations/status`, {
+      const statusRes = await fetch(`${apiBaseUrl}/integrations/status`, {
         credentials: "include",
       });
       if (statusRes.ok) {
@@ -518,7 +518,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchIntegrations();
@@ -545,7 +545,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
 
   // Save integration to API
   const handleSaveIntegration = async (name: string, value: string) => {
-    const res = await fetch(`${API_BASE}/admin/integrations`, {
+    const res = await fetch(`${apiBaseUrl}/admin/integrations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -566,7 +566,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     if (!confirm(`Are you sure you want to disconnect ${integrationId}?`)) return;
 
     try {
-      const res = await fetch(`${API_BASE}/admin/integrations/${integrationId}`, {
+      const res = await fetch(`${apiBaseUrl}/admin/integrations/${integrationId}`, {
         method: "DELETE",
         credentials: "include",
       });

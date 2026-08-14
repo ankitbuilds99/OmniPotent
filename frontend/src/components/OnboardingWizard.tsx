@@ -15,8 +15,7 @@ import {
   Shield,
   Users,
 } from "lucide-react";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 interface OnboardingStep {
   id: string;
@@ -91,6 +90,7 @@ function WelcomeStep({ onTryPlayground }: { onTryPlayground: () => void }) {
 
 // Step 2: Playground Demo
 function PlaygroundStep({ onNext }: { onNext: () => void }) {
+  const apiBaseUrl = useApiBaseUrl();
   const [investigating, setInvestigating] = useState(false);
   const [steps, setSteps] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -107,7 +107,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
       // Try to run a real investigation via the streaming API
       const demoPrompt = "Investigate: High error rate detected in checkout-service. 5xx errors increased 300% in the last 10 minutes.";
 
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch(`${apiBaseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: demoPrompt }),

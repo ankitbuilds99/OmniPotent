@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
-
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { useApiBaseUrl } from "../lib/runtime";
 
 type Tab = "overview" | "alerts" | "runbooks" | "metrics";
 
@@ -449,6 +448,7 @@ export function Dashboard({
   onIntegrations,
   onKnowledge
 }: DashboardProps) {
+  const apiBaseUrl = useApiBaseUrl();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
@@ -460,9 +460,9 @@ export function Dashboard({
     setLoading(true);
     try {
       const [alertsRes, runbooksRes, executionsRes] = await Promise.allSettled([
-        fetch(`${API_BASE}/oncall/alerts`),
-        fetch(`${API_BASE}/api/runbooks`),
-        fetch(`${API_BASE}/api/runbooks/executions`),
+        fetch(`${apiBaseUrl}/oncall/alerts`),
+        fetch(`${apiBaseUrl}/api/runbooks`),
+        fetch(`${apiBaseUrl}/api/runbooks/executions`),
       ]);
 
       if (alertsRes.status === "fulfilled" && alertsRes.value.ok) {
@@ -486,7 +486,7 @@ export function Dashboard({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBaseUrl]);
 
   useEffect(() => {
     fetchData();
@@ -507,7 +507,7 @@ export function Dashboard({
 
   const handleAcknowledgeAlert = async (alertId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/oncall/alerts/${alertId}/acknowledge`, { method: "POST" });
+      const res = await fetch(`${apiBaseUrl}/oncall/alerts/${alertId}/acknowledge`, { method: "POST" });
       if (res.ok) {
         fetchData();
       }
@@ -518,7 +518,7 @@ export function Dashboard({
 
   const handleResolveAlert = async (alertId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/oncall/alerts/${alertId}/resolve`, { method: "POST" });
+      const res = await fetch(`${apiBaseUrl}/oncall/alerts/${alertId}/resolve`, { method: "POST" });
       if (res.ok) {
         fetchData();
       }
@@ -529,7 +529,7 @@ export function Dashboard({
 
   const handleExecuteRunbook = async (runbookId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/runbooks/${runbookId}/execute`, {
+      const res = await fetch(`${apiBaseUrl}/api/runbooks/${runbookId}/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -544,7 +544,7 @@ export function Dashboard({
 
   const handleApproveExecution = async (executionId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/runbooks/executions/${executionId}/approve`, { method: "POST" });
+      const res = await fetch(`${apiBaseUrl}/api/runbooks/executions/${executionId}/approve`, { method: "POST" });
       if (res.ok) {
         fetchData();
       }
@@ -555,7 +555,7 @@ export function Dashboard({
 
   const handleRejectExecution = async (executionId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/runbooks/executions/${executionId}/reject`, { method: "POST" });
+      const res = await fetch(`${apiBaseUrl}/api/runbooks/executions/${executionId}/reject`, { method: "POST" });
       if (res.ok) {
         fetchData();
       }
