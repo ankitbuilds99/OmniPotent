@@ -16,9 +16,11 @@ import {
   Eye,
   Edit3,
   AlertCircle,
-  X
+  X,
+  CheckCircle
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { sendInvitationEmail, isEmailServiceConfigured } from '../lib/emailService'
 
 interface TeamMember {
   id: string
@@ -53,6 +55,7 @@ export function Team({ onBack }: TeamProps) {
   const [inviteRole, setInviteRole] = useState<'admin' | 'member' | 'viewer'>('member')
   const [inviting, setInviting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
 
   useEffect(() => {
     loadTeam()
@@ -101,11 +104,22 @@ export function Team({ onBack }: TeamProps) {
 
     setInviting(true)
     setError(null)
+    setSuccess(null)
 
     try {
-      // In production, send invitation via API
+      const inviteId = Date.now().toString()
+      const inviteLink = `${window.location.origin}/invite/${inviteId}`
+
+      const emailSent = await sendInvitationEmail({
+        toEmail: inviteEmail,
+        inviterName: user?.user_metadata?.full_name as string || user?.email || 'Team Admin',
+        inviterEmail: user?.email || '',
+        role: inviteRole,
+        inviteLink
+      })
+
       const newInvitation: Invitation = {
-        id: Date.now().toString(),
+        id: inviteId,
         email: inviteEmail,
         role: inviteRole,
         createdAt: new Date().toISOString(),
@@ -114,6 +128,14 @@ export function Team({ onBack }: TeamProps) {
       setInvitations([...invitations, newInvitation])
       setInviteEmail('')
       setShowInviteModal(false)
+
+      if (emailSent) {
+        setSuccess(`Invitation sent to ${inviteEmail}`)
+      } else if (!isEmailServiceConfigured()) {
+        setSuccess(`Invitation created for ${inviteEmail} (email not configured)`)
+      } else {
+        setError('Invitation created but email failed to send')
+      }
     } catch {
       setError('Failed to send invitation')
     } finally {
@@ -208,6 +230,23 @@ export function Team({ onBack }: TeamProps) {
               Invite Member
             </button>
           </div>
+
+          {/* Success */}
+          {success && (
+            <div
+              className="rounded-xl p-4 mb-6 flex items-center gap-3"
+              style={{
+                backgroundColor: 'var(--surface)',
+                border: '1px solid var(--good)'
+              }}
+            >
+              <CheckCircle size={20} style={{ color: 'var(--good)' }} />
+              <span style={{ color: 'var(--text)' }}>{success}</span>
+              <button onClick={() => setSuccess(null)} className="ml-auto">
+                <X size={18} style={{ color: 'var(--text-2)' }} />
+              </button>
+            </div>
+          )}
 
           {/* Error */}
           {error && (
