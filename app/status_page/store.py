@@ -823,41 +823,63 @@ class LiveStatusStore(InMemoryStatusStore):
                     description=desc,
                     group=group,
                     display_order=order,
+                    status=ComponentStatus.DEGRADED,
                     created_at=now,
                     updated_at=now,
                 )
 
-        system_health = await checker.check_all()
-        for comp_name, health in system_health.components.items():
-            comp_id = comp_name.lower().replace(" ", "_")
-            if comp_id in self._components:
-                self._components[comp_id].status = self._map_health_status(health.status)
-                self._components[comp_id].updated_at = now
-
-        mcp_summary = await mcp_monitor.check_all()
-        for server_health in mcp_summary.servers:
-            comp_id = f"mcp_{server_health.name}"
-            if comp_id not in self._components:
-                self._components[comp_id] = Component(
-                    id=comp_id,
-                    name=f"MCP: {server_health.name.replace('_', ' ').title()}",
-                    description=f"MCP server for {server_health.name}",
-                    group="MCP Servers",
-                    display_order=100 + len([c for c in self._components if c.startswith("mcp_")]),
-                    created_at=now,
-                    updated_at=now,
-                )
-            self._components[comp_id].status = self._map_mcp_status(server_health.status)
-            self._components[comp_id].updated_at = now
-
-        alive, _ = await checker.liveness()
-        if "api" in self._components:
-            self._components["api"].status = (
-                ComponentStatus.OPERATIONAL if alive else ComponentStatus.MAJOR_OUTAGE
+        try:
+            system_health = await checker.check_all()
+            log.info(
+                "Health check results: %d components, overall=%s",
+                len(system_health.components),
+                system_health.status.value,
             )
-            self._components["api"].updated_at = now
+            for comp_name, health in system_health.components.items():
+                comp_id = comp_name.lower().replace(" ", "_")
+                if comp_id in self._components:
+                    self._components[comp_id].status = self._map_health_status(health.status)
+                    self._components[comp_id].updated_at = now
+                    log.info("Component %s: %s - %s", comp_id, health.status.value, health.message)
+        except Exception as e:
+            log.error("Failed to run health checks: %s", e)
+            for comp_id in ["database", "redis", "llm"]:
+                if comp_id in self._components:
+                    self._components[comp_id].status = ComponentStatus.MAJOR_OUTAGE
 
-        log.debug("Synced %d components from health checks", len(self._components))
+        try:
+            mcp_summary = await mcp_monitor.check_all()
+            for server_health in mcp_summary.servers:
+                comp_id = f"mcp_{server_health.name}"
+                if comp_id not in self._components:
+                    self._components[comp_id] = Component(
+                        id=comp_id,
+                        name=f"MCP: {server_health.name.replace('_', ' ').title()}",
+                        description=f"MCP server for {server_health.name}",
+                        group="MCP Servers",
+                        display_order=100 + len([c for c in self._components if c.startswith("mcp_")]),
+                        status=ComponentStatus.DEGRADED,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                self._components[comp_id].status = self._map_mcp_status(server_health.status)
+                self._components[comp_id].updated_at = now
+        except Exception as e:
+            log.error("Failed to check MCP servers: %s", e)
+
+        try:
+            alive, _ = await checker.liveness()
+            if "api" in self._components:
+                self._components["api"].status = (
+                    ComponentStatus.OPERATIONAL if alive else ComponentStatus.MAJOR_OUTAGE
+                )
+                self._components["api"].updated_at = now
+        except Exception as e:
+            log.error("Failed to check API liveness: %s", e)
+            if "api" in self._components:
+                self._components["api"].status = ComponentStatus.MAJOR_OUTAGE
+
+        log.info("Synced %d components from health checks", len(self._components))
 
     def _map_health_status(self, status: Any) -> ComponentStatus:
         """Map HealthStatus to ComponentStatus."""
@@ -868,7 +890,7 @@ class LiveStatusStore(InMemoryStatusStore):
             HealthStatus.DEGRADED: ComponentStatus.DEGRADED,
             HealthStatus.UNHEALTHY: ComponentStatus.MAJOR_OUTAGE,
         }
-        return mapping.get(status, ComponentStatus.OPERATIONAL)
+        return mapping.get(status, ComponentStatus.DEGRADED)
 
     def _map_mcp_status(self, status: Any) -> ComponentStatus:
         """Map MCPServerStatus to ComponentStatus."""

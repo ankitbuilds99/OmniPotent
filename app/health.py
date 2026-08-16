@@ -139,8 +139,9 @@ class HealthChecker:
         uptime = time.monotonic() - self._start_time
 
         if not self._checks:
+            log.warning("No health checks registered - returning degraded status")
             return SystemHealth(
-                status=HealthStatus.HEALTHY,
+                status=HealthStatus.DEGRADED,
                 version=self._version,
                 uptime_seconds=uptime,
             )
