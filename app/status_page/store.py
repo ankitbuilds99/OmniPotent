@@ -778,6 +778,9 @@ class LiveStatusStore(InMemoryStatusStore):
             return
         self._started = True
 
+        from app.health import setup_health_checks
+        setup_health_checks()
+
         await self._sync_components_from_health_checks()
 
         if self._auto_start:
