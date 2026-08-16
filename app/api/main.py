@@ -396,7 +396,13 @@ async def lifespan(app: FastAPI):
         )
         slo_task = asyncio.create_task(poller.run())
         log.info("proactive SLO poller enabled")
+    # Live status page health check polling
+    from app.status_page import start_live_status_polling, stop_live_status_polling
+    await start_live_status_polling()
+    log.info("live status page polling started")
     yield
+    # Stop live status polling first
+    await stop_live_status_polling()
     for _task in (slo_task, job_task):
         if _task:
             _task.cancel()

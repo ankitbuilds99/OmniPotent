@@ -1,17 +1,19 @@
 """Storage layer for status page data.
 
 Provides in-memory storage with an interface that can be swapped for
-database-backed storage in production.
+database-backed storage in production. Includes LiveStatusStore that
+integrates with real health checks.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from app.status_page.models import (
     Component,
@@ -25,6 +27,10 @@ from app.status_page.models import (
     Subscriber,
     SubscriptionType,
 )
+
+if TYPE_CHECKING:
+    from app.health import HealthChecker
+    from app.mcp.health import MCPHealthMonitor
 
 log = logging.getLogger("omnipotent.status_page.store")
 
@@ -249,32 +255,17 @@ class StatusStore(ABC):
 
 
 class InMemoryStatusStore(StatusStore):
-    """In-memory implementation of the status store."""
+    """In-memory implementation of the status store.
+
+    Note: This base class no longer sets up hardcoded default components.
+    Use LiveStatusStore for real health check integration.
+    """
 
     def __init__(self) -> None:
         self._components: dict[str, Component] = {}
         self._incidents: dict[str, Incident] = {}
         self._maintenances: dict[str, Maintenance] = {}
         self._subscribers: dict[str, Subscriber] = {}
-        self._setup_default_components()
-
-    def _setup_default_components(self) -> None:
-        """Set up default components."""
-        defaults = [
-            ("api", "API", "Core REST API endpoints", "Core", 1),
-            ("dashboard", "Dashboard", "Web dashboard application", "Core", 2),
-            ("database", "Database", "Primary database cluster", "Infrastructure", 3),
-            ("authentication", "Authentication", "Login and authentication services", "Core", 4),
-            ("notifications", "Notifications", "Email and push notifications", "Services", 5),
-        ]
-        for comp_id, name, desc, group, order in defaults:
-            self._components[comp_id] = Component(
-                id=comp_id,
-                name=name,
-                description=desc,
-                group=group,
-                display_order=order,
-            )
 
     def _generate_id(self, prefix: str = "") -> str:
         """Generate a unique ID."""
@@ -761,19 +752,194 @@ class InMemoryStatusStore(StatusStore):
         }
 
 
+class LiveStatusStore(InMemoryStatusStore):
+    """Status store that integrates with real health checks.
+
+    Components are dynamically created from:
+    - HealthChecker registered checks (database, redis, llm)
+    - MCPHealthMonitor registered MCP servers
+
+    Health status mapping:
+    - HEALTHY -> OPERATIONAL
+    - DEGRADED -> DEGRADED
+    - UNHEALTHY -> MAJOR_OUTAGE
+    """
+
+    def __init__(
+        self,
+        poll_interval_seconds: float = 30.0,
+        auto_start_polling: bool = True,
+    ) -> None:
+        super().__init__()
+        self._poll_interval = poll_interval_seconds
+        self._polling_task: asyncio.Task | None = None
+        self._auto_start = auto_start_polling
+        self._started = False
+
+    async def start(self) -> None:
+        """Start the health check polling loop."""
+        if self._started:
+            return
+        self._started = True
+
+        await self._sync_components_from_health_checks()
+
+        if self._auto_start:
+            self._polling_task = asyncio.create_task(self._poll_health_checks())
+            log.info("LiveStatusStore started polling health checks every %.0fs", self._poll_interval)
+
+    async def stop(self) -> None:
+        """Stop the health check polling loop."""
+        if self._polling_task:
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+            self._polling_task = None
+        self._started = False
+        log.info("LiveStatusStore stopped polling")
+
+    async def _sync_components_from_health_checks(self) -> None:
+        """Sync components from registered health checks."""
+        from app.health import get_health_checker, HealthStatus
+        from app.mcp.health import get_health_monitor, MCPServerStatus
+
+        now = datetime.now(timezone.utc)
+        checker = get_health_checker()
+        mcp_monitor = get_health_monitor()
+
+        component_configs = [
+            ("api", "API", "Core REST API endpoints", "Core", 1),
+            ("database", "Database", "Primary database cluster", "Infrastructure", 2),
+            ("redis", "Redis", "Cache and session storage", "Infrastructure", 3),
+            ("llm", "LLM Provider", "AI model API connectivity", "Infrastructure", 4),
+        ]
+
+        for comp_id, name, desc, group, order in component_configs:
+            if comp_id not in self._components:
+                self._components[comp_id] = Component(
+                    id=comp_id,
+                    name=name,
+                    description=desc,
+                    group=group,
+                    display_order=order,
+                    created_at=now,
+                    updated_at=now,
+                )
+
+        system_health = await checker.check_all()
+        for comp_name, health in system_health.components.items():
+            comp_id = comp_name.lower().replace(" ", "_")
+            if comp_id in self._components:
+                self._components[comp_id].status = self._map_health_status(health.status)
+                self._components[comp_id].updated_at = now
+
+        mcp_summary = await mcp_monitor.check_all()
+        for server_health in mcp_summary.servers:
+            comp_id = f"mcp_{server_health.name}"
+            if comp_id not in self._components:
+                self._components[comp_id] = Component(
+                    id=comp_id,
+                    name=f"MCP: {server_health.name.replace('_', ' ').title()}",
+                    description=f"MCP server for {server_health.name}",
+                    group="MCP Servers",
+                    display_order=100 + len([c for c in self._components if c.startswith("mcp_")]),
+                    created_at=now,
+                    updated_at=now,
+                )
+            self._components[comp_id].status = self._map_mcp_status(server_health.status)
+            self._components[comp_id].updated_at = now
+
+        alive, _ = await checker.liveness()
+        if "api" in self._components:
+            self._components["api"].status = (
+                ComponentStatus.OPERATIONAL if alive else ComponentStatus.MAJOR_OUTAGE
+            )
+            self._components["api"].updated_at = now
+
+        log.debug("Synced %d components from health checks", len(self._components))
+
+    def _map_health_status(self, status: Any) -> ComponentStatus:
+        """Map HealthStatus to ComponentStatus."""
+        from app.health import HealthStatus
+
+        mapping = {
+            HealthStatus.HEALTHY: ComponentStatus.OPERATIONAL,
+            HealthStatus.DEGRADED: ComponentStatus.DEGRADED,
+            HealthStatus.UNHEALTHY: ComponentStatus.MAJOR_OUTAGE,
+        }
+        return mapping.get(status, ComponentStatus.OPERATIONAL)
+
+    def _map_mcp_status(self, status: Any) -> ComponentStatus:
+        """Map MCPServerStatus to ComponentStatus."""
+        from app.mcp.health import MCPServerStatus
+
+        mapping = {
+            MCPServerStatus.HEALTHY: ComponentStatus.OPERATIONAL,
+            MCPServerStatus.DEGRADED: ComponentStatus.DEGRADED,
+            MCPServerStatus.UNHEALTHY: ComponentStatus.MAJOR_OUTAGE,
+            MCPServerStatus.UNKNOWN: ComponentStatus.DEGRADED,
+            MCPServerStatus.STOPPED: ComponentStatus.MAJOR_OUTAGE,
+        }
+        return mapping.get(status, ComponentStatus.OPERATIONAL)
+
+    async def _poll_health_checks(self) -> None:
+        """Periodically poll health checks and update component status."""
+        while True:
+            try:
+                await asyncio.sleep(self._poll_interval)
+                await self._sync_components_from_health_checks()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error("Error polling health checks: %s", e)
+
+    async def refresh(self) -> None:
+        """Manually trigger a health check sync."""
+        await self._sync_components_from_health_checks()
+
+
 # Global store instance
 _store: StatusStore | None = None
+_live_store: LiveStatusStore | None = None
 
 
 def get_status_store() -> StatusStore:
-    """Get the default status store."""
-    global _store
+    """Get the default status store.
+
+    Returns the LiveStatusStore for real health check integration.
+    """
+    global _store, _live_store
     if _store is None:
-        _store = InMemoryStatusStore()
+        _live_store = LiveStatusStore()
+        _store = _live_store
     return _store
+
+
+def get_live_status_store() -> LiveStatusStore | None:
+    """Get the live status store if initialized."""
+    return _live_store
+
+
+async def start_live_status_polling() -> None:
+    """Start the live status store polling (call during app startup)."""
+    store = get_status_store()
+    if isinstance(store, LiveStatusStore):
+        await store.start()
+
+
+async def stop_live_status_polling() -> None:
+    """Stop the live status store polling (call during app shutdown)."""
+    if _live_store:
+        await _live_store.stop()
 
 
 def set_status_store(store: StatusStore) -> None:
     """Set a custom status store (for testing or database-backed storage)."""
-    global _store
+    global _store, _live_store
     _store = store
+    if isinstance(store, LiveStatusStore):
+        _live_store = store
+    else:
+        _live_store = None
