@@ -46,17 +46,28 @@ class DatabaseHealth:
 
 def _get_database_url() -> str:
     """Get async database URL from settings."""
+    from pathlib import Path
+
     s = get_settings()
     url = s.copilot_database_url
 
     if not url:
-        url = "sqlite+aiosqlite:///data/copilot.db"
+        db_dir = Path("data")
+        if not db_dir.exists():
+            try:
+                db_dir.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                db_dir = Path("/tmp")
+                log.warning("Cannot create data/ directory, using /tmp for SQLite")
+
+        db_path = db_dir / "copilot.db"
+        url = f"sqlite+aiosqlite:///{db_path}"
 
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-    elif url.startswith("sqlite://"):
+    elif url.startswith("sqlite://") and not url.startswith("sqlite+"):
         url = url.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
     return url

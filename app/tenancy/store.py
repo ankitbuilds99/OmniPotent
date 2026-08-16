@@ -95,7 +95,20 @@ class TenantStore:
                 "Postgres tenant store isn't implemented yet — set COPILOT_TENANT_DB "
                 "to a SQLite path, or add an asyncpg-backed TenantStore for production."
             )
-        self.db_path = db_path
+        self.db_path = self._ensure_db_path(db_path)
+
+    def _ensure_db_path(self, db_path: str) -> str:
+        """Ensure the directory for the database file exists."""
+        from pathlib import Path
+
+        path = Path(db_path)
+        if path.parent != Path(".") and not path.parent.exists():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                fallback = Path("/tmp") / path.name
+                return str(fallback)
+        return db_path
 
     async def setup(self) -> None:
         import aiosqlite

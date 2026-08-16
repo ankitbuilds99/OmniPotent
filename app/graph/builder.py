@@ -561,6 +561,19 @@ def _get_latest_task(state: AgentState) -> str:
     return ""
 
 
+def _ensure_sqlite_path(db_path: str) -> str:
+    """Ensure the directory for the SQLite database exists."""
+    from pathlib import Path
+
+    path = Path(db_path)
+    if path.parent != Path(".") and not path.parent.exists():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError):
+            return str(Path("/tmp") / path.name)
+    return db_path
+
+
 def make_checkpointer():
     """Return an async checkpointer context manager.
 
@@ -572,6 +585,7 @@ def make_checkpointer():
     db = get_settings().copilot_checkpoint_db
     if db.startswith(("postgres://", "postgresql://")):
         return _postgres_checkpointer(db)
+    db = _ensure_sqlite_path(db)
     return AsyncSqliteSaver.from_conn_string(db)
 
 
