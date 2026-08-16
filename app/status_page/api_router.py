@@ -19,7 +19,7 @@ from app.status_page.models import (
     SubscriptionType,
 )
 from app.status_page.notifications import get_status_notifier
-from app.status_page.store import get_status_store, get_live_status_store, LiveStatusStore
+from app.status_page.store import get_status_store, get_live_status_store
 
 router = APIRouter(prefix="/api/status", tags=["Status Page"])
 

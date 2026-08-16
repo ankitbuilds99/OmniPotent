@@ -13,7 +13,7 @@ import secrets
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from app.status_page.models import (
     Component,
@@ -27,10 +27,6 @@ from app.status_page.models import (
     Subscriber,
     SubscriptionType,
 )
-
-if TYPE_CHECKING:
-    from app.health import HealthChecker
-    from app.mcp.health import MCPHealthMonitor
 
 log = logging.getLogger("omnipotent.status_page.store")
 
@@ -802,8 +798,8 @@ class LiveStatusStore(InMemoryStatusStore):
 
     async def _sync_components_from_health_checks(self) -> None:
         """Sync components from registered health checks."""
-        from app.health import get_health_checker, HealthStatus
-        from app.mcp.health import get_health_monitor, MCPServerStatus
+        from app.health import get_health_checker
+        from app.mcp.health import get_health_monitor
 
         now = datetime.now(timezone.utc)
         checker = get_health_checker()
