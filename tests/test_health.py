@@ -174,22 +174,22 @@ class TestComponentHealthChecks:
 
     @pytest.mark.asyncio
     async def test_check_redis_not_configured(self):
-        """Redis check should return healthy when not configured."""
+        """Redis check should return degraded when not configured (in-memory fallback)."""
         with patch("app.config.get_settings") as mock:
             mock.return_value.copilot_redis_url = ""
             result = await check_redis()
 
-            assert result.status == HealthStatus.HEALTHY
+            assert result.status == HealthStatus.DEGRADED
             assert "not configured" in result.message.lower()
 
     @pytest.mark.asyncio
     async def test_check_llm_multi_tenant(self):
-        """LLM check should pass in multi-tenant mode."""
+        """LLM check should return degraded in multi-tenant mode (health varies by tenant)."""
         with patch("app.config.get_settings") as mock:
             mock.return_value.copilot_multi_tenant = True
             result = await check_llm()
 
-            assert result.status == HealthStatus.HEALTHY
+            assert result.status == HealthStatus.DEGRADED
             assert "multi-tenant" in result.message.lower()
 
     @pytest.mark.asyncio
