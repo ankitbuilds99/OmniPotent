@@ -150,6 +150,14 @@ markers = [
 [tool.coverage.run]
 source = ["app"]
 branch = true
+# Record paths relative to the repo root rather than absolute. The PR coverage
+# comment (py-cov-action/python-coverage-comment-action) runs in a container
+# where the checkout is mounted somewhere else, so absolute runner paths baked
+# into .coverage do not resolve there and `coverage json` aborts with
+# "No source for code: .../app/__init__.py". That step is gated on
+# `github.event_name == 'pull_request'`, so push and schedule runs skipped it
+# and stayed green — every pull_request run of the workflow has failed here.
+relative_files = true
 omit = [
     "app/__main__.py",
     "*/tests/*",

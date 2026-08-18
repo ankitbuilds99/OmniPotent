@@ -134,7 +134,9 @@ class EvalReporter:
         # so instead of comparing a partial number against a whole one.
         baseline_cost = baseline_metrics.get("cost", {}).get("mean_cost_per_investigation_usd") or 0
         current_cost = result.metrics.cost.mean_cost_per_investigation_usd
-        if not result.metrics.cost.cost_is_complete:
+        # The `is None` half is what narrows the type for the comparison below;
+        # cost_is_complete cannot, since a partially-priced run has a real mean.
+        if current_cost is None or not result.metrics.cost.cost_is_complete:
             alerts.append(RegressionAlert(
                 metric_name="cost",
                 previous_value=baseline_cost,

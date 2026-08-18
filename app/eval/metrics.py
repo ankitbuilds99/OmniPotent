@@ -285,8 +285,11 @@ class MetricsCalculator:
         # they are counted separately and the totals cover only the priced ones.
         priced = [r.cost_usd for r in results if r.cost_usd is not None]
         unpriced = len(results) - len(priced)
-        total_cost = sum(priced) if priced else None
-        mean_cost = (total_cost / len(priced)) if priced else None
+        total_cost: float | None = None
+        mean_cost: float | None = None
+        if priced:
+            total_cost = sum(priced)
+            mean_cost = total_cost / len(priced)
 
         return CostMetrics(
             total_tokens=total_tokens,

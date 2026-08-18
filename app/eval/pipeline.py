@@ -409,11 +409,19 @@ class EvalPipeline:
         # Cost. An unpriced model yields no cost at all, and "no cost" must not be
         # read as "under budget" — that would let the budget gate pass precisely
         # when spend is unknown. Fail the check and name the reason instead.
+        # The `is None` half is what narrows the type for the comparison below;
+        # cost_is_complete cannot do that, since a partially-priced run has a real
+        # mean that still covers only some of the scenarios.
         mean_cost = metrics.cost.mean_cost_per_investigation_usd
-        if not metrics.cost.cost_is_complete:
+        if mean_cost is None or not metrics.cost.cost_is_complete:
+            unpriced = metrics.cost.unpriced_scenarios
+            reason = (
+                f"{unpriced} scenario(s) ran on a model with no verified price"
+                if unpriced
+                else "no scenario produced a priced result"
+            )
             failures.append(
-                f"Cost budget not checked: {metrics.cost.unpriced_scenarios} scenario(s) "
-                "ran on a model with no verified price (add it to app/model_catalog.py)"
+                f"Cost budget not checked: {reason} (add it to app/model_catalog.py)"
             )
         elif mean_cost > self.config.max_cost_per_investigation_usd:
             failures.append(
