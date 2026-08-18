@@ -41,10 +41,20 @@ class ClusterStats:
 class ErrorClusterer:
     """Clusters similar errors for triage."""
 
-    def __init__(self) -> None:
+    def __init__(self, similarity_threshold: float | None = None) -> None:
         self._clusters: dict[str, ErrorCluster] = {}
         self._cluster_counter = 0
-        self._similarity_threshold = 0.6
+        # How much signature overlap two errors need to land in one cluster.
+        # Operator-tunable (LOG_SIMILARITY_THRESHOLD) because the right value
+        # depends on how templated a fleet's log messages are: too low and
+        # unrelated errors merge into one useless bucket, too high and every
+        # error becomes its own cluster. Read here, not at import, so the
+        # environment is fully loaded first.
+        if similarity_threshold is None:
+            from app.config import get_settings
+
+            similarity_threshold = get_settings().log_similarity_threshold
+        self._similarity_threshold = similarity_threshold
 
     def cluster(self, logs: list[LogEntry]) -> list[ErrorCluster]:
         """Cluster error logs."""

@@ -30,6 +30,18 @@ class RegressionAlert:
     current_value: float
     change_percent: float
     severity: str  # warning, critical
+    # Set when the alert is about the check itself being unable to run (e.g. an
+    # unpriced model) rather than about an observed regression in the number.
+    detail: str = ""
+
+
+def _usd(value: float | None, places: int = 3) -> str:
+    """Format a cost for display, or "unknown" when the model had no price.
+
+    Costs are None when no verified price exists (see eval/metrics.estimate_cost).
+    Printing that as $0.000 would read as "free" in every report format.
+    """
+    return "unknown" if value is None else f"${value:.{places}f}"
 
 
 class EvalReporter:
@@ -115,10 +127,29 @@ class EvalReporter:
                 severity="critical" if change > 50 else "warning",
             ))
 
-        # Check cost regression
-        baseline_cost = baseline_metrics.get("cost", {}).get("mean_cost_per_investigation_usd", 0)
+        # Check cost regression.
+        # A run containing unpriced models has no comparable cost: its total omits
+        # those scenarios, so it always looks flat or cheaper than the baseline and
+        # the check below would pass no matter how much the run actually cost. Say
+        # so instead of comparing a partial number against a whole one.
+        baseline_cost = baseline_metrics.get("cost", {}).get("mean_cost_per_investigation_usd") or 0
         current_cost = result.metrics.cost.mean_cost_per_investigation_usd
-        if baseline_cost > 0 and current_cost > baseline_cost * (1 + self.regression_threshold):
+        # The `is None` half is what narrows the type for the comparison below;
+        # cost_is_complete cannot, since a partially-priced run has a real mean.
+        if current_cost is None or not result.metrics.cost.cost_is_complete:
+            alerts.append(RegressionAlert(
+                metric_name="cost",
+                previous_value=baseline_cost,
+                current_value=current_cost if current_cost is not None else 0.0,
+                change_percent=0.0,
+                severity="warning",
+                detail=(
+                    f"cost regression not checked: {result.metrics.cost.unpriced_scenarios} "
+                    "scenario(s) ran on a model with no verified price. Add it to "
+                    "app/model_catalog.py to restore the check."
+                ),
+            ))
+        elif baseline_cost > 0 and current_cost > baseline_cost * (1 + self.regression_threshold):
             change = (current_cost - baseline_cost) / baseline_cost * 100
             alerts.append(RegressionAlert(
                 metric_name="cost",
@@ -186,8 +217,8 @@ class EvalReporter:
 | Metric | Value |
 |--------|-------|
 | Total Tokens | {result.metrics.cost.total_tokens:,} |
-| Total Cost | ${result.metrics.cost.total_cost_usd:.2f} |
-| Mean Cost/Investigation | ${result.metrics.cost.mean_cost_per_investigation_usd:.3f} |
+| Total Cost | {_usd(result.metrics.cost.total_cost_usd, 2)} |
+| Mean Cost/Investigation | {_usd(result.metrics.cost.mean_cost_per_investigation_usd)} |
 
 """
 
@@ -264,7 +295,7 @@ class EvalReporter:
             <div class="metric-label">Mean Latency</div>
         </div>
         <div class="metric-card">
-            <div class="metric-value">${result.metrics.cost.mean_cost_per_investigation_usd:.3f}</div>
+            <div class="metric-value">{_usd(result.metrics.cost.mean_cost_per_investigation_usd)}</div>
             <div class="metric-label">Cost/Investigation</div>
         </div>
     </div>
@@ -324,7 +355,7 @@ class EvalReporter:
                         {"type": "mrkdwn", "text": f"*Scenarios:*\n{result.scenarios_passed}/{result.scenarios_total} passed"},
                         {"type": "mrkdwn", "text": f"*Accuracy:*\n{result.metrics.accuracy.exact_match_rate:.0%}"},
                         {"type": "mrkdwn", "text": f"*Mean Latency:*\n{result.metrics.latency.mean_ms:.0f}ms"},
-                        {"type": "mrkdwn", "text": f"*Mean Cost:*\n${result.metrics.cost.mean_cost_per_investigation_usd:.3f}"},
+                        {"type": "mrkdwn", "text": f"*Mean Cost:*\n{_usd(result.metrics.cost.mean_cost_per_investigation_usd)}"},
                     ]
                 },
             ]

@@ -520,8 +520,8 @@ class TestCostEstimation:
         """Test Anthropic Haiku cost calculation."""
         from app.observability.metrics import _estimate_llm_cost
 
-        cost = _estimate_llm_cost("anthropic", "claude-haiku-4", 1_000_000, 1_000_000)
-        expected = 0.25 + 1.25
+        cost = _estimate_llm_cost("anthropic", "claude-haiku-4-5", 1_000_000, 1_000_000)
+        expected = 1.0 + 5.0
         assert cost == pytest.approx(expected, abs=0.01)
 
     def test_openai_gpt4o_cost(self):
@@ -532,13 +532,43 @@ class TestCostEstimation:
         expected = 2.5 + 5.0
         assert cost == pytest.approx(expected, abs=0.01)
 
-    def test_unknown_model_default_cost(self):
-        """Test unknown model uses default pricing."""
+    def test_unknown_model_reports_no_cost_rather_than_a_guess(self):
+        """An unrecognised model must yield None, not an invented rate.
+
+        The table this replaced fell back to a hardcoded $1/$3 for anything it
+        didn't match, so a typo'd or newly released model silently produced a
+        confident, wrong dollar figure on the cost dashboard. None makes the
+        caller skip the metric instead (see record_llm_call).
+        """
         from app.observability.metrics import _estimate_llm_cost
 
-        cost = _estimate_llm_cost("unknown", "mystery-model", 1_000_000, 1_000_000)
-        expected = 1.0 + 3.0
-        assert cost == pytest.approx(expected, abs=0.01)
+        assert _estimate_llm_cost("unknown", "mystery-model", 1_000_000, 1_000_000) is None
+        # There is no Claude Haiku 4 — this fabricated ID was referenced in four
+        # places and used to price against the real Haiku row.
+        assert _estimate_llm_cost("anthropic", "claude-haiku-4", 1_000, 1_000) is None
+
+    def test_longer_model_id_is_not_priced_as_its_shorter_sibling(self):
+        """``claude-opus-4-8`` must not be billed at the ``claude-opus-4`` rate.
+
+        The old table matched with ``m in model``, so the substring ``claude-opus-4``
+        hit first and the newer model's spend was reported at the older, dearer
+        rate. It now resolves to its own catalog row, whose price is unverified —
+        so the honest answer is "no figure", not a figure from another model.
+        """
+        from app.observability.metrics import _estimate_llm_cost
+
+        assert _estimate_llm_cost("anthropic", "claude-opus-4", 1_000_000, 0) == pytest.approx(
+            15.0, abs=0.01
+        )
+        assert _estimate_llm_cost("anthropic", "claude-opus-4-8", 1_000_000, 0) is None
+
+    def test_dated_snapshot_prices_as_its_base_model(self):
+        """Providers return dated IDs; those must still price correctly."""
+        from app.observability.metrics import _estimate_llm_cost
+
+        assert _estimate_llm_cost(
+            "anthropic", "claude-sonnet-4-20250514", 1_000_000, 500_000
+        ) == pytest.approx(3.0 + 7.5, abs=0.01)
 
 
 class TestObservabilityModuleExports:

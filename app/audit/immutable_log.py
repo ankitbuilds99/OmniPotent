@@ -240,6 +240,9 @@ class ImmutableAuditLog:
         self._latest_hash = self.GENESIS_HASH
         self._siem_endpoints: list[str] = []
         self._http_client: httpx.AsyncClient | None = None
+        # Latch so the "this log is unsigned" warning is emitted once per instance
+        # instead of once per entry during a full verify_integrity() sweep.
+        self._unsigned_warned = False
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
@@ -313,9 +316,44 @@ class ImmutableAuditLog:
         return signature
 
     def _verify_signature(self, entry: AuditEntry) -> bool:
-        """Verify an entry's signature."""
-        if not self.signing_key or not entry.signature:
-            return True  # No signature to verify
+        """Verify an entry's signature.
+
+        The old single `not self.signing_key or not entry.signature` guard folded
+        three different situations into one optimistic True, and two of them are
+        exactly the tamper we are supposed to catch: an entry whose signature was
+        stripped from a signed log, and a signed entry checked by a verifier that
+        has no key (so the signature is unverifiable, not valid). Both now fail
+        closed. Only "signing is switched off everywhere" — no key AND an unsigned
+        entry — is a genuine nothing-to-check; the hash chain still covers it.
+        """
+        if not self.signing_key:
+            if entry.signature:
+                log.warning(
+                    "Audit entry %s (seq %d) is signed but no signing key is "
+                    "configured (set AUDIT_SIGNING_KEY); cannot verify — treating "
+                    "as invalid rather than trusting an unchecked signature",
+                    entry.id, entry.sequence_number,
+                )
+                return False
+            if not self._unsigned_warned:
+                # Once per instance: verify_integrity() walks every entry and we
+                # do not want one line per record.
+                self._unsigned_warned = True
+                log.warning(
+                    "Audit log for org=%s is unsigned (AUDIT_SIGNING_KEY not set); "
+                    "integrity rests on the hash chain alone",
+                    self.org_id,
+                )
+            return True
+
+        if not entry.signature:
+            log.warning(
+                "Audit entry %s (seq %d) has no signature but this log is "
+                "configured to sign every entry — treating as tampered",
+                entry.id, entry.sequence_number,
+            )
+            return False
+
         expected = self._sign_entry(entry.entry_hash)
         if expected is None:
             return False

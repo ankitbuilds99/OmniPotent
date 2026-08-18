@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Project root = two levels up from this file (app/config.py -> app -> root)
@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Fields with a validation_alias below are still constructible by their
+        # Python name (Settings(copilot_database_url=...)), which tests rely on.
+        populate_by_name=True,
     )
 
     # --- LLM ---
@@ -138,6 +141,24 @@ class Settings(BaseSettings):
     # preventing the agent from being aimed at arbitrary host paths.
     copilot_sources_root: str = ""
 
+    # --- Demo mode ---
+    # Several subsystems (runbook execution, remediation handlers, the Slack
+    # command handlers, the incident store, billing) have a code path that
+    # fabricates a plausible result when their real backend isn't configured.
+    # That path is OFF by default: unconfigured subsystems fail closed rather
+    # than report success for work they never did. Set this to true only for
+    # demos and local walkthroughs — every fabricated payload is then labelled
+    # "(simulated)" so it can never be mistaken for a real result. Refused
+    # outright when COPILOT_ENV=production.
+    copilot_demo_mode: bool = False
+
+    # --- Local state ---
+    # Writable directory for state this process owns: SQLite databases, graph
+    # checkpoints, the vector store. Empty = <project root>/data. In a container
+    # point this at a mounted volume; the image filesystem is usually read-only
+    # and is always ephemeral, so anything written elsewhere is lost on restart.
+    copilot_state_dir: str = ""
+
     # --- URLs (configurable for different environments) ---
     # Frontend URL for redirects (Stripe, OAuth, etc.)
     frontend_url: str = "http://localhost:3000"
@@ -179,6 +200,12 @@ class Settings(BaseSettings):
     http_timeout_mcp: float = 20.0
 
     # --- Redis Connection Pool ---
+    # These are PER-WORKLOAD baselines, not process-wide totals. app/redis_pool.py
+    # runs four pools (cache, session, pubsub, queue) and scales this baseline by a
+    # per-workload factor, so the process can open roughly 3.8x this value in
+    # total (session doubles it; pubsub and queue take fractions). Size against
+    # your Redis `maxclients` accordingly: 50 here means ~190 connections per
+    # replica, and replicaCount multiplies that again.
     redis_min_connections: int = 5
     redis_max_connections: int = 50
     redis_connection_timeout: float = 2.0
@@ -284,7 +311,12 @@ class Settings(BaseSettings):
     copilot_checkpoint_db: str = "./copilot_checkpoints.sqlite"
     # Redis URL for the SHARED (cross-replica) rate limiter and cache. Empty =
     # per-process in-memory (single-instance only). e.g. redis://host:6379/0
-    copilot_redis_url: str = ""
+    # Also accepts the bare REDIS_URL that managed platforms (Render, Heroku,
+    # Helm, docker-compose) inject by convention — see copilot_database_url.
+    copilot_redis_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("COPILOT_REDIS_URL", "REDIS_URL"),
+    )
     # Response cache backend: "memory" (default), "redis", or "none" (disabled).
     # Redis uses COPILOT_REDIS_URL; falls back to memory if unavailable.
     copilot_cache_backend: str = "memory"
@@ -405,8 +437,15 @@ class Settings(BaseSettings):
 
     # --- Database (production persistence) ---
     # Database URL: postgresql://user:pass@host:5432/db or sqlite:///path.db
-    # Empty = SQLite at data/copilot.db (dev default).
-    copilot_database_url: str = ""
+    # Empty = SQLite under COPILOT_STATE_DIR (dev default).
+    # Managed platforms inject a bare DATABASE_URL (Render, Heroku, Helm charts,
+    # docker-compose all do), so accept that name too — otherwise a correctly
+    # provisioned Postgres is silently ignored and the app falls back to SQLite
+    # on an ephemeral container filesystem.
+    copilot_database_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("COPILOT_DATABASE_URL", "DATABASE_URL"),
+    )
     # Connection pool settings (PostgreSQL only).
     copilot_db_pool_size: int = 10
     copilot_db_pool_overflow: int = 20
@@ -482,17 +521,23 @@ class Settings(BaseSettings):
                 "COPILOT_API_TOKEN must be set when COPILOT_ENV=production "
                 "(refusing to start an unauthenticated, internet-exposed API)."
             )
-        # Multi-tenant stores per-tenant credentials encrypted at rest; in
-        # production refuse to boot with an ephemeral vault key (it would lose
-        # every tenant's secrets on restart and weaken isolation).
-        if (
-            self.copilot_multi_tenant
-            and self.copilot_env == "production"
-            and not self.copilot_secret_key.strip()
-        ):
+        # The secret key is not multi-tenant-only: it also signs the OAuth/session
+        # JWTs (app/auth/oauth.py). Without it those fall back to a well-known
+        # constant, so anyone can mint a valid token. Require it for every
+        # production deployment, not just multi-tenant ones.
+        if self.copilot_env == "production" and not self.copilot_secret_key.strip():
             raise ValueError(
-                "COPILOT_SECRET_KEY must be set when COPILOT_MULTI_TENANT=true in "
-                "production (per-tenant secrets are encrypted with it)."
+                "COPILOT_SECRET_KEY must be set when COPILOT_ENV=production "
+                "(it signs session tokens and encrypts stored secrets; without it "
+                "tokens would be signed with a publicly known key)."
+            )
+        # Demo mode fabricates successful results for subsystems that have no
+        # real backend. That is never acceptable in production.
+        if self.copilot_demo_mode and self.copilot_env == "production":
+            raise ValueError(
+                "COPILOT_DEMO_MODE must be false when COPILOT_ENV=production "
+                "(it makes remediation and runbook steps report success without "
+                "doing anything)."
             )
         return self
 
@@ -534,6 +579,33 @@ class Settings(BaseSettings):
         """The directory tree /sources/* is confined to (defaults to project root)."""
         base = self.copilot_sources_root.strip()
         return Path(base).expanduser().resolve() if base else ROOT.resolve()
+
+    @property
+    def state_dir(self) -> Path:
+        """Directory this process writes local state into (see copilot_state_dir).
+
+        Resolution only — use ensure_state_dir()/state_path() before opening a
+        file, so the directory exists.
+        """
+        base = self.copilot_state_dir.strip()
+        return (Path(base).expanduser() if base else (ROOT / "data")).resolve()
+
+    def ensure_state_dir(self) -> Path:
+        """state_dir, created if missing. Raises if it cannot be created — a
+        read-only state directory is a deployment error, not something to paper
+        over by silently relocating data to /tmp where it is lost on restart."""
+        path = self.state_dir
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def state_path(self, name: str) -> Path:
+        """Resolve `name` under state_dir. Absolute paths and paths the operator
+        wrote explicitly (./foo, ../foo) are honoured as-is."""
+        candidate = Path(name).expanduser()
+        if candidate.is_absolute() or name.startswith((".", "/", "~")):
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            return candidate.resolve()
+        return self.ensure_state_dir() / name
 
     @property
     def offline_mode(self) -> bool:

@@ -23,7 +23,7 @@ podAnnotations:
   prometheus.io/path: "/metrics"
 
 podSecurityContext:
-  fsGroup: 1000
+  fsGroup: 10001
   runAsNonRoot: true
 
 securityContext:
@@ -33,7 +33,7 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
   runAsNonRoot: true
-  runAsUser: 1000
+  runAsUser: 10001
 
 service:
   type: ClusterIP

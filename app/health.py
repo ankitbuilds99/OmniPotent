@@ -112,9 +112,17 @@ class HealthChecker:
                 message=f"Unknown component: {name}",
             )
 
+        # Per-check deadline is operator-tunable (HTTP_TIMEOUT_HEALTH): a probe
+        # against a cold managed Postgres legitimately needs longer than one
+        # against a local Redis. Read per call, not at import, so the value a
+        # test or a reloaded process sets is the one that applies.
+        from app.config import get_settings
+
+        timeout = get_settings().http_timeout_health
+
         start = time.monotonic()
         try:
-            result = await asyncio.wait_for(check(), timeout=5.0)
+            result = await asyncio.wait_for(check(), timeout=timeout)
             result.latency_ms = (time.monotonic() - start) * 1000
             self._last_results[name] = result
             return result
@@ -123,7 +131,7 @@ class HealthChecker:
                 name=name,
                 status=HealthStatus.UNHEALTHY,
                 latency_ms=(time.monotonic() - start) * 1000,
-                message="Health check timed out",
+                message=f"Health check timed out after {timeout:g}s",
             )
         except Exception as e:
             log.warning("Health check failed for %s: %s", name, e)
@@ -134,8 +142,20 @@ class HealthChecker:
                 message=str(e),
             )
 
-    async def check_all(self, timeout: float = 10.0) -> SystemHealth:
-        """Run all health checks and aggregate status."""
+    async def check_all(self, timeout: float | None = None) -> SystemHealth:
+        """Run all health checks and aggregate status.
+
+        The aggregate deadline defaults to twice the per-check one
+        (HTTP_TIMEOUT_HEALTH) rather than a fixed 10s. The checks run
+        concurrently, so one per-check deadline plus headroom is all that is
+        needed — and, more to the point, a fixed 10s silently capped the knob:
+        raising HTTP_TIMEOUT_HEALTH above 10 moved the per-check deadline but
+        this outer one still cut the probe off first.
+        """
+        if timeout is None:
+            from app.config import get_settings
+
+            timeout = get_settings().http_timeout_health * 2
         uptime = time.monotonic() - self._start_time
 
         if not self._checks:

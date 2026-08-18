@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from app import model_catalog
+
 log = logging.getLogger("omnipotent.llm.router")
 
 
@@ -62,91 +64,131 @@ class ModelConfig:
         return capability in self.capabilities
 
 
+def _config(name: str, **kwargs: Any) -> ModelConfig | None:
+    """A ModelConfig whose per-1k rates come from app.model_catalog.
+
+    The dataclass keeps its per-1k fields (that's this module's public API); only
+    the source of the numbers changes — the catalog is per-1M and converts. A model
+    the catalog cannot price is dropped rather than defaulted, because cost_score
+    feeds the routing score directly and a placeholder rate would silently steer
+    real traffic.
+    """
+    rates = model_catalog.price_per_1k(name)
+    if rates is None:
+        log.warning(
+            "model %r has no verified price in the model catalog; "
+            "excluding it from the router's model table",
+            name,
+        )
+        return None
+    return ModelConfig(
+        name=name,
+        cost_per_1k_input=rates[0],
+        cost_per_1k_output=rates[1],
+        **kwargs,
+    )
+
+
+# Latency percentiles and capability sets are this router's own operational
+# knowledge; the costs are not written here. They come from app.model_catalog,
+# which several other modules disagreed with (gpt-4o was billed at both $2.50/$10
+# and the retired $5/$15 launch price depending on which table you read).
 MODELS: dict[str, ModelConfig] = {
-    "gpt-4o-mini": ModelConfig(
-        name="gpt-4o-mini",
-        provider="openai",
-        tier=ModelTier.FAST,
-        cost_per_1k_input=0.00015,
-        cost_per_1k_output=0.0006,
-        max_context=128000,
-        max_output=16384,
-        latency_p50_ms=200,
-        latency_p99_ms=1000,
-        capabilities={"chat", "function_calling", "json_mode"},
-    ),
-    "gpt-4o": ModelConfig(
-        name="gpt-4o",
-        provider="openai",
-        tier=ModelTier.STANDARD,
-        cost_per_1k_input=0.0025,
-        cost_per_1k_output=0.01,
-        max_context=128000,
-        max_output=16384,
-        latency_p50_ms=500,
-        latency_p99_ms=3000,
-        capabilities={"chat", "function_calling", "json_mode", "vision"},
-    ),
-    "claude-3-5-haiku": ModelConfig(
-        name="claude-3-5-haiku-20241022",
-        provider="anthropic",
-        tier=ModelTier.FAST,
-        cost_per_1k_input=0.0008,
-        cost_per_1k_output=0.004,
-        max_context=200000,
-        max_output=8192,
-        latency_p50_ms=300,
-        latency_p99_ms=1500,
-        capabilities={"chat", "function_calling"},
-    ),
-    "claude-3-5-sonnet": ModelConfig(
-        name="claude-3-5-sonnet-20241022",
-        provider="anthropic",
-        tier=ModelTier.STANDARD,
-        cost_per_1k_input=0.003,
-        cost_per_1k_output=0.015,
-        max_context=200000,
-        max_output=8192,
-        latency_p50_ms=800,
-        latency_p99_ms=4000,
-        capabilities={"chat", "function_calling", "vision", "computer_use"},
-    ),
-    "claude-3-opus": ModelConfig(
-        name="claude-3-opus-20240229",
-        provider="anthropic",
-        tier=ModelTier.PREMIUM,
-        cost_per_1k_input=0.015,
-        cost_per_1k_output=0.075,
-        max_context=200000,
-        max_output=4096,
-        latency_p50_ms=2000,
-        latency_p99_ms=10000,
-        capabilities={"chat", "function_calling", "vision"},
-    ),
-    "o1": ModelConfig(
-        name="o1",
-        provider="openai",
-        tier=ModelTier.PREMIUM,
-        cost_per_1k_input=0.015,
-        cost_per_1k_output=0.06,
-        max_context=200000,
-        max_output=100000,
-        latency_p50_ms=5000,
-        latency_p99_ms=30000,
-        capabilities={"chat", "reasoning"},
-    ),
-    "o1-mini": ModelConfig(
-        name="o1-mini",
-        provider="openai",
-        tier=ModelTier.ADVANCED,
-        cost_per_1k_input=0.003,
-        cost_per_1k_output=0.012,
-        max_context=128000,
-        max_output=65536,
-        latency_p50_ms=3000,
-        latency_p99_ms=15000,
-        capabilities={"chat", "reasoning"},
-    ),
+    key: config
+    for key, config in (
+        (
+            "gpt-4o-mini",
+            _config(
+                "gpt-4o-mini",
+                provider="openai",
+                tier=ModelTier.FAST,
+                max_context=128000,
+                max_output=16384,
+                latency_p50_ms=200,
+                latency_p99_ms=1000,
+                capabilities={"chat", "function_calling", "json_mode"},
+            ),
+        ),
+        (
+            "gpt-4o",
+            _config(
+                "gpt-4o",
+                provider="openai",
+                tier=ModelTier.STANDARD,
+                max_context=128000,
+                max_output=16384,
+                latency_p50_ms=500,
+                latency_p99_ms=3000,
+                capabilities={"chat", "function_calling", "json_mode", "vision"},
+            ),
+        ),
+        (
+            "claude-3-5-haiku",
+            _config(
+                "claude-3-5-haiku-20241022",
+                provider="anthropic",
+                tier=ModelTier.FAST,
+                max_context=200000,
+                max_output=8192,
+                latency_p50_ms=300,
+                latency_p99_ms=1500,
+                capabilities={"chat", "function_calling"},
+            ),
+        ),
+        (
+            "claude-3-5-sonnet",
+            _config(
+                "claude-3-5-sonnet-20241022",
+                provider="anthropic",
+                tier=ModelTier.STANDARD,
+                max_context=200000,
+                max_output=8192,
+                latency_p50_ms=800,
+                latency_p99_ms=4000,
+                capabilities={"chat", "function_calling", "vision", "computer_use"},
+            ),
+        ),
+        (
+            "claude-3-opus",
+            _config(
+                "claude-3-opus-20240229",
+                provider="anthropic",
+                tier=ModelTier.PREMIUM,
+                max_context=200000,
+                max_output=4096,
+                latency_p50_ms=2000,
+                latency_p99_ms=10000,
+                capabilities={"chat", "function_calling", "vision"},
+            ),
+        ),
+        (
+            "o1",
+            _config(
+                "o1",
+                provider="openai",
+                tier=ModelTier.PREMIUM,
+                max_context=200000,
+                max_output=100000,
+                latency_p50_ms=5000,
+                latency_p99_ms=30000,
+                capabilities={"chat", "reasoning"},
+            ),
+        ),
+        (
+            "o1-mini",
+            _config(
+                "o1-mini",
+                provider="openai",
+                tier=ModelTier.ADVANCED,
+                max_context=128000,
+                max_output=65536,
+                latency_p50_ms=3000,
+                latency_p99_ms=15000,
+                capabilities={"chat", "reasoning"},
+            ),
+        ),
+    )
+    if config is not None
 }
 
 

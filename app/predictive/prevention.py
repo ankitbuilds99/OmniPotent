@@ -12,6 +12,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable
 
+from app.config import get_settings
 from app.predictive.predictions import PredictedIncident, IncidentType
 
 log = logging.getLogger("omnipotent.predictive.prevention")
@@ -577,9 +578,27 @@ class PreventionEngine:
                 action.result = str(e)
                 log.exception("action execution failed", extra={"action_id": action_id})
                 return False
-        else:
+        elif get_settings().copilot_demo_mode:
+            log.warning(
+                "COPILOT_DEMO_MODE=true - marking action COMPLETED without a handler",
+                extra={"action_id": action_id, "action_type": action.action_type.value},
+            )
             action.status = ActionStatus.COMPLETED
-            action.result = "No handler registered - simulated execution"
+            action.result = "No handler registered - simulated execution (simulated)"
+        else:
+            # Nothing was scaled, restarted or failed over: without a handler
+            # this engine has no way to act. Marking the action COMPLETED told
+            # the operator the incident had been prevented when it had not.
+            log.warning(
+                "no handler registered for action type; refusing to report success",
+                extra={"action_id": action_id, "action_type": action.action_type.value},
+            )
+            action.status = ActionStatus.FAILED
+            action.result = (
+                f"No handler registered for action type '{action.action_type.value}' "
+                "(register one with PreventionEngine.register_handler); refusing to "
+                "report success for an action that was not performed"
+            )
 
         log.info(
             "action executed",

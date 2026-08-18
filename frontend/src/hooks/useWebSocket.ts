@@ -9,17 +9,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { API_TOKEN, wsUrl } from "../config";
 import type { StreamEvent } from "../types";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
-
-// Convert HTTP URL to WebSocket URL
-function getWsUrl(): string {
-  const url = new URL(BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString().replace(/\/$/, "");
-}
+// The http->ws conversion now lives in ../config: the local copy resolved the base
+// URL with `?? "http://localhost:8000"`, which kept the Dockerfile's deliberately
+// empty VITE_API_URL and made `new URL("")` throw at module load — taking this whole
+// hook down in every production image.
+const TOKEN = API_TOKEN;
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
 
@@ -140,7 +137,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const params = new URLSearchParams();
     if (sessionId) params.set("session_id", sessionId);
     const queryString = params.toString();
-    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`;
+    const url = wsUrl(`/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`);
 
     // Use subprotocol for auth token (not logged in access logs)
     // Format: ["copilot-v1", "auth-<token>"] or just ["copilot-v1"] if no token
@@ -150,7 +147,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     }
 
     try {
-      const ws = new WebSocket(wsUrl, protocols);
+      const ws = new WebSocket(url, protocols);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -331,7 +328,7 @@ export async function probeWebSocket(threadId: string): Promise<boolean> {
   if (!isWebSocketSupported()) return false;
 
   return new Promise((resolve) => {
-    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}`;
+    const url = wsUrl(`/ws/chat/${threadId}`);
 
     // Use subprotocol for auth token (secure - not in URL/logs)
     const protocols: string[] = ["copilot-v1"];
@@ -340,7 +337,7 @@ export async function probeWebSocket(threadId: string): Promise<boolean> {
     }
 
     try {
-      const ws = new WebSocket(wsUrl, protocols);
+      const ws = new WebSocket(url, protocols);
       const timeout = setTimeout(() => {
         ws.close();
         resolve(false);

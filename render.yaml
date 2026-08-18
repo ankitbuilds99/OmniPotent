@@ -33,12 +33,38 @@ services:
         value: production
       - key: COPILOT_API_TOKEN
         generateValue: true  # Auto-generate secure token
+      # Required in production (the app refuses to start without it): signs
+      # session tokens and encrypts stored secrets. NOT generateValue — it must
+      # be a Fernet key, and rotating it makes everything already encrypted
+      # unreadable. Generate once and paste it in:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: COPILOT_SECRET_KEY
+        sync: false
 
-      # Database
+      # Database — the managed Postgres below is the ONLY durable store on Render.
+      # Both names must be set: COPILOT_DATABASE_URL is the app/alembic database,
+      # COPILOT_CHECKPOINT_DB is LangGraph's resumable state. With only the
+      # checkpoint URL wired, the app fell back to SQLite on the container's
+      # ephemeral filesystem and lost every row on each redeploy.
+      - key: COPILOT_DATABASE_URL
+        fromDatabase:
+          name: copilot-db
+          property: connectionString
       - key: COPILOT_CHECKPOINT_DB
         fromDatabase:
           name: copilot-db
           property: connectionString
+
+      # Local scratch state (vector index, caches). The free plan has NO
+      # persistent disk — Render disks require a paid instance type — so this
+      # directory is wiped on every deploy and restart. It is set explicitly only
+      # so writes land in the image's writable dir rather than wherever the
+      # process happened to start; anything that must survive belongs in the
+      # Postgres URLs above. Add a Render Key Value (Redis) service and set
+      # COPILOT_REDIS_URL before scaling past one instance: without it the rate
+      # limiter, cache and spend caps are per-process.
+      - key: COPILOT_STATE_DIR
+        value: /app/data
 
       # GitHub integration (set these for live GitHub mode)
       - key: GITHUB_TOKEN

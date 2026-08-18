@@ -11,9 +11,16 @@ replicaCount: 2  # >1 requires Postgres checkpointer + Redis (see config below)
 config:
   COPILOT_ENV: production
   COPILOT_PROVIDER: anthropic
-  # Multi-instance state: point these at real backends when replicaCount > 1.
-  COPILOT_REDIS_URL: ""              # e.g. redis://redis:6379/0 (shared limiter+queue+spend)
-  COPILOT_CHECKPOINT_DB: ""         # e.g. postgresql://user@pg/copilot (shared session state)
+  # Where the app writes local state (SQLite DBs, graph checkpoints, vectors).
+  # Must match persistence.mountPath below, and the image sets the same value.
+  COPILOT_STATE_DIR: /app/data
+  # Multi-instance state: set these when replicaCount > 1. Deliberately absent
+  # rather than "" — an empty string is NOT "unset": it lands in the ConfigMap as
+  # an empty env var that overrides the app's own default (an empty checkpoint DB
+  # resolves to the state DIRECTORY, which SQLite cannot open). Set them with:
+  #   --set-string config.COPILOT_REDIS_URL=redis://redis:6379/0
+  #   --set-string config.COPILOT_CHECKPOINT_DB=postgresql://user@pg/copilot
+  # The app also accepts a bare DATABASE_URL / REDIS_URL from a managed platform.
   COPILOT_RATE_LIMIT_PER_MIN: "120"
   COPILOT_MAX_ITERATIONS: "8"
   COPILOT_GLOBAL_TOKEN_CAP: "0"
@@ -56,12 +63,26 @@ probes:
   liveness: /healthz
   readiness: /readyz
 
-# Persistent volume for the default SQLite checkpointer (single-instance only).
-# Not used when COPILOT_CHECKPOINT_DB is a postgres:// URL.
+# Persistent volume for the default SQLite state (checkpointer, tenant DB,
+# vectors) — single-instance only. Not needed when COPILOT_CHECKPOINT_DB /
+# COPILOT_DATABASE_URL point at Postgres. Keep mountPath == COPILOT_STATE_DIR
+# above: a volume mounted anywhere else receives nothing.
+# Must match the uid the image runs as: the Dockerfile creates `appuser` with
+# uid 10001 and chowns /app to it. Override both together if you rebuild the
+# image with a different uid — a mismatch makes COPILOT_STATE_DIR unwritable and
+# the pod fails on startup rather than silently losing state.
+securityContext:
+  runAsUser: 10001
+  fsGroup: 10001
+
 persistence:
+  # Off by default: state lives in the container's own filesystem and is LOST on
+  # every restart/reschedule. Fine for a trial; enable it (and keep mountPath in
+  # step with config.COPILOT_STATE_DIR) before relying on incident history,
+  # graph checkpoints, or the vector store surviving a rollout.
   enabled: false
   size: 1Gi
-  mountPath: /data
+  mountPath: /app/data
 
 serviceAccount:
   create: true

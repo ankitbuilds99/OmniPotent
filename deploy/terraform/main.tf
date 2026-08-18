@@ -268,10 +268,15 @@ resource "aws_secretsmanager_secret" "app_secrets" {
 
 resource "aws_secretsmanager_secret_version" "app_secrets" {
   secret_id = aws_secretsmanager_secret.app_secrets.id
+  # Keys are consumed verbatim as env var names (ExternalSecrets / ECS `secrets`),
+  # so use the COPILOT_-prefixed names the app documents. The bare DATABASE_URL /
+  # REDIS_URL are accepted as aliases too, but alembic (migrations/env.py) reads
+  # only COPILOT_DATABASE_URL — under the bare name migrations silently target the
+  # bundled SQLite file instead of this RDS instance.
   secret_string = jsonencode({
-    DATABASE_URL   = "postgresql://copilot:${random_password.db_password.result}@${module.rds.db_instance_endpoint}/devops_copilot"
-    REDIS_URL      = "rediss://:${random_password.redis_password.result}@${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379/0"
-    REDIS_PASSWORD = random_password.redis_password.result
+    COPILOT_DATABASE_URL = "postgresql://copilot:${random_password.db_password.result}@${module.rds.db_instance_endpoint}/devops_copilot"
+    COPILOT_REDIS_URL    = "rediss://:${random_password.redis_password.result}@${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379/0"
+    REDIS_PASSWORD       = random_password.redis_password.result
   })
 }
 

@@ -16,6 +16,8 @@ from enum import Enum
 from typing import Any
 from urllib.parse import urlencode
 
+from app.config import get_settings
+
 log = logging.getLogger("omnipotent.sso.saml")
 
 
@@ -365,10 +367,36 @@ class SAMLService:
         return datetime.fromisoformat(dt_str)
 
     def _verify_signature(self, xml_str: str, config: SAMLConfig) -> bool:
-        """Verify XML signature (placeholder - requires xmlsec library in production)."""
+        """Verify the XML signature on a SAML response.
+
+        Real verification needs XML-DSig canonicalisation plus certificate-chain
+        validation (xmlsec), which is not wired up here. This used to return True
+        unconditionally, so any attacker who could POST to the ACS endpoint had a
+        forged assertion accepted as authentic — a full authentication bypass.
+        With no verifier available we now fail closed; only an IdP explicitly
+        configured as unsigned is allowed through.
+        """
         if not config.want_response_signed and not config.want_assertions_signed:
+            # The operator declared this IdP sends unsigned responses, so there is
+            # genuinely no signature to check. Nothing is being skipped silently.
             return True
-        return True
+
+        if get_settings().copilot_demo_mode:
+            log.warning(
+                "SAML signature accepted WITHOUT verification because "
+                "COPILOT_DEMO_MODE is on (simulated); never enable this where real "
+                "identities are trusted",
+                extra={"idp": config.entity_id, "simulated": True},
+            )
+            return True
+
+        log.warning(
+            "SAML signature verification is not available (no xmlsec verifier is "
+            "configured); refusing to mark the assertion as signature-valid for IdP "
+            "%s rather than trusting an unverified response",
+            config.entity_id,
+        )
+        return False
 
     def _verify_conditions(
         self,

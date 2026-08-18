@@ -24,8 +24,8 @@ spec:
       serviceAccountName: omnipotent-api
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        fsGroup: 10001
 
       initContainers:
         - name: wait-for-db
@@ -94,7 +94,11 @@ spec:
               echo "New migration state:"
               alembic current
           env:
-            - name: DATABASE_URL
+            # migrations/env.py reads COPILOT_DATABASE_URL specifically. Injected
+            # as the bare DATABASE_URL it fell through to alembic.ini's
+            # sqlite:///data/copilot.db and "migrated" a throwaway file inside the
+            # container while reporting success. Same for the two jobs below.
+            - name: COPILOT_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: omnipotent-db-credentials
@@ -145,8 +149,8 @@ spec:
       serviceAccountName: omnipotent-api
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        fsGroup: 10001
 
       initContainers:
         - name: wait-for-db
@@ -220,7 +224,7 @@ spec:
 
               echo "Pre-sync migration completed"
           env:
-            - name: DATABASE_URL
+            - name: COPILOT_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: omnipotent-db-credentials
@@ -270,8 +274,8 @@ spec:
       serviceAccountName: omnipotent-api
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        fsGroup: 10001
 
       containers:
         - name: rollback
@@ -302,7 +306,7 @@ spec:
               NEW_STATE=$(alembic current 2>/dev/null | head -1 || echo "none")
               echo "Rolled back to: $NEW_STATE"
           env:
-            - name: DATABASE_URL
+            - name: COPILOT_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: omnipotent-db-credentials

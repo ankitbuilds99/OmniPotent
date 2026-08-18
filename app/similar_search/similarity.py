@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.config import get_settings
 from app.similar_search.models import (
     IncidentRecord,
     SimilarityScore,
@@ -18,6 +19,13 @@ from app.similar_search.models import (
 )
 
 log = logging.getLogger("omnipotent.similar_search.similarity")
+
+# A dimension is reported as a *difference* only when it is near-unrelated, not
+# merely "below the match bar". Deliberately independent of the match threshold:
+# raising the bar for what counts as similar must not turn every middling
+# dimension into a stated difference — scores in between are simply not evidence
+# either way.
+_DIFFERENCE_SCORE_MAX = 0.3
 
 
 class SymptomMatcher:
@@ -446,11 +454,14 @@ class MultiDimensionalScorer:
         match_reasons = []
         difference_reasons = []
 
-        threshold = 0.7
+        # Same "similar enough" bar the search filters use, so a dimension that
+        # counts as a match here is one that would also let an incident through
+        # SIMILAR_INCIDENT_THRESHOLD. Read per call — this is a long-lived scorer.
+        threshold = get_settings().similar_incident_threshold
         for dim, score in dimension_scores.items():
             if score >= threshold:
                 match_reasons.append(dimension_details[dim])
-            elif score < 0.3:
+            elif score < _DIFFERENCE_SCORE_MAX:
                 difference_reasons.append(dimension_details[dim])
 
         high_scores = sum(1 for s in dimension_scores.values() if s >= threshold)

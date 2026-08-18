@@ -20,8 +20,12 @@ services:
       COPILOT_RATE_LIMIT_PER_MIN: ${COPILOT_RATE_LIMIT_PER_MIN:-120}
       COPILOT_MAX_SESSIONS: ${COPILOT_MAX_SESSIONS:-50}
       # --- database ---
-      DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # The app accepts the bare DATABASE_URL/REDIS_URL that managed platforms
+      # inject, but inject the COPILOT_-prefixed names here so the container's
+      # config is unambiguous. The ${DATABASE_URL:-...} on the right is the
+      # HOST-side override (docker compose interpolation), not what the app reads.
+      COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
+      COPILOT_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # --- LLM provider + keys ---
       COPILOT_PROVIDER: ${COPILOT_PROVIDER:-anthropic}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -36,13 +40,16 @@ services:
       LOGS_DATA_PATH: ./app/mcp/servers/logs_metrics/sample_data
       # --- agent + state ---
       COPILOT_MAX_ITERATIONS: ${COPILOT_MAX_ITERATIONS:-8}
-      COPILOT_CHECKPOINT_DB: /data/copilot_checkpoints.sqlite
+      # One state directory for every local store (SQLite DBs, checkpoints,
+      # vectors); it must match the volume mount below and the Dockerfile.
+      COPILOT_STATE_DIR: /app/data
+      COPILOT_CHECKPOINT_DB: /app/data/copilot_checkpoints.sqlite
       COPILOT_AUTO_INVESTIGATE: ${COPILOT_AUTO_INVESTIGATE:-true}
       # --- auth ---
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
     volumes:
-      - copilot_state:/data
+      - copilot_state:/app/data
     depends_on:
       postgres:
         condition: service_healthy

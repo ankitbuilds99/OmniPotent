@@ -40,6 +40,37 @@ from app.similar_search.recommendations import (
 
 log = logging.getLogger("omnipotent.similar_search.search")
 
+# Auto-suggest (and the "highly similar" callout) interrupts a responder who is
+# mid-incident, so it needs a stricter bar than the "related incidents" list a
+# responder chose to open. Expressed as a margin above the one configured
+# threshold rather than a second literal, so tuning SIMILAR_INCIDENT_THRESHOLD
+# moves both bars together.
+_AUTO_SUGGEST_MARGIN = 0.10
+
+# Highest usable auto-suggest bar. Scores are cosine similarities in [0, 1] and
+# the comparison is strict (>), so anything at 1.0 is unreachable by construction.
+_MAX_AUTO_SUGGEST = 0.99
+
+
+def _default_similarity_floor() -> float:
+    """Floor for search results (SIMILAR_INCIDENT_THRESHOLD), read per instance."""
+    from app.config import get_settings
+
+    return get_settings().similar_incident_threshold
+
+
+def _default_auto_suggest_threshold() -> float:
+    """The stricter, interrupt-worthy bar. Rounded to keep binary-float noise out
+    of a number that gets logged and compared.
+
+    Capped just below 1.0, not at it: the call site tests ``score > threshold``
+    and scores are cosine similarities in [0, 1], so a threshold of exactly 1.0
+    can never be exceeded. An operator raising SIMILAR_INCIDENT_THRESHOLD to 0.9+
+    to mean "only near-identical incidents" would instead have turned
+    auto-suggest off altogether, with nothing to indicate it.
+    """
+    return min(_MAX_AUTO_SUGGEST, round(_default_similarity_floor() + _AUTO_SUGGEST_MARGIN, 4))
+
 
 @dataclass
 class SearchConfig:
@@ -47,12 +78,12 @@ class SearchConfig:
 
     embedding_config: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     default_limit: int = 10
-    min_similarity_threshold: float = 0.5
+    min_similarity_threshold: float = field(default_factory=_default_similarity_floor)
     enable_patterns: bool = True
     enable_recommendations: bool = True
     enable_knowledge_graph: bool = True
     pattern_lookback_days: int = 90
-    auto_suggest_threshold: float = 0.8
+    auto_suggest_threshold: float = field(default_factory=_default_auto_suggest_threshold)
     proactive_check_interval_minutes: int = 5
 
 
@@ -116,7 +147,18 @@ class SimilarIncidentSearch:
         limit = limit or self._config.default_limit
         filters = filters or SearchFilters()
 
+        # The configured floor wins over a looser caller-supplied one — returning
+        # weakly-related incidents as "similar" is how a responder gets sent down
+        # the wrong path. But say so: silently substituting a different threshold
+        # than the caller asked for makes the result set inexplicable.
         if filters.min_similarity < self._config.min_similarity_threshold:
+            log.warning(
+                "Requested min_similarity=%.2f is below the configured floor "
+                "%.2f (SIMILAR_INCIDENT_THRESHOLD); searching at %.2f instead",
+                filters.min_similarity,
+                self._config.min_similarity_threshold,
+                self._config.min_similarity_threshold,
+            )
             filters.min_similarity = self._config.min_similarity_threshold
 
         vector_results = self._search_engine.search(
@@ -229,7 +271,11 @@ class SimilarIncidentSearch:
             suggestions.append("No similar incidents found. This may be a new issue.")
             return suggestions
 
-        high_confidence = [s for s in similar if s.similarity.overall_score > 0.8]
+        high_confidence = [
+            s
+            for s in similar
+            if s.similarity.overall_score > self._config.auto_suggest_threshold
+        ]
         if high_confidence:
             suggestions.append(
                 f"Found {len(high_confidence)} highly similar incident(s). "

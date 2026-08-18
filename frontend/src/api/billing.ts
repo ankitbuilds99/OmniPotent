@@ -18,13 +18,11 @@ import type {
   BillingCycle,
   MetricType,
 } from '../types/billing';
+import { API_BASE_URL, authHeaders } from '../config';
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? '';
-
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return TOKEN ? { ...extra, Authorization: `Bearer ${TOKEN}` } : { ...extra };
-}
+// Resolved once in ../config: a blank VITE_API_URL (what the Dockerfile sets) must
+// mean "same origin", which the old `??` fallback silently got wrong.
+const BASE_URL = API_BASE_URL;
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });

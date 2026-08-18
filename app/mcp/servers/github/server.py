@@ -23,8 +23,24 @@ import re
 from mcp.server.fastmcp import FastMCP
 
 # MCP servers run as subprocesses - use env vars directly, not app.config
-# (which may fail to load in the subprocess context)
+# (which may fail to load in the subprocess context). These are the same env
+# names Settings.http_timeout_github / http_timeout_mcp bind to, so operators
+# tune one knob.
 _GITHUB_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT_GITHUB", "15.0"))
+
+
+def _mcp_timeout() -> float:
+    """Deadline for the long-running raw artifact fetches (job-log downloads),
+    which follow a redirect to storage and are far slower than a JSON API call.
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # "owner/repo" the real-API calls target. Required only in real (token) mode.
@@ -297,7 +313,7 @@ def get_failed_job_logs(run_id: int | str, max_chars: int | str = 4000) -> dict:
         if job.get("conclusion") == "failure":
             log = httpx.get(
                 f"https://api.github.com/repos/{repo}/actions/jobs/{job['id']}/logs",
-                headers=headers, timeout=20, follow_redirects=True,
+                headers=headers, timeout=_mcp_timeout(), follow_redirects=True,
             )
             tail = log.text[-max_chars:] if log.status_code < 400 else f"(could not fetch logs: {log.status_code})"
             failed.append({"name": job.get("name"), "conclusion": "failure", "log_tail": tail})

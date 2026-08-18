@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from app.config import get_settings
 from app.runbooks.models import (
     DEFAULT_RUNBOOKS,
     ExecutionMode,
@@ -25,6 +26,23 @@ from app.runbooks.models import (
 )
 
 log = logging.getLogger("omnipotent.runbooks")
+
+
+def _refuse(step_kind: str, missing: str) -> tuple[bool, str, str]:
+    """Fail-closed (success, output, error) triple for a step with no backend.
+
+    Most step types below have nothing behind them: no shell is spawned, no
+    cluster is contacted, no message is posted. Returning success for those
+    would tell a responder that a mitigation ran when it never did — the one
+    failure mode that is worse than the step erroring out — so they refuse
+    instead unless the operator explicitly asked for a simulation.
+    """
+    log.warning("Runbook %s step not executed: %s", step_kind, missing)
+    return (
+        False,
+        "",
+        f"{missing}; refusing to report success for an action that was not performed",
+    )
 
 
 class RunbookExecutor:
@@ -134,76 +152,152 @@ class RunbookExecutor:
             return False, "", str(e)
 
     async def _exec_command(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Execute a shell command (simulated in demo mode)."""
-        log.info("Executing command: %s", step.action)
-        return True, f"Command executed: {step.action}", ""
+        """Execute a shell command.
+
+        No command runner is wired into this executor — nothing is ever spawned.
+        """
+        if not get_settings().copilot_demo_mode:
+            return _refuse(
+                "command",
+                f"no command executor is configured for runbook COMMAND steps "
+                f"(command was: {step.action!r})",
+            )
+
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING command: %s", step.action)
+        return True, f"Command executed: {step.action} (simulated)", ""
 
     async def _exec_kubernetes(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Execute a Kubernetes operation (simulated in demo mode)."""
+        """Execute a Kubernetes operation.
+
+        RunbookExecutor holds no Kubernetes client, so none of these actions
+        ever reach a cluster; the strings below are descriptions of what *would*
+        happen, not observations of what did.
+        """
         action = step.action
         params = step.params
 
-        log.info("Kubernetes action: %s params=%s", action, params)
-
+        # Work out the message first so an unknown action is still reported as
+        # such rather than being masked by the not-configured refusal.
         if action == "rollout_restart":
             deployment = params.get("deployment", "unknown")
-            return True, f"Initiated rollout restart for {deployment}", ""
+            output = f"Initiated rollout restart for {deployment}"
 
         elif action == "wait_rollout":
             deployment = params.get("deployment", "unknown")
-            return True, f"Rollout completed for {deployment}", ""
+            output = f"Rollout completed for {deployment}"
 
         elif action == "scale":
             deployment = params.get("deployment", "unknown")
             replicas = params.get("replicas", "0")
-            return True, f"Scaled {deployment} to {replicas} replicas", ""
+            output = f"Scaled {deployment} to {replicas} replicas"
 
         elif action == "get_deployment":
             deployment = params.get("deployment", "unknown")
-            return True, f"Deployment {deployment}: 3 replicas, Ready", ""
+            output = f"Deployment {deployment}: 3 replicas, Ready"
 
         elif action == "rollout_history":
             deployment = params.get("deployment", "unknown")
-            return True, f"Revision history for {deployment}: rev1, rev2, rev3 (current)", ""
+            output = f"Revision history for {deployment}: rev1, rev2, rev3 (current)"
 
         elif action == "rollout_undo":
             deployment = params.get("deployment", "unknown")
-            return True, f"Rolled back {deployment} to previous revision", ""
+            output = f"Rolled back {deployment} to previous revision"
 
         elif action == "cordon_node":
             node = params.get("node", "unknown")
-            return True, f"Node {node} cordoned", ""
+            output = f"Node {node} cordoned"
 
         elif action == "drain_node":
             node = params.get("node", "unknown")
-            return True, f"Node {node} drained", ""
+            output = f"Node {node} drained"
 
-        return False, "", f"Unknown Kubernetes action: {action}"
+        else:
+            return False, "", f"Unknown Kubernetes action: {action}"
+
+        if not get_settings().copilot_demo_mode:
+            return _refuse(
+                f"kubernetes/{action}",
+                "no Kubernetes client is wired into the runbook executor "
+                "(set KUBE_CONFIG_PATH and inject a client)",
+            )
+
+        log.warning(
+            "COPILOT_DEMO_MODE=true - SIMULATING Kubernetes action: %s params=%s",
+            action, params,
+        )
+        return True, f"{output} (simulated)", ""
 
     async def _exec_slack(
         self,
         step: RunbookStep,
         context: dict[str, Any],
     ) -> tuple[bool, str, str]:
-        """Post a Slack message (simulated in demo mode)."""
+        """Post a Slack message.
+
+        No Slack client is wired into this executor, so nothing is posted. A
+        step that claims it notified the channel when it did not is how an
+        incident goes unannounced.
+        """
         message = step.params.get("message", "")
         message = self._substitute_variables(message, context)
-        log.info("Slack message: %s", message)
-        return True, f"Posted to Slack: {message}", ""
+
+        if not get_settings().copilot_demo_mode:
+            return _refuse(
+                "slack",
+                "no Slack client is wired into the runbook executor "
+                "(set SLACK_BOT_TOKEN and inject a client)",
+            )
+
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING Slack message: %s", message)
+        return True, f"Posted to Slack: {message} (simulated)", ""
 
     async def _exec_wait(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Wait for a specified duration."""
+        """Wait for a specified duration.
+
+        This is the one step type that really does what it says, so it runs in
+        both modes — but the wait is only shortened (and relabelled) for demos;
+        a real run has to actually elapse or the steps after it are checking a
+        system that has not settled yet.
+        """
         seconds = int(step.params.get("seconds", 10))
+
+        if get_settings().copilot_demo_mode:
+            capped = min(seconds, 5)
+            log.warning(
+                "COPILOT_DEMO_MODE=true - SIMULATING %ds wait as %ds", seconds, capped
+            )
+            await asyncio.sleep(capped)
+            return True, f"Waited {seconds} seconds (simulated: slept {capped}s)", ""
+
+        # Nothing else enforces step.timeout_seconds, so refuse a wait that
+        # would outlive its own step budget instead of blocking the execution.
+        if seconds > step.timeout_seconds:
+            return False, "", (
+                f"wait of {seconds}s exceeds the step timeout of "
+                f"{step.timeout_seconds}s"
+            )
+
         log.info("Waiting %d seconds", seconds)
-        await asyncio.sleep(min(seconds, 5))
+        await asyncio.sleep(seconds)
         return True, f"Waited {seconds} seconds", ""
 
     async def _exec_http(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Make an HTTP request (simulated in demo mode)."""
+        """Make an HTTP request.
+
+        No request is issued here; "200 OK" below is a literal, not a response.
+        """
         url = step.params.get("url", "")
         method = step.params.get("method", "GET")
-        log.info("HTTP %s %s", method, url)
-        return True, f"HTTP {method} {url}: 200 OK", ""
+
+        if not get_settings().copilot_demo_mode:
+            return _refuse(
+                "http",
+                f"no HTTP client is wired into the runbook executor "
+                f"(request was: {method} {url})",
+            )
+
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING HTTP %s %s", method, url)
+        return True, f"HTTP {method} {url}: 200 OK (simulated)", ""
 
     async def execute(
         self,

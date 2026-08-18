@@ -11,7 +11,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from collections import defaultdict
 
+from app import model_catalog
+
 log = logging.getLogger("omnipotent.model_router.cost")
+
+# Models we've already reported as unpriced, so a hot request path can't flood the
+# log with the same line.
+_UNPRICED_WARNED: set[str] = set()
 
 
 @dataclass
@@ -62,6 +68,60 @@ class UsageRecord:
     request_type: str = "inference"
 
 
+# The models this optimizer prices out of the box. Only the IDs live here — every
+# rate comes from app.model_catalog, because this table used to carry gpt-4o at its
+# retired $5/$15 launch price and Haiku 3.5 at $1/$5 instead of $0.80/$4. The
+# `-latest` spellings are kept because callers and the /model-router API already
+# send those strings; the catalog resolves them to the canonical entry.
+_DEFAULT_COST_MODEL_IDS = (
+    "claude-3-5-sonnet-latest",
+    "claude-3-5-haiku-latest",
+    "claude-3-opus-latest",
+    "gpt-4o",
+    "gpt-4o-mini",
+)
+
+
+def _catalog_costs() -> dict[str, ModelCost]:
+    """Build the per-1k default cost table from the per-1M catalog.
+
+    The public shape (per-1k floats on ModelCost) is unchanged — only where the
+    numbers come from. A model the catalog has no verified price for is left out
+    entirely rather than given a placeholder rate, so it can never contribute a
+    made-up figure to a budget check.
+    """
+    costs: dict[str, ModelCost] = {}
+    for model_id in _DEFAULT_COST_MODEL_IDS:
+        info = model_catalog.resolve(model_id)
+        if info is None or not info.has_pricing:
+            log.warning(
+                "model %r has no verified price in the model catalog; "
+                "omitting it from the default cost table",
+                model_id,
+            )
+            continue
+        costs[model_id] = ModelCost(
+            model_id=model_id,
+            input_cost_per_1k=info.input_per_1k,  # type: ignore[arg-type]
+            output_cost_per_1k=info.output_per_1k,  # type: ignore[arg-type]
+            cached_input_cost_per_1k=info.cached_input_per_1k or 0.0,
+        )
+    return costs
+
+
+def _warn_unpriced(model_id: str, action: str) -> None:
+    """Say once, loudly, that we are reporting $0 because we don't know the price."""
+    if model_id in _UNPRICED_WARNED:
+        return
+    _UNPRICED_WARNED.add(model_id)
+    log.warning(
+        "no cost entry for model %r; %s reports $0.00 for it. Add the model to "
+        "app/model_catalog.py or register it with add_model_cost().",
+        model_id,
+        action,
+    )
+
+
 class CostOptimizer:
     """Optimizes model selection for cost efficiency.
 
@@ -72,37 +132,8 @@ class CostOptimizer:
     - Batch optimization recommendations
     """
 
-    # Current model costs (as of implementation date)
-    DEFAULT_COSTS = {
-        "claude-3-5-sonnet-latest": ModelCost(
-            model_id="claude-3-5-sonnet-latest",
-            input_cost_per_1k=0.003,
-            output_cost_per_1k=0.015,
-            cached_input_cost_per_1k=0.0003,
-        ),
-        "claude-3-5-haiku-latest": ModelCost(
-            model_id="claude-3-5-haiku-latest",
-            input_cost_per_1k=0.001,
-            output_cost_per_1k=0.005,
-            cached_input_cost_per_1k=0.0001,
-        ),
-        "claude-3-opus-latest": ModelCost(
-            model_id="claude-3-opus-latest",
-            input_cost_per_1k=0.015,
-            output_cost_per_1k=0.075,
-            cached_input_cost_per_1k=0.0015,
-        ),
-        "gpt-4o": ModelCost(
-            model_id="gpt-4o",
-            input_cost_per_1k=0.005,
-            output_cost_per_1k=0.015,
-        ),
-        "gpt-4o-mini": ModelCost(
-            model_id="gpt-4o-mini",
-            input_cost_per_1k=0.00015,
-            output_cost_per_1k=0.0006,
-        ),
-    }
+    # Rates sourced from app.model_catalog — see _catalog_costs().
+    DEFAULT_COSTS = _catalog_costs()
 
     def __init__(
         self,
@@ -149,6 +180,7 @@ class CostOptimizer:
         """
         cost_info = self.model_costs.get(model_id)
         if not cost_info:
+            _warn_unpriced(model_id, "estimate_cost()")
             return CostEstimate(
                 model_id=model_id,
                 estimated_input_tokens=input_tokens,
@@ -196,6 +228,7 @@ class CostOptimizer:
                 + (output_tokens / 1000) * cost_info.output_cost_per_1k
             )
         else:
+            _warn_unpriced(model_id, "record_usage()")
             cost = 0.0
 
         record = UsageRecord(

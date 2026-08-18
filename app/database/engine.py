@@ -46,21 +46,17 @@ class DatabaseHealth:
 
 def _get_database_url() -> str:
     """Get async database URL from settings."""
-    from pathlib import Path
-
     s = get_settings()
     url = s.copilot_database_url
 
     if not url:
-        db_dir = Path("data")
-        if not db_dir.exists():
-            try:
-                db_dir.mkdir(parents=True, exist_ok=True)
-            except (PermissionError, OSError):
-                db_dir = Path("/tmp")
-                log.warning("Cannot create data/ directory, using /tmp for SQLite")
-
-        db_path = db_dir / "copilot.db"
+        # No URL configured -> SQLite inside the one state directory every
+        # subsystem shares (COPILOT_STATE_DIR), not a CWD-relative "data/" that
+        # moves with however the process was launched. state_path() raises if the
+        # directory can't be created: an unwritable state dir is a deployment
+        # error, and silently relocating the database to /tmp used to discard
+        # every row on the next restart with nothing but a log line to show.
+        db_path = s.state_path("copilot.db")
         url = f"sqlite+aiosqlite:///{db_path}"
 
     if url.startswith("postgresql://"):

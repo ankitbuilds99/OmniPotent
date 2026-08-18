@@ -18,7 +18,10 @@ helm install copilot ./deploy/helm/copilot \
 - **Service**, **ServiceAccount**, **ConfigMap** (non-secret env), and a **Secret**
   (use `secret.existingSecret` to source from your secrets manager / External Secrets
   Operator instead of inlining values).
-- Optional **PVC** for the SQLite checkpointer (single-instance only).
+- Optional **PVC** for the local SQLite state (single-instance only). It mounts at
+  `persistence.mountPath`, which must stay equal to `config.COPILOT_STATE_DIR`
+  (`/app/data`) — everything the app writes locally (checkpoints, tenant DB,
+  vector index) goes there, so a volume mounted anywhere else receives nothing.
 
 ## Scaling to >1 replica
 The default SQLite checkpointer + per-process limiter/queue are single-instance. For

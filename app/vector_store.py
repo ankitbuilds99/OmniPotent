@@ -75,7 +75,7 @@ def _get_vector_config() -> tuple[VectorStoreType, EmbeddingModelType, Path]:
 
     Returns (store_type, embedding_model, persist_directory).
     """
-    from app.config import get_settings, ROOT
+    from app.config import get_settings
 
     settings = get_settings()
 
@@ -87,11 +87,15 @@ def _get_vector_config() -> tuple[VectorStoreType, EmbeddingModelType, Path]:
     if not embedding_model:
         embedding_model = "text-embedding-3-small"
 
+    # Everything this process persists locally lives under one directory
+    # (COPILOT_STATE_DIR), so the vectors sit next to the checkpoint/tenant DBs
+    # and a single mounted volume keeps them all. A bare persist-dir name lands
+    # there; an explicit path ("./vectors", "/mnt/vectors") is honoured as
+    # written. Resolution only — the backends mkdir it when they open it.
     persist_dir = getattr(settings, "copilot_vector_persist_dir", "").strip()
-    if persist_dir:
-        persist_path = Path(persist_dir).expanduser().resolve()
-    else:
-        persist_path = ROOT / ".vector_store"
+    persist_path = (
+        settings.state_path(persist_dir) if persist_dir else settings.state_dir / "vector_store"
+    )
 
     return store_type, embedding_model, persist_path  # type: ignore
 

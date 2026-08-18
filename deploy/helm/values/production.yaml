@@ -57,12 +57,18 @@ app:
     OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
     OTEL_SERVICE_NAME: omnipotent-api-production
     SENTRY_ENVIRONMENT: production
+    # Every local store (SQLite, checkpoints, vectors) writes here; must be a
+    # writable mount, since the container root filesystem is read-only.
+    COPILOT_STATE_DIR: /app/data
 
+  # Keys copied out of the omnipotent-secrets Secret as env vars — they must
+  # exist under these names in it. COPILOT_-prefixed: the bare DATABASE_URL /
+  # REDIS_URL work for the app, but alembic reads only COPILOT_DATABASE_URL.
   secrets:
     - name: omnipotent-secrets
       keys:
-        - DATABASE_URL
-        - REDIS_URL
+        - COPILOT_DATABASE_URL
+        - COPILOT_REDIS_URL
         - JWT_SECRET
         - OPENAI_API_KEY
         - SENTRY_DSN
@@ -387,9 +393,15 @@ extraVolumes:
     emptyDir: {}
   - name: cache
     emptyDir: {}
+  # COPILOT_STATE_DIR (see app.env above). Per-pod scratch: durable state belongs
+  # in Postgres/Redis via COPILOT_DATABASE_URL / COPILOT_REDIS_URL.
+  - name: data
+    emptyDir: {}
 
 extraVolumeMounts:
   - name: tmp
     mountPath: /tmp
   - name: cache
     mountPath: /app/.cache
+  - name: data
+    mountPath: /app/data

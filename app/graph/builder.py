@@ -561,19 +561,6 @@ def _get_latest_task(state: AgentState) -> str:
     return ""
 
 
-def _ensure_sqlite_path(db_path: str) -> str:
-    """Ensure the directory for the SQLite database exists."""
-    from pathlib import Path
-
-    path = Path(db_path)
-    if path.parent != Path(".") and not path.parent.exists():
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        except (PermissionError, OSError):
-            return str(Path("/tmp") / path.name)
-    return db_path
-
-
 def make_checkpointer():
     """Return an async checkpointer context manager.
 
@@ -582,11 +569,23 @@ def make_checkpointer():
     deployments, since graph state is already keyed by thread_id. Postgres needs
     the optional `langgraph-checkpoint-postgres` package.
     """
-    db = get_settings().copilot_checkpoint_db
+    settings = get_settings()
+    # An empty override (a chart that renders COPILOT_CHECKPOINT_DB: "") is not
+    # "unset" — it would resolve to the state directory itself, which SQLite
+    # cannot open. Treat it as the default filename.
+    db = settings.copilot_checkpoint_db.strip() or "copilot_checkpoints.sqlite"
     if db.startswith(("postgres://", "postgresql://")):
         return _postgres_checkpointer(db)
-    db = _ensure_sqlite_path(db)
-    return AsyncSqliteSaver.from_conn_string(db)
+    if db == ":memory:":  # SQLite's in-memory DB — not a filesystem path
+        return AsyncSqliteSaver.from_conn_string(db)
+    # Bare names land in the shared state directory (COPILOT_STATE_DIR) so the
+    # checkpoint DB lives with the rest of this process's state instead of
+    # wherever the server happened to be started from; an explicitly written
+    # path ("./copilot_checkpoints.sqlite", "/var/lib/...") is honoured as-is.
+    # state_path() raises when the directory can't be created rather than
+    # quietly relocating resumable graph state to /tmp, where the next restart
+    # would lose every in-flight human-in-the-loop investigation.
+    return AsyncSqliteSaver.from_conn_string(str(settings.state_path(db)))
 
 
 @asynccontextmanager

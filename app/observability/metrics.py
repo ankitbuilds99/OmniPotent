@@ -13,13 +13,22 @@ Provides comprehensive metrics for:
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 
+from app import model_catalog
+
+log = logging.getLogger("omnipotent.observability.metrics")
+
 LATENCY_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
 TOKEN_BUCKETS = (100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000)
+
+# Models we've already complained about, so an unpriced model on a hot call path
+# can't flood the log. Bounded by the number of distinct model ids seen.
+_UNPRICED_WARNED: set[str] = set()
 
 
 class MetricType(Enum):
@@ -439,8 +448,12 @@ def record_llm_call(
             "copilot_llm_errors_total", labels={**labels, "error": error}
         )
 
+    # None = we have no verified price for this model. Recording a guess would
+    # quietly corrupt every cost dashboard built on this counter, so skip it; the
+    # token counters above still tell you the call happened and how big it was.
     cost = _estimate_llm_cost(provider, model, input_tokens, output_tokens)
-    _registry.counter_inc("copilot_llm_cost_dollars", cost, labels=labels)
+    if cost is not None:
+        _registry.counter_inc("copilot_llm_cost_dollars", cost, labels=labels)
 
 
 def _estimate_llm_cost(
@@ -448,27 +461,26 @@ def _estimate_llm_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
-) -> float:
-    """Estimate LLM cost in USD."""
-    pricing = {
-        ("anthropic", "claude-sonnet-4"): (3.0, 15.0),
-        ("anthropic", "claude-opus-4"): (15.0, 75.0),
-        ("anthropic", "claude-haiku-4"): (0.25, 1.25),
-        ("openai", "gpt-4o"): (2.5, 10.0),
-        ("openai", "gpt-4o-mini"): (0.15, 0.60),
-        ("gemini", "gemini-2.0-flash"): (0.075, 0.30),
-    }
+) -> float | None:
+    """Estimate LLM cost in USD, or None when the model has no verified price.
 
-    input_price, output_price = 1.0, 3.0
-    for (p, m), (ip, op) in pricing.items():
-        if p == provider and m in model:
-            input_price, output_price = ip, op
-            break
-
-    input_cost = (input_tokens / 1_000_000) * input_price
-    output_cost = (output_tokens / 1_000_000) * output_price
-
-    return input_cost + output_cost
+    Delegates to the model catalog. The table this replaced matched with
+    ``m in model``, so ``claude-opus-4-8`` hit the ``claude-opus-4`` row and
+    over-reported cost threefold, and anything unmatched fell back to an invented
+    (1.0, 3.0) rate. ``provider`` is kept in the signature for the call site's
+    labels but is no longer part of the lookup — the catalog owns the mapping from
+    model id to provider, so the two can't disagree.
+    """
+    cost = model_catalog.estimate_cost_usd(model, input_tokens, output_tokens)
+    if cost is None and model not in _UNPRICED_WARNED:
+        _UNPRICED_WARNED.add(model)
+        log.warning(
+            "no verified price for model %r (provider %r); "
+            "cost metric skipped for this model. Add it to app/model_catalog.py.",
+            model,
+            provider,
+        )
+    return cost
 
 
 def record_mcp_tool_call(
