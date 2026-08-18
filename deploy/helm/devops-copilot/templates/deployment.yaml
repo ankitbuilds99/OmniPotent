@@ -45,23 +45,32 @@ spec:
             - secretRef:
                 name: {{ include "omnipotent.fullname" . }}-secrets
           env:
+            # State the app writes locally (SQLite/checkpoints/vectors) — on the
+            # `data` volume mounted below, never the read-only image filesystem.
+            - name: COPILOT_STATE_DIR
+              value: /app/data
             {{- if .Values.redis.enabled }}
-            - name: REDIS_URL
-              value: "redis://:$(REDIS_PASSWORD)@{{ include "omnipotent.fullname" . }}-redis-master:6379/0"
+            # The password entry comes FIRST: kubelet only expands $(VAR) against
+            # env vars declared earlier in this list, so the reverse order left a
+            # literal "$(REDIS_PASSWORD)" in the URL.
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "omnipotent.fullname" . }}-redis
                   key: redis-password
+            # COPILOT_-prefixed name: app/config.py also accepts the bare
+            # REDIS_URL, but be explicit about what this chart configures.
+            - name: COPILOT_REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@{{ include "omnipotent.fullname" . }}-redis-master:6379/0"
             {{- end }}
             {{- if .Values.postgresql.enabled }}
-            - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "omnipotent.fullname" . }}-postgresql
                   key: password
+            - name: COPILOT_DATABASE_URL
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
             {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
@@ -74,10 +83,17 @@ spec:
               mountPath: /tmp
             - name: cache
               mountPath: /app/.cache
+            - name: data
+              mountPath: /app/data
       volumes:
         - name: tmp
           emptyDir: {}
         - name: cache
+          emptyDir: {}
+        # COPILOT_STATE_DIR. readOnlyRootFilesystem is on, so the app needs a
+        # writable mount here; it is per-pod scratch, durable state goes to
+        # Postgres/Redis above.
+        - name: data
           emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -1,14 +1,13 @@
 // Thin, typed client for the OmniPotent backend.
 
+import { API_BASE_URL, API_TOKEN, authHeaders, wsUrl } from "./config";
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+// Resolved once in ./config so every module agrees on the base URL and on what
+// "unset" means (blank env vars included — `??` used to let "" through).
+const BASE_URL = API_BASE_URL;
 // Optional bearer token (set VITE_API_TOKEN when the backend has COPILOT_API_TOKEN).
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
-
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return TOKEN ? { ...extra, Authorization: `Bearer ${TOKEN}` } : { ...extra };
-}
+const TOKEN = API_TOKEN;
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -142,6 +141,37 @@ export function getMe(): Promise<Me> {
   return get<Me>("/me");
 }
 
+/** One entry of the server-side model catalog (`app/model_catalog.py`). */
+export interface CatalogModel {
+  id: string;
+  provider: string;
+  display_name: string;
+  max_context: number | null;
+  max_output: number | null;
+  /** USD per 1M tokens. `null` means the price is unverified — show nothing, never a guess. */
+  input_per_1m: number | null;
+  output_per_1m: number | null;
+  cached_input_per_1m: number | null;
+  has_pricing: boolean;
+  capabilities: string[];
+  supports_thinking: boolean;
+  supports_temperature: boolean;
+  status: "current" | "legacy" | "retired";
+}
+
+/** Payload of `GET /api/models`. */
+export interface ModelCatalog {
+  pricing_last_verified: string;
+  pricing_unit: string;
+  defaults: Record<string, { main: string; fast: string }>;
+  models: CatalogModel[];
+}
+
+/** The models the backend will actually accept, with their real prices. */
+export function getModelCatalog(): Promise<ModelCatalog> {
+  return get<ModelCatalog>("/api/models");
+}
+
 /** Switch LLM provider/model/key at runtime. */
 export function configureModel(
   provider: string,
@@ -238,9 +268,7 @@ export async function health(): Promise<boolean> {
 
 /** Get the WebSocket base URL (converts http(s) to ws(s)). */
 export function getWebSocketUrl(): string {
-  const url = new URL(BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString().replace(/\/$/, "");
+  return wsUrl();
 }
 
 /** Get the auth token for WebSocket connections. */

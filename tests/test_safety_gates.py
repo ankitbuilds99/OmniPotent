@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from uuid import uuid4
 
+from app import config as cfg
 from app.safety_gates import (
     ConfidenceGate,
     PolicyGate,
@@ -12,6 +13,16 @@ from app.safety_gates import (
     SafetyGateOrchestrator,
     SafetyDecision,
 )
+
+
+@pytest.fixture
+def demo_mode(monkeypatch):
+    """Opt into the stub executors' simulated pass, which is off by default."""
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+    cfg.get_settings.cache_clear()
+    yield
+    monkeypatch.delenv("COPILOT_DEMO_MODE", raising=False)
+    cfg.get_settings.cache_clear()
 
 
 class TestConfidenceGate:
@@ -209,8 +220,14 @@ class TestSandboxGate:
         assert "skipped" in result.reasoning.lower()
 
     @pytest.mark.asyncio
-    async def test_runs_tests_in_sandbox(self):
-        """Should run tests and report results."""
+    async def test_fails_closed_without_a_real_executor(self):
+        """The stub executor verifies nothing, so the gate must not pass.
+
+        This is the last gate before an autonomous change reaches production.
+        The stub sleeps and returns a green result without applying the change
+        or running a single test; treating that as a pass fails *open*, which is
+        the one direction a safety gate must never fail.
+        """
         gate = SandboxGate()
 
         result = await gate.evaluate(
@@ -218,7 +235,19 @@ class TestSandboxGate:
             action_details={},
         )
 
-        # With mock executor, tests should pass
+        assert result.passed is False
+        assert "not implemented" in result.reasoning.lower()
+
+    @pytest.mark.asyncio
+    async def test_runs_tests_in_sandbox_when_simulation_is_requested(self, demo_mode):
+        """COPILOT_DEMO_MODE=true restores the simulated pass for walkthroughs."""
+        gate = SandboxGate()
+
+        result = await gate.evaluate(
+            action_type="deploy_fix",
+            action_details={},
+        )
+
         assert result.passed is True
         assert "Tests:" in result.reasoning
 
@@ -240,8 +269,12 @@ class TestSafetyGateOrchestrator:
     """Tests for the full 3-gate orchestrator."""
 
     @pytest.mark.asyncio
-    async def test_auto_approves_when_all_pass(self):
-        """Should auto-approve when all gates pass."""
+    async def test_auto_approves_when_all_pass(self, demo_mode):
+        """Should auto-approve when all gates pass.
+
+        Needs demo_mode: with no real sandbox executor injected, layer 3 now
+        fails closed, so "all gates pass" is only reachable under simulation.
+        """
         orchestrator = SafetyGateOrchestrator()
 
         result = await orchestrator.evaluate(
@@ -266,6 +299,40 @@ class TestSafetyGateOrchestrator:
         assert result.final_decision == SafetyDecision.AUTO_APPROVED
         assert result.all_gates_passed is True
         assert result.requires_human_approval is False
+
+    @pytest.mark.asyncio
+    async def test_does_not_auto_approve_when_the_sandbox_cannot_verify(self):
+        """Same high-confidence input, no simulation: a human must sign off.
+
+        Identical to the case above except that COPILOT_DEMO_MODE is off, so the
+        sandbox gate reports that it verified nothing. High confidence and a
+        clean policy check must not be enough to send an unverified change out
+        on their own.
+        """
+        orchestrator = SafetyGateOrchestrator()
+
+        result = await orchestrator.evaluate(
+            incident_id=uuid4(),
+            organization_id=uuid4(),
+            action_type="scale_up",
+            action_details={},
+            investigation_result={
+                "confidence_score": 0.9,
+                "specialist_results": {
+                    "telemetry": {"confidence_score": 0.9},
+                    "code": {"confidence_score": 0.9},
+                    "dependencies": {"confidence_score": 0.9},
+                    "historical": {"confidence_score": 0.9},
+                },
+                "root_cause_hypothesis": "High traffic load",
+            },
+            target_service="api",
+            target_environment="staging",
+        )
+
+        assert result.final_decision != SafetyDecision.AUTO_APPROVED
+        assert result.all_gates_passed is False
+        assert result.requires_human_approval is True
 
     @pytest.mark.asyncio
     async def test_escalates_on_low_confidence(self):

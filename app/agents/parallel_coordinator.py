@@ -21,7 +21,9 @@ from uuid import UUID, uuid4
 
 import anthropic
 
+from app import model_catalog
 from app.agents.protocol import SharedContext
+from app.config import get_settings
 
 log = logging.getLogger("omnipotent.agents.parallel_coordinator")
 
@@ -412,19 +414,44 @@ class ParallelInvestigationCoordinator:
         SpecialistType.COLLABORATION: COLLABORATION_PROMPT,
     }
 
+    # Pinned to a dated snapshot deliberately: specialist prompts here expect a
+    # stable model, and a floating alias would silently change their output. It is
+    # validated against the catalog at import so a retired pin can't go unnoticed.
+    DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
     def __init__(
         self,
         client: anthropic.AsyncAnthropic | None = None,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "",
     ):
         """Initialize the coordinator.
 
         Args:
             client: Anthropic async client (created if not provided)
-            model: Default model to use for agents
+            model: Model for the specialist agents; falls back to COPILOT_MODEL,
+                then to the pinned DEFAULT_MODEL.
         """
         self._client = client
-        self._model = model
+        self._model = model or get_settings().copilot_model or self.DEFAULT_MODEL
+        info = model_catalog.resolve(self._model)
+        if info is None:
+            log.warning(
+                "model %r is not in the model catalog — check for a typo", self._model
+            )
+        elif info.status == "retired":
+            log.warning(
+                "model %r is retired and will start failing; update DEFAULT_MODEL "
+                "or COPILOT_MODEL", self._model,
+            )
+
+    def _max_tokens(self) -> int:
+        """Output-token ceiling for one specialist call.
+
+        Read at call time from LLM_MAX_TOKENS. Previously this was hardcoded to
+        4096 in two places, so raising the setting had no effect here and the two
+        call sites could drift apart.
+        """
+        return get_settings().llm_max_tokens
 
     @property
     def client(self) -> anthropic.AsyncAnthropic:
@@ -566,7 +593,7 @@ class ParallelInvestigationCoordinator:
         try:
             response = await self.client.messages.create(
                 model=model,
-                max_tokens=4096,
+                max_tokens=self._max_tokens(),
                 system="You are an expert incident investigator. Respond with valid JSON only.",
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -745,7 +772,7 @@ class ParallelInvestigationCoordinator:
         try:
             response = await self.client.messages.create(
                 model=model,
-                max_tokens=4096,
+                max_tokens=self._max_tokens(),
                 system="You are an expert incident coordinator. Synthesize findings decisively. Respond with valid JSON.",
                 messages=[{"role": "user", "content": prompt}],
             )

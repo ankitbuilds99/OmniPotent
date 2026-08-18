@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
+import { API_BASE_URL } from "../config";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+// Same resolution as every other caller: `|| ""` here vs `??` elsewhere meant two
+// different behaviours for one concept.
+const API_BASE = API_BASE_URL;
 
 type Tab = "overview" | "alerts" | "runbooks" | "metrics";
 

@@ -7,7 +7,35 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import model_catalog
+
 log = logging.getLogger("omnipotent.eval.metrics")
+
+# Models we've already reported as unpriced; an eval run scores hundreds of
+# scenarios with the same model, so warn once per model rather than per scenario.
+_UNPRICED_WARNED: set[str] = set()
+
+
+def _catalog_pricing(*model_ids: str) -> dict[str, dict[str, float]]:
+    """Per-1M input/output rates for the eval models, read from the catalog.
+
+    The shape is unchanged (``{model: {"input": ..., "output": ...}}``, USD per 1M)
+    — only the source is. Hand-maintained, this table had gpt-4o at its retired
+    $5/$15 launch price. Unpriced models are omitted so they can't contribute a
+    placeholder rate to a cost regression check.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for model_id in model_ids:
+        rates = model_catalog.price_per_1m(model_id)
+        if rates is None:
+            log.warning(
+                "model %r has no verified price in the model catalog; "
+                "omitting it from MODEL_PRICING",
+                model_id,
+            )
+            continue
+        out[model_id] = {"input": rates[0], "output": rates[1]}
+    return out
 
 
 @dataclass
@@ -91,12 +119,24 @@ class CostMetrics:
     input_tokens: int = 0
     output_tokens: int = 0
 
-    total_cost_usd: float = 0.0
-    mean_cost_per_investigation_usd: float = 0.0
+    # None when no scenario in the run had a verified price. A total of 0.0 would
+    # be read as "this run was free" by the cost regression check.
+    total_cost_usd: float | None = 0.0
+    mean_cost_per_investigation_usd: float | None = 0.0
+
+    # Scenarios whose model had no verified price, so they contributed nothing to
+    # the totals above. Non-zero means the totals cover only part of the run and
+    # cost cannot be compared against a baseline.
+    unpriced_scenarios: int = 0
 
     # By model
     tokens_by_model: dict[str, int] = field(default_factory=dict)
     cost_by_model: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def cost_is_complete(self) -> bool:
+        """True when every scenario in the run was priced."""
+        return self.unpriced_scenarios == 0 and self.total_cost_usd is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +145,8 @@ class CostMetrics:
             "output_tokens": self.output_tokens,
             "total_cost_usd": self.total_cost_usd,
             "mean_cost_per_investigation_usd": self.mean_cost_per_investigation_usd,
+            "unpriced_scenarios": self.unpriced_scenarios,
+            "cost_is_complete": self.cost_is_complete,
             "tokens_by_model": self.tokens_by_model,
             "cost_by_model": self.cost_by_model,
         }
@@ -124,20 +166,21 @@ class EvalResultData:
     services_expected: list[str]
     duration_ms: float
     tokens_used: int
-    cost_usd: float
+    # None when the model had no verified price — see estimate_cost().
+    cost_usd: float | None
 
 
 class MetricsCalculator:
     """Calculates evaluation metrics from results."""
 
-    # Model pricing per 1M tokens
-    MODEL_PRICING = {
-        "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-        "claude-3-5-sonnet-20241022": {"input": 3.0, "output": 15.0},
-        "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
-        "gpt-4-turbo": {"input": 10.0, "output": 30.0},
-        "gpt-4o": {"input": 5.0, "output": 15.0},
-    }
+    # Model pricing per 1M tokens, sourced from app.model_catalog.
+    MODEL_PRICING = _catalog_pricing(
+        "claude-sonnet-4-20250514",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-haiku-20240307",
+        "gpt-4-turbo",
+        "gpt-4o",
+    )
 
     def __init__(self, slo_threshold_ms: float = 60000.0):
         """Initialize the calculator.
@@ -236,16 +279,24 @@ class MetricsCalculator:
             return CostMetrics()
 
         total_tokens = sum(r.tokens_used for r in results)
-        total_cost = sum(r.cost_usd for r in results)
+
+        # Scenarios whose model had no verified price carry cost_usd=None. Summing
+        # them as zero would understate the run and read as a cost improvement, so
+        # they are counted separately and the totals cover only the priced ones.
+        priced = [r.cost_usd for r in results if r.cost_usd is not None]
+        unpriced = len(results) - len(priced)
+        total_cost = sum(priced) if priced else None
+        mean_cost = (total_cost / len(priced)) if priced else None
 
         return CostMetrics(
             total_tokens=total_tokens,
             input_tokens=int(total_tokens * 0.7),  # Estimate
             output_tokens=int(total_tokens * 0.3),
             total_cost_usd=total_cost,
-            mean_cost_per_investigation_usd=total_cost / len(results),
+            mean_cost_per_investigation_usd=mean_cost,
+            unpriced_scenarios=unpriced,
             tokens_by_model={model: total_tokens},
-            cost_by_model={model: total_cost},
+            cost_by_model={model: total_cost} if total_cost is not None else {},
         )
 
     def _calculate_service_metrics(self, results: list[EvalResultData]) -> dict[str, float]:
@@ -338,14 +389,28 @@ class MetricsCalculator:
         tokens: int,
         model: str = "claude-sonnet-4-20250514",
         input_ratio: float = 0.7,
-    ) -> float:
-        """Estimate cost for a given token count."""
-        pricing = self.MODEL_PRICING.get(model, {"input": 3.0, "output": 15.0})
+    ) -> float | None:
+        """Estimate cost for a given token count, or None if the price is unknown.
+
+        Prices any model the catalog knows, not just the five in MODEL_PRICING.
+
+        None rather than 0.0 for an unpriced model, because this feeds the cost
+        regression check in eval/reporter.py: a zero is indistinguishable from
+        "this run got cheaper", so it would make the gate pass silently — more
+        permissive than the invented Sonnet rate it replaced, and in the one
+        direction a gate must not fail. Callers propagate the None so the report
+        says "unknown" out loud.
+        """
         input_tokens = int(tokens * input_ratio)
         output_tokens = tokens - input_tokens
 
-        cost = (
-            input_tokens * pricing["input"] / 1_000_000 +
-            output_tokens * pricing["output"] / 1_000_000
-        )
+        cost = model_catalog.estimate_cost_usd(model, input_tokens, output_tokens)
+        if cost is None and model not in _UNPRICED_WARNED:
+            _UNPRICED_WARNED.add(model)
+            log.warning(
+                "no verified price for model %r; eval cost will be reported as "
+                "unknown and the cost regression check cannot run. "
+                "Add it to app/model_catalog.py.",
+                model,
+            )
         return cost

@@ -17,7 +17,51 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
+from app import model_catalog
+
 log = logging.getLogger("omnipotent.cost.token_optimizer")
+
+# Models already reported as unpriced; token accounting is per-request, so warn
+# once per model rather than once per call.
+_UNPRICED_WARNED: set[str] = set()
+
+# The models this optimizer can select between. IDs only — every rate comes from
+# app.model_catalog, so this table can no longer drift from the five others that
+# used to price the same models differently.
+_PRICED_MODEL_IDS = (
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
+    "claude-3-opus-20240229",
+    "claude-3-sonnet-20240229",
+    "claude-3-haiku-20240307",
+    "claude-3-5-sonnet-20240620",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514",
+)
+
+
+def _catalog_pricing() -> dict[str, dict[str, float]]:
+    """Per-1M input/output rates for the selectable models, from the catalog.
+
+    Shape is unchanged (``{model: {"input": ..., "output": ...}}``, USD per 1M) so
+    select_model()'s cheapest-model scan keeps working. Unpriced models are left
+    out: select_model() sorts on these numbers, so a placeholder rate would make an
+    unpriced model look like the cheapest option and win.
+    """
+    pricing: dict[str, dict[str, float]] = {}
+    for model_id in _PRICED_MODEL_IDS:
+        rates = model_catalog.price_per_1m(model_id)
+        if rates is None:
+            log.warning(
+                "model %r has no verified price in the model catalog; "
+                "excluding it from the token optimizer's pricing table",
+                model_id,
+            )
+            continue
+        pricing[model_id] = {"input": rates[0], "output": rates[1]}
+    return pricing
 
 
 class TokenEncoder(Protocol):
@@ -165,18 +209,7 @@ class TokenOptimizer:
         self._encoder: TokenEncoder | None = None
         self._encoding_name = "cl100k_base"
 
-        self._model_pricing = {
-            "gpt-4o": {"input": 2.50, "output": 10.00},
-            "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-            "gpt-4-turbo": {"input": 10.00, "output": 30.00},
-            "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
-            "claude-3-opus-20240229": {"input": 15.00, "output": 75.00},
-            "claude-3-sonnet-20240229": {"input": 3.00, "output": 15.00},
-            "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
-            "claude-3-5-sonnet-20240620": {"input": 3.00, "output": 15.00},
-            "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
-            "claude-opus-4-20250514": {"input": 15.00, "output": 75.00},
-        }
+        self._model_pricing = _catalog_pricing()
 
         self._complexity_models = {
             TaskComplexity.TRIVIAL: "gpt-4o-mini",
@@ -517,11 +550,25 @@ class TokenOptimizer:
         input_tokens: int,
         output_tokens: int,
     ) -> float:
-        """Calculate cost for token usage."""
-        pricing = self._model_pricing.get(model, {"input": 1.0, "output": 3.0})
-        input_cost = (input_tokens / 1_000_000) * pricing["input"]
-        output_cost = (output_tokens / 1_000_000) * pricing["output"]
-        return input_cost + output_cost
+        """Calculate cost for token usage.
+
+        Prices any model the catalog knows, not just the selectable ones. A model
+        with no verified price costs 0.0 and warns once naming it — the old
+        fallback billed unknown models at an invented $1/$3, which wrote a
+        confidently wrong number into token_usage.cost_usd and every budget check
+        derived from it.
+        """
+        cost = model_catalog.estimate_cost_usd(model, input_tokens, output_tokens)
+        if cost is None:
+            if model not in _UNPRICED_WARNED:
+                _UNPRICED_WARNED.add(model)
+                log.warning(
+                    "no verified price for model %r; recording $0.00 cost for it. "
+                    "Add the model to app/model_catalog.py.",
+                    model,
+                )
+            return 0.0
+        return cost
 
     async def check_budget(
         self,

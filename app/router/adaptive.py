@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import model_catalog
 from app.router.classifier import TaskClassifier, TaskComplexity, ClassificationResult
 from app.router.metrics import RouterMetrics
 
@@ -91,63 +92,85 @@ class RouterConfig:
     min_samples_for_learning: int = 10
 
 
-# Default model profiles
+def _profile(name: str, **kwargs: Any) -> ModelProfile | None:
+    """A default profile whose cost fields come from app.model_catalog.
+
+    Returns None when the catalog has no verified price for `name`. A model we
+    cannot price must not be offered for routing at all: _score_models() would
+    read the dataclass' placeholder rate as if it were real and could route
+    production traffic on an invented cost.
+    """
+    rates = model_catalog.price_per_1m(name)
+    if rates is None:
+        log.warning(
+            "model %r has no verified price in the model catalog; leaving it out "
+            "of the default routing profiles",
+            name,
+        )
+        return None
+    return ModelProfile(
+        name=name,
+        input_cost_per_1m=rates[0],
+        output_cost_per_1m=rates[1],
+        **kwargs,
+    )
+
+
+# Default model profiles. Latency/throughput/quality are this router's own
+# heuristics, but the cost fields are NOT hand-written here — they come from
+# app.model_catalog, which this file used to contradict (gpt-4o at the retired
+# $5/$15 launch price rather than the current $2.50/$10, which skewed every
+# cost-weighted routing decision away from gpt-4o).
 DEFAULT_PROFILES = [
-    ModelProfile(
-        name="claude-sonnet-4-20250514",
-        provider="anthropic",
-        max_context_tokens=200000,
-        typical_latency_ms=2500,
-        tokens_per_second=80,
-        input_cost_per_1m=3.0,
-        output_cost_per_1m=15.0,
-        quality_by_complexity={"trivial": 0.98, "simple": 0.97, "moderate": 0.95, "complex": 0.92, "expert": 0.88},
-        weight=1.0,
-    ),
-    ModelProfile(
-        name="claude-3-haiku-20240307",
-        provider="anthropic",
-        max_context_tokens=200000,
-        typical_latency_ms=500,
-        tokens_per_second=150,
-        input_cost_per_1m=0.25,
-        output_cost_per_1m=1.25,
-        quality_by_complexity={"trivial": 0.95, "simple": 0.92, "moderate": 0.85, "complex": 0.70, "expert": 0.55},
-        weight=0.8,
-    ),
-    ModelProfile(
-        name="claude-3-opus-20240229",
-        provider="anthropic",
-        max_context_tokens=200000,
-        typical_latency_ms=5000,
-        tokens_per_second=40,
-        input_cost_per_1m=15.0,
-        output_cost_per_1m=75.0,
-        quality_by_complexity={"trivial": 0.99, "simple": 0.99, "moderate": 0.98, "complex": 0.96, "expert": 0.94},
-        weight=0.6,  # Lower weight due to cost
-    ),
-    ModelProfile(
-        name="gpt-4o",
-        provider="openai",
-        max_context_tokens=128000,
-        typical_latency_ms=2000,
-        tokens_per_second=100,
-        input_cost_per_1m=5.0,
-        output_cost_per_1m=15.0,
-        quality_by_complexity={"trivial": 0.97, "simple": 0.96, "moderate": 0.93, "complex": 0.90, "expert": 0.85},
-        weight=0.9,
-    ),
-    ModelProfile(
-        name="gpt-4-turbo",
-        provider="openai",
-        max_context_tokens=128000,
-        typical_latency_ms=3000,
-        tokens_per_second=60,
-        input_cost_per_1m=10.0,
-        output_cost_per_1m=30.0,
-        quality_by_complexity={"trivial": 0.98, "simple": 0.97, "moderate": 0.94, "complex": 0.91, "expert": 0.87},
-        weight=0.7,
-    ),
+    p
+    for p in (
+        _profile(
+            "claude-sonnet-4-20250514",
+            provider="anthropic",
+            max_context_tokens=200000,
+            typical_latency_ms=2500,
+            tokens_per_second=80,
+            quality_by_complexity={"trivial": 0.98, "simple": 0.97, "moderate": 0.95, "complex": 0.92, "expert": 0.88},
+            weight=1.0,
+        ),
+        _profile(
+            "claude-3-haiku-20240307",
+            provider="anthropic",
+            max_context_tokens=200000,
+            typical_latency_ms=500,
+            tokens_per_second=150,
+            quality_by_complexity={"trivial": 0.95, "simple": 0.92, "moderate": 0.85, "complex": 0.70, "expert": 0.55},
+            weight=0.8,
+        ),
+        _profile(
+            "claude-3-opus-20240229",
+            provider="anthropic",
+            max_context_tokens=200000,
+            typical_latency_ms=5000,
+            tokens_per_second=40,
+            quality_by_complexity={"trivial": 0.99, "simple": 0.99, "moderate": 0.98, "complex": 0.96, "expert": 0.94},
+            weight=0.6,  # Lower weight due to cost
+        ),
+        _profile(
+            "gpt-4o",
+            provider="openai",
+            max_context_tokens=128000,
+            typical_latency_ms=2000,
+            tokens_per_second=100,
+            quality_by_complexity={"trivial": 0.97, "simple": 0.96, "moderate": 0.93, "complex": 0.90, "expert": 0.85},
+            weight=0.9,
+        ),
+        _profile(
+            "gpt-4-turbo",
+            provider="openai",
+            max_context_tokens=128000,
+            typical_latency_ms=3000,
+            tokens_per_second=60,
+            quality_by_complexity={"trivial": 0.98, "simple": 0.97, "moderate": 0.94, "complex": 0.91, "expert": 0.87},
+            weight=0.7,
+        ),
+    )
+    if p is not None
 ]
 
 

@@ -46,7 +46,16 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import audit, feedback, metering, metrics_source, observability, runtime, tenant_context
+from app import (
+    audit,
+    feedback,
+    metering,
+    metrics_source,
+    model_catalog,
+    observability,
+    runtime,
+    tenant_context,
+)
 from app.config import ROOT, get_settings
 from app.integrations import pagerduty as pd_webhook
 from app.integrations import slack
@@ -1150,8 +1159,10 @@ async def me() -> dict:
                 "application/json": {
                     "example": {
                         "provider": "anthropic",
-                        "model": "claude-sonnet-4-20250514",
-                        "fast_model": "claude-haiku-4-20250514",
+                        # Sourced from the catalog: the literals here had drifted to
+                        # a model ID that does not exist.
+                        "model": model_catalog.default_model("anthropic"),
+                        "fast_model": model_catalog.default_model("anthropic", fast=True),
                         "offline_mode": False,
                         "servers": [
                             {"name": "datadog", "label": "Datadog", "tools": ["search_logs"]}
@@ -1228,6 +1239,51 @@ async def frontend_config() -> dict:
         "supabase_anon_key": s.supabase_anon_key or "",
         "api_url": "",  # Empty = same-origin
     }
+
+
+@app.get(
+    "/api/models",
+    tags=["Config"],
+    summary="List selectable LLM models",
+    description="Returns the model catalog: every model the UI may offer, with its "
+    "provider, context window, capabilities and published price. Prices are USD per "
+    "1M tokens and are `null` when the vendor rate has not been verified — show those "
+    "as unknown rather than substituting a guess.",
+    response_description="Model catalog with per-provider defaults",
+    responses={
+        200: {
+            "description": "Model catalog",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "pricing_last_verified": model_catalog.PRICING_LAST_VERIFIED,
+                        "pricing_unit": "usd_per_1m_tokens",
+                        "defaults": model_catalog.DEFAULT_MODELS,
+                        "models": [
+                            model_catalog.to_dict(
+                                model_catalog.get(
+                                    model_catalog.default_model("anthropic", fast=True)
+                                )
+                            )
+                        ],
+                    }
+                }
+            },
+        }
+    },
+)
+async def models_catalog() -> dict:
+    """List the LLM models a caller may select.
+
+    Single source of truth for the frontend model picker, so the UI can no longer
+    offer IDs the backend would reject. Retired models are omitted; they stay in
+    the catalog only so historical usage still prices correctly.
+
+    Returns:
+        dict: Catalog payload with pricing metadata, per-provider defaults, and
+        one entry per selectable model.
+    """
+    return model_catalog.catalog_payload()
 
 
 @app.get(
@@ -1379,13 +1435,13 @@ async def github_disconnect() -> dict:
                 "application/json": {
                     "example": {
                         "provider": "anthropic",
-                        "model": "claude-sonnet-4-20250514",
-                        "fast_model": "claude-haiku-4-20250514"
+                        "model": model_catalog.default_model("anthropic"),
+                        "fast_model": model_catalog.default_model("anthropic", fast=True),
                     }
                 }
             },
         },
-        400: {"description": "Invalid provider or missing API key"},
+        400: {"description": "Invalid provider, unknown model ID, or missing API key"},
     },
 )
 async def model_configure(req: ModelConfigRequest) -> dict:
@@ -1407,6 +1463,36 @@ async def model_configure(req: ModelConfigRequest) -> dict:
     if provider not in {"anthropic", "openai", "gemini", "groq", "deepseek"}:
         raise HTTPException(
             400, "provider must be one of: anthropic, openai, gemini, groq, deepseek"
+        )
+
+    # runtime.set_model() stores whatever string it is handed, so an unknown ID
+    # only surfaced later as a provider 404 mid-investigation. Reject it here,
+    # where the caller can still see which IDs are valid. Empty means "use the
+    # provider default", which is legitimate.
+    #
+    # Checked against the catalog *entry*, not just is_known(): that is
+    # provider-agnostic, so it accepted "gpt-4o" for provider=anthropic (which
+    # then 404s on the first call with the key the user just pasted) and accepted
+    # retired IDs the provider no longer serves. Dated snapshots
+    # ("claude-sonnet-4-20250514") still resolve to their base entry and pass,
+    # which is why this resolves rather than requiring an exact match.
+    for field_name, value in (("model", req.model), ("fast_model", req.fast_model)):
+        candidate = (value or "").strip()
+        if not candidate:
+            continue
+        info = model_catalog.resolve(candidate)
+        if info is None:
+            reason = "unknown"
+        elif info.provider != provider:
+            reason = f"a {info.provider} model, not {provider}"
+        elif info.status == "retired":
+            reason = "retired and no longer served"
+        else:
+            continue
+        raise HTTPException(
+            400,
+            f"{field_name} {candidate!r} is {reason}; valid IDs for {provider}: "
+            + ", ".join(model_catalog.selectable_ids(provider)),
         )
 
     snapshot = runtime.model_snapshot()
@@ -3200,7 +3286,13 @@ async def slack_interactions(request: Request):
 # --------------------------------------------------------------------------- #
 def _verify_github_signature(secret: str, payload: bytes, signature: str) -> bool:
     """Verify GitHub webhook HMAC-SHA256 signature."""
-    if not secret or not signature:
+    if not secret:
+        log.warning(
+            "GitHub webhook rejected: no shared secret configured "
+            "(set GITHUB_WEBHOOK_SECRET)"
+        )
+        return False
+    if not signature:
         return False
     expected = "sha256=" + hmac.new(
         secret.encode(), payload, hashlib.sha256
@@ -3216,7 +3308,7 @@ def _verify_github_signature(secret: str, payload: bytes, signature: str) -> boo
     "deployment_status, and security_advisory events for auto-triage.",
     responses={
         200: {"description": "Event processed"},
-        401: {"description": "Invalid webhook signature"},
+        401: {"description": "Invalid or unconfigured webhook signature"},
     },
 )
 async def github_webhook(request: Request) -> dict[str, object]:
@@ -3233,10 +3325,11 @@ async def github_webhook(request: Request) -> dict[str, object]:
     s = get_settings()
     sig = request.headers.get("x-hub-signature-256", "")
 
-    if s.github_webhook_secret and not _verify_github_signature(
-        s.github_webhook_secret, raw, sig
-    ):
-        raise HTTPException(401, "invalid GitHub webhook signature")
+    # Unconditional: `if secret and not verify(...)` meant a deployment that never
+    # set GITHUB_WEBHOOK_SECRET accepted unsigned events from anyone, which is the
+    # same hole the helper is written to close.
+    if not _verify_github_signature(s.github_webhook_secret, raw, sig):
+        raise HTTPException(401, "invalid or unconfigured GitHub webhook signature")
 
     try:
         payload = json.loads(raw)
@@ -3307,9 +3400,22 @@ async def github_webhook(request: Request) -> dict[str, object]:
 # GitLab Webhook — auto-triage merge requests, issues, pipelines
 # --------------------------------------------------------------------------- #
 def _verify_gitlab_token(secret: str, token: str) -> bool:
-    """Verify GitLab webhook secret token."""
+    """Verify the GitLab webhook secret token.
+
+    Fails closed when no secret is configured: this endpoint is unauthenticated
+    apart from the token, so "no secret, allow" let anyone on the internet inject
+    fake pipeline/deployment events and drive auto-triage. Mirrors
+    ``_verify_github_signature`` and the PagerDuty webhook, which already reject
+    an unconfigured secret.
+    """
     if not secret:
-        return True  # No secret configured, allow
+        log.warning(
+            "GitLab webhook rejected: no shared secret configured "
+            "(set GITLAB_WEBHOOK_SECRET)"
+        )
+        return False
+    if not token:
+        return False
     return hmac.compare_digest(secret, token)
 
 
@@ -3321,7 +3427,7 @@ def _verify_gitlab_token(secret: str, token: str) -> bool:
     "pipeline, and deployment events for auto-triage.",
     responses={
         200: {"description": "Event processed"},
-        401: {"description": "Invalid webhook token"},
+        401: {"description": "Invalid or unconfigured webhook token"},
     },
 )
 async def gitlab_webhook(request: Request) -> dict[str, object]:
@@ -3338,10 +3444,8 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
     s = get_settings()
     token = request.headers.get("x-gitlab-token", "")
 
-    if s.gitlab_webhook_secret and not _verify_gitlab_token(
-        s.gitlab_webhook_secret, token
-    ):
-        raise HTTPException(401, "invalid GitLab webhook token")
+    if not _verify_gitlab_token(s.gitlab_webhook_secret, token):
+        raise HTTPException(401, "invalid or unconfigured GitLab webhook token")
 
     try:
         payload = json.loads(raw)

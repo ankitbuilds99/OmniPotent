@@ -8,14 +8,17 @@ Stored in memory only — never written to disk.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from app import tenant_context
+from app import model_catalog, tenant_context
 from app.config import ROOT, get_settings
 
-# Every provider the agent can target. Keep in sync with app/llm.py defaults,
-# the API validation, and the frontend provider dropdown.
-PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "gemini", "groq", "deepseek")
+log = logging.getLogger("omnipotent.runtime")
+
+# Every provider the agent can target, derived from the model catalog so this
+# list cannot drift from app/llm.py's defaults the way a hand-maintained copy did.
+PROVIDERS: tuple[str, ...] = tuple(model_catalog.DEFAULT_MODELS)
 
 _ov: dict[str, str] = {
     # model / provider
@@ -99,6 +102,25 @@ def fast_model_override() -> str:
     return _ov["fast_model"] or get_settings().copilot_fast_model
 
 
+def _warn_unknown_model(model: str, prov: str, label: str) -> None:
+    """Warn (don't reject) when a model ID isn't in the catalog.
+
+    A typo here used to surface much later as an opaque provider-side error with
+    no hint of the cause. It stays a warning rather than an exception because the
+    catalog can lag a newly released model, and refusing to run a real model is
+    worse than letting a typo through with a loud log line. The API boundary is
+    where user-supplied IDs get a hard 400 — see the /model route.
+    """
+    if not model or model_catalog.is_known(model):
+        return
+    known = ", ".join(model_catalog.selectable_ids(prov)) or "none for this provider"
+    log.warning(
+        "%s model %r is not in the model catalog (provider %r). Proceeding anyway, "
+        "but check for a typo — known IDs: %s",
+        label, model, prov, known,
+    )
+
+
 def set_model(provider: str, api_key: str, model: str = "", fast_model: str = "") -> None:
     prov = (provider or "").strip().lower()
     _ov["provider"] = prov
@@ -108,6 +130,8 @@ def set_model(provider: str, api_key: str, model: str = "", fast_model: str = ""
         _keys[prov] = (api_key or "").strip()
     _ov["model"] = (model or "").strip()
     _ov["fast_model"] = (fast_model or "").strip()
+    _warn_unknown_model(_ov["model"], prov, "main")
+    _warn_unknown_model(_ov["fast_model"], prov, "fast")
 
 
 # ---- github ----

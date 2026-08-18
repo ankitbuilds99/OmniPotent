@@ -18,9 +18,32 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from app.config import get_settings
 from app.safety_gates.models import GateResult
 
 log = logging.getLogger("omnipotent.safety_gates.sandbox")
+
+# Neither executor below actually applies the change or runs the tests: they
+# sleep and return a green result. This gate is the last thing standing between
+# an autonomous remediation and production, so a fabricated pass here fails
+# *open* — the most dangerous direction for a gate. Unless the operator asked
+# for a simulation, an unimplemented sandbox reports that it verified nothing.
+_NOT_VERIFIED = (
+    "sandbox verification is not implemented for this executor: the change was "
+    "not applied and no tests were run (inject a real SandboxExecutor, or set "
+    "COPILOT_DEMO_MODE=true to simulate); refusing to report a fix as verified"
+)
+
+
+def _demo_mode() -> bool:
+    """True when the operator explicitly opted into simulated verification."""
+    return get_settings().copilot_demo_mode
+
+
+def _unverified_result(executor: str) -> dict[str, Any]:
+    """Fail-closed payload shared by the stub executors' step methods."""
+    log.warning("%s: %s", executor, _NOT_VERIFIED)
+    return {"success": False, "error": _NOT_VERIFIED, "not_configured": True}
 
 
 @dataclass
@@ -31,6 +54,9 @@ class SandboxTestResult:
     total: int = 0
     failures: list[dict[str, Any]] = field(default_factory=list)
     duration_ms: int = 0
+    # True when the counts above were made up by a stub executor in demo mode
+    # rather than observed from a real test run.
+    simulated: bool = False
 
 
 @dataclass
@@ -134,11 +160,15 @@ class LocalSandboxExecutor(SandboxExecutor):
         if sandbox_id not in self._sandboxes:
             return {"success": False, "error": "Sandbox not found"}
 
+        if not _demo_mode():
+            return _unverified_result("LocalSandboxExecutor.apply_change")
+
         # Simulate applying change
         await asyncio.sleep(0.1)  # Simulate work
         self._sandboxes[sandbox_id]["change_applied"] = True
 
-        return {"success": True}
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING change application in sandbox")
+        return {"success": True, "simulated": True}
 
     async def run_tests(
         self,
@@ -148,8 +178,20 @@ class LocalSandboxExecutor(SandboxExecutor):
         if sandbox_id not in self._sandboxes:
             return SandboxTestResult(total=0, failures=[{"error": "Sandbox not found"}])
 
+        if not _demo_mode():
+            log.warning("LocalSandboxExecutor.run_tests: %s", _NOT_VERIFIED)
+            # One failed "test" so the gate scores this 0.0 and cannot pass.
+            return SandboxTestResult(
+                passed=0,
+                failed=1,
+                total=1,
+                failures=[{"error": _NOT_VERIFIED}],
+            )
+
         # Simulate running tests
         await asyncio.sleep(0.2)
+
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING a passing sandbox test run")
 
         # Default: all tests pass
         return SandboxTestResult(
@@ -158,6 +200,7 @@ class LocalSandboxExecutor(SandboxExecutor):
             total=5,
             failures=[],
             duration_ms=200,
+            simulated=True,
         )
 
     async def detect_side_effects(
@@ -174,9 +217,13 @@ class LocalSandboxExecutor(SandboxExecutor):
         if sandbox_id not in self._sandboxes:
             return {"success": False, "error": "Sandbox not found"}
 
+        if not _demo_mode():
+            return _unverified_result("LocalSandboxExecutor.verify_rollback")
+
         # Simulate rollback verification
         await asyncio.sleep(0.1)
-        return {"success": True}
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING rollback verification")
+        return {"success": True, "simulated": True}
 
     async def destroy_sandbox(
         self,
@@ -244,25 +291,42 @@ class KubernetesSandboxExecutor(SandboxExecutor):
         if sandbox_id not in self._sandboxes:
             return {"success": False, "error": "Sandbox not found"}
 
+        # No manifest is ever applied here, whether or not a k8s_client was
+        # handed in, so this is a stub in every configuration.
+        if not _demo_mode():
+            return _unverified_result("KubernetesSandboxExecutor.apply_change")
+
         # In production: apply K8s manifests, run helm upgrade, etc.
         await asyncio.sleep(0.5)  # Simulate deployment time
 
-        return {"success": True}
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING manifest application in sandbox")
+        return {"success": True, "simulated": True}
 
     async def run_tests(
         self,
         sandbox_id: str,
         test_suite: str,
     ) -> SandboxTestResult:
+        if not _demo_mode():
+            log.warning("KubernetesSandboxExecutor.run_tests: %s", _NOT_VERIFIED)
+            return SandboxTestResult(
+                passed=0,
+                failed=1,
+                total=1,
+                failures=[{"error": _NOT_VERIFIED}],
+            )
+
         # In production: run test pods, health checks
         await asyncio.sleep(1.0)
 
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING a passing sandbox test run")
         return SandboxTestResult(
             passed=10,
             failed=0,
             total=10,
             failures=[],
             duration_ms=1000,
+            simulated=True,
         )
 
     async def detect_side_effects(
@@ -276,9 +340,13 @@ class KubernetesSandboxExecutor(SandboxExecutor):
         self,
         sandbox_id: str,
     ) -> dict[str, Any]:
+        if not _demo_mode():
+            return _unverified_result("KubernetesSandboxExecutor.verify_rollback")
+
         # In production: run rollback and verify state
         await asyncio.sleep(0.5)
-        return {"success": True}
+        log.warning("COPILOT_DEMO_MODE=true - SIMULATING rollback verification")
+        return {"success": True, "simulated": True}
 
     async def destroy_sandbox(
         self,
@@ -367,16 +435,26 @@ class SandboxGate:
             )
 
             if not apply_result.get("success"):
+                # "We could not verify this" is a different answer from "this
+                # change broke the sandbox": the first needs a human to decide,
+                # the second is evidence the action is bad. Either way the gate
+                # does not pass, so the action is never auto-approved.
+                not_configured = bool(apply_result.get("not_configured"))
+                await self.executor.destroy_sandbox(sandbox_id)
                 return GateResult(
                     gate_name="sandbox",
                     passed=False,
                     score=0.0,
-                    reasoning=f"Failed to apply change in sandbox: {apply_result.get('error')}",
+                    reasoning=(
+                        f"Sandbox verification unavailable: {apply_result.get('error')}"
+                        if not_configured
+                        else f"Failed to apply change in sandbox: {apply_result.get('error')}"
+                    ),
                     violations=[{
-                        "type": "sandbox_apply_failed",
+                        "type": "sandbox_not_configured" if not_configured else "sandbox_apply_failed",
                         "severity": "high",
                         "message": apply_result.get("error", "Unknown error"),
-                        "action": "block",
+                        "action": "escalate" if not_configured else "block",
                     }],
                     duration_ms=int((time.time() - start_time) * 1000),
                 )
@@ -491,10 +569,13 @@ class SandboxGate:
         violations: list[dict[str, Any]],
     ) -> str:
         """Build human-readable sandbox reasoning."""
+        # A reviewer reading this block must be able to tell measured results
+        # from a demo-mode stand-in, so the marker travels with the numbers.
+        suffix = " (simulated)" if test_result.simulated else ""
         lines = [
-            "**Sandbox Verification Results:**",
+            f"**Sandbox Verification Results:**{suffix}",
             "",
-            f"✓ Tests: {test_result.passed}/{test_result.total} passed",
+            f"✓ Tests: {test_result.passed}/{test_result.total} passed{suffix}",
             f"{'✓' if not side_effects else '⚠️'} Side Effects: {len(side_effects)} detected",
             f"{'✓' if rollback_result.get('success') else '✗'} Rollback: {'Verified' if rollback_result.get('success') else 'Failed'}",
             "",

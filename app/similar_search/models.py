@@ -8,6 +8,18 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.config import get_settings
+
+
+def _default_min_similarity() -> float:
+    """The one "similar enough" bar (SIMILAR_INCIDENT_THRESHOLD).
+
+    Used as a dataclass default_factory so it is read when a filter object is
+    built, not when this module is imported — an import-time read would freeze
+    whatever the environment was at first import.
+    """
+    return get_settings().similar_incident_threshold
+
 
 class IncidentSeverity(Enum):
     """Incident severity levels."""
@@ -178,7 +190,7 @@ class SearchFilters:
     """Filters for incident search."""
 
     time_range_days: int = 365
-    min_similarity: float = 0.7
+    min_similarity: float = field(default_factory=_default_min_similarity)
     severities: list[IncidentSeverity] = field(default_factory=list)
     services: list[str] = field(default_factory=list)
     include_dependent_services: bool = True

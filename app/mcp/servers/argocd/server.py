@@ -45,6 +45,17 @@ def _headers() -> dict:
     }
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live argocd read.
+
+    The write tools already say "(simulated)"; the read tools returned fixtures
+    shaped exactly like real API responses, so an investigation built on invented
+    data looked identical to one built on a live system.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "argocd")
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures — multi-scenario support via centralized fixture system
 # --------------------------------------------------------------------------- #
@@ -229,7 +240,7 @@ async def list_applications(project: str = "", health_status: str = "", sync_sta
             apps = [a for a in apps if a.get("health_status", "").lower() == health_status.lower()]
         if sync_status:
             apps = [a for a in apps if a.get("sync_status", "").lower() == sync_status.lower()]
-        return apps
+        return _demo(apps)
 
     params = {}
     if project:
@@ -276,10 +287,10 @@ async def get_application(name: str) -> dict:
     """
     if OFFLINE:
         if name == "checkout-svc":
-            return dict(_DEMO_APPLICATION_DETAIL)
+            return _demo(dict(_DEMO_APPLICATION_DETAIL))
         matching = [a for a in _get_apps() if a.get("name") == name]
         if matching:
-            return matching[0]
+            return _demo(matching[0])
         return {"error": f"application '{name}' not found (offline demo)",
                 "available": [a["name"] for a in _get_apps()]}
 
@@ -347,7 +358,7 @@ async def get_application_history(name: str, max_count: int | str = 10) -> list[
     if OFFLINE:
         if name != "checkout-svc":
             return [{"error": f"application '{name}' not found (offline demo has 'checkout-svc')"}]
-        return _DEMO_HISTORY[:max_count]
+        return _demo(list(_DEMO_HISTORY[:max_count]))
 
     data = await _get(f"/api/v1/applications/{name}")
     history = data.get("status", {}).get("history", [])
@@ -384,7 +395,7 @@ async def get_application_resources(name: str) -> list[dict]:
     if OFFLINE:
         if name != "checkout-svc":
             return [{"error": f"application '{name}' not found (offline demo has 'checkout-svc')"}]
-        return list(_DEMO_RESOURCES)
+        return _demo(list(_DEMO_RESOURCES))
 
     data = await _get(f"/api/v1/applications/{name}")
     resources = data.get("status", {}).get("resources", [])
@@ -414,7 +425,7 @@ async def get_sync_status(name: str) -> dict:
     """
     if OFFLINE:
         if name == "checkout-svc":
-            return {
+            return _demo({
                 "name": "checkout-svc",
                 "sync_status": "OutOfSync",
                 "health_status": "Degraded",
@@ -425,18 +436,18 @@ async def get_sync_status(name: str) -> dict:
                 "message": "Application is out of sync with the target revision. "
                           "The current deployed revision (abc1234) differs from "
                           "the target (def5678 on main).",
-            }
+            })
         matching = [a for a in _get_apps() if a.get("name") == name]
         if matching:
             app = matching[0]
             is_synced = app.get("sync_status") == "Synced"
-            return {
+            return _demo({
                 "name": name,
                 "sync_status": app.get("sync_status"),
                 "health_status": app.get("health_status"),
                 "is_synced": is_synced,
                 "message": "Application is in sync." if is_synced else "Application is out of sync.",
-            }
+            })
         return {"error": f"application '{name}' not found (offline demo)",
                 "available": [a.get("name") for a in _get_apps()]}
 

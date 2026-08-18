@@ -472,17 +472,26 @@ resource "aws_ecs_task_definition" "api" {
         }
       ]
 
+      # Cleartext only. Anything with a credential in it goes in `secrets` below:
+      # this array is returned verbatim by ecs:DescribeTaskDefinition and shows up
+      # in the console, the CLI and CloudTrail.
       environment = [
         { name = "ENVIRONMENT", value = var.environment },
         { name = "AWS_REGION", value = var.aws_region },
-        { name = "DATABASE_URL", value = "postgresql://${aws_db_instance.main.username}:${var.db_password}@${aws_db_instance.main.endpoint}/${aws_db_instance.main.db_name}" },
-        { name = "REDIS_URL", value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379/0" },
+        { name = "COPILOT_REDIS_URL", value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379/0" },
+        # Local state dir (matches the image); durable state is RDS/ElastiCache.
+        { name = "COPILOT_STATE_DIR", value = "/app/data" },
         { name = "S3_BUCKET", value = aws_s3_bucket.artifacts.bucket },
         { name = "SERVICE_NAME", value = "devops-copilot" },
         { name = "SERVICE_VERSION", value = "1.0.0" },
       ]
 
       secrets = [
+        {
+          # Was in `environment` with the RDS master password inline.
+          name      = "COPILOT_DATABASE_URL"
+          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:COPILOT_DATABASE_URL::"
+        },
         {
           name      = "ANTHROPIC_API_KEY"
           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:ANTHROPIC_API_KEY::"
@@ -492,7 +501,9 @@ resource "aws_ecs_task_definition" "api" {
           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:STRIPE_SECRET_KEY::"
         },
         {
-          name      = "SECRET_KEY"
+          # The app reads COPILOT_SECRET_KEY (and refuses to start in production
+          # without it); the Secrets Manager JSON key stays SECRET_KEY.
+          name      = "COPILOT_SECRET_KEY"
           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:SECRET_KEY::"
         }
       ]
@@ -671,9 +682,17 @@ resource "aws_secretsmanager_secret" "app_secrets" {
 resource "aws_secretsmanager_secret_version" "app_secrets" {
   secret_id = aws_secretsmanager_secret.app_secrets.id
   secret_string = jsonencode({
-    ANTHROPIC_API_KEY  = var.anthropic_api_key
-    STRIPE_SECRET_KEY  = var.stripe_secret_key
-    SECRET_KEY         = random_password.secret_key.result
+    ANTHROPIC_API_KEY = var.anthropic_api_key
+    STRIPE_SECRET_KEY = var.stripe_secret_key
+    # COPILOT_SECRET_KEY keys the Fernet secret vault, which requires exactly 32
+    # base64-encoded bytes — the raw 64-char random_password below is rejected at
+    # runtime. Derived deterministically from it, so applying this does not
+    # rotate the key (rotation would make stored secrets unreadable).
+    SECRET_KEY = base64encode(substr(random_password.secret_key.result, 0, 32))
+    # Embeds the RDS master password, so it belongs here and is injected through
+    # the task definition's `secrets` block — never `environment`, which every
+    # principal with ecs:DescribeTaskDefinition can read in cleartext.
+    COPILOT_DATABASE_URL = "postgresql://${aws_db_instance.main.username}:${var.db_password}@${aws_db_instance.main.endpoint}/${aws_db_instance.main.db_name}"
   })
 }
 

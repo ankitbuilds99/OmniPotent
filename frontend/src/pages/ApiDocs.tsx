@@ -17,8 +17,9 @@ import {
   Activity,
   ArrowLeft
 } from 'lucide-react'
-
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+// Shown to the user as "your API base URL", so it must be the same value the rest
+// of the app actually calls — resolved once in ../config.
+import { API_BASE_URL } from '../config'
 
 interface EndpointGroup {
   name: string

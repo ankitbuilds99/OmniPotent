@@ -29,11 +29,14 @@ spec:
     spec:
       serviceAccountName: omnipotent
       terminationGracePeriodSeconds: 60
+      # These MUST match the uid the image chowns /app to (appuser, 10001 — see
+      # Dockerfile). They were 1000, which owns nothing in the image: the process
+      # could not write COPILOT_STATE_DIR and every SQLite store failed to open.
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: api
           image: ghcr.io/ankit25bcs10610/omnipotent:latest
@@ -48,6 +51,11 @@ spec:
             - secretRef:
                 name: omnipotent-secrets
           env:
+            # Local state directory. Must match the `data` volumeMount below and
+            # the Dockerfile: the root filesystem is read-only, so anything the
+            # app writes outside a mounted volume fails at runtime.
+            - name: COPILOT_STATE_DIR
+              value: /app/data
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -115,6 +123,9 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        # Scratch only: with replicas > 1 this is per-pod and wiped on restart,
+        # so durable state must live in Postgres/Redis (COPILOT_DATABASE_URL,
+        # COPILOT_CHECKPOINT_DB, COPILOT_REDIS_URL from the ConfigMap/Secret).
         - name: data
           emptyDir: {}
       affinity:

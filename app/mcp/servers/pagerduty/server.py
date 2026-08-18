@@ -53,6 +53,17 @@ def _as_int(value, default: int) -> int:
         return default
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live pagerduty read.
+
+    The write tools already say "(simulated)"; the read tools returned fixtures
+    shaped exactly like real API responses, so an investigation built on invented
+    data looked identical to one built on a live system.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "pagerduty")
+
+
 def _headers() -> dict:
     return {
         "Authorization": f"Token token={PAGERDUTY_API_TOKEN}",
@@ -85,7 +96,7 @@ def list_incidents(statuses: str = "triggered,acknowledged", limit: int | str = 
     if OFFLINE:
         inc = _get_incident()
         items = [inc] if inc and (not wanted or inc.get("status") in wanted) else []
-        return items[:limit]
+        return _demo(items[:limit])
 
     import httpx
 
@@ -117,7 +128,7 @@ def get_incident(incident_id: str) -> dict:
     if OFFLINE:
         inc = _get_incident()
         if incident_id in ("", inc.get("id", "")):
-            return dict(inc)
+            return _demo(dict(inc))
         return {"error": f"unknown incident '{incident_id}' (offline demo has {inc.get('id', 'none')})"}
 
     import httpx
@@ -144,7 +155,7 @@ def get_incident_alerts(incident_id: str) -> list[dict]:
     investigation should start from (service, metric, threshold, source monitor)."""
     if OFFLINE:
         inc = _get_incident()
-        return _get_alerts() if incident_id in ("", inc.get("id", "")) else []
+        return _demo(_get_alerts()) if incident_id in ("", inc.get("id", "")) else []
 
     import httpx
 

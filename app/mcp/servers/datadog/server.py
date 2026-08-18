@@ -88,6 +88,16 @@ def _parse_line(line: str) -> tuple[str, str]:
     return (parts[1], parts[2]) if len(parts) >= 3 else ("", "")
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live Datadog read.
+
+    Offline responses were shaped exactly like live ones, so an RCA built on
+    invented error rates looked identical to one built on real telemetry.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "datadog")
+
+
 def _offline_search_logs(service, level, contains, limit):
     out: list[str] = []
     for line in _read_log_lines():
@@ -101,7 +111,10 @@ def _offline_search_logs(service, level, contains, limit):
         out.append(line)
         if len(out) >= limit:
             break
-    return out
+    # list[str] has nowhere to hang a metadata key, so the notice goes in as a
+    # comment line. Added after filtering, so it never affects the result set.
+    from app.mcp.fixtures import demo_notice
+    return [f"# {demo_notice('datadog')}", *out]
 
 
 def _offline_error_summary(service):
@@ -112,12 +125,12 @@ def _offline_error_summary(service):
             continue
         msg = line.split('error="', 1)[1].split('"', 1)[0] if 'error="' in line else line
         counter[msg] += 1
-    return {
+    return _demo({
         "service": service or "all",
         "total_errors": sum(counter.values()),
         "distinct_errors": len(counter),
         "breakdown": [{"message": m, "count": c} for m, c in counter.most_common()],
-    }
+    })
 
 
 def _offline_metric(service, metric):
@@ -133,7 +146,7 @@ def _offline_metric(service, metric):
         return {"error": f"unknown/empty metric '{metric}'", "available": list(svc)}
     first, last = series[0].get("value"), series[-1].get("value")
     trend = "rising" if last > first else "falling" if last < first else "flat"
-    return {"service": service, "metric": metric, "series": series, "trend": trend, "latest": last}
+    return _demo({"service": service, "metric": metric, "series": series, "trend": trend, "latest": last})
 
 
 def _offline_services():

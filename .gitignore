@@ -112,3 +112,6 @@ coverage/
 tmp/
 temp/
 *.tmp
+
+# Claude Code local settings (may contain machine-specific paths/credentials)
+.claude/settings.local.json*

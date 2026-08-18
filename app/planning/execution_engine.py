@@ -18,6 +18,7 @@ from typing import Any, Callable, Awaitable
 from pathlib import Path
 import uuid
 
+from app.config import get_settings
 from app.planning.task_graph import (
     TaskGraph,
     TaskNode,
@@ -360,6 +361,19 @@ class ExecutionEngine:
             else:
                 task.outputs = await self._execute_default_handler(ctx, task, inputs)
 
+            # The default handler's tools fail closed: they return an error payload
+            # instead of raising, so nothing above this point would notice. Without
+            # this check a plan whose every tool refused still reported
+            # status="completed", failed_tasks=0, errors=[] — the caller had no way
+            # to tell "did the work" from "did nothing". Raise so the task takes the
+            # normal failure path below, including retries.
+            if isinstance(task.outputs, dict) and task.outputs.get("status") == "failed":
+                failed = task.outputs.get("failed_tools") or []
+                raise RuntimeError(
+                    f"no tool executed for task {task.id}: "
+                    f"{', '.join(failed) if failed else 'handler reported failure'}"
+                )
+
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now(timezone.utc)
             task.progress = 1.0
@@ -428,10 +442,20 @@ class ExecutionEngine:
                     log.error("Tool %s failed: %s", tool_name, e)
                     results[tool_name] = {"error": str(e)}
 
+        # Tools that fail closed (see create_default_tools) hand back an error
+        # payload rather than raising, so surface that here: a task whose every
+        # tool refused to run was not "executed".
+        failed_tools = [
+            name
+            for name, result in results.items()
+            if isinstance(result, dict) and result.get("error")
+        ]
+
         return {
-            "status": "executed",
+            "status": "failed" if failed_tools and len(failed_tools) == len(results) else "executed",
             "task_type": task.task_type.value,
             "tool_results": results,
+            "failed_tools": failed_tools,
             "inputs_received": list(inputs.keys()),
         }
 
@@ -506,48 +530,94 @@ class ExecutionEngine:
                 log.error("Progress callback error: %s", e)
 
 
+def _tool_not_configured(tool: str, missing: str) -> dict[str, Any]:
+    """Fail-closed payload for a default tool that has no backend behind it.
+
+    These handlers are registered by the planning API (app/planning/api_router.py),
+    so their output is what a caller sees for a task. "analyzed"/"sent"/"success"
+    from a handler that contacted nothing is a plan step reported as done when
+    it never ran, so outside demo mode they report the missing wiring instead.
+    """
+    log.warning("Planning tool '%s' not executed: %s", tool, missing)
+    return {
+        "status": "failed",
+        "error": (
+            f"{missing}; refusing to report success for work that was not performed"
+        ),
+    }
+
+
 def create_default_tools() -> dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]]:
-    """Create default tool handlers."""
+    """Create default tool handlers.
+
+    None of these are wired to a real backend: they are placeholders so a task
+    graph can be walked end to end. They only produce a result in demo mode.
+    """
+
+    def _demo() -> bool:
+        return get_settings().copilot_demo_mode
 
     async def logs_tool(inputs: dict[str, Any]) -> dict[str, Any]:
-        """Simulate log analysis tool."""
+        """Log analysis tool (no log source wired up)."""
+        if not _demo():
+            return _tool_not_configured("logs", "no log source is configured")
+        log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED logs result")
         return {
             "status": "analyzed",
+            "simulated": True,
             "log_entries": 0,
             "patterns_found": [],
             "time_range": "last_1h",
         }
 
     async def metrics_tool(inputs: dict[str, Any]) -> dict[str, Any]:
-        """Simulate metrics analysis tool."""
+        """Metrics analysis tool (no metrics source wired up)."""
+        if not _demo():
+            return _tool_not_configured("metrics", "no metrics source is configured")
+        log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED metrics result")
         return {
             "status": "analyzed",
+            "simulated": True,
             "metrics_checked": [],
             "anomalies": [],
             "time_range": "last_1h",
         }
 
     async def traces_tool(inputs: dict[str, Any]) -> dict[str, Any]:
-        """Simulate trace analysis tool."""
+        """Trace analysis tool (no trace source wired up)."""
+        if not _demo():
+            return _tool_not_configured("traces", "no trace source is configured")
+        log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED traces result")
         return {
             "status": "analyzed",
+            "simulated": True,
             "traces_sampled": 0,
             "slow_spans": [],
             "error_spans": [],
         }
 
     async def ci_cd_tool(inputs: dict[str, Any]) -> dict[str, Any]:
-        """Simulate CI/CD tool."""
+        """CI/CD tool (no pipeline runner wired up)."""
+        if not _demo():
+            return _tool_not_configured("ci_cd", "no CI/CD provider is configured")
+        log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED CI/CD result")
         return {
             "status": "executed",
+            "simulated": True,
             "pipeline": "default",
-            "result": "success",
+            "result": "success (simulated)",
         }
 
     async def notification_tool(inputs: dict[str, Any]) -> dict[str, Any]:
-        """Simulate notification tool."""
+        """Notification tool (no notifier wired up)."""
+        if not _demo():
+            return _tool_not_configured(
+                "notification", "no notification channel is configured"
+            )
+        log.warning("COPILOT_DEMO_MODE=true - no notification was actually sent")
         return {
             "status": "sent",
+            "simulated": True,
             "channels": ["slack"],
             "recipients": [],
         }

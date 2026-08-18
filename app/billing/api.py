@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
+
 from app.billing.models import (
     BillingCycle,
     MetricType,
@@ -17,8 +19,13 @@ from app.billing.plans import PlanManager
 from app.billing.feature_gate import FeatureGateService
 from app.billing.usage_tracker import UsageTracker, UsageReporter
 from app.billing.stripe_integration import StripeBillingService
+from app.config import get_settings
 
 log = logging.getLogger("omnipotent.billing.api")
+
+# Marker for values produced without a payment processor, so a simulated
+# subscription can never be read as a paid one.
+SIMULATED_SUFFIX = " (simulated)"
 
 
 @dataclass
@@ -252,8 +259,26 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe checkout session."""
         if not self._stripe:
-            # Demo mode: create/update subscription in store and redirect to success URL
-            log.info("Stripe not configured - using demo checkout for plan %s", plan_name)
+            # Without a payment processor there is no way to charge anyone, so
+            # activating a paid plan here would hand out the paid tier for free
+            # to whoever asks. Refuse outright unless this is an explicit demo.
+            if not get_settings().copilot_demo_mode:
+                log.warning(
+                    "Checkout requested for plan %s but Stripe is not configured "
+                    "(set STRIPE_API_KEY); refusing to activate a paid subscription "
+                    "that was never paid for",
+                    plan_name,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="billing is not configured",
+                )
+
+            log.warning(
+                "COPILOT_DEMO_MODE=true - activating a SIMULATED subscription to plan %s "
+                "without any payment",
+                plan_name,
+            )
             plan = self._plan_manager.get_plan(plan_name)
             if plan:
                 cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
@@ -269,6 +294,8 @@ class BillingAPI:
             return {
                 "checkout_url": redirect_url,
                 "session_id": f"demo_session_{org_id}_{plan_name}",
+                "plan_name": plan_name + SIMULATED_SUFFIX,
+                "simulated": True,
             }
 
         cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
@@ -294,9 +321,22 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe customer portal session."""
         if not self._stripe:
-            # Demo mode: redirect to return URL or billing page
-            log.info("Stripe not configured - using demo portal")
-            return {"portal_url": return_url or "/?portal=demo"}
+            # The "portal" below is just a redirect back into the app: no invoice,
+            # card or cancellation control exists behind it. Sending a customer
+            # there as if it were their billing portal is a dead end.
+            if not get_settings().copilot_demo_mode:
+                log.warning(
+                    "Billing portal requested but Stripe is not configured "
+                    "(set STRIPE_API_KEY); refusing to return a portal URL that "
+                    "manages nothing"
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="billing is not configured",
+                )
+
+            log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED billing portal URL")
+            return {"portal_url": return_url or "/?portal=demo", "simulated": True}
 
         result = await self._stripe.create_portal_session(org_id, return_url)
         return {"portal_url": result.portal_url}

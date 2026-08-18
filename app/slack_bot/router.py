@@ -12,8 +12,49 @@ import logging
 import httpx
 import os
 
+from app.config import get_settings
+
 router = APIRouter(prefix="/slack", tags=["slack"])
 logger = logging.getLogger(__name__)
+
+# Marker appended to every value that was fabricated rather than measured, so a
+# screenshot of a demo can never be mistaken for a real incident response.
+SIMULATED_SUFFIX = " (simulated)"
+
+
+def _not_configured_response(subsystem: str, missing: str) -> dict:
+    """Ephemeral Slack reply for a command whose backend is not wired up.
+
+    Slack renders a non-2xx response as a generic failure with no explanation,
+    so we answer 200 with an ephemeral message that names the missing piece.
+    The point is that we never hand back invented data: the operator is told
+    plainly that there is nothing behind this command in this deployment.
+    """
+    return {
+        "response_type": "ephemeral",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f":warning: *{subsystem} is not configured*\n"
+                        f"{missing}\n"
+                        "No data is being reported because none was collected."
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Set `COPILOT_DEMO_MODE=true` for a clearly-labelled simulated response.",
+                    },
+                ],
+            },
+        ],
+    }
 
 
 class SlackConfig:
@@ -199,18 +240,27 @@ def build_rca_result_blocks(
     confidence: int,
     evidence: list,
     recommendation: str,
+    simulated: bool = False,
 ) -> list:
-    """Build Slack blocks for RCA results."""
+    """Build Slack blocks for RCA results.
+
+    ``simulated`` labels the card end to end: a reader scrolling past the header
+    must be able to tell that the root cause and confidence below were invented.
+    """
     confidence_emoji = ":large_green_circle:" if confidence >= 80 else ":large_yellow_circle:" if confidence >= 50 else ":red_circle:"
 
     evidence_text = "\n".join([f"• {e}" for e in evidence[:5]])
+
+    header_text = ":white_check_mark: Investigation Complete"
+    if simulated:
+        header_text += SIMULATED_SUFFIX
 
     return [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":white_check_mark: Investigation Complete",
+                "text": header_text,
                 "emoji": True,
             }
         },
@@ -234,11 +284,15 @@ def build_rca_result_blocks(
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Confidence:*\n{confidence_emoji} {confidence}%",
+                    "text": f"*Confidence:*\n{confidence_emoji} {confidence}%"
+                    + (SIMULATED_SUFFIX if simulated else ""),
                 },
                 {
                     "type": "mrkdwn",
-                    "text": "*Status:*\n:white_check_mark: Verified",
+                    # "Verified" would be an outright lie for a fabricated card.
+                    "text": "*Status:*\n:test_tube: Simulated - not a real finding"
+                    if simulated
+                    else "*Status:*\n:white_check_mark: Verified",
                 },
             ]
         },
@@ -309,25 +363,79 @@ async def run_investigation(
 
         await add_reaction(channel, thread_ts, "eyes")
 
-        # Simulated investigation - in production, this would call the real RCA engine
+        # No RCA engine is wired into this router. Until one is, the only answer
+        # we could produce is a fabricated one - and a made-up root cause posted
+        # into an incident thread is worse than no answer at all, because
+        # responders act on it. So we say we have nothing instead.
+        if not get_settings().copilot_demo_mode:
+            logger.warning(
+                "Slack investigation requested but no RCA engine is configured for "
+                "app.slack_bot.router; refusing to post a fabricated root cause"
+            )
+            await update_slack_message(
+                channel,
+                message_ts,
+                "Investigation backend not configured",
+                [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                ":warning: *Investigation backend not configured*\n"
+                                f"*Query:* {query}\n"
+                                "This deployment has no RCA engine wired to the Slack bot, "
+                                "so no root cause was produced. Nothing was analysed."
+                            ),
+                        },
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "Set `COPILOT_DEMO_MODE=true` for a clearly-labelled simulated investigation.",
+                            },
+                        ],
+                    },
+                ],
+            )
+            await add_reaction(channel, thread_ts, "warning")
+            return
+
+        # Demo mode: the canned investigation below is fiction, and every line of
+        # it is labelled as such.
+        logger.warning(
+            "COPILOT_DEMO_MODE=true - posting a SIMULATED investigation result to channel %s",
+            channel,
+        )
+
         import asyncio
         await asyncio.sleep(3)
 
-        # Mock results
         result_blocks = build_rca_result_blocks(
             query=query,
-            root_cause="Database connection pool exhaustion due to connection leak in payment-service v2.4.1",
+            root_cause=(
+                "Database connection pool exhaustion due to connection leak in "
+                "payment-service v2.4.1" + SIMULATED_SUFFIX
+            ),
             confidence=87,
             evidence=[
-                "Error rate spiked 300% at 14:32 UTC",
-                "payment-service v2.4.1 deployed at 14:15 UTC",
-                "DB connection count at max (100/100)",
-                "Similar pattern in commit abc123 (connection leak)",
+                "Error rate spiked 300% at 14:32 UTC" + SIMULATED_SUFFIX,
+                "payment-service v2.4.1 deployed at 14:15 UTC" + SIMULATED_SUFFIX,
+                "DB connection count at max (100/100)" + SIMULATED_SUFFIX,
+                "Similar pattern in commit abc123 (connection leak)" + SIMULATED_SUFFIX,
             ],
-            recommendation="Rollback payment-service to v2.4.0. The connection leak was introduced in the refactored database client.",
+            recommendation=(
+                "Rollback payment-service to v2.4.0. The connection leak was introduced "
+                "in the refactored database client." + SIMULATED_SUFFIX
+            ),
+            simulated=True,
         )
 
-        await update_slack_message(channel, message_ts, "Investigation complete", result_blocks)
+        await update_slack_message(
+            channel, message_ts, "Investigation complete" + SIMULATED_SUFFIX, result_blocks
+        )
 
         await add_reaction(channel, thread_ts, "white_check_mark")
 
@@ -484,7 +592,21 @@ async def slash_status(request: Request):
     service_raw = form_data.get("text", "")
     service = str(service_raw).strip() if service_raw else ""
 
-    # Mock status data
+    # There is no observability backend behind this command; the numbers below
+    # are literals. Reporting "checkout: degraded, 230ms" while nothing was
+    # measured is exactly how a responder ends up chasing a phantom.
+    if not get_settings().copilot_demo_mode:
+        logger.warning(
+            "/status requested but no observability backend is configured for the "
+            "Slack bot; refusing to report fabricated service health"
+        )
+        return _not_configured_response(
+            "Service status",
+            "No monitoring source is wired to the Slack `/status` command in this deployment.",
+        )
+
+    logger.warning("COPILOT_DEMO_MODE=true - returning SIMULATED service health for /status")
+
     services = {
         "api": {"status": "healthy", "latency": "45ms", "error_rate": "0.01%"},
         "checkout": {"status": "degraded", "latency": "230ms", "error_rate": "2.3%"},
@@ -497,12 +619,13 @@ async def slash_status(request: Request):
         status_emoji = ":large_green_circle:" if s["status"] == "healthy" else ":large_yellow_circle:"
         return {
             "response_type": "ephemeral",
+            "simulated": True,
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{service.title()} Service Status*\n{status_emoji} {s['status'].title()}\n• Latency: {s['latency']}\n• Error Rate: {s['error_rate']}",
+                        "text": f"*{service.title()} Service Status*{SIMULATED_SUFFIX}\n{status_emoji} {s['status'].title()}\n• Latency: {s['latency']}\n• Error Rate: {s['error_rate']}",
                     }
                 }
             ]
@@ -514,7 +637,7 @@ async def slash_status(request: Request):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":bar_chart: System Status",
+                "text": ":bar_chart: System Status" + SIMULATED_SUFFIX,
                 "emoji": True,
             }
         }
@@ -526,11 +649,11 @@ async def slash_status(request: Request):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"{status_emoji} *{name}*: {s['status'].title()} | {s['latency']} | {s['error_rate']} errors",
+                "text": f"{status_emoji} *{name}*: {s['status'].title()} | {s['latency']} | {s['error_rate']} errors{SIMULATED_SUFFIX}",
             }
         })
 
-    return {"response_type": "ephemeral", "blocks": blocks}
+    return {"response_type": "ephemeral", "simulated": True, "blocks": blocks}
 
 
 @router.post("/commands/oncall")
@@ -540,7 +663,22 @@ async def slash_oncall(request: Request):
     team_raw = form_data.get("text", "")
     team = str(team_raw).strip() if team_raw else ""
 
-    # Mock on-call data
+    # No scheduling provider (PagerDuty/Opsgenie) is wired to this command, so
+    # the rota below is invented. Naming a person who is not actually on call is
+    # the worst possible failure mode here: the real on-call never gets paged.
+    if not get_settings().copilot_demo_mode:
+        logger.warning(
+            "/oncall requested but no on-call schedule provider is configured for the "
+            "Slack bot; refusing to name fabricated responders"
+        )
+        return _not_configured_response(
+            "On-call schedule",
+            "No on-call provider (PagerDuty/Opsgenie) is wired to the Slack `/oncall` command "
+            "in this deployment.",
+        )
+
+    logger.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED on-call rota for /oncall")
+
     oncall_data = {
         "platform": {"primary": "Alice Smith", "secondary": "Bob Jones", "escalation": "#platform-oncall"},
         "infra": {"primary": "Charlie Brown", "secondary": "Diana Prince", "escalation": "#infra-oncall"},
@@ -551,12 +689,13 @@ async def slash_oncall(request: Request):
         o = oncall_data[team]
         return {
             "response_type": "ephemeral",
+            "simulated": True,
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{team.title()} On-Call*\n:bust_in_silhouette: Primary: {o['primary']}\n:busts_in_silhouette: Secondary: {o['secondary']}\n:mega: Escalation: {o['escalation']}",
+                        "text": f"*{team.title()} On-Call*{SIMULATED_SUFFIX}\n:bust_in_silhouette: Primary: {o['primary']}{SIMULATED_SUFFIX}\n:busts_in_silhouette: Secondary: {o['secondary']}{SIMULATED_SUFFIX}\n:mega: Escalation: {o['escalation']}",
                     }
                 }
             ]
@@ -568,7 +707,7 @@ async def slash_oncall(request: Request):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":telephone_receiver: On-Call Schedule",
+                "text": ":telephone_receiver: On-Call Schedule" + SIMULATED_SUFFIX,
                 "emoji": True,
             }
         }
@@ -579,11 +718,11 @@ async def slash_oncall(request: Request):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*{name.title()}*: {o['primary']} (backup: {o['secondary']})",
+                "text": f"*{name.title()}*: {o['primary']} (backup: {o['secondary']}){SIMULATED_SUFFIX}",
             }
         })
 
-    return {"response_type": "ephemeral", "blocks": blocks}
+    return {"response_type": "ephemeral", "simulated": True, "blocks": blocks}
 
 
 @router.post("/commands/incident")
@@ -832,15 +971,32 @@ async def slash_postmortem(request: Request):
         }
 
     elif subcommand == "actions":
+        # The list below is a canned example, not a query against postmortem
+        # records - a team could otherwise believe follow-up work is tracked
+        # (and one item already "done") when nothing of the sort exists.
+        if not get_settings().copilot_demo_mode:
+            logger.warning(
+                "/postmortem actions requested but no postmortem action-item store is "
+                "configured for the Slack bot; refusing to list fabricated action items"
+            )
+            return _not_configured_response(
+                "Postmortem action item tracking",
+                "No postmortem store is wired to the Slack `/postmortem` command in this deployment.",
+            )
+
+        logger.warning(
+            "COPILOT_DEMO_MODE=true - returning SIMULATED postmortem action items"
+        )
         return {
             "response_type": "ephemeral",
+            "simulated": True,
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
                         "text": (
-                            "*Action Items from Recent Incidents:*\n\n"
+                            f"*Action Items from Recent Incidents:*{SIMULATED_SUFFIX}\n\n"
                             "1. :white_large_square: Add connection pool monitoring\n"
                             "2. :white_large_square: Implement circuit breaker for payment-service\n"
                             "3. :white_check_mark: Add pre-deploy health checks\n"

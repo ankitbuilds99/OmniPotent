@@ -102,9 +102,15 @@ class DataConsistencyChecker:
         await checker(check, target, params)
 
         check.safety_score = self._calculate_safety_score(check)
+        # One safety bar for the whole product: this is the same gate the
+        # remediation path applies (SAFETY_CONFIDENCE_THRESHOLD), so an operator
+        # who tightens it tightens it everywhere. Read per check, not at import,
+        # so a mid-incident config change actually takes effect.
+        from app.config import get_settings
+
         check.is_safe = (
             check.preconditions_met
-            and check.safety_score >= 0.7
+            and check.safety_score >= get_settings().safety_confidence_threshold
             and len(check.failed_preconditions) == 0
         )
 

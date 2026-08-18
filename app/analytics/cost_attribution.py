@@ -14,7 +14,50 @@ from enum import Enum
 from typing import Any
 from collections import defaultdict
 
+from app import model_catalog
+
 log = logging.getLogger("omnipotent.analytics.cost")
+
+# Models already reported as unpriced. Billing attribution runs on every request,
+# so warn once per model instead of once per call.
+_UNPRICED_WARNED: set[str] = set()
+
+# Models this tracker prices by default. Only IDs live here — the rates come from
+# app.model_catalog. Hand-maintained, this table and app/eval/metrics.py disagreed
+# about gpt-4o ($2.50/$10 here, the retired $5/$15 there).
+_TRACKED_MODEL_IDS = (
+    "gpt-4o",
+    "gpt-4o-mini",
+    "claude-3-5-sonnet",
+    "claude-3-5-haiku",
+    "claude-3-opus",
+    "o1",
+    "o1-mini",
+)
+
+
+def _catalog_rates() -> dict[str, dict[str, Decimal]]:
+    """Per-1k USD rates as Decimals, converted from the catalog's per-1M figures.
+
+    Money stays in Decimal end to end: the per-1M price is stringified before it
+    becomes a Decimal so a float artifact can never leak into a billing total.
+    A model with no verified price is omitted, so record() cannot invent a rate.
+    """
+    rates: dict[str, dict[str, Decimal]] = {}
+    for model_id in _TRACKED_MODEL_IDS:
+        per_1m = model_catalog.price_per_1m(model_id)
+        if per_1m is None:
+            log.warning(
+                "model %r has no verified price in the model catalog; "
+                "omitting it from the cost-attribution rate table",
+                model_id,
+            )
+            continue
+        rates[model_id] = {
+            "input": Decimal(str(per_1m[0])) / 1000,
+            "output": Decimal(str(per_1m[1])) / 1000,
+        }
+    return rates
 
 
 class CostCategory(Enum):
@@ -135,36 +178,7 @@ class CostTracker:
     def __init__(self):
         self._entries: list[CostEntry] = []
         self._budgets: dict[str, CostBudget] = {}
-        self._cost_rates: dict[str, dict[str, Decimal]] = {
-            "gpt-4o": {
-                "input": Decimal("0.0025"),
-                "output": Decimal("0.01"),
-            },
-            "gpt-4o-mini": {
-                "input": Decimal("0.00015"),
-                "output": Decimal("0.0006"),
-            },
-            "claude-3-5-sonnet": {
-                "input": Decimal("0.003"),
-                "output": Decimal("0.015"),
-            },
-            "claude-3-5-haiku": {
-                "input": Decimal("0.0008"),
-                "output": Decimal("0.004"),
-            },
-            "claude-3-opus": {
-                "input": Decimal("0.015"),
-                "output": Decimal("0.075"),
-            },
-            "o1": {
-                "input": Decimal("0.015"),
-                "output": Decimal("0.06"),
-            },
-            "o1-mini": {
-                "input": Decimal("0.003"),
-                "output": Decimal("0.012"),
-            },
-        }
+        self._cost_rates: dict[str, dict[str, Decimal]] = _catalog_rates()
         self._entry_counter = 0
 
     def record(
@@ -182,7 +196,20 @@ class CostTracker:
         """Record a cost entry."""
         self._entry_counter += 1
 
-        rates = self._cost_rates.get(model, {"input": Decimal("0"), "output": Decimal("0")})
+        rates = self._cost_rates.get(model)
+        if rates is None:
+            # Attribute $0 rather than a guess, but never silently: an unpriced
+            # model showing up here means a tenant is being under-billed until
+            # someone adds it to the catalog.
+            if model not in _UNPRICED_WARNED:
+                _UNPRICED_WARNED.add(model)
+                log.warning(
+                    "no rate for model %r; attributing $0.00 to tenant %r. "
+                    "Add the model to app/model_catalog.py.",
+                    model,
+                    tenant_id,
+                )
+            rates = {"input": Decimal("0"), "output": Decimal("0")}
         input_cost = (Decimal(input_tokens) / 1000) * rates["input"]
         output_cost = (Decimal(output_tokens) / 1000) * rates["output"]
         total_cost = input_cost + output_cost

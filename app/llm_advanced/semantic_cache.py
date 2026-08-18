@@ -339,24 +339,33 @@ class TieredSemanticCache:
         self,
         embedding_func: Callable[[str], Coroutine[Any, Any, list[float]]] | None = None,
     ):
+        # Thresholds and sizes are operator-tunable (CACHE_SIMILARITY_THRESHOLD_*
+        # / CACHE_MAX_ENTRIES_*): how near-miss a query may be before it reuses a
+        # cached answer is a correctness/cost trade-off only the operator can make.
+        # Read here rather than at import so the values aren't frozen before the
+        # environment is loaded.
+        from app.config import get_settings
+
+        s = get_settings()
+
         self._tiers: dict[str, SemanticCache] = {
             "hot": SemanticCache(
                 embedding_func=embedding_func,
-                similarity_threshold=0.95,
+                similarity_threshold=s.cache_similarity_threshold_high,
                 default_ttl=timedelta(hours=1),
-                max_entries=1000,
+                max_entries=s.cache_max_entries_small,
             ),
             "warm": SemanticCache(
                 embedding_func=embedding_func,
-                similarity_threshold=0.92,
+                similarity_threshold=s.cache_similarity_threshold_medium,
                 default_ttl=timedelta(hours=12),
-                max_entries=5000,
+                max_entries=s.cache_max_entries_medium,
             ),
             "cold": SemanticCache(
                 embedding_func=embedding_func,
-                similarity_threshold=0.90,
+                similarity_threshold=s.cache_similarity_threshold_low,
                 default_ttl=timedelta(days=7),
-                max_entries=20000,
+                max_entries=s.cache_max_entries_large,
             ),
         }
 
@@ -409,8 +418,23 @@ _cache: SemanticCache | None = None
 def get_semantic_cache(
     embedding_func: Callable[[str], Coroutine[Any, Any, list[float]]] | None = None,
 ) -> SemanticCache:
-    """Get the default semantic cache."""
+    """Get the default semantic cache.
+
+    Built from the operator's settings, not the constructor defaults. This used
+    to call ``SemanticCache()`` bare, so the process-wide cache silently ignored
+    every CACHE_* knob: raising CACHE_SIMILARITY_THRESHOLD_MEDIUM to stop
+    near-miss queries reusing each other's answers changed the tiered cache but
+    left this one still serving hits at 0.92. The medium/warm tier's values are
+    the right source — they are the ones this cache's defaults mirrored.
+    """
     global _cache
     if _cache is None:
-        _cache = SemanticCache(embedding_func=embedding_func)
+        from app.config import get_settings
+
+        s = get_settings()
+        _cache = SemanticCache(
+            embedding_func=embedding_func,
+            similarity_threshold=s.cache_similarity_threshold_medium,
+            max_entries=s.cache_max_entries_medium,
+        )
     return _cache

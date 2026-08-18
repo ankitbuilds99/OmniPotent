@@ -13,6 +13,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlencode
 
@@ -261,6 +262,32 @@ async def get_user_info(provider: str, access_token: str) -> OAuthUser | None:
         return None
 
 
+@lru_cache(maxsize=1)
+def _ephemeral_session_secret() -> str:
+    """Random per-process HMAC key used when COPILOT_SECRET_KEY is unset.
+
+    Cached so the whole process signs and verifies with the same value, and so
+    the warning below is emitted exactly once.
+    """
+    log.warning(
+        "COPILOT_SECRET_KEY not set — signing session tokens with an ephemeral "
+        "per-process key; sessions will NOT survive a restart and will not "
+        "validate across replicas. Set one in production."
+    )
+    return secrets.token_urlsafe(32)
+
+
+def _session_secret() -> str:
+    """Resolve the HMAC key for session JWTs — never a fixed literal.
+
+    A shared default here would let anyone who has read the source mint a valid
+    session for any org, so an unset key falls back to random bytes rather than
+    a guessable constant. app/config.py already refuses to boot production
+    without COPILOT_SECRET_KEY, so the fallback only ever applies to local runs.
+    """
+    return get_settings().copilot_secret_key.strip() or _ephemeral_session_secret()
+
+
 def create_session_token(
     user_id: str,
     org_id: str,
@@ -269,8 +296,7 @@ def create_session_token(
     expires_hours: int = 24,
 ) -> str:
     """Create a JWT session token."""
-    s = get_settings()
-    secret = s.copilot_secret_key or "dev-secret-key"
+    secret = _session_secret()
 
     now = datetime.now(timezone.utc)
     payload = {
@@ -288,8 +314,7 @@ def create_session_token(
 
 def verify_session_token(token: str) -> dict[str, Any] | None:
     """Verify and decode a session token."""
-    s = get_settings()
-    secret = s.copilot_secret_key or "dev-secret-key"
+    secret = _session_secret()
 
     try:
         payload = jwt.decode(token, secret, algorithms=["HS256"])

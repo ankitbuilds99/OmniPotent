@@ -17,10 +17,16 @@ spec:
       labels: {{- include "copilot.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "copilot.serviceAccountName" . }}
+      # runAsUser MUST match the uid the image's Dockerfile chowns /app to
+      # (appuser, 10001). It used to be hardcoded to 1000, which owns nothing in
+      # the image: the process could not write COPILOT_STATE_DIR (/app/data) and
+      # every SQLite store failed to open on startup. fsGroup applies the same id
+      # to the mounted PVC so persisted state stays writable across restarts.
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.runAsUser }}
+        fsGroup: {{ .Values.securityContext.fsGroup }}
       containers:
         - name: copilot
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

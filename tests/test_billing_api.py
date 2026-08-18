@@ -6,6 +6,9 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+from fastapi import HTTPException
+
+from app import config as cfg
 from app.billing.models import (
     PricingPlan,
     Subscription,
@@ -23,6 +26,16 @@ from app.billing.api import (
 )
 from app.billing.store import InMemoryBillingStore, FakeStripeClient
 from app.billing.stripe_integration import StripeBillingService
+
+
+@pytest.fixture
+def demo_mode(monkeypatch):
+    """Opt into the simulated-billing path that is off by default."""
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+    cfg.get_settings.cache_clear()
+    yield
+    monkeypatch.delenv("COPILOT_DEMO_MODE", raising=False)
+    cfg.get_settings.cache_clear()
 
 
 class TestPlanResponse:
@@ -377,21 +390,42 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_create_checkout_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """create_checkout should return demo checkout when Stripe not configured."""
+        """Without Stripe, checkout must refuse — not hand out the paid tier free."""
+        with pytest.raises(HTTPException) as exc:
+            await api_no_stripe.create_checkout(org_id, "team")
+        assert exc.value.status_code == 503
+
+        # ...and no subscription was created as a side effect.
+        assert await api_no_stripe._store.get_subscription(org_id) is None
+
+    @pytest.mark.asyncio
+    async def test_create_checkout_no_stripe_demo_mode(
+        self, api_no_stripe: BillingAPI, org_id, demo_mode
+    ):
+        """COPILOT_DEMO_MODE=true restores the simulated checkout, clearly labelled."""
         result = await api_no_stripe.create_checkout(org_id, "team")
 
-        assert "checkout_url" in result
-        assert "session_id" in result
         assert "demo_session" in result["session_id"]
+        assert result["simulated"] is True
 
     # Create portal tests
 
     @pytest.mark.asyncio
     async def test_create_portal_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """create_portal should return demo portal when Stripe not configured."""
+        """Without Stripe the "portal" manages nothing, so it must not be offered."""
+        with pytest.raises(HTTPException) as exc:
+            await api_no_stripe.create_portal(org_id)
+        assert exc.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_create_portal_no_stripe_demo_mode(
+        self, api_no_stripe: BillingAPI, org_id, demo_mode
+    ):
+        """COPILOT_DEMO_MODE=true restores the simulated portal, clearly labelled."""
         result = await api_no_stripe.create_portal(org_id)
 
         assert "portal_url" in result
+        assert result["simulated"] is True
 
     # Change plan tests
 

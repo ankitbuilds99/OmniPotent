@@ -12,6 +12,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app import model_catalog
+
+# The OpenAPI examples below quote real model IDs. They used to be hand-written
+# literals and drifted into fiction ("claude-haiku-4-20250514" never existed),
+# which then got copied into client SDKs, so they are sourced from the catalog.
+_EXAMPLE_MODEL = model_catalog.default_model("anthropic")
+_EXAMPLE_FAST_MODEL = model_catalog.default_model("anthropic", fast=True)
+
 
 # --------------------------------------------------------------------------- #
 # Enums for API response types
@@ -286,8 +294,8 @@ class ConfigResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "provider": "anthropic",
-                "model": "claude-sonnet-4-20250514",
-                "fast_model": "claude-haiku-4-20250514",
+                "model": _EXAMPLE_MODEL,
+                "fast_model": _EXAMPLE_FAST_MODEL,
                 "offline_mode": False,
                 "servers": [
                     {"name": "datadog", "label": "Datadog", "tools": ["search_logs", "get_metric"]},
@@ -355,8 +363,8 @@ class ModelConfigResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "provider": "anthropic",
-                "model": "claude-sonnet-4-20250514",
-                "fast_model": "claude-haiku-4-20250514"
+                "model": _EXAMPLE_MODEL,
+                "fast_model": _EXAMPLE_FAST_MODEL
             }
         }
     }

@@ -1,11 +1,19 @@
-"""In-memory incident store for demo purposes."""
+"""In-memory incident store.
+
+Starts empty. The seeded sample incidents below are only loaded when
+COPILOT_DEMO_MODE is on, so a real deployment never shows an operator three
+invented incidents (complete with an 87%-confidence root cause) alongside the
+ones that actually fired.
+"""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.config import get_settings
 from app.incidents.models import (
     Incident,
     IncidentSeverity,
@@ -19,14 +27,29 @@ from app.incidents.models import (
     TimelineEntry,
 )
 
+log = logging.getLogger("omnipotent.incidents.store")
+
 AGENT_TYPES = ["knowledge", "reasoning", "action", "learning", "collaboration", "ambient"]
+
+# Appended to every seeded value that a user can read, so a demo incident is
+# never mistaken for a real one in a list of both.
+SIMULATED_SUFFIX = " (simulated)"
 
 
 class IncidentStore:
-    def __init__(self) -> None:
+    def __init__(self, seed_demo_data: bool | None = None) -> None:
         self._incidents: dict[UUID, Incident] = {}
         self._investigations: dict[UUID, Investigation] = {}
-        self._init_demo_data()
+
+        # `seed_demo_data` exists for tests that want the fixtures deterministically;
+        # production goes through the setting, which is off by default.
+        if seed_demo_data is None:
+            seed_demo_data = get_settings().copilot_demo_mode
+        if seed_demo_data:
+            log.warning(
+                "COPILOT_DEMO_MODE=true - seeding the incident store with SIMULATED incidents"
+            )
+            self._init_demo_data()
 
     def _init_demo_data(self) -> None:
         now = datetime.utcnow()
@@ -37,7 +60,10 @@ class IncidentStore:
             incident_id=inc1_id,
             started_at=now - timedelta(minutes=15),
             overall_confidence=0.87,
-            root_cause="Database connection pool exhaustion due to long-running queries",
+            root_cause=(
+                "Database connection pool exhaustion due to long-running queries"
+                + SIMULATED_SUFFIX
+            ),
             recommended_actions=[
                 "Increase connection pool size from 20 to 50",
                 "Add query timeout of 30 seconds",
@@ -144,7 +170,7 @@ class IncidentStore:
 
         inc1 = Incident(
             id=inc1_id,
-            title="Checkout API 500 errors",
+            title="Checkout API 500 errors" + SIMULATED_SUFFIX,
             description="High rate of 500 errors on /api/checkout endpoint affecting customer transactions",
             severity=IncidentSeverity.CRITICAL,
             status=IncidentStatus.INVESTIGATING,
@@ -153,7 +179,7 @@ class IncidentStore:
             acknowledged_at=now - timedelta(minutes=18),
             acknowledged_by="oncall-bot",
             assignee="platform-team",
-            tags=["api", "checkout", "database"],
+            tags=["api", "checkout", "database", "simulated"],
             customer_impact=True,
             impact="~15% of checkout transactions failing",
             investigation=inv1,
@@ -189,7 +215,7 @@ class IncidentStore:
 
         inc2 = Incident(
             id=uuid4(),
-            title="High latency on API Gateway",
+            title="High latency on API Gateway" + SIMULATED_SUFFIX,
             description="P99 latency exceeding 2s threshold",
             severity=IncidentSeverity.HIGH,
             status=IncidentStatus.MONITORING,
@@ -198,7 +224,7 @@ class IncidentStore:
             acknowledged_at=now - timedelta(minutes=55),
             acknowledged_by="jane.doe",
             assignee="jane.doe",
-            tags=["latency", "gateway"],
+            tags=["latency", "gateway", "simulated"],
             timeline=[
                 TimelineEntry(
                     timestamp=now - timedelta(hours=1),
@@ -228,7 +254,7 @@ class IncidentStore:
 
         inc3 = Incident(
             id=uuid4(),
-            title="Memory leak in worker pods",
+            title="Memory leak in worker pods" + SIMULATED_SUFFIX,
             description="Gradual memory increase in worker-pool pods",
             severity=IncidentSeverity.MEDIUM,
             status=IncidentStatus.IDENTIFIED,
@@ -237,7 +263,7 @@ class IncidentStore:
             acknowledged_at=now - timedelta(hours=2, minutes=50),
             acknowledged_by="john.smith",
             assignee="backend-team",
-            tags=["memory", "kubernetes", "worker"],
+            tags=["memory", "kubernetes", "worker", "simulated"],
             timeline=[],
         )
 

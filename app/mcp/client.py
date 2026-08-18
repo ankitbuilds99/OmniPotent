@@ -71,9 +71,18 @@ def _server_config() -> dict:
             "transport": "stdio",
             # Runtime creds (set via the UI "Connect GitHub" flow) take
             # precedence over .env, so live mode can be toggled without restart.
+            #
+            # The timeouts must be forwarded explicitly. A stdio server inherits
+            # only DEFAULT_INHERITED_ENV_VARS (HOME, PATH, SHELL, TERM, USER,
+            # LOGNAME) plus whatever is in this dict — not os.environ — so
+            # HTTP_TIMEOUT_GITHUB / HTTP_TIMEOUT_MCP set in .env never reached the
+            # subprocess and the server always fell back to its own literals,
+            # making both knobs silently inert.
             "env": {
                 "GITHUB_TOKEN": runtime.github_token(),
                 "GITHUB_REPO": runtime.github_repo(),
+                "HTTP_TIMEOUT_GITHUB": str(s.http_timeout_github),
+                "HTTP_TIMEOUT_MCP": str(s.http_timeout_mcp),
             },
         },
         "pagerduty": {

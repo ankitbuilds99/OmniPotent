@@ -103,6 +103,11 @@ class SlackClient:
         """Fetch bot user info on connect."""
         try:
             resp = await self._call("auth.test")
+            # A non-ok auth.test (bad/absent token) used to be swallowed here and
+            # logged as "connected", leaving a client that silently drops every
+            # later call. Surface it instead so callers know Slack is unusable.
+            if not resp.ok:
+                raise SlackAPIError("auth.test", resp.error or "unknown", resp.data)
             self._bot_user_id = resp.data.get("user_id")
             self._team_id = resp.data.get("team_id")
             log.info(
@@ -202,10 +207,19 @@ class SlackClient:
         timestamp: str,
         body: bytes,
     ) -> bool:
-        """Verify a Slack request signature."""
+        """Verify a Slack request signature.
+
+        Fails closed: with no signing secret we cannot tell a Slack request from
+        anyone else's POST, so we must not report the request as verified. The
+        caller sees an unverified request and rejects it, rather than acting on
+        an unauthenticated command.
+        """
         if not self.config.signing_secret:
-            log.warning("No signing secret configured, skipping verification")
-            return True
+            log.warning(
+                "Cannot verify Slack request: no signing secret configured "
+                "(set SLACK_SIGNING_SECRET); treating the request as unverified"
+            )
+            return False
 
         if abs(time.time() - int(timestamp)) > 300:
             return False
@@ -742,14 +756,37 @@ async def get_slack_client() -> SlackClient:
     if _client is None:
         import os
 
+        from app.config import get_settings
+
+        settings = get_settings()
+        bot_token = settings.slack_bot_token or os.getenv("SLACK_BOT_TOKEN", "")
+
+        # Without a token every call would fail server-side anyway; refusing here
+        # gives the caller the actual reason instead of a Slack "not_authed".
+        if not bot_token:
+            log.warning(
+                "Slack client requested but no bot token is configured "
+                "(set SLACK_BOT_TOKEN); refusing to create an unauthenticated client"
+            )
+            raise SlackAPIError(
+                "auth.test",
+                "slack is not configured (set SLACK_BOT_TOKEN)",
+            )
+
         config = SlackClientConfig(
-            bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
+            bot_token=bot_token,
             app_token=os.getenv("SLACK_APP_TOKEN"),
-            signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
+            signing_secret=settings.slack_signing_secret or os.getenv("SLACK_SIGNING_SECRET"),
         )
 
         _client = SlackClient(config)
-        await _client.connect()
+        try:
+            await _client.connect()
+        except Exception:
+            # Do not cache a client that never authenticated - the next caller
+            # would get it back believing Slack is connected.
+            _client = None
+            raise
 
     return _client
 
