@@ -4,71 +4,22 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from uuid import UUID
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from app.billing import (
-    BillingAPI,
-    InMemoryBillingStore,
-    StripeBillingService,
+# These singletons live in app.billing.runtime rather than here so that other
+# features which gate on a plan flag (deduplication layers, quotas) read the same
+# store these endpoints write to. A second store would mean an org that upgraded
+# through this router still looked unsubscribed to the gate.
+from app.billing.runtime import (
+    current_org_id as _current_org_id,
+    get_billing_api as _get_billing_api,
 )
-from app.config import get_settings
-from app import tenant_context
 
 log = logging.getLogger("omnipotent.api.billing")
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
-
-# Billing service singletons (initialized lazily)
-_BILLING_STORE: InMemoryBillingStore | None = None
-_STRIPE_SERVICE: StripeBillingService | None = None
-_BILLING_API: BillingAPI | None = None
-
-
-def _get_store() -> InMemoryBillingStore:
-    global _BILLING_STORE
-    if _BILLING_STORE is None:
-        _BILLING_STORE = InMemoryBillingStore()
-    return _BILLING_STORE
-
-
-def _get_stripe_service() -> StripeBillingService | None:
-    global _STRIPE_SERVICE
-    s = get_settings()
-    if _STRIPE_SERVICE is None and s.stripe_api_key:
-        try:
-            import stripe
-            stripe.api_key = s.stripe_api_key
-            _STRIPE_SERVICE = StripeBillingService(
-                store=_get_store(),
-                stripe_client=stripe,
-                webhook_secret=s.stripe_webhook_secret or "",
-                frontend_url=s.frontend_url or "http://localhost:3000",
-            )
-        except Exception as e:
-            log.warning("Failed to initialize Stripe: %s", e)
-    return _STRIPE_SERVICE
-
-
-def _get_billing_api() -> BillingAPI:
-    global _BILLING_API
-    if _BILLING_API is None:
-        _BILLING_API = BillingAPI(
-            store=_get_store(),
-            stripe_service=_get_stripe_service(),
-        )
-    return _BILLING_API
-
-
-def _current_org_id() -> UUID:
-    """Get current organization ID from tenant context."""
-    cfg = tenant_context.get_tenant()
-    if cfg is None:
-        # In single-tenant mode, use a fixed org ID
-        return UUID("00000000-0000-0000-0000-000000000000")
-    return UUID(cfg.org_id)
 
 
 # Request/Response models

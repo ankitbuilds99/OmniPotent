@@ -25,10 +25,12 @@ WORKDIR /app
 
 # Install deps first for better layer caching. Editable install keeps the package
 # rooted at /app so config.ROOT resolves sample_repo/ and frontend/dist/ correctly.
-# Include postgres extra for production Postgres checkpoint storage.
+# Include postgres extra for production Postgres checkpoint storage, and tasks
+# (dramatiq + apscheduler) because the worker runs from this same image with a
+# different command — without it the worker container dies on import.
 COPY pyproject.toml README.md ./
 COPY app ./app
-RUN pip install --no-cache-dir -e ".[postgres]"
+RUN pip install --no-cache-dir -e ".[postgres,tasks]"
 
 # Sample fixtures so the container is runnable out of the box.
 COPY sample_repo ./sample_repo

@@ -5,7 +5,50 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
-replicaCount: 2  # >1 requires Postgres checkpointer + Redis (see config below)
+# PINNED TO 1 — TEMPORARY. Do not raise this until the stores listed below are
+# externalised. Authoritative business state currently lives in module-level
+# Python dicts with no persistence layer behind them:
+#   app/runbooks/router.py    _runbooks/_executions
+#   app/rbac/manager.py           _managers
+#   app/waitlist/manager.py       _waitlist_store
+#   app/deduplication/api_router.py _pipelines  (per-org incidents/fingerprints)
+#   app/dependency_graph/api_router.py _graphs  (per-org discovered service graph)
+#   app/cost_optimizer/api_router.py _budget_managers  (budgets, spend, alerts)
+#   app/cost_optimizer/api_router.py _roi_trackers  (recorded savings)
+# Three more that are instance state on a singleton rather than module-level dicts:
+#   app/alerting/engine.py    AlertEngine._rules/_metric_history/_firing_alerts
+#   app/planning/execution_engine.py  ExecutionEngine._active_executions
+#   app/coordinator/dag_executor.py   DAGExecutor._pending_approvals
+# Rules added through the MCP alerting server, the metrics they are evaluated
+# against, and which alerts are currently firing are all per-pod: a second replica
+# evaluates a different rule set against a different history, and re-fires alerts the
+# first pod already has open.
+# The last two are a different problem, not just an unmoved table: an in-flight
+# execution is a live asyncio task and a pending approval is a live future, so
+# /planning/executions/{id}/cancel|pause and /coordinator/.../approve act on
+# objects owned by the pod running the DAG. A row in Postgres cannot be cancelled
+# or approved — routing those commands to the right pod needs a control channel
+# (pub/sub or a work queue), which is why persisting the execution *records* did
+# not clear these two.
+# With >1 replica and no sessionAffinity, requests round-robin across pods, so an
+# investigation recorded on pod A does not exist on pod B, and per-org state is
+# split per-pod and lost on every restart, deploy and scale-down. The Postgres
+# checkpointer + Redis note below covers only the LangGraph checkpointer; it does
+# NOT cover any of the stores above.
+#
+# DONE — now in Postgres, each behind an Alembic revision. Set
+# COPILOT_DATABASE_URL (or DATABASE_URL) to a Postgres instance and run
+# `alembic upgrade head`; with it unset the app falls back to SQLite under
+# COPILOT_STATE_DIR, which is single-node only and needs persistence.enabled
+# below.
+#   002_crm              app/customers — customers, trials, and the usage
+#                        records billing is computed from (crm_customers,
+#                        crm_trials, crm_usage_events)
+#   003_investigations   investigation history behind /dashboard/* (investigations)
+#   004_planning_coord   planning task graphs and coordinator DAG execution
+#                        records (planning_graphs, coordinator_executions)
+# REVERT TO 2 WHEN: the remaining stores above are externalised.
+replicaCount: 1
 
 # Non-secret configuration → rendered into a ConfigMap and injected as env.
 config:
@@ -48,14 +91,56 @@ resources:
     cpu: "1"
     memory: 1Gi
 
+# Dramatiq worker (deploy/helm/copilot/templates/worker-deployment.yaml): drains the
+# background task queues in its own pods, off the API's request path.
+#
+# Off by default because it is useless without a broker: the worker reads
+# COPILOT_REDIS_URL, and with none set app/tasks/broker.py falls back to a stub broker
+# and the pod runs healthy while processing nothing. Enable it together with
+#   --set worker.enabled=true --set-string config.COPILOT_REDIS_URL=redis://...
+#
+# replicaCount here is NOT subject to the pin on the API above. A worker holds no
+# authoritative state; Redis holds the queue and Dramatiq gives each message to one
+# consumer, so these scale horizontally today.
+#
+# What it actually runs: only send_notification and sync_usage_to_stripe do real work
+# from a separate process right now. The other actors need state that lives in the API
+# process — app/tasks/worker.py names each one and what unblocks it. There is no
+# scheduler deployment: its jobs were removed, and `--mode scheduler` exits 1 rather
+# than idling, so one would only CrashLoopBackOff.
+worker:
+  enabled: false
+  replicaCount: 1
+  # Dramatiq's own defaults are 8 processes / 8 threads, which is heavy for the
+  # workload here (outbound HTTP with retries). Sized to the resources below.
+  processes: 2
+  threads: 8
+  # Above the longest actor time_limit (run_investigation, 300s) so an in-flight
+  # message can finish on shutdown rather than being redelivered from the top.
+  terminationGracePeriodSeconds: 330
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# DISABLED — TEMPORARY, paired with replicaCount: 1 above. Autoscaling is the
+# acute form of the in-memory-state bug: every scale-up serves requests from a
+# pod with empty stores, and every scale-down silently destroys the usage records
+# that pod accumulated. Re-enable together with replicaCount.
 autoscaling:
-  enabled: true
+  enabled: false
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 
+# Disabled while replicaCount is 1: a PDB with minAvailable 1 over a single
+# replica permits zero voluntary evictions, which blocks node drains and cluster
+# upgrades indefinitely. Re-enable with replicaCount.
 podDisruptionBudget:
-  enabled: true
+  enabled: false
   minAvailable: 1
 
 # Liveness/readiness map to the app's probes (app/api/main.py).

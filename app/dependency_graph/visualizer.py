@@ -19,7 +19,10 @@ class VisualizationFormat(str, Enum):
     D3 = "d3"
     DOT = "dot"
     ASCII = "ascii"
-    SVG = "svg"
+    # No SVG member: it was offered here but `render` had no branch for it, so
+    # every request for it raised ValueError. Rendering SVG means running the DOT
+    # output through graphviz, which is a system dependency this package does not
+    # have. Callers who want SVG should render DOT and pipe it through `dot -Tsvg`.
 
 
 @dataclass

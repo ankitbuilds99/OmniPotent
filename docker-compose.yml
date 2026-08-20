@@ -62,6 +62,44 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # Dramatiq worker — drains the background task queues off the request path.
+  #
+  # Same image as the API, different command. It consumes every queue, but only two
+  # actors do useful work from a separate process today: send_notification and
+  # sync_usage_to_stripe (outbound HTTP built from env + arguments, retried with
+  # backoff). The rest need state that lives in the API process — app/tasks/worker.py
+  # documents which and why. Note this is a SECOND queue system: the API also runs
+  # app/jobqueue.py in-process for investigations, which is the one with a result path.
+  #
+  # There is deliberately no scheduler service. Its two jobs were removed (neither
+  # could work from a scheduler process), so `--mode scheduler` now exits 1 rather
+  # than idling; a service here would just crash-loop.
+  worker:
+    build: .
+    command: ["python", "-m", "app.tasks.worker", "--mode", "worker"]
+    environment:
+      COPILOT_ENV: ${COPILOT_ENV:-development}
+      # The broker. Dramatiq reads this directly (app/tasks/broker.py); without it
+      # the worker falls back to a stub broker and silently processes nothing.
+      COPILOT_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
+      # --- outbound targets for the two deployable actors ---
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-}
+      PAGERDUTY_API_TOKEN: ${PAGERDUTY_API_TOKEN:-}
+      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
+      # --- LLM keys, for run_investigation once its results are shareable ---
+      COPILOT_PROVIDER: ${COPILOT_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      COPILOT_STATE_DIR: /app/data
+    volumes:
+      - copilot_state:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   # PostgreSQL Database
   postgres:
     image: postgres:16-alpine

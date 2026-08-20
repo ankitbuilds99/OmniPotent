@@ -368,7 +368,7 @@ test:
     - uv sync --extra dev
   script:
     - uv run pytest --cov={src_dirs} --cov-report=xml
-  coverage: '/TOTAL.*\s+(\d+%)/'
+  coverage: '/TOTAL.*\\s+(\\d+%)/'
   artifacts:
     reports:
       coverage_report:
@@ -412,7 +412,7 @@ test:
   script:
     - npm ci
     - npm run test -- --coverage
-  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  coverage: '/All files[^|]*\\|[^|]*\\s+([\\d\\.]+)/'
   artifacts:
     reports:
       coverage_report:

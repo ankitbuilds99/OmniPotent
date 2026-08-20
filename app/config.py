@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     gitlab_webhook_secret: str = ""
     # Microsoft Teams incoming webhook URL for notifications.
     teams_webhook_url: str = ""
+    # Target for the generic WEBHOOK notification channel. NotificationPreferences
+    # has no per-user webhook URL, so this channel is deployment-level only. Empty
+    # means the channel reports delivery failure rather than silently succeeding.
+    copilot_notification_webhook_url: str = ""
     # Jira Cloud/Server integration for issue management.
     jira_base_url: str = ""  # e.g., https://yourcompany.atlassian.net
     jira_email: str = ""     # Jira account email

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -38,6 +40,49 @@ class TestDatabaseEngine:
             mock.return_value.copilot_database_url = "postgres://user:pass@host/db"
             url = _get_database_url()
             assert "postgresql+asyncpg://" in url
+
+
+class TestEnsureSchema:
+    """Tests for the first-caller schema creation."""
+
+    async def test_concurrent_callers_do_not_race_to_create_the_schema(
+        self, tmp_path, monkeypatch
+    ):
+        """Two coroutines reaching a fresh database together must not both create it.
+
+        `create_all(checkfirst=True)` is idempotent only against a completed
+        creation: it issues a SELECT and then a CREATE, so without a lock both
+        callers see no tables and the loser raises
+        "table organizations already exists". Reachable by anything that touches
+        the ORM outside the API lifespan — a worker, a script, or a background
+        task racing a poll.
+        """
+        from app.config import get_settings
+        from app.database import engine as db_engine
+
+        monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+        get_settings.cache_clear()
+        await db_engine.close_db()
+        try:
+            await asyncio.gather(*(db_engine.ensure_schema() for _ in range(8)))
+        finally:
+            await db_engine.close_db()
+            get_settings.cache_clear()
+
+    async def test_the_schema_lock_does_not_leak_across_event_loops(self):
+        """An asyncio.Lock binds to one loop and raises on any other.
+
+        pytest-asyncio gives each test its own loop, so a single module-level
+        lock would work in the first test that touched it and fail in every
+        later one. Locks are therefore keyed by loop and dropped in close_db.
+        """
+        from app.database import engine as db_engine
+
+        lock = db_engine._schema_lock()
+        assert lock is db_engine._schema_lock(), "same loop must reuse its lock"
+
+        await db_engine.close_db()
+        assert db_engine._schema_locks == {}, "close_db must drop stale loop locks"
 
 
 class TestDatabaseHealth:

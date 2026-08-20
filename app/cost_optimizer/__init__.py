@@ -2,10 +2,19 @@
 
 Provides comprehensive cost optimization:
 - AI/LLM token cost tracking and optimization
-- Cloud resource cost analysis
-- Model routing for cost/performance balance
+- GPU fleet cost tracking across AWS and GCP
 - Budget management and alerts
 - ROI tracking for automation
+
+Served at ``/api/cost/*`` by :mod:`app.cost_optimizer.api_router`.
+
+Model routing is deliberately not here. This package used to carry a
+``CostAwareModelRouter`` that duplicated the wired
+:class:`app.model_router.adaptive_router.AdaptiveModelRouter` — two routers deciding
+which model to call, by different rules, would disagree. It was deleted on
+2026-08-20; the wired router is the one to extend. Two capabilities existed only in
+the deleted copy and have no home yet: rate-limit awareness (backing off a provider
+that returned 429) and adaptive learning from recorded call outcomes.
 """
 
 from app.cost_optimizer.token_optimizer import (
@@ -13,12 +22,6 @@ from app.cost_optimizer.token_optimizer import (
     TokenUsage,
     TokenBudget,
     OptimizationStrategy,
-)
-from app.cost_optimizer.model_router import (
-    CostAwareModelRouter,
-    ModelConfig,
-    RoutingDecision,
-    RoutingStrategy,
 )
 from app.cost_optimizer.budget_manager import (
     BudgetManager,
@@ -49,10 +52,6 @@ __all__ = [
     "TokenUsage",
     "TokenBudget",
     "OptimizationStrategy",
-    "CostAwareModelRouter",
-    "ModelConfig",
-    "RoutingDecision",
-    "RoutingStrategy",
     "BudgetManager",
     "Budget",
     "BudgetAlert",

@@ -358,6 +358,10 @@ class GPUTracker:
     - Demand forecasting
     """
 
+    # Below this many observations a forecast would be a line through noise, so
+    # forecast_demand() declines instead.
+    MIN_OBSERVATIONS_FOR_FORECAST = 7
+
     def __init__(
         self,
         aws_region: str = "us-east-1",
@@ -373,6 +377,10 @@ class GPUTracker:
         self._instances: dict[str, GPUInstance] = {}
         self._availability: dict[str, GPUAvailability] = {}
         self._reservations: dict[str, GPUReservation] = {}
+
+        # One entry per scan per GPU type: what was actually running, and when.
+        # forecast_demand() projects from these and from nothing else.
+        self._usage_history: list[dict[str, Any]] = []
 
         self._http_client: httpx.AsyncClient | None = None
 
@@ -457,6 +465,7 @@ class GPUTracker:
         except Exception as e:
             log.error("Failed to scan AWS GPU instances: %s", e)
 
+        self.record_observation()
         return instances
 
     def _map_aws_instance_to_gpu(self, instance_type: str) -> dict[str, Any]:
@@ -592,6 +601,7 @@ class GPUTracker:
         except Exception as e:
             log.error("Failed to scan GCP GPU instances: %s", e)
 
+        self.record_observation()
         return instances
 
     def _map_gcp_accelerator_to_type(self, accelerator_type: str) -> GPUType:
@@ -650,9 +660,30 @@ class GPUTracker:
 
         for instance in on_demand_instances:
             pricing = GPUPriceDatabase.get_pricing(instance.provider, instance.gpu_type)
-            if pricing and pricing.get("spot_range"):
+
+            # Prefer the spot price we actually fetched over the static range in
+            # GPUPriceDatabase: the range is a list-price reference that goes stale,
+            # and this figure is what a customer decides a migration on.
+            key = (
+                f"{instance.provider.value}:{instance.region}:"
+                f"{instance.gpu_type.value}:spot"
+            )
+            observed = self._availability.get(key)
+            if observed is not None and observed.spot_price is not None:
+                avg_spot: float | None = observed.spot_price
+                basis = f"current spot price ${observed.spot_price:.2f}/hr"
+            elif pricing and pricing.get("spot_range"):
                 spot_min, spot_max = pricing["spot_range"]
                 avg_spot = (spot_min + spot_max) / 2
+                basis = (
+                    f"midpoint of the reference spot range "
+                    f"${spot_min:.2f}–${spot_max:.2f}/hr, not a live quote"
+                )
+            else:
+                avg_spot = None
+                basis = ""
+
+            if avg_spot is not None:
                 savings = (instance.hourly_cost - avg_spot) * 24 * 30
 
                 if savings > 100:
@@ -661,7 +692,7 @@ class GPUTracker:
                         id=f"rec_{rec_id}",
                         category="spot_conversion",
                         title=f"Convert {instance.instance_id} to Spot",
-                        description=f"This {instance.gpu_type.value} instance could save ${savings:.0f}/month by using spot instances",
+                        description=f"This {instance.gpu_type.value} instance could save ${savings:.0f}/month by using spot instances (based on {basis})",
                         estimated_savings_monthly=savings,
                         estimated_savings_percentage=((instance.hourly_cost - avg_spot) / instance.hourly_cost) * 100,
                         effort="low",
@@ -723,43 +754,103 @@ class GPUTracker:
 
         return sorted(recommendations, key=lambda r: r.estimated_savings_monthly, reverse=True)
 
+    def record_observation(self) -> None:
+        """Snapshot current GPU counts per type as one point of usage history.
+
+        Called at the end of each cloud scan. This is the only thing forecasts are
+        built from, so a deployment that never scans has no history and gets no
+        forecast — which is the correct answer, not a reason to synthesise one.
+        """
+        now = datetime.now(timezone.utc)
+        counts: dict[str, int] = {}
+        for instance in self._instances.values():
+            if not instance.available:
+                continue
+            counts[instance.gpu_type.value] = (
+                counts.get(instance.gpu_type.value, 0) + instance.gpu_count
+            )
+
+        for gpu_type, gpus in counts.items():
+            self._usage_history.append({"at": now, "gpu_type": gpu_type, "gpus": gpus})
+
     async def forecast_demand(
         self,
         gpu_type: GPUType,
         horizon_days: int = 30,
     ) -> dict[str, Any]:
-        """Forecast GPU demand based on historical patterns."""
-        historical_usage = []
-        for i in range(30):
-            usage = 50 + 20 * (1 if i % 7 < 5 else 0.5) + (i % 7) * 2
-            historical_usage.append(usage)
+        """Project GPU demand from observed usage history.
 
-        avg_usage = sum(historical_usage) / len(historical_usage)
-        trend = (historical_usage[-7:] and sum(historical_usage[-7:]) / 7 or avg_usage) - (
-            historical_usage[:7] and sum(historical_usage[:7]) / 7 or avg_usage
-        ) / 30
+        Returns ``status: "insufficient_data"`` rather than a forecast when too few
+        observations exist. This used to manufacture 30 days of history from a
+        formula (``50 + 20 * ...``) and project from that, so it produced a
+        confident curve — and a "reserve N GPUs" recommendation — for customers
+        whose fleet it had never looked at. A reservation is a spending commitment;
+        inventing the demand behind it is worse than declining to answer.
+        """
+        observations = [
+            o for o in self._usage_history if o["gpu_type"] == gpu_type.value
+        ]
+
+        if len(observations) < self.MIN_OBSERVATIONS_FOR_FORECAST:
+            return {
+                "gpu_type": gpu_type.value,
+                "status": "insufficient_data",
+                "observations": len(observations),
+                "observations_required": self.MIN_OBSERVATIONS_FOR_FORECAST,
+                "message": (
+                    "Not enough observed usage to forecast. Scan the cloud accounts "
+                    "regularly to build history."
+                ),
+                "forecast": [],
+                "recommendations": [],
+            }
+
+        observations.sort(key=lambda o: o["at"])
+        usage = [float(o["gpus"]) for o in observations]
+        avg_usage = sum(usage) / len(usage)
+
+        # Slope per observation, from the mean of the first half against the second.
+        half = len(usage) // 2
+        early = sum(usage[:half]) / half
+        late = sum(usage[half:]) / (len(usage) - half)
+        span = max(1, len(usage) - half)
+        trend = (late - early) / span
+
+        # The spread of what was actually observed, used as the confidence band —
+        # a fixed ±20% would imply a precision this has no basis for.
+        spread = max(usage) - min(usage)
+        band = max(spread / 2, avg_usage * 0.1)
+
+        # Project forward from the most recent observation, not the mean: on a
+        # growing fleet the mean is already behind, so anchoring there forecasts
+        # fewer GPUs than are running right now.
+        latest = usage[-1]
 
         forecast = []
         for day in range(1, horizon_days + 1):
-            projected = avg_usage + trend * day
-            is_weekend = (datetime.now(timezone.utc) + timedelta(days=day)).weekday() >= 5
-            if is_weekend:
-                projected *= 0.6
+            projected = latest + trend * day
             forecast.append({
                 "day": day,
                 "projected_gpus": max(0, int(projected)),
-                "confidence_low": max(0, int(projected * 0.8)),
-                "confidence_high": int(projected * 1.2),
+                "confidence_low": max(0, int(projected - band)),
+                "confidence_high": int(projected + band),
             })
 
+        baseline = int(min(usage))
         return {
             "gpu_type": gpu_type.value,
-            "current_usage": int(avg_usage),
+            "status": "ok",
+            "observations": len(observations),
+            "observed_from": observations[0]["at"].isoformat(),
+            "observed_to": observations[-1]["at"].isoformat(),
+            "current_usage": int(usage[-1]),
+            "average_usage": round(avg_usage, 1),
             "trend": "increasing" if trend > 0 else "decreasing" if trend < 0 else "stable",
             "forecast": forecast,
             "recommendations": [
-                f"Consider reserving {int(avg_usage * 0.7)} GPUs to cover baseline demand",
-                "Use spot instances for burst capacity",
+                f"Baseline observed usage never fell below {baseline} GPUs; "
+                f"that is the safe floor for a reservation",
+                "Use spot instances for burst capacity above the baseline",
             ],
         }
 

@@ -20,12 +20,58 @@ log = logging.getLogger("omnipotent.dashboard.trends")
 
 
 class TrendDirection(str, Enum):
-    """Direction of a trend."""
+    """Direction of a trend, in terms of whether it is good or bad.
+
+    Not the direction of the number itself — see `MetricPolarity`. For MTTR,
+    error rate or cost, a rising value is DECLINING health.
+    """
 
     IMPROVING = "improving"
     STABLE = "stable"
     DECLINING = "declining"
     UNKNOWN = "unknown"
+
+
+class MetricPolarity(str, Enum):
+    """Whether a rising value is good or bad for a given metric.
+
+    Without this every metric was treated as HIGHER_IS_BETTER, so a 30% rise in
+    mean-time-to-resolution was reported to the user as "mttr_minutes improved by
+    30.0%" — the exact opposite of what happened, in the human-readable sentence
+    that goes on the dashboard.
+    """
+
+    HIGHER_IS_BETTER = "higher_is_better"
+    LOWER_IS_BETTER = "lower_is_better"
+
+
+# Metrics where a rising number is worse. Matched as a substring against the
+# metric name, so "mttr_minutes" and "p90_mttr" both resolve.
+_LOWER_IS_BETTER_HINTS = (
+    "mttr",
+    "duration",
+    "latency",
+    "error",
+    "failure",
+    "cost",
+    "spend",
+    "abstention",
+    "escalation",
+    "downtime",
+    "incident",
+)
+
+
+def infer_polarity(metric_name: str) -> MetricPolarity:
+    """Guess a metric's polarity from its name.
+
+    A guess, and named like one. Callers that know the answer should pass
+    `polarity` to `analyze` explicitly rather than rely on this.
+    """
+    lowered = metric_name.lower()
+    if any(hint in lowered for hint in _LOWER_IS_BETTER_HINTS):
+        return MetricPolarity.LOWER_IS_BETTER
+    return MetricPolarity.HIGHER_IS_BETTER
 
 
 class AnomalyType(str, Enum):
@@ -61,12 +107,23 @@ class Trend:
     data_points: list[DataPoint] = field(default_factory=list)
     anomaly: AnomalyType = AnomalyType.NONE
     forecast_next: float | None = None
+    # Recorded so a consumer can tell why a falling number was called an
+    # improvement. Inferred from the metric name when not supplied.
+    polarity: MetricPolarity | None = None
+
+    def __post_init__(self) -> None:
+        if self.polarity is None:
+            self.polarity = infer_polarity(self.metric_name)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "metric_name": self.metric_name,
             "direction": self.direction.value,
+            # Signed and raw: `direction` already says whether the change is good,
+            # so a consumer that wants "which way did the number move" needs the
+            # sign preserved here.
             "change_percent": round(self.change_percent, 1),
+            "polarity": (self.polarity or infer_polarity(self.metric_name)).value,
             "current_value": round(self.current_value, 2),
             "previous_value": round(self.previous_value, 2),
             "confidence": round(self.confidence, 2),
@@ -98,6 +155,7 @@ class TrendAnalyzer:
         metric_name: str,
         data_points: list[DataPoint],
         comparison_window: int = 7,
+        polarity: MetricPolarity | None = None,
     ) -> Trend:
         """Analyze a time series for trends.
 
@@ -105,10 +163,14 @@ class TrendAnalyzer:
             metric_name: Name of the metric
             data_points: List of data points (oldest first)
             comparison_window: Days to use for comparison
+            polarity: Whether a rising value is good or bad for this metric.
+                Inferred from the name when omitted.
 
         Returns:
             Trend analysis result
         """
+        if polarity is None:
+            polarity = infer_polarity(metric_name)
         if len(data_points) < 2:
             return Trend(
                 metric_name=metric_name,
@@ -132,10 +194,10 @@ class TrendAnalyzer:
 
         if abs(change_percent) < self.significance_threshold * 100:
             direction = TrendDirection.STABLE
-        elif change_percent > 0:
-            direction = TrendDirection.IMPROVING
         else:
-            direction = TrendDirection.DECLINING
+            rising = change_percent > 0
+            better = rising == (polarity == MetricPolarity.HIGHER_IS_BETTER)
+            direction = TrendDirection.IMPROVING if better else TrendDirection.DECLINING
 
         confidence = self._calculate_confidence(values)
 
@@ -158,6 +220,7 @@ class TrendAnalyzer:
             data_points=sorted_points[-30:],
             anomaly=anomaly,
             forecast_next=forecast,
+            polarity=polarity,
         )
 
     def _calculate_window_avg(self, values: list[float], window: int) -> float:
@@ -260,18 +323,23 @@ class TrendAnalyzer:
 def calculate_trends(
     metrics: dict[str, list[tuple[datetime, float]]],
     comparison_days: int = 7,
+    polarities: dict[str, MetricPolarity] | None = None,
 ) -> dict[str, Trend]:
     """Calculate trends for multiple metrics.
 
     Args:
         metrics: Dictionary of metric name -> list of (timestamp, value)
         comparison_days: Days to compare
+        polarities: Optional metric name -> polarity. Any metric not listed has
+            its polarity inferred from its name, which is a guess — supply this
+            for metrics whose names don't say which direction is good.
 
     Returns:
         Dictionary of metric name -> Trend
     """
     analyzer = TrendAnalyzer()
     results = {}
+    polarities = polarities or {}
 
     for metric_name, data in metrics.items():
         data_points = [
@@ -279,7 +347,10 @@ def calculate_trends(
             for ts, val in data
         ]
         results[metric_name] = analyzer.analyze(
-            metric_name, data_points, comparison_days
+            metric_name,
+            data_points,
+            comparison_days,
+            polarity=polarities.get(metric_name),
         )
 
     return results

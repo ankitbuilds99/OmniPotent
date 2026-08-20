@@ -29,12 +29,16 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Numeric,
+    Uuid,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.models import Base
+# JSONType/Uuid instead of the postgresql-only JSONB/UUID: these tables live on the
+# same Base.metadata as app/database/models.py, so create_all() compiles all of them
+# together and one postgresql-only column here makes every table in the app
+# uncreatable on SQLite — the default backend. Same PostgreSQL DDL either way.
+from app.database.models import Base, JSONType
 
 
 # ============================================================================
@@ -47,16 +51,16 @@ class OncallTeam(Base):
     __tablename__ = "oncall_teams"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     timezone: Mapped[str] = mapped_column(String(50), default="UTC", nullable=False)
-    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, default={
+    settings: Mapped[dict[str, Any]] = mapped_column(JSONType, default={
         "default_rotation_type": "weekly",
         "allow_self_coverage": True,
         "require_acknowledgment": True,
@@ -95,18 +99,18 @@ class OncallTeamMember(Base):
     __tablename__ = "oncall_team_members"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     team_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(50), default="member", nullable=False)
 
     # Contact preferences (order matters for escalation)
-    contact_methods: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=[
+    contact_methods: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=[
         {"type": "push", "delay_minutes": 0},
         {"type": "sms", "delay_minutes": 1},
         {"type": "phone", "delay_minutes": 3},
@@ -115,10 +119,10 @@ class OncallTeamMember(Base):
 
     # Availability preferences
     timezone: Mapped[str | None] = mapped_column(String(50))
-    working_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    working_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
     # Skills for AI routing
-    skills: Mapped[list[str]] = mapped_column(JSONB, default=[])
+    skills: Mapped[list[str]] = mapped_column(JSONType, default=[])
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     joined_at: Mapped[datetime] = mapped_column(
@@ -145,10 +149,10 @@ class OncallSchedule(Base):
     __tablename__ = "oncall_schedules"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     team_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
@@ -158,7 +162,7 @@ class OncallSchedule(Base):
     schedule_type: Mapped[str] = mapped_column(String(50), default="rotation", nullable=False)
 
     # Rotation settings
-    rotation_config: Mapped[dict[str, Any]] = mapped_column(JSONB, default={
+    rotation_config: Mapped[dict[str, Any]] = mapped_column(JSONType, default={
         "type": "weekly",
         "handoff_time": "09:00",
         "handoff_day": "monday",
@@ -167,7 +171,7 @@ class OncallSchedule(Base):
 
     # Coverage requirements
     coverage_type: Mapped[str] = mapped_column(String(50), default="24x7", nullable=False)
-    coverage_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    coverage_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
     # Layer (primary=1, secondary=2, tertiary=3)
     layer: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -209,13 +213,13 @@ class OncallRotationParticipant(Base):
     __tablename__ = "oncall_rotation_participants"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     schedule_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_schedules.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_schedules.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
     )
 
     # Position in rotation
@@ -252,13 +256,13 @@ class OncallShift(Base):
     __tablename__ = "oncall_shifts"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     schedule_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_schedules.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_schedules.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
 
     # Shift timing
@@ -270,14 +274,14 @@ class OncallShift(Base):
 
     # Source: rotation, manual, override, swap
     source: Mapped[str] = mapped_column(String(50), default="rotation", nullable=False)
-    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
 
     # Status: scheduled, active, completed, swapped, cancelled
     status: Mapped[str] = mapped_column(String(50), default="scheduled", nullable=False)
 
     # For shadow rotations (training)
     shadow_of: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_shifts.id")
+        Uuid(as_uuid=True), ForeignKey("oncall_shifts.id")
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -308,20 +312,20 @@ class OncallOverride(Base):
     __tablename__ = "oncall_overrides"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     schedule_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_schedules.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_schedules.id", ondelete="CASCADE"), nullable=False
     )
 
     # Who is being replaced
     original_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
 
     # Who is covering
     override_user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
 
     # Override period
@@ -335,7 +339,7 @@ class OncallOverride(Base):
     # Approval
     requires_approval: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -343,7 +347,7 @@ class OncallOverride(Base):
     status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
 
     created_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -364,23 +368,23 @@ class OncallSwapRequest(Base):
     __tablename__ = "oncall_swap_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
 
     # Requestor's shift
     from_shift_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_shifts.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_shifts.id"), nullable=False
     )
     from_user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
 
     # Target (can be specific user or open request)
     to_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
     to_shift_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_shifts.id")
+        Uuid(as_uuid=True), ForeignKey("oncall_shifts.id")
     )
 
     # Timing
@@ -394,7 +398,7 @@ class OncallSwapRequest(Base):
 
     # Response
     responded_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -421,17 +425,17 @@ class OncallEscalationPolicy(Base):
     __tablename__ = "oncall_escalation_policies"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     team_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
 
     # When to use this policy
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    conditions: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    conditions: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
     # Repeat settings
     repeat_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -462,10 +466,10 @@ class OncallEscalationStep(Base):
     __tablename__ = "oncall_escalation_steps"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     policy_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_escalation_policies.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_escalation_policies.id", ondelete="CASCADE"), nullable=False
     )
 
     step_number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -474,13 +478,13 @@ class OncallEscalationStep(Base):
     delay_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Targets: [{"type": "schedule", "schedule_id": "...", "layer": "primary"}, ...]
-    targets: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    targets: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, nullable=False)
 
     # Notification settings
-    notification_channels: Mapped[list[str]] = mapped_column(JSONB, default=["push", "sms", "phone"])
+    notification_channels: Mapped[list[str]] = mapped_column(JSONType, default=["push", "sms", "phone"])
 
     # Conditions to skip this step
-    skip_if: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    skip_if: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -504,13 +508,13 @@ class OncallAlert(Base):
     __tablename__ = "oncall_alerts"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("organizations.id"), nullable=False
     )
     team_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_teams.id")
+        Uuid(as_uuid=True), ForeignKey("oncall_teams.id")
     )
 
     # Alert details
@@ -535,34 +539,34 @@ class OncallAlert(Base):
     )
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acknowledged_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
 
     # Escalation tracking
     escalation_policy_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_escalation_policies.id")
+        Uuid(as_uuid=True), ForeignKey("oncall_escalation_policies.id")
     )
     current_escalation_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     escalation_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # AI analysis
-    ai_analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    ai_analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     ai_suggested_responder: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
     ai_routing_reason: Mapped[str | None] = mapped_column(Text)
 
     # Metadata
-    tags: Mapped[list[str]] = mapped_column(JSONB, default=[])
-    custom_fields: Mapped[dict[str, Any]] = mapped_column(JSONB, default={})
-    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    tags: Mapped[list[str]] = mapped_column(JSONType, default=[])
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(JSONType, default={})
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
     # Link to incident
-    incident_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -590,13 +594,13 @@ class OncallNotification(Base):
     __tablename__ = "oncall_notifications"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     alert_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_alerts.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_alerts.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
 
     # Notification details
@@ -621,7 +625,7 @@ class OncallNotification(Base):
     # Provider response
     provider: Mapped[str | None] = mapped_column(String(50))
     provider_id: Mapped[str | None] = mapped_column(String(255))
-    provider_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    provider_response: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
     # Failure info
     error_message: Mapped[str | None] = mapped_column(Text)
@@ -650,10 +654,10 @@ class OncallHolidayCalendar(Base):
     __tablename__ = "oncall_holiday_calendars"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     country_code: Mapped[str | None] = mapped_column(String(10))
@@ -675,10 +679,10 @@ class OncallHoliday(Base):
     __tablename__ = "oncall_holidays"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     calendar_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_holiday_calendars.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_holiday_calendars.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     holiday_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -699,10 +703,10 @@ class OncallTimeOff(Base):
     __tablename__ = "oncall_time_off"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
     )
 
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -715,13 +719,13 @@ class OncallTimeOff(Base):
     # Approval
     status: Mapped[str] = mapped_column(String(50), default="approved", nullable=False)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
 
     # Coverage handled?
     coverage_arranged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     coverage_override_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_overrides.id")
+        Uuid(as_uuid=True), ForeignKey("oncall_overrides.id")
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -743,13 +747,13 @@ class OncallCompensationRule(Base):
     __tablename__ = "oncall_compensation_rules"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
     team_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_teams.id")
+        Uuid(as_uuid=True), ForeignKey("oncall_teams.id")
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -787,10 +791,10 @@ class OncallCompensationRecord(Base):
     __tablename__ = "oncall_compensation_records"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
 
     # Period
@@ -819,7 +823,7 @@ class OncallCompensationRecord(Base):
     # Status: pending, approved, paid
     status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -838,13 +842,13 @@ class OncallMetrics(Base):
     __tablename__ = "oncall_metrics"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     team_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("oncall_teams.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("members.id")
+        Uuid(as_uuid=True), ForeignKey("members.id")
     )
 
     # Time bucket

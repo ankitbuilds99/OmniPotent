@@ -1,0 +1,84 @@
+{{- if .Values.worker.enabled }}
+# Dramatiq worker — background task queues, off the API's request path.
+#
+# Same image as the API with a different command. Unlike the API deployment this one
+# is safe to scale horizontally: a worker holds no authoritative state, it takes work
+# from Redis, and Dramatiq hands each message to exactly one consumer. The API's
+# replicaCount is pinned to 1 for state reasons that do not apply here.
+#
+# Only two actors do real work from a separate process today (send_notification,
+# sync_usage_to_stripe); app/tasks/worker.py records which others are blocked and on
+# what. There is deliberately no scheduler Deployment — its jobs were removed because
+# none could work from a scheduler process, and `--mode scheduler` exits 1 rather than
+# idling, so a Deployment would CrashLoopBackOff.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "copilot.fullname" . }}-worker
+  labels:
+    {{- include "copilot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "copilot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ .Values.config | toYaml | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+      labels:
+        {{- include "copilot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: {{ include "copilot.serviceAccountName" . }}
+      # Matches the API deployment: appuser (10001) is the uid the image chowns
+      # /app to. No PVC is mounted here, so fsGroup only covers emptyDir//tmp.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.runAsUser }}
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      # Dramatiq's ShutdownNotifications middleware needs time to finish an in-flight
+      # message before the pod dies; below the actors' time_limit and a task restarts
+      # from the top on the next consumer instead of resuming.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "app.tasks.worker"]
+          args:
+            - "--mode"
+            - "worker"
+            - "--processes"
+            - {{ .Values.worker.processes | quote }}
+            - "--threads"
+            - {{ .Values.worker.threads | quote }}
+          # Same config and secrets as the API: the worker reads COPILOT_REDIS_URL for
+          # the broker and the Slack/PagerDuty/Stripe credentials its actors call out with.
+          envFrom:
+            - configMapRef:
+                name: {{ include "copilot.fullname" . }}
+            - secretRef:
+                name: {{ include "copilot.secretName" . }}
+          # No HTTP probes: this process serves no port. A worker that cannot reach
+          # Redis exits, and the restart policy surfaces it.
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

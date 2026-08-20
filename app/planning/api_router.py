@@ -1,6 +1,22 @@
 """Planning Layer API Router.
 
 REST API for task graph management and execution.
+
+Graphs live in Postgres (`app/planning/store.py`), not in a module-level dict.
+Two consequences worth knowing when reading the handlers below:
+
+  * Every mutating route must `save_graph` before returning. The response tells
+    the caller the change was made, so it has to be durable by then — there is
+    no longer a shared object that later requests happen to observe.
+  * Background execution mutates a graph the route loaded, so it saves the
+    graph again when it finishes. Without that the run's results would be
+    discarded and `GET /graphs/{id}/progress` would report 0% forever.
+
+Concurrent mutations of one graph are last-write-wins: two requests adding a
+task at the same instant each read, mutate and write the whole state, so one
+task is lost. That is a real change from the shared-dict behaviour and is
+accepted here because a graph is built by one operator issuing sequential calls.
+Anything that needs concurrent writers wants per-task rows, not this table.
 """
 
 from __future__ import annotations
@@ -11,6 +27,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
+from app.planning import store
 from app.planning.task_graph import (
     TaskGraph,
     TaskPriority,
@@ -26,12 +43,12 @@ from app.planning.execution_engine import (
     ExecutionEngine,
     create_default_tools,
 )
+from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.planning.api")
 
 router = APIRouter(prefix="/planning", tags=["planning"])
 
-_graphs: dict[str, TaskGraph] = {}
 _execution_engine: ExecutionEngine | None = None
 _goal_decomposer: GoalDecomposer | None = None
 
@@ -52,6 +69,18 @@ def get_goal_decomposer() -> GoalDecomposer:
     if _goal_decomposer is None:
         _goal_decomposer = GoalDecomposer(use_templates=True)
     return _goal_decomposer
+
+
+async def _require_graph(org_id: str, graph_id: str) -> TaskGraph:
+    """Load a graph or 404.
+
+    Scoped by org: a graph id is caller-supplied, so an unscoped lookup would
+    hand one tenant's graph to another that guessed (or reused) the same name.
+    """
+    graph = await store.load_graph(org_id, graph_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Graph not found")
+    return graph
 
 
 class CreateGraphInput(BaseModel):
@@ -100,8 +129,15 @@ class CreateIncidentGraphInput(BaseModel):
 @router.post("/graphs")
 async def create_graph(input: CreateGraphInput) -> dict[str, Any]:
     """Create a new task graph."""
+    org_id = storage_org_id()
     graph = TaskGraph(input.graph_id)
-    _graphs[graph.id] = graph
+
+    if input.graph_id and await store.load_graph(org_id, graph.id) is not None:
+        # Silently overwriting would discard tasks the caller had already added
+        # under that id.
+        raise HTTPException(status_code=409, detail="Graph already exists")
+
+    await store.save_graph(org_id, graph)
     return {
         "graph_id": graph.id,
         "created": True,
@@ -111,22 +147,23 @@ async def create_graph(input: CreateGraphInput) -> dict[str, Any]:
 @router.get("/graphs/{graph_id}")
 async def get_graph(graph_id: str) -> dict[str, Any]:
     """Get a task graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-    return _graphs[graph_id].to_dict()
+    graph = await _require_graph(storage_org_id(), graph_id)
+    return graph.to_dict()
 
 
 @router.delete("/graphs/{graph_id}")
 async def delete_graph(graph_id: str) -> dict[str, Any]:
     """Delete a task graph."""
-    if graph_id in _graphs:
-        del _graphs[graph_id]
-    return {"deleted": True}
+    deleted = await store.delete_graph(storage_org_id(), graph_id)
+    # Reports what happened. The previous version returned deleted=True even
+    # when no such graph existed, so a typo'd id read as a successful delete.
+    return {"deleted": deleted}
 
 
 @router.get("/graphs")
 async def list_graphs() -> dict[str, Any]:
     """List all task graphs."""
+    graphs = await store.list_graphs(storage_org_id())
     return {
         "graphs": [
             {
@@ -134,19 +171,17 @@ async def list_graphs() -> dict[str, Any]:
                 "task_count": len(g.nodes),
                 "progress": g.get_progress(),
             }
-            for g in _graphs.values()
+            for g in graphs
         ],
-        "count": len(_graphs),
+        "count": len(graphs),
     }
 
 
 @router.post("/graphs/{graph_id}/tasks")
 async def add_task(graph_id: str, input: AddTaskInput) -> dict[str, Any]:
     """Add a task to a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-
-    graph = _graphs[graph_id]
+    org_id = storage_org_id()
+    graph = await _require_graph(org_id, graph_id)
 
     try:
         task_type = TaskType(input.task_type)
@@ -171,18 +206,19 @@ async def add_task(graph_id: str, input: AddTaskInput) -> dict[str, Any]:
             task_id=input.task_id,
             metadata=input.metadata,
         )
-        return task.to_dict()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    await store.save_graph(org_id, graph)
+    return task.to_dict()
 
 
 @router.get("/graphs/{graph_id}/tasks/{task_id}")
 async def get_task(graph_id: str, task_id: str) -> dict[str, Any]:
     """Get a task from a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
+    graph = await _require_graph(storage_org_id(), graph_id)
 
-    task = _graphs[graph_id].get_task(task_id)
+    task = graph.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -192,53 +228,52 @@ async def get_task(graph_id: str, task_id: str) -> dict[str, Any]:
 @router.delete("/graphs/{graph_id}/tasks/{task_id}")
 async def remove_task(graph_id: str, task_id: str) -> dict[str, Any]:
     """Remove a task from a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
+    org_id = storage_org_id()
+    graph = await _require_graph(org_id, graph_id)
 
-    _graphs[graph_id].remove_task(task_id)
-    return {"removed": True}
+    # remove_task returns None and is a no-op for an unknown id, so membership
+    # has to be checked here to answer truthfully.
+    existed = graph.get_task(task_id) is not None
+    graph.remove_task(task_id)
+    await store.save_graph(org_id, graph)
+    return {"removed": existed}
 
 
 @router.post("/graphs/{graph_id}/dependencies")
 async def add_dependency(graph_id: str, input: AddDependencyInput) -> dict[str, Any]:
     """Add a dependency between tasks."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
+    org_id = storage_org_id()
+    graph = await _require_graph(org_id, graph_id)
 
     try:
-        _graphs[graph_id].add_dependency(input.task_id, input.depends_on)
-        return {"added": True}
+        graph.add_dependency(input.task_id, input.depends_on)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    await store.save_graph(org_id, graph)
+    return {"added": True}
 
 
 @router.get("/graphs/{graph_id}/plan")
 async def get_execution_plan(graph_id: str) -> dict[str, Any]:
     """Get execution plan for a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-
-    plan = _graphs[graph_id].get_execution_plan()
-    return plan.to_dict()
+    graph = await _require_graph(storage_org_id(), graph_id)
+    return graph.get_execution_plan().to_dict()
 
 
 @router.get("/graphs/{graph_id}/progress")
 async def get_progress(graph_id: str) -> dict[str, Any]:
     """Get execution progress for a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-
-    return _graphs[graph_id].get_progress()
+    graph = await _require_graph(storage_org_id(), graph_id)
+    return graph.get_progress()
 
 
 @router.get("/graphs/{graph_id}/visualize")
 async def visualize_graph(graph_id: str) -> dict[str, Any]:
     """Get ASCII visualization of a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-
+    graph = await _require_graph(storage_org_id(), graph_id)
     return {
-        "visualization": _graphs[graph_id].visualize_dag(),
+        "visualization": graph.visualize_dag(),
     }
 
 
@@ -249,11 +284,12 @@ async def execute_graph(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Execute a task graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-
+    # Resolved here, not inside run_execution: a BackgroundTask can run after the
+    # middleware has reset the tenant contextvar, which would file the saved
+    # result under the wrong org.
+    org_id = storage_org_id()
+    graph = await _require_graph(org_id, graph_id)
     engine = get_execution_engine()
-    graph = _graphs[graph_id]
 
     async def run_execution() -> None:
         result = await engine.execute(
@@ -262,6 +298,10 @@ async def execute_graph(
             stop_on_failure=input.stop_on_failure,
             initial_context=input.context,
         )
+        # Execution mutates task states on the loaded copy. Saving is what makes
+        # those results survive the background task; without it /progress would
+        # report the graph as untouched forever.
+        await store.save_graph(org_id, graph)
         log.info("Execution completed: %s", result.to_dict())
 
     background_tasks.add_task(run_execution)
@@ -278,11 +318,9 @@ async def execute_graph_sync(
     input: ExecuteGraphInput,
 ) -> dict[str, Any]:
     """Execute a task graph synchronously."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
-
+    org_id = storage_org_id()
+    graph = await _require_graph(org_id, graph_id)
     engine = get_execution_engine()
-    graph = _graphs[graph_id]
 
     result = await engine.execute(
         graph,
@@ -291,22 +329,26 @@ async def execute_graph_sync(
         initial_context=input.context,
     )
 
+    await store.save_graph(org_id, graph)
     return result.to_dict()
 
 
 @router.post("/graphs/{graph_id}/checkpoint")
 async def create_checkpoint(graph_id: str) -> dict[str, Any]:
     """Create a checkpoint for a graph."""
-    if graph_id not in _graphs:
-        raise HTTPException(status_code=404, detail="Graph not found")
+    org_id = storage_org_id()
+    graph = await _require_graph(org_id, graph_id)
 
-    checkpoint = _graphs[graph_id].create_checkpoint()
+    checkpoint = graph.create_checkpoint()
+    await store.save_graph(org_id, graph)
     return checkpoint
 
 
 @router.post("/goals/decompose")
 async def decompose_goal(input: CreateGoalInput) -> dict[str, Any]:
     """Decompose a goal into a task graph."""
+    org_id = storage_org_id()
+
     try:
         category = GoalCategory(input.category)
     except ValueError:
@@ -318,7 +360,7 @@ async def decompose_goal(input: CreateGoalInput) -> dict[str, Any]:
         priority = TaskPriority.MEDIUM
 
     goal = Goal(
-        id=f"goal_{len(_graphs)}",
+        id=f"goal_{await store.count_graphs(org_id)}",
         description=input.description,
         category=category,
         context=input.context,
@@ -330,7 +372,7 @@ async def decompose_goal(input: CreateGoalInput) -> dict[str, Any]:
     decomposer = get_goal_decomposer()
     result = await decomposer.decompose(goal)
 
-    _graphs[result.task_graph.id] = result.task_graph
+    await store.save_graph(org_id, result.task_graph)
 
     return result.to_dict()
 
@@ -338,13 +380,14 @@ async def decompose_goal(input: CreateGoalInput) -> dict[str, Any]:
 @router.post("/incident-graph")
 async def create_incident_graph(input: CreateIncidentGraphInput) -> dict[str, Any]:
     """Create an incident response task graph."""
+    org_id = storage_org_id()
     graph = create_incident_response_graph(
         incident_id=input.incident_id,
         affected_services=input.affected_services,
         severity=input.severity,
     )
 
-    _graphs[graph.id] = graph
+    await store.save_graph(org_id, graph)
 
     return graph.to_dict()
 
@@ -360,7 +403,14 @@ async def list_tools() -> dict[str, Any]:
 
 @router.get("/executions")
 async def list_executions() -> dict[str, Any]:
-    """List active executions."""
+    """List executions running *on this process*.
+
+    Not backed by the database, and deliberately so: an in-flight execution is a
+    live asyncio task, and /cancel and /pause below act on that object. A row in
+    Postgres cannot be cancelled — stopping work on another replica needs a
+    control channel, not a table. So these three endpoints see only the runs this
+    pod started, which is why the single-replica pin still names this store.
+    """
     engine = get_execution_engine()
     executions = []
 
@@ -372,12 +422,13 @@ async def list_executions() -> dict[str, Any]:
     return {
         "executions": executions,
         "count": len(executions),
+        "scope": "this process only",
     }
 
 
 @router.post("/executions/{execution_id}/cancel")
 async def cancel_execution(execution_id: str) -> dict[str, Any]:
-    """Cancel an active execution."""
+    """Cancel an active execution. Only affects runs started by this process."""
     engine = get_execution_engine()
     cancelled = await engine.cancel(execution_id)
     return {"cancelled": cancelled}
@@ -385,7 +436,7 @@ async def cancel_execution(execution_id: str) -> dict[str, Any]:
 
 @router.post("/executions/{execution_id}/pause")
 async def pause_execution(execution_id: str) -> dict[str, Any]:
-    """Pause an execution and get checkpoint."""
+    """Pause an execution and get checkpoint. This process's runs only."""
     engine = get_execution_engine()
     checkpoint = await engine.pause(execution_id)
 

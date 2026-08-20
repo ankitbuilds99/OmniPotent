@@ -24,6 +24,15 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+# JSONB on PostgreSQL, plain JSON anywhere else. The emitted PostgreSQL DDL is
+# unchanged (so a database that already ran this revision is unaffected), but a
+# bare postgresql.JSONB() cannot be COMPILED outside PostgreSQL — and alembic.ini
+# defaults sqlalchemy.url to SQLite, so `alembic upgrade head` failed at this
+# revision on the default configuration with:
+#   CompileError (in table 'organizations', column 'settings'): ...
+#   can't render element of type JSONB
+JSONType = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
+
 
 def upgrade() -> None:
     op.create_table(
@@ -32,7 +41,7 @@ def upgrade() -> None:
         sa.Column("slug", sa.String(64), nullable=False),
         sa.Column("name", sa.String(256), nullable=False),
         sa.Column("plan", sa.String(32), nullable=False, server_default="free"),
-        sa.Column("settings", postgresql.JSONB(), nullable=True, server_default="{}"),
+        sa.Column("settings", JSONType, nullable=True, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -78,7 +87,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(32), nullable=False, server_default="active"),
         sa.Column("query", sa.Text(), nullable=False),
         sa.Column("summary", sa.Text(), nullable=True),
-        sa.Column("report", postgresql.JSONB(), nullable=True),
+        sa.Column("report", JSONType, nullable=True),
         sa.Column("tokens_used", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("feedback_rating", sa.String(16), nullable=True),
@@ -97,7 +106,7 @@ def upgrade() -> None:
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("investigation_id", sa.UUID(), nullable=False),
         sa.Column("event_type", sa.String(32), nullable=False),
-        sa.Column("data", postgresql.JSONB(), nullable=True, server_default="{}"),
+        sa.Column("data", JSONType, nullable=True, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["investigation_id"], ["investigations.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -110,7 +119,7 @@ def upgrade() -> None:
         sa.Column("org_id", sa.UUID(), nullable=True),
         sa.Column("actor", sa.String(256), nullable=True),
         sa.Column("event_type", sa.String(64), nullable=False),
-        sa.Column("data", postgresql.JSONB(), nullable=True, server_default="{}"),
+        sa.Column("data", JSONType, nullable=True, server_default="{}"),
         sa.Column("prev_hash", sa.String(64), nullable=False),
         sa.Column("entry_hash", sa.String(64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -134,8 +143,8 @@ def upgrade() -> None:
         sa.Column("duration_seconds", sa.Integer(), nullable=False, server_default="300"),
         sa.Column("severity", sa.String(16), nullable=False, server_default="high"),
         sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default="true"),
-        sa.Column("notification_channels", postgresql.JSONB(), nullable=True, server_default="[]"),
-        sa.Column("labels", postgresql.JSONB(), nullable=True, server_default="{}"),
+        sa.Column("notification_channels", JSONType, nullable=True, server_default="[]"),
+        sa.Column("labels", JSONType, nullable=True, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -169,8 +178,8 @@ def upgrade() -> None:
         sa.Column("status", sa.String(32), nullable=False, server_default="pending"),
         sa.Column("trigger", sa.String(32), nullable=False, server_default="manual"),
         sa.Column("triggered_by", sa.String(256), nullable=True),
-        sa.Column("variables", postgresql.JSONB(), nullable=True, server_default="{}"),
-        sa.Column("results", postgresql.JSONB(), nullable=True, server_default="{}"),
+        sa.Column("variables", JSONType, nullable=True, server_default="{}"),
+        sa.Column("results", JSONType, nullable=True, server_default="{}"),
         sa.Column("started_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
