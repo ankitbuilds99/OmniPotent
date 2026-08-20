@@ -441,11 +441,17 @@ def execute_runbook_async(
 ) -> dict[str, Any]:
     """Execute a runbook asynchronously.
 
-    Two worker-process limits apply. ``RunbookExecutor`` loads only DEFAULT_RUNBOOKS
-    on construction, so a runbook added through the API exists in the API's executor
-    and not here — this raises ValueError for it. And the execution record is written
-    to the worker's own ``_executions`` dict, so the ``execution_id`` returned is not
-    resolvable through the API. Both clear up when runbook state is shared.
+    Reads the definition from the shared store and writes progress back to it, so
+    the ``execution_id`` returned here resolves through
+    ``GET /api/runbooks/executions/{id}`` on the API. Both of the limits this
+    docstring used to record — the worker seeing only DEFAULT_RUNBOOKS, and its
+    execution record living in a process-local dict — were consequences of
+    runbook state being per-process, and cleared when it moved to Postgres
+    (migration ``005_runbooks``).
+
+    The worker has no request context, so ``org_id`` must be passed by the
+    enqueuer; it falls back to the same default the API files unattributed rows
+    under rather than guessing.
 
     Args:
         runbook_id: Runbook identifier.
@@ -457,18 +463,41 @@ def execute_runbook_async(
         Execution result.
     """
     import asyncio
+    import uuid
 
     log.info("Executing runbook %s (triggered by %s)", runbook_id, triggered_by)
 
     async def _execute() -> dict[str, Any]:
+        from app.runbooks import store
         from app.runbooks.executor import RunbookExecutor
+        from app.runbooks.models import RunbookExecution
+        from app.tenant_context import DEFAULT_STORAGE_ORG
+
+        scope = org_id or DEFAULT_STORAGE_ORG
+        await store.ensure_builtins(scope)
+        runbook = await store.load_runbook(scope, runbook_id)
+        if runbook is None:
+            raise ValueError(f"Runbook '{runbook_id}' not found for org '{scope}'")
+
+        execution_id = f"exec-{uuid.uuid4().hex[:8]}"
+
+        async def persist(current: RunbookExecution) -> None:
+            await store.save_execution(scope, current)
 
         executor = RunbookExecutor()
-        execution = await executor.execute(runbook_id, variables)
+        execution = await executor.execute(
+            runbook_id,
+            variables,
+            triggered_by=triggered_by,
+            runbook=runbook,
+            execution_id=execution_id,
+            on_progress=persist,
+        )
 
         return {
             "execution_id": execution.id,
             "runbook_id": runbook_id,
+            "org_id": scope,
             "status": execution.status.value,
             "started_at": execution.started_at.isoformat(),
         }

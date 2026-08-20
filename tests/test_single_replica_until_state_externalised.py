@@ -50,6 +50,12 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 #                             unscoped lookup was cross-tenant reachable.
 #                             tests/test_planning_persistence.py and
 #                             tests/test_coordinator_persistence.py cover them.
+#   app/runbooks/router.py    _runbooks / _executions  ->  Postgres
+#                             (runbook_definitions, runbook_runs; migration
+#                             005_runbooks). The built-in DEFAULT_RUNBOOKS are
+#                             seeded per org rather than shared, so one tenant's
+#                             edit no longer rewrites everyone's.
+#                             tests/test_runbook_persistence.py covers it.
 #
 # NOT yet externalised, and not movable by adding a table: the live-object state
 # behind /planning/executions (cancel, pause) and /coordinator/.../approve is
@@ -58,8 +64,6 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 # channel. Tracked below so the pin does not lift on the mistaken belief that
 # "the coordinator is persisted now".
 IN_MEMORY_STORES: list[tuple[str, str]] = [
-    ("app/runbooks/router.py", "_runbooks"),
-    ("app/runbooks/router.py", "_executions"),
     ("app/rbac/manager.py", "_managers"),
     ("app/waitlist/manager.py", "_waitlist_store"),
     ("app/deduplication/api_router.py", "_pipelines"),

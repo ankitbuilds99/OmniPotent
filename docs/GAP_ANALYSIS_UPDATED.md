@@ -352,7 +352,7 @@ adding one is a pricing decision rather than a wiring decision.
 | Notification delivery (Slack, PagerDuty) | ✅ Complete | `app/tasks/tasks.py:send_notification` |
 | Metered usage sync to Stripe | ✅ Complete | `app/tasks/tasks.py:sync_usage_to_stripe` |
 | Out-of-process investigations | ⚠️ Blocked | `app/tasks/tasks.py:run_investigation` — runs, but the report is unreadable (see below) |
-| Out-of-process runbook execution | ⚠️ Blocked | `app/tasks/tasks.py:execute_runbook_async` — same, plus custom runbooks are invisible to a worker |
+| Out-of-process runbook execution | ✅ Complete | `app/tasks/tasks.py:execute_runbook_async` — reads definitions from and writes progress to `runbook_definitions`/`runbook_runs`, so the returned `execution_id` resolves through the API |
 | Scheduled/periodic jobs | ❌ None | `app/tasks/worker.py:SCHEDULED_JOBS` is empty; `--mode scheduler` exits non-zero |
 | Webhook offloading | ❌ Not wired | `app/tasks/tasks.py:process_webhook` acknowledges without acting; the API's webhook routes handle synchronously |
 
@@ -369,11 +369,14 @@ extra, so a worker container would have died on `import dramatiq`.
 What a worker can and cannot do is decided by process boundaries, and the split is
 uneven. `send_notification` and `sync_usage_to_stripe` are fire-and-forget outbound
 HTTP built from env settings and their own arguments — exactly what a worker is for,
-and both are deployed. `run_investigation` and `execute_runbook_async` do real work
-but hand back results nobody can read: no result backend is configured, and the
-session and execution records they create live in the worker's memory, so the API's
-lookup endpoints would 404 on the IDs returned. Both become useful once investigation
-state is externalised, which is already the next planned change.
+and both are deployed. `execute_runbook_async` was in the same position until runbook
+state moved to Postgres: it now loads the definition from `runbook_definitions` and
+writes progress to `runbook_runs`, so a worker can run a runbook an operator authored
+through the API and the `execution_id` it returns resolves through
+`GET /api/runbooks/executions/{id}`. `run_investigation` still hands back a result
+nobody can read — no result backend is configured, and the session it creates lives in
+the worker's memory, so the API's lookup endpoint 404s on the ID returned. It becomes
+useful once session state is externalised the same way.
 
 The scheduler was removed rather than deployed. Its two jobs could not work from a
 scheduler process: session cleanup cannot reach `app.api.main._SESSIONS`, and alert
@@ -400,7 +403,8 @@ requires prior history for that service/metric pair before it fires.
 | ORM schema creation | ✅ Wired | `app/database/engine.py:ensure_schema`, called from the API lifespan |
 | Investigation history & dashboard analytics | ✅ Postgres | `app/dashboard/metrics.py` → `investigations`, Alembic `003_investigations`; served by `GET /dashboard/metrics` and `/dashboard/trends` |
 | Planning graphs, coordinator DAG executions | ✅ Postgres | `app/planning/store.py` → `planning_graphs`, `app/coordinator/store.py` → `coordinator_executions`, Alembic `004_planning_coord` |
-| Runbooks, RBAC, waitlist, dedup, dep-graph, cost | ⚠️ In-process | 8 further module-level dicts, listed in `deploy/helm/copilot/values.yaml` |
+| Runbook definitions & executions | ✅ Postgres | `app/runbooks/store.py` → `runbook_definitions` / `runbook_runs`, Alembic `005_runbooks`; built-ins seeded per org |
+| RBAC, waitlist, dedup, dep-graph, cost | ⚠️ In-process | 6 further module-level dicts, listed in `deploy/helm/copilot/values.yaml` |
 | In-flight execution control (cancel/pause/approve) | ⚠️ Per-pod, by nature | `ExecutionEngine._active_executions`, `DAGExecutor._pending_approvals` — live asyncio objects; needs a control channel, not a table |
 | LangGraph checkpointer | ⚠️ SQLite by default | Postgres when `COPILOT_CHECKPOINT_DB` is set |
 
@@ -568,6 +572,69 @@ the same instant each read, mutate and write the whole state, so one task is los
 accepted because a graph is built by one operator issuing sequential calls; anything
 needing concurrent writers wants per-task rows rather than a JSON column.
 
+#### Runbooks (fourth slice)
+
+This one was not only a storage problem. The runbook API had three independent defects
+at once, and fixing any one alone would have left it lying about something else.
+
+**No runbook was ever executed.** `POST /runbooks/{id}/execute` took a `BackgroundTasks`
+parameter and never scheduled anything on it. It wrote a record with status `running`
+and returned; nothing advanced it, and its `steps` list stayed empty forever. `approve`
+did the same thing — set a status field to `running` and return. `RunbookExecutor`, which
+actually runs steps, existed in `app/runbooks/executor.py` and had no caller anywhere in
+the request path. So an operator who triggered a mitigation during an incident got a
+record that said "running" indefinitely, from an API that had never run a runbook step.
+This is the same pattern the earlier orphan-wiring work kept turning up: an unwired
+module beside a wired one that fabricates its output.
+
+**`GET /runbooks/executions` was unreachable.** It was declared *after*
+`GET /runbooks/{runbook_id}`, and FastAPI matches in declaration order, so every request
+resolved as a lookup of a runbook whose id happened to be `executions` and returned 404
+"Runbook not found". The literal routes now precede the parameterised one and
+`test_literal_execution_routes_are_declared_before_the_parameterised_one` pins the
+ordering — re-adding a route above them would otherwise reintroduce the bug with no
+symptom beyond a 404 that reads as an ordinary missing runbook.
+
+**The two dicts.** `_runbooks` was seeded at import from `DEFAULT_RUNBOOKS` and written
+to by `POST /runbooks`, so a runbook authored during an incident lived only on the
+replica that served the request and was gone at the next restart — the worst possible
+lifetime for a document whose whole purpose is to exist the next time the same thing
+breaks. Both now live in Postgres under `(id, org_id)`, like the earlier slices.
+
+The built-ins are seeded **per org** rather than shared. They are starting points an
+operator is expected to edit or disable, and the single process-wide copy meant one
+tenant's edit rewrote every tenant's; `is_builtin` records which rows came from the seed.
+
+Executor changes, all additive:
+
+- `execute()` takes an optional `runbook` and `execution_id`. The router keeps
+  definitions per tenant, so resolving them through the executor's process-wide registry
+  would let two orgs sharing a runbook id run whichever was written last; and the id must
+  be known before the run starts, because the response returns it for polling.
+- `on_progress` is awaited after every step, so a caller polling a long runbook sees it
+  advance. A run that reports only its final state is indistinguishable from a hung one.
+  A raising hook is logged and swallowed — the hook is bookkeeping, and a step that
+  really ran must not be un-run because recording it failed.
+- `resume(execution, runbook, from_step_id)` was split out of `approve()`, which could
+  only ever continue a run whose `_pending_approvals` entry was in *this* process. An
+  approval that landed on a different replica than the one that paused the run could
+  never be actioned; the execution simply stayed `waiting_approval` forever. Resume
+  refuses when `from_step_id` is no longer in the runbook — resuming by position after an
+  edit would run whatever now occupies that offset, which for a file full of scale and
+  drain actions is how the wrong cluster gets touched.
+
+Smaller corrections: rejection is recorded as `skipped` rather than `failed` (a human
+declining is not the runbook going wrong, and the old behaviour inflated the failure rate
+of every runbook anyone thought better of); unknown `execution_mode`/`step_type` values
+now 422 with the valid list instead of raising `ValueError` out of the route as a 500;
+`limit` is bounded; `delete` reports what it actually did; and timestamps are
+timezone-aware, since SQLite drops the offset and a naive string reads as local time.
+
+The executor's fail-closed behaviour is now observable end to end: a `command` step with
+no command runner configured produces a **failed** execution carrying "refusing to report
+success for an action that was not performed", where previously the status field simply
+never moved off `running`.
+
 ---
 
 ## Remaining Gaps (Priority Order)
@@ -681,9 +748,9 @@ had invented.
 
 2. **Move authoritative state out of process memory**, in cost-of-loss order:
    customers/billing → investigation history → coordinator executions and planning
-   graphs. *(All three done — see Platform Enablers §G. 8 module-level stores remain,
-   plus the two live-object stores that need a control channel rather than a table;
-   the replica pin lifts once those are handled.)*
+   graphs → runbooks. *(All four done — see Platform Enablers §G. 6 module-level stores
+   remain, plus the two live-object stores that need a control channel rather than a
+   table; the replica pin lifts once those are handled.)*
 
 3. **Enforce or remove the plan flags.** `PlanFeatures` declares 37 fields and 26 of
    them are referenced nowhere outside `app/billing/` — 22 boolean flags plus all four
@@ -709,4 +776,5 @@ the wrong layer.
 ---
 
 *Originally written against the codebase as of 2026-08-02; §4 Planning, §5 Coordinator,
-Platform Enablers §A, §F and §G, and these recommendations updated 2026-08-20.*
+Platform Enablers §A, §F and §G, the runbooks slice, and these recommendations updated
+2026-08-20.*

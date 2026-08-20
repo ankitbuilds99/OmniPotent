@@ -520,6 +520,87 @@ class CoordinatorExecution(Base):
     )
 
 
+class RunbookDefinition(Base):
+    """A runbook definition managed through /api/runbooks.
+
+    Runbooks are operational procedures an operator authors once and reaches for
+    during an incident. They previously lived in `app/runbooks/router.py:_runbooks`,
+    a module-level dict seeded at import from DEFAULT_RUNBOOKS — so a runbook
+    written on Tuesday was gone after the next deploy, and in the meantime only
+    the replica that served the POST could see it.
+
+    `definition` holds `Runbook.to_dict()`. The built-in DEFAULT_RUNBOOKS are
+    seeded per org on first access rather than shared, so an operator can edit or
+    disable one without changing what every other tenant sees; `is_builtin`
+    records which rows came from that seed.
+
+    `service` and `trigger` are lifted out of the payload because listing filters
+    on them, and a filter that deserializes every runbook to read one string does
+    not stay cheap.
+    """
+
+    __tablename__ = "runbook_definitions"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    org_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    service: Mapped[str] = mapped_column(String(255), nullable=False, default="*")
+    trigger: Mapped[str] = mapped_column(String(64), nullable=False, default="manual")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    definition: Mapped[dict[str, Any]] = mapped_column(
+        JSONType, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_runbook_defs_org_service", "org_id", "service"),
+    )
+
+
+class RunbookRun(Base):
+    """One execution of a runbook, recorded from the moment it is triggered.
+
+    Written before the steps run, like `CoordinatorExecution` and for the same
+    reason: a caller polls the execution while it is in flight, and a row that
+    only appears on completion answers 404 for exactly that window.
+
+    The dict this replaces was worse than per-pod. `execute_runbook` accepted a
+    `BackgroundTasks` argument, never scheduled anything on it, and stored a
+    record with status "running" that nothing would ever advance — so every
+    execution this API reported was a status field that no runbook step backed.
+    """
+
+    __tablename__ = "runbook_runs"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    org_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    runbook_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    runbook_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    triggered_by: Mapped[str] = mapped_column(String(128), nullable=False, default="manual")
+    execution: Mapped[dict[str, Any]] = mapped_column(
+        JSONType, nullable=False, default=dict
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_runbook_runs_org_started", "org_id", "started_at"),
+        Index("ix_runbook_runs_org_runbook", "org_id", "runbook_id"),
+    )
+
+
 class UsageRecord(Base):
     """Per-tenant usage metering for billing."""
 

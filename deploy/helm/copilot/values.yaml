@@ -8,7 +8,6 @@ image:
 # PINNED TO 1 — TEMPORARY. Do not raise this until the stores listed below are
 # externalised. Authoritative business state currently lives in module-level
 # Python dicts with no persistence layer behind them:
-#   app/runbooks/router.py    _runbooks/_executions
 #   app/rbac/manager.py           _managers
 #   app/waitlist/manager.py       _waitlist_store
 #   app/deduplication/api_router.py _pipelines  (per-org incidents/fingerprints)
@@ -47,6 +46,10 @@ image:
 #   003_investigations   investigation history behind /dashboard/* (investigations)
 #   004_planning_coord   planning task graphs and coordinator DAG execution
 #                        records (planning_graphs, coordinator_executions)
+#   005_runbooks         runbook definitions and their execution records
+#                        (runbook_definitions, runbook_runs). The shipped
+#                        DEFAULT_RUNBOOKS are seeded per org, so one tenant
+#                        editing a built-in no longer changes every tenant's.
 # REVERT TO 2 WHEN: the remaining stores above are externalised.
 replicaCount: 1
 
