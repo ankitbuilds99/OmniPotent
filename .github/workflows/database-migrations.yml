@@ -4,15 +4,25 @@ on:
   push:
     branches: [main]
     paths:
-      - 'alembic/**'
+      # `alembic/` and `app/db/` do not exist in this repo: alembic.ini sets
+      # `script_location = migrations`, and the models are `app/database/`.
+      # Both were dead entries, so the one change this workflow exists to
+      # guard -- editing a model without writing a migration -- never
+      # triggered it.
       - 'migrations/**'
-      - 'app/db/models/**'
+      - 'alembic.ini'
+      - 'app/database/**'
   pull_request:
     branches: [main]
     paths:
-      - 'alembic/**'
+      # `alembic/` and `app/db/` do not exist in this repo: alembic.ini sets
+      # `script_location = migrations`, and the models are `app/database/`.
+      # Both were dead entries, so the one change this workflow exists to
+      # guard -- editing a model without writing a migration -- never
+      # triggered it.
       - 'migrations/**'
-      - 'app/db/models/**'
+      - 'alembic.ini'
+      - 'app/database/**'
   workflow_dispatch:
     inputs:
       environment:
