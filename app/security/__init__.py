@@ -42,6 +42,7 @@ from app.security.secret_rotation import (
     get_rotation_manager,
 )
 from app.security.secrets import (
+    SecretsScanError,
     SecretsScanner,
     get_secret_patterns,
     is_safe_to_commit,
@@ -109,6 +110,7 @@ __all__ = [
     "rotate_api_key",
     "list_api_keys",
     # Secrets Scanner
+    "SecretsScanError",
     "SecretsScanner",
     "scan_for_secrets",
     "is_safe_to_commit",

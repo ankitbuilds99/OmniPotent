@@ -306,9 +306,30 @@ adding one is a pricing decision rather than a wiring decision.
 | Confidence | ✅ Complete | `app/verification/` |
 | Hallucination rate | ✅ Complete | `app/verification/hallucination_detector.py` |
 | Failure rate | ✅ Complete | `app/observability/metrics.py` |
-| Model cost | ✅ Complete | `app/cost_tracking/` |
+| Model cost | ✅ Complete | `app/cost_tracking/`, `copilot_llm_cost_dollars` + `copilot_llm_calls_unpriced_total` |
 | Approval % | ⚠️ Unwired | `app/analytics_advanced/human_loop.py` — nothing imports it |
 | Success % | ⚠️ Unwired | `app/analytics_advanced/ai_performance.py` — nothing imports it |
+
+The model-cost row gained a second metric because the first one was quietly incomplete.
+`copilot_llm_cost_dollars` is deliberately not emitted for a model whose price the
+catalog has not verified — recording a guess would corrupt every dashboard built on it.
+But a series that is absent graphs as zero, so "we have no price for this model" and
+"this model cost nothing" drew the same line, and the warning explaining the difference
+went to the logs, which is not where anyone reading a cost graph is looking. This was
+not hypothetical: the default Anthropic model, `claude-opus-4-8`, is one of the unpriced
+rows, so the default configuration reported no cost at all.
+`copilot_llm_calls_unpriced_total` counts the omissions next to the number they
+undercut; alert on it above zero, and its `model` label names the catalog row to fill.
+
+The catalog's own resolver was the other half. Its prefix fallback exists so a dated
+snapshot (`claude-sonnet-4-20250514`) can inherit its base model's price, but a bare `-`
+boundary cannot tell a date stamp from a version bump, so an uncatalogued point release
+— `claude-opus-4-5`, `-4-6`, `-4-7` — resolved to `claude-opus-4` and was billed at
+$15/$75 against a 32k output cap. That is the same threefold over-report as the
+`m in model` substring bug the catalog was built to end, reached by a longer route, and
+the confidence is what makes it costly: a wrong number reaches the dashboard, while
+`None` would have reached `copilot_llm_calls_unpriced_total` and asked for a real price.
+`resolve()` now accepts only an eight-digit snapshot stamp as an inheritable suffix.
 
 ### C. Security Layer
 
@@ -321,6 +342,37 @@ adding one is a pricing decision rather than a wiring decision.
 | Encryption | ✅ Complete | Multiple modules |
 | Key rotation | ✅ Complete | `app/security/secret_rotation.py` |
 | Zero Trust | ⚠️ Partial | Session binding exists, needs full implementation |
+| Pre-commit secret scan | ✅ Complete | `scripts/scan_staged_secrets.py`, installed by `scripts/install-git-hooks.sh` |
+
+The pre-commit row is new, and it is worth saying why it did not exist before: the
+scanner did, and had never run. Its logic lived in a `python3 -c "..."` string whose
+first statement was `Path(__file__).parent.parent`, and `__file__` is undefined under
+`-c`, so every invocation died with a `NameError` before reaching even its own error
+handling. The hook was also never installed — `.git/hooks` held only git's stock
+samples, because the install step was a comment in the script's own header rather than
+a command anyone ran. Three of the credentials found in cleartext on 2026-08-18 were in
+files this hook would have been asked about.
+
+Two further faults were policy rather than syntax, and both pointed the same way. The
+script ended `except Exception: sys.exit(0)` under the comment "Don't block commit on
+scanner errors", and `SecretsScanner.scan_git_staged` returned `[]` from its own bare
+`except` — so a scan that could not run was indistinguishable from one that found
+nothing, and the hook printed "✅ No secrets detected" over both. A detector that
+reports clean when it fails is worse than no detector: it converts an unknown into an
+all-clear, and whoever reads it stops looking. Both now raise `SecretsScanError`, the
+entry point exits 2, and every non-zero exit blocks; `--no-verify` remains the escape,
+typed deliberately by someone who has read what broke.
+
+The scan also read staged *filenames* and then opened those paths on disk, so it
+checked the working tree rather than the index. Stage a key, delete the line, forget to
+re-stage, and it scanned the clean copy and passed the key through. It now reads each
+staged blob with `git show :path`, and lists paths NUL-separated so a name containing a
+quote or newline cannot come back escaped into a path that matches no file — which
+`scan_file` had been skipping silently, again as "clean". The logic moved out of the
+shell string into an importable module for one reason: a control that cannot be
+imported cannot be tested, which is why this one was broken for its entire life.
+`tests/test_secrets_precommit_hook.py` now drives it end to end, up to a real
+`git commit` that git actually refuses.
 
 The RBAC row previously cited `app/rbac/` — a second, entirely unwired implementation
 (5 roles, its own `PermissionSet`, a `BaseHTTPMiddleware` that was never installed, and

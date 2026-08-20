@@ -25,6 +25,15 @@ from typing import Any
 log = logging.getLogger("omnipotent.security.secrets")
 
 
+class SecretsScanError(RuntimeError):
+    """A scan could not be completed, so its result says nothing.
+
+    Exists so that "found nothing" and "never looked" are different outcomes.
+    A detector that reports clean when it failed is worse than no detector: it
+    converts an unknown into an all-clear, and the caller stops looking.
+    """
+
+
 class SecretType(Enum):
     """Types of secrets that can be detected."""
 
@@ -407,36 +416,86 @@ class SecretsScanner:
         return findings
 
     def scan_git_staged(self, repo_path: Path | str = ".") -> list[SecretFinding]:
-        """Scan git staged files for secrets.
+        """Scan the staged content of a git repository for secrets.
 
         Args:
             repo_path: Path to the git repository
 
         Returns:
             List of SecretFinding objects
+
+        Raises:
+            SecretsScanError: if the scan could not be performed. It must not
+                return ``[]`` for that: an empty list is how the caller spells
+                "clean", and this is the check standing between a credential and
+                a public remote. This previously caught every exception and
+                returned ``[]``, so a scan that never ran was indistinguishable
+                from one that found nothing -- and the hook printed "No secrets
+                detected" either way.
+
+        Two further corrections over the version this replaces:
+
+        *   It reads each file's **staged blob** (``git show :path``) rather than
+            the copy on disk. Those differ whenever a file is edited after being
+            staged, and the staged bytes are the ones about to be committed --
+            ``git add`` a key, then delete the line from the working tree, and
+            the old code scanned the clean copy and passed the key through.
+        *   Paths come back NUL-separated (``-z``). Without it git quotes and
+            escapes any path containing a newline, quote, or non-ASCII byte, and
+            splitting that on newlines yields paths that do not exist -- which
+            `scan_file` skipped silently, again as "clean".
         """
         import subprocess
 
+        # ACMR: added, copied, modified, renamed -- everything whose content is
+        # entering the commit. Deletions are excluded because there is no staged
+        # blob to read, and removing a file cannot introduce a secret.
         try:
-            result = subprocess.run(
-                ["git", "diff", "--cached", "--name-only"],
+            listing = subprocess.run(
+                ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
                 capture_output=True,
                 text=True,
                 cwd=repo_path,
             )
-            if result.returncode != 0:
-                return []
+        except OSError as exc:  # git missing, cwd gone
+            raise SecretsScanError(f"could not run git in {repo_path}: {exc}") from exc
 
-            findings: list[SecretFinding] = []
-            for file_name in result.stdout.strip().split("\n"):
-                if file_name:
-                    file_path = Path(repo_path) / file_name
-                    findings.extend(self.scan_file(file_path))
+        if listing.returncode != 0:
+            raise SecretsScanError(
+                f"git diff --cached failed in {repo_path} "
+                f"(exit {listing.returncode}): {listing.stderr.strip()}"
+            )
 
-            return findings
-        except Exception as e:
-            log.debug("Git scan failed: %s", e)
-            return []
+        findings: list[SecretFinding] = []
+        for name in listing.stdout.split("\0"):
+            if not name:
+                continue
+
+            path = Path(name)
+            if path.suffix.lower() in self.exclude_extensions:
+                continue
+            if path.name in self.exclude_files:
+                continue
+            if any(excluded in path.parts for excluded in self.exclude_dirs):
+                continue
+
+            blob = subprocess.run(
+                ["git", "show", f":{name}"],
+                capture_output=True,
+                cwd=repo_path,
+            )
+            if blob.returncode != 0:
+                raise SecretsScanError(
+                    f"could not read staged content of {name!r}: "
+                    f"{blob.stderr.decode('utf-8', 'replace').strip()}"
+                )
+
+            # errors="ignore" so a binary blob degrades to whatever text it
+            # contains instead of aborting the scan of every other file.
+            content = blob.stdout.decode("utf-8", errors="ignore")
+            findings.extend(self.scan_content(content, name))
+
+        return findings
 
     def _get_remediation(self, secret_type: SecretType) -> str:
         """Get remediation advice for a secret type."""
@@ -499,6 +558,12 @@ def is_safe_to_commit(
 
     Returns:
         Tuple of (is_safe, findings)
+
+    Raises:
+        SecretsScanError: if the staged content could not be read. Deliberately
+            propagated rather than reported as safe -- see `scan_git_staged`.
+            Callers gating a commit on this should treat the exception as a
+            block, not as a pass.
     """
     findings = _get_scanner().scan_git_staged(repo_path)
 

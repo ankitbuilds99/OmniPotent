@@ -28,6 +28,35 @@ def test_dated_snapshot_resolves_by_prefix():
     assert mc.resolve("claude-opus-4-20250514").id == "claude-opus-4"
 
 
+def test_an_uncatalogued_point_release_does_not_borrow_its_predecessors_row():
+    # The `-` boundary alone could not tell `-20250514` from `-5`, so a version
+    # bump the catalog had not seen yet resolved to the older model and was
+    # priced at its rate — confidently, which is the harmful part: `price_per_1m`
+    # returned a number, so nothing downstream saw the None that says "unknown".
+    # claude-opus-4 is $15/$75 with a 32k output cap; a newer Opus is neither.
+    for unknown in ("claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7"):
+        assert mc.resolve(unknown) is None, f"{unknown} borrowed another row"
+        assert mc.price_per_1m(unknown) is None
+        assert mc.estimate_cost_usd(unknown, 1_000_000, 1_000_000) is None
+
+    # Same shape, one family over, and one the catalog *does* know: the guard
+    # has to bite on the unknown without disturbing the known.
+    assert mc.resolve("claude-sonnet-4-5") is None
+    assert mc.resolve("claude-haiku-4-5").id == "claude-haiku-4-5"
+
+
+def test_only_a_date_stamp_inherits_the_parent_row():
+    # A snapshot is the same model rebuilt, so inheriting is sound. Everything
+    # else is a guess, and `-latest` is the tempting one: it names whatever the
+    # family points at *now*, which is exactly the model whose price we don't
+    # have. The catalog carries explicit aliases for the -latest forms it knows.
+    assert mc.resolve("claude-sonnet-4-20250514").id == "claude-sonnet-4"
+    assert mc.resolve("claude-sonnet-4-latest") is None
+    assert mc.resolve("claude-sonnet-4-preview") is None
+    assert mc.resolve("claude-sonnet-4-2025") is None  # too short to be a date
+    assert mc.resolve("claude-sonnet-4-202505141") is None  # too long
+
+
 def test_prefix_match_does_not_swallow_a_longer_sibling():
     # The bug this replaces: observability/metrics.py matched with `m in model`,
     # so claude-opus-4-8 hit the claude-opus-4 row and its cost was reported at
