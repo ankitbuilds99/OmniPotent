@@ -387,6 +387,10 @@ async def lifespan(app: FastAPI):
     # this only verifies connectivity — Alembic owns the schema there.
     from app.database.engine import close_db, ensure_schema
     await ensure_schema()
+    # Drain queued audit events to the hash chain. `audit.record` is synchronous
+    # (five of its call sites are in sync functions), so it queues and this task
+    # writes. Started after ensure_schema so the first drain has a table.
+    audit.start_drain()
     # OpenTelemetry tracing (no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set).
     from app import otel
     otel.init_tracing()
@@ -416,6 +420,9 @@ async def lifespan(app: FastAPI):
     await start_live_status_polling()
     log.info("live status page polling started")
     yield
+    # Write whatever audit events are still queued before anything else shuts
+    # down; they are the record of what this process did.
+    await audit.stop_drain()
     # Stop live status polling first
     await stop_live_status_polling()
     for _task in (slo_task, job_task):
@@ -2505,7 +2512,7 @@ async def get_audit(limit: int = 100, event_prefix: str = "") -> dict:
         dict: List of audit events, newest first.
     """
     limit = max(1, min(limit, 1000))
-    return {"events": audit.recent(limit=limit, event_prefix=event_prefix)}
+    return {"events": await audit.recent(limit=limit, event_prefix=event_prefix)}
 
 
 @app.get(
@@ -2540,7 +2547,7 @@ async def audit_verify() -> dict:
     Returns:
         dict: Verification result with valid flag and count or broken index.
     """
-    return audit.verify_chain()
+    return await audit.verify_all_chains()
 
 
 # --------------------------------------------------------------------------- #
@@ -3653,6 +3660,9 @@ class WaitlistSignupRequest(BaseModel):
     team_size: str = ""
     use_case: str = ""
     source: str = "landing_page"
+    # The referral code of whoever sent this person here — `REF1A2B3C4D`, as
+    # printed in that person's share link. NOT the code issued to this signup,
+    # which is derived from their own email and returned in the response.
     referral_code: str = ""
     utm_source: str = ""
     utm_medium: str = ""
@@ -3702,7 +3712,7 @@ async def waitlist_signup(req: WaitlistSignupRequest, request: Request):
     if request.client:
         client_ip = request.client.host
 
-    entry, message = add_to_waitlist(
+    entry, message = await add_to_waitlist(
         email=req.email,
         source=source,
         company=req.company,
@@ -3746,7 +3756,7 @@ async def waitlist_position(email: str):
     from app.waitlist import WaitlistManager
 
     manager = WaitlistManager()
-    result = manager.get_position(email)
+    result = await manager.get_position(email)
 
     if not result.get("found"):
         raise HTTPException(404, "Email not found in waitlist")
@@ -3765,7 +3775,7 @@ async def waitlist_stats():
     """Get waitlist statistics."""
     from app.waitlist import get_waitlist_stats
 
-    return get_waitlist_stats()
+    return await get_waitlist_stats()
 
 
 # --------------------------------------------------------------------------- #

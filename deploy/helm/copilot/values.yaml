@@ -6,29 +6,67 @@ image:
   pullPolicy: IfNotPresent
 
 # PINNED TO 1 — TEMPORARY. Do not raise this until the stores listed below are
-# externalised. Authoritative business state currently lives in module-level
-# Python dicts with no persistence layer behind them:
-#   app/rbac/manager.py           _managers
-#   app/waitlist/manager.py       _waitlist_store
-#   app/deduplication/api_router.py _pipelines  (per-org incidents/fingerprints)
-#   app/dependency_graph/api_router.py _graphs  (per-org discovered service graph)
-#   app/cost_optimizer/api_router.py _budget_managers  (budgets, spend, alerts)
-#   app/cost_optimizer/api_router.py _roi_trackers  (recorded savings)
-# Three more that are instance state on a singleton rather than module-level dicts:
-#   app/alerting/engine.py    AlertEngine._rules/_metric_history/_firing_alerts
-#   app/planning/execution_engine.py  ExecutionEngine._active_executions
+# externalised.
+#
+# This list was rebuilt twice, because twice a slice found a live store that was
+# not on it. The original scan looked only for lower-case module-level names
+# bound to a dict literal, and authoritative state hides in four shapes:
+# module-level dicts, instance attributes on a module-level singleton, in-memory
+# implementations behind a `get_*_store()` factory, and containers built by a
+# call (`defaultdict(list)`, `deque(maxlen=...)`) rather than written as a
+# literal. What follows is every module reachable by import from
+# app/api/main.py, scanned in all four shapes, filtered to what a wired endpoint
+# actually reads and writes. Caches over a durable layer, per-pod control
+# machinery (locks, rate limiters, circuit breakers) and prefilled constants are
+# deliberately excluded — those are correct per-pod.
+# tests/test_single_replica_until_state_externalised.py holds the machine-checked
+# copy and fails if any entry stops resolving.
+#
+# Module-level containers (12):
+#   app/deduplication/api_router.py    _pipelines  (per-org incidents/fingerprints)
+#   app/dependency_graph/api_router.py _graphs, _discovered_at
+#   app/cost_optimizer/api_router.py   _budget_managers, _roi_trackers,
+#                                      _token_optimizers, _gpu_trackers
+#   app/slo/tracker.py                 _SLOS, _SLI_DATA  (UPPER_CASE; the tracker
+#                                      is rebuilt per request, so the SLOs and
+#                                      the samples compliance is computed from
+#                                      live in these two dicts, not the tracker)
+#   app/api/graphql/schema.py          _investigations, _incidents
+#   app/api/main.py                    _SEEN_DELIVERIES  (webhook de-duplication:
+#                                      a redelivery landing on another replica is
+#                                      processed twice, which for an incident
+#                                      webhook is a duplicate investigation)
+# Not listed, and worth naming because a scan keeps finding it:
+# app/audit_legacy.py _PENDING is a bounded hand-off queue between the
+# synchronous audit record() and the drain that writes the chain. Every pod
+# drains its own into the same table, so it does not block a second replica.
+#
+# Instance state on a module-level singleton (6) — same remedy, a table; listed
+# apart only because finding them needs the instance-attribute scan:
+#   app/status_page/store.py  _components, _incidents, _maintenances, _subscribers
+#                             (the public status page resets on every deploy,
+#                             including the subscribers who asked to be told
+#                             about the next outage)
+#   app/incidents/store.py    _incidents, _investigations
+# Live-object state (3) — NOT fixable by adding a table:
+#   app/planning/execution_engine.py  ExecutionEngine._active_executions, _cancelled
 #   app/coordinator/dag_executor.py   DAGExecutor._pending_approvals
-# Rules added through the MCP alerting server, the metrics they are evaluated
-# against, and which alerts are currently firing are all per-pod: a second replica
-# evaluates a different rule set against a different history, and re-fires alerts the
-# first pod already has open.
-# The last two are a different problem, not just an unmoved table: an in-flight
-# execution is a live asyncio task and a pending approval is a live future, so
-# /planning/executions/{id}/cancel|pause and /coordinator/.../approve act on
-# objects owned by the pod running the DAG. A row in Postgres cannot be cancelled
-# or approved — routing those commands to the right pod needs a control channel
-# (pub/sub or a work queue), which is why persisting the execution *records* did
-# not clear these two.
+# An in-flight execution is a live asyncio task and a pending approval is a live
+# future, so /planning/executions/{id}/cancel|pause and /coordinator/.../approve
+# act on objects owned by the pod running the DAG. A row in Postgres cannot be
+# cancelled or approved; cancel on the wrong replica records the intent and the
+# work carries on. Routing those commands needs a control channel (pub/sub or a
+# work queue), which is why persisting the execution *records* did not clear
+# these.
+#
+# Note AlertEngine._rules/_metric_history/_firing_alerts was previously listed
+# here. No HTTP router reaches it: its only callers are the MCP alerting server
+# and app/tasks/tasks.py, so it is out of scope for *this* pin. It is not fine,
+# though — those are two different processes sharing a module-level singleton
+# that exists separately in each, so a rule registered over MCP is already
+# invisible to the worker that evaluates it. Raising the API replica count
+# neither causes nor fixes that; it needs its own slice.
+#
 # With >1 replica and no sessionAffinity, requests round-robin across pods, so an
 # investigation recorded on pod A does not exist on pod B, and per-org state is
 # split per-pod and lost on every restart, deploy and scale-down. The Postgres
@@ -50,7 +88,58 @@ image:
 #                        (runbook_definitions, runbook_runs). The shipped
 #                        DEFAULT_RUNBOOKS are seeded per org, so one tenant
 #                        editing a built-in no longer changes every tenant's.
-# REVERT TO 2 WHEN: the remaining stores above are externalised.
+#   006_waitlist         early-access signups (waitlist_signups). Not org-scoped,
+#                        unlike the rest: a signup happens before the person has
+#                        an organization. Positions come from MAX(position)+1
+#                        under a unique constraint, replacing a module counter
+#                        that reset to 0 on restart and reissued positions
+#                        earlier signups had already been promised.
+#   007_teams            teams, their membership lists and their outstanding
+#                        invitations (teams, team_members, team_invitations).
+#                        Held on a singleton's instance dicts rather than at
+#                        module scope, so it never appeared on the list above
+#                        despite its router being wired all along — every team,
+#                        membership and pending invitation was destroyed on each
+#                        restart, including invitations already emailed to
+#                        people outside the system. `teams.slug` and
+#                        `(team_id, user_id)` are now unique, which the dicts
+#                        could not enforce.
+#   008_oauth            OAuth identities and pending CSRF state tokens
+#                        (oauth_accounts, oauth_states). The worst one found so
+#                        far, and it was not on the list above either. The
+#                        callback mints a fresh `user_id` whenever the account
+#                        lookup misses, so with accounts in a dict every restart
+#                        returned each existing user as a brand-new one and
+#                        stranded their teams, roles and history under an id
+#                        nobody could sign in as again — silently, with nothing
+#                        logged. The state dict separately broke login outright
+#                        above one replica: the login redirect and the provider's
+#                        callback are separate requests that load-balance
+#                        independently, so every mismatched pair failed with
+#                        "Invalid or expired state parameter". Existing
+#                        deployments have no record of the ids already handed
+#                        out, so this stops the bleeding from here on; it cannot
+#                        reunite what was already split.
+#   009_audit            the tamper-evident audit trail (audit_events). This
+#                        one was already broken on a single pod: the events
+#                        lived in a deque(maxlen=2000), so at the 2001st event
+#                        it evicted the genesis entry and GET /audit/verify --
+#                        which recomputes from an empty prev_hash -- reported
+#                        the trail as tampered with, permanently, with nothing
+#                        wrong. A tamper-evidence control that cries wolf
+#                        forever is worse than none: the first real detection
+#                        reads as the same known false alarm. Below 2000 events
+#                        it failed the other way, attesting `valid: true` over
+#                        whichever replica's fraction of the trail served the
+#                        request. The chain is per-org now, its position held by
+#                        a unique (org_id, seq) so several replicas can append
+#                        to a serial chain at once, and GET /audit is scoped to
+#                        the calling tenant — it previously returned every org's
+#                        events to whoever asked.
+# REVERT TO 2 WHEN: every store listed above is externalised. That condition is
+# machine-checked — test_pin_is_lifted_once_state_is_externalised fails once the
+# list empties and hands over the exact knobs to restore. Do not lift the pin on
+# a reading of this comment alone: it has been wrong twice.
 replicaCount: 1
 
 # Non-secret configuration → rendered into a ConfigMap and injected as env.

@@ -1,7 +1,7 @@
 """Tests for team models."""
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from app.teams.models import (
@@ -133,8 +133,12 @@ class TestTeamInvitation:
             email="invite@example.com",
             invited_by="user456",
         )
-        # Check expires_at is approximately 7 days from now
-        expected = datetime.utcnow() + timedelta(days=7)
+        # Check expires_at is approximately 7 days from now. Aware, not
+        # `utcnow()`: these timestamps round-trip through a database column that
+        # carries an offset, and subtracting a naive datetime from an aware one
+        # raises rather than comparing wrong.
+        assert invite.expires_at.tzinfo is not None
+        expected = datetime.now(timezone.utc) + timedelta(days=7)
         delta = abs((invite.expires_at - expected).total_seconds())
         assert delta < 60  # Within 1 minute
 

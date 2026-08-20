@@ -56,6 +56,88 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 #                             seeded per org rather than shared, so one tenant's
 #                             edit no longer rewrites everyone's.
 #                             tests/test_runbook_persistence.py covers it.
+#   app/waitlist/manager.py   _waitlist_store / _email_index / _position_counter
+#                             ->  Postgres (waitlist_signups; migration
+#                             006_waitlist). The one table here that is NOT
+#                             org-scoped: a signup happens before the person has
+#                             an organization. `position` is derived from
+#                             MAX(position)+1 and is unique, replacing a counter
+#                             that reset to 0 on restart and reissued positions
+#                             earlier signups already held.
+#                             tests/test_waitlist_persistence.py covers it.
+#   app/teams/store.py        TeamStore._teams / _members / _invitations /
+#                             _user_teams  ->  Postgres (teams, team_members,
+#                             team_invitations; migration 007_teams). Never on
+#                             the list below — it was found late, because the
+#                             dicts were instance attributes on a singleton
+#                             rather than module-level names, so the scan that
+#                             built this list did not see them. Its router was
+#                             wired the whole time, so teams, memberships and
+#                             outstanding invitations were destroyed on every
+#                             restart. `_user_teams` got no table: it was a
+#                             hand-maintained index that is now a query.
+#                             tests/test_teams_persistence.py covers it.
+#   app/auth/oauth.py         _OAUTH_ACCOUNTS / _USER_ACCOUNTS / _OAUTH_STATES
+#                             ->  Postgres (oauth_accounts, oauth_states;
+#                             migration 008_oauth). The worst one found so far,
+#                             and it was not on the list below either: the
+#                             callback mints a new `user_id` whenever the account
+#                             lookup misses, so with the accounts in a dict every
+#                             restart returned each existing user as a brand-new
+#                             one and stranded their memberships and history
+#                             under an id nobody could sign in as again. The
+#                             state dict separately broke login outright above one
+#                             replica, since the redirect and the callback need
+#                             not reach the same pod. `_USER_ACCOUNTS` got no
+#                             table; it is a query now.
+#                             tests/test_oauth_identity_persistence.py covers it.
+#   app/audit_legacy.py       _BUFFER
+#                             ->  Postgres (audit_events; migration 009_audit).
+#                             Found by the factory-call scan below, and the only
+#                             one so far that was already broken on a single
+#                             pod: the buffer was a `deque(maxlen=2000)`, so at
+#                             the 2001st event it evicted the genesis entry and
+#                             /audit/verify -- which recomputes from
+#                             `prev_hash == ""` -- reported the trail as
+#                             tampered with, permanently, with nothing wrong.
+#                             Below 2000 it had the usual per-pod problem in the
+#                             opposite direction: `valid: true` over one
+#                             replica's fraction of the events. The chain is per
+#                             org now and its position is a unique
+#                             `(org_id, seq)`, which is what lets several
+#                             processes append to a serial chain at once.
+#                             tests/test_audit_chain_persistence.py covers it.
+#
+# The list below was rebuilt after the teams and OAuth slices, because both were
+# missing from it and the reason was the same each time: the scan that seeded it
+# only looked for lower-case module-level names bound to a dict literal. Three
+# shapes of the same problem slipped through —
+#   * instance attributes on a module-level singleton (teams);
+#   * UPPER_CASE module-level dicts (`_SLOS`, `_OAUTH_ACCOUNTS`);
+#   * in-memory implementations behind a `get_*_store()` factory (status page);
+#   * containers built by a factory call rather than written as a literal
+#     (`defaultdict(list)`, `deque(maxlen=...)`) — found last, when `_SLI_DATA`
+#     was listed here but silently failed to resolve against the scanner. That
+#     is the unsafe direction to be wrong in: an undetected store drops off the
+#     surviving list, so the pin looks liftable when it is not. `_is_mutable_
+#     container` now matches both spellings, and a test below asserts every
+#     declared entry still resolves so the next one cannot fail silently.
+# Everything below is now the result of scanning *every* module reachable by
+# import from app/api/main.py, in all four shapes, and keeping what a wired
+# endpoint actually reads and writes. Caches over a durable layer (session
+# objects over the checkpointer), per-pod control machinery (locks, rate-limit
+# buckets, circuit breakers, adaptive timeouts) and prefilled constants are
+# deliberately absent: those are correct per-pod and moving them would be wrong.
+#
+# One exclusion worth naming, because the scan will keep finding it:
+# `app/audit_legacy.py::_PENDING` is a bounded hand-off queue between the
+# synchronous `record()` and the async drain that writes the chain. It is not a
+# store -- nothing reads from it, it is drained on a timer and on shutdown, and
+# every pod drains its own into the same table, so it does not stop a second
+# replica. It is not free of consequence either: events sitting in it when a
+# process is killed are lost, which is a real (sub-second) durability gap
+# documented in that module. Closing it needs an await at the call site, which
+# the five synchronous callers of `record()` block.
 #
 # NOT yet externalised, and not movable by adding a table: the live-object state
 # behind /planning/executions (cancel, pause) and /coordinator/.../approve is
@@ -64,12 +146,50 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 # channel. Tracked below so the pin does not lift on the mistaken belief that
 # "the coordinator is persisted now".
 IN_MEMORY_STORES: list[tuple[str, str]] = [
-    ("app/rbac/manager.py", "_managers"),
-    ("app/waitlist/manager.py", "_waitlist_store"),
     ("app/deduplication/api_router.py", "_pipelines"),
     ("app/dependency_graph/api_router.py", "_graphs"),
+    # When the graph for an org was last discovered. Splitting it from _graphs
+    # means a second pod re-discovers on its own schedule.
+    ("app/dependency_graph/api_router.py", "_discovered_at"),
     ("app/cost_optimizer/api_router.py", "_budget_managers"),
     ("app/cost_optimizer/api_router.py", "_roi_trackers"),
+    # Same file, same shape, missed when the first two were listed.
+    ("app/cost_optimizer/api_router.py", "_token_optimizers"),
+    ("app/cost_optimizer/api_router.py", "_gpu_trackers"),
+    # SLO definitions and the samples compliance is computed from, behind the
+    # wired /slo routes. UPPER_CASE, which is the only reason they were missed.
+    # Note the tracker is constructed per request (`_get_tracker` returns a new
+    # SLOTracker every call), so these two dicts — not the tracker — are where
+    # every SLO actually lives.
+    ("app/slo/tracker.py", "_SLOS"),
+    ("app/slo/tracker.py", "_SLI_DATA"),
+    # Read by /investigations in app/api/main.py, which imports it inside the
+    # handler — an import edge no module-level scan would have followed.
+    ("app/api/graphql/schema.py", "_investigations"),
+    ("app/api/graphql/schema.py", "_incidents"),
+    # Webhook delivery de-duplication. Per-pod means a redelivery that lands on
+    # another replica is processed a second time, which for an incident webhook
+    # is a duplicate investigation rather than a duplicate row.
+    ("app/api/main.py", "_SEEN_DELIVERIES"),
+]
+
+# Table-shaped state held on the instance of a module-level singleton. Distinct
+# from PROCESS_LOCAL_RUNTIME_STATE below: nothing here is a live asyncio object,
+# so these move to Postgres exactly the way the module-level dicts did. They are
+# listed apart only because finding them needs the instance-attribute scan —
+# the blind spot that hid the teams store through six slices.
+SINGLETON_HELD_STORES: list[tuple[str, str]] = [
+    # `get_status_store()` returns an InMemoryStatusStore; there is no other
+    # implementation. Behind the wired /status routes, so a public status page's
+    # components, incidents and subscribers are per-pod and reset on deploy —
+    # including the subscribers who asked to be told about the next outage.
+    ("app/status_page/store.py", "_components"),
+    ("app/status_page/store.py", "_incidents"),
+    ("app/status_page/store.py", "_maintenances"),
+    ("app/status_page/store.py", "_subscribers"),
+    # `get_incident_store()`, behind the wired /api/incidents routes.
+    ("app/incidents/store.py", "_incidents"),
+    ("app/incidents/store.py", "_investigations"),
 ]
 
 # Process-local state held on *instances* rather than at module scope, as
@@ -84,6 +204,12 @@ IN_MEMORY_STORES: list[tuple[str, str]] = [
 PROCESS_LOCAL_RUNTIME_STATE: list[tuple[str, str]] = [
     # /planning/executions, /executions/{id}/cancel, /executions/{id}/pause
     ("app/planning/execution_engine.py", "_active_executions"),
+    # The other half of cancellation, and the same defect: the cancel request
+    # marks the id here, but the loop that reads the mark runs on whichever pod
+    # owns the execution. Cancel on the wrong replica records the intent and the
+    # work carries on. Listed so externalising _active_executions alone does not
+    # read as done.
+    ("app/planning/execution_engine.py", "_cancelled"),
     # /coordinator/executions/{id}/tasks/{id}/approve
     ("app/coordinator/dag_executor.py", "_pending_approvals"),
 ]
@@ -94,8 +220,37 @@ REVERT_HINT = (
 )
 
 
+# Callables that return a fresh mutable container. A store is no less
+# process-local for having been built by one of these instead of written as a
+# literal, and `_SLI_DATA = defaultdict(list)` is exactly that case: a
+# literal-only scan dropped it from the surviving list, which is the unsafe
+# direction to be wrong in -- an undetected store makes the pin look liftable.
+_CONTAINER_FACTORIES = frozenset(
+    {"dict", "list", "set", "defaultdict", "OrderedDict", "deque", "Counter"}
+)
+
+
+def _is_mutable_container(value: ast.expr) -> bool:
+    """Whether `value` constructs a fresh mutable container.
+
+    Covers both spellings: the literal (`{}`, `[]`) and the factory call
+    (`defaultdict(list)`, `dict()`). A dotted call such as `collections.deque()`
+    is matched on its attribute name, since the import style is irrelevant to
+    whether the result is per-process state.
+    """
+    if isinstance(value, (ast.Dict, ast.List, ast.Set)):
+        return True
+    if isinstance(value, ast.Call):
+        func = value.func
+        if isinstance(func, ast.Name):
+            return func.id in _CONTAINER_FACTORIES
+        if isinstance(func, ast.Attribute):
+            return func.attr in _CONTAINER_FACTORIES
+    return False
+
+
 def _module_level_dict_names(rel_path: str) -> set[str]:
-    """Names bound to a literal dict/list at module scope in `rel_path`.
+    """Names bound to a mutable container at module scope in `rel_path`.
 
     Module scope is what matters: a dict built inside a function is per-call and
     harmless, while one at module scope is process-global and is exactly the
@@ -114,7 +269,7 @@ def _module_level_dict_names(rel_path: str) -> set[str]:
             targets = [node.target]
         else:
             continue
-        if not isinstance(node.value, (ast.Dict, ast.List)):
+        if not _is_mutable_container(node.value):
             continue
         for t in targets:
             if isinstance(t, ast.Name):
@@ -123,7 +278,7 @@ def _module_level_dict_names(rel_path: str) -> set[str]:
 
 
 def _instance_dict_attrs(rel_path: str) -> set[str]:
-    """Names bound to a literal dict/list on `self` anywhere in `rel_path`.
+    """Names bound to a mutable container on `self` anywhere in `rel_path`.
 
     Unlike the module-scope scan above this walks the whole tree, because the
     assignment lives inside `__init__`. What makes it per-pod is not the
@@ -142,7 +297,7 @@ def _instance_dict_attrs(rel_path: str) -> set[str]:
             targets, value = [node.target], node.value
         else:
             continue
-        if not isinstance(value, (ast.Dict, ast.List)):
+        if not _is_mutable_container(value):
             continue
         for t in targets:
             if (
@@ -156,15 +311,23 @@ def _instance_dict_attrs(rel_path: str) -> set[str]:
 
 def surviving_in_memory_stores() -> list[str]:
     """Every tracked store that is still process-local, of either kind."""
-    return [
-        f"{mod}::{name}"
-        for mod, name in IN_MEMORY_STORES
-        if name in _module_level_dict_names(mod)
-    ] + [
-        f"{mod}::self.{name}"
-        for mod, name in PROCESS_LOCAL_RUNTIME_STATE
-        if name in _instance_dict_attrs(mod)
-    ]
+    return (
+        [
+            f"{mod}::{name}"
+            for mod, name in IN_MEMORY_STORES
+            if name in _module_level_dict_names(mod)
+        ]
+        + [
+            f"{mod}::self.{name}"
+            for mod, name in SINGLETON_HELD_STORES
+            if name in _instance_dict_attrs(mod)
+        ]
+        + [
+            f"{mod}::self.{name}"
+            for mod, name in PROCESS_LOCAL_RUNTIME_STATE
+            if name in _instance_dict_attrs(mod)
+        ]
+    )
 
 
 def _load(rel_path: str):
@@ -321,4 +484,33 @@ def test_pin_is_lifted_once_state_is_externalised() -> None:
         "3/20, keda 3/50 fallback 5, argocd staging 2 (2-5) / production 3 "
         "(3-20), overlays staging 2 (2-5) / production 3 (3-20)), re-enable "
         "autoscaling and the PodDisruptionBudget, then delete this test module."
+    )
+
+
+def test_every_declared_store_still_resolves() -> None:
+    """Each tracked entry must still be found by the scanner that tracks it.
+
+    The skip above is driven by `surviving_in_memory_stores()`, which keeps an
+    entry only if the scan finds it in the source. So an entry that stops
+    matching — renamed attribute, deleted module, or a shape the scanner does
+    not recognise — does not fail; it quietly leaves the list and moves the pin
+    one store closer to lifting. That is how `_SLI_DATA` sat here unresolved: it
+    is `defaultdict(list)`, and the scan matched only literals.
+
+    Requiring every declared entry to resolve turns all three into loud
+    failures. Externalising a store is then a deliberate two-part edit: change
+    the code, and delete its line here.
+    """
+    declared = (
+        [(m, n, f"{m}::{n}") for m, n in IN_MEMORY_STORES]
+        + [(m, n, f"{m}::self.{n}") for m, n in SINGLETON_HELD_STORES]
+        + [(m, n, f"{m}::self.{n}") for m, n in PROCESS_LOCAL_RUNTIME_STATE]
+    )
+    surviving = set(surviving_in_memory_stores())
+    unresolved = [label for _, _, label in declared if label not in surviving]
+    assert not unresolved, (
+        "Declared stores that the scanner no longer finds: "
+        f"{unresolved}. Either the store really was externalised — in which case "
+        "delete its entry from the list above — or it changed shape and the scan "
+        "silently stopped counting it, which understates what blocks the pin."
     )

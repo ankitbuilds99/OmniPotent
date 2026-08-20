@@ -4,7 +4,8 @@ across resets or into the wrong task; audit lines are tenant-stamped."""
 
 import asyncio
 
-from app import audit
+from app import audit, config as cfg
+from app.database.engine import close_db
 from app.tenant_context import (
     TenantConfig,
     get_tenant,
@@ -59,8 +60,11 @@ def test_run_with_tenant_in_background_task_reestablishes_context():
     asyncio.run(scenario())
 
 
-def test_audit_lines_are_tenant_and_actor_stamped():
-    audit.clear()
+async def test_audit_lines_are_tenant_and_actor_stamped(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    await close_db()
+    await audit.clear()
     audit.record("test.event_no_tenant")
     token = set_tenant(TenantConfig(org_id="acme"))
     set_actor("key:ci")
@@ -69,8 +73,17 @@ def test_audit_lines_are_tenant_and_actor_stamped():
     finally:
         reset_tenant(token)
         set_actor("-")
+    await audit.flush()
 
-    events = {e["event"]: e for e in audit.recent()}
+    # Read both chains: the trail is stored per org now, so `recent()` shows the
+    # caller's tenant only -- which is the isolation this test is about.
+    from app.audit import store
+
+    events = {
+        e["event"]: e
+        for org in ("-", "acme")
+        for e in await store.chain(org)
+    }
     assert events["test.event_no_tenant"]["org_id"] == "-"
     assert events["test.event_with_tenant"]["org_id"] == "acme"
     assert events["test.event_with_tenant"]["actor"] == "key:ci"

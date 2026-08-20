@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -31,6 +30,7 @@ from app.auth.oauth import (
     find_account_by_provider,
     find_account_by_email,
     get_user_accounts,
+    touch_last_login,
 )
 from app.config import get_settings
 
@@ -123,7 +123,7 @@ async def oauth_login(
     if redirect_uri:
         callback_url += f"?redirect_uri={redirect_uri}"
 
-    auth_url = get_authorization_url(provider, callback_url)
+    auth_url = await get_authorization_url(provider, callback_url)
     if not auth_url:
         raise HTTPException(500, "Failed to generate authorization URL")
 
@@ -154,7 +154,7 @@ async def oauth_callback(
     if not code:
         raise HTTPException(400, "Missing authorization code")
 
-    verified_provider = verify_oauth_state(state)
+    verified_provider = await verify_oauth_state(state)
     if not verified_provider:
         raise HTTPException(400, "Invalid or expired state parameter")
 
@@ -178,18 +178,24 @@ async def oauth_callback(
     if not oauth_user:
         raise HTTPException(500, "Failed to get user info")
 
-    existing = find_account_by_provider(provider, oauth_user.provider_id)
+    existing = await find_account_by_provider(provider, oauth_user.provider_id)
     if existing:
         user_id = existing.user_id
-        existing.last_login = datetime.now(timezone.utc)
+        # Not `existing.last_login = ...`: the account is now a detached copy of
+        # a row, so assigning to it would update nothing.
+        await touch_last_login(existing.id)
     else:
-        email_account = find_account_by_email(oauth_user.email)
+        email_account = await find_account_by_email(oauth_user.email)
         if email_account:
             user_id = email_account.user_id
         else:
             user_id = f"user_{secrets.token_hex(8)}"
 
-        link_oauth_account(user_id, oauth_user)
+        # Takes the user id already on the identity if one was linked
+        # concurrently, so a first-ever login racing with itself resolves to one
+        # user rather than to whichever request committed last.
+        linked = await link_oauth_account(user_id, oauth_user)
+        user_id = linked.user_id
 
     org_id = _get_or_create_org_for_user(user_id, oauth_user.email)
 
@@ -250,7 +256,7 @@ async def get_current_user(request: Request) -> UserInfo:
         raise HTTPException(401, "Invalid or expired token")
 
     user_id = payload["sub"]
-    accounts = get_user_accounts(user_id)
+    accounts = await get_user_accounts(user_id)
 
     return UserInfo(
         id=user_id,
@@ -274,7 +280,7 @@ async def list_linked_accounts(request: Request) -> list[dict[str, Any]]:
     if not payload:
         raise HTTPException(401, "Invalid or expired token")
 
-    accounts = get_user_accounts(payload["sub"])
+    accounts = await get_user_accounts(payload["sub"])
     return [
         {
             "provider": a.provider,
@@ -312,7 +318,7 @@ async def link_provider(
     base_url = str(request.base_url).rstrip("/")
     callback_url = f"{base_url}/auth/{provider}/callback?link=true"
 
-    auth_url = get_authorization_url(provider, callback_url)
+    auth_url = await get_authorization_url(provider, callback_url)
     if not auth_url:
         raise HTTPException(500, "Failed to generate authorization URL")
 

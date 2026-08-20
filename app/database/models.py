@@ -20,6 +20,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -520,6 +521,66 @@ class CoordinatorExecution(Base):
     )
 
 
+class WaitlistSignup(Base):
+    """One early-access signup.
+
+    Deliberately NOT tenant-scoped, unlike every other table added in this
+    effort: a waitlist signup happens before the person has an organization, so
+    there is no org to scope it to. The waitlist is a property of the product.
+
+    Replaces `app/waitlist/manager.py:_waitlist_store` / `_email_index` /
+    `_position_counter`. These were leads — real email addresses submitted by
+    real people — held in a dict that was emptied on every restart, deploy and
+    scale-down, with no export having ever run. `_position_counter` was worse
+    than merely volatile: it reset to 0 on restart, so the signups after a
+    deploy were handed positions that earlier signups already held.
+
+    `position` is unique so that a race between two concurrent signups fails
+    loudly and retries, rather than silently issuing the same position twice.
+    `email` is unique because it is the identity a caller looks an entry up by.
+    """
+
+    __tablename__ = "waitlist_signups"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    tier: Mapped[str] = mapped_column(String(32), nullable=False, default="standard")
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="landing_page")
+
+    company: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    role: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    team_size: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    use_case: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    referral_code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    referred_by: Mapped[str] = mapped_column(String(320), default="", nullable=False)
+    referral_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    utm_source: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    utm_medium: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    utm_campaign: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+
+    # Hashed, never the raw address — this is duplicate-detection material, not
+    # something anyone should be able to read back out of the table.
+    ip_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    user_agent: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    tags: Mapped[list[Any]] = mapped_column(JSONType, nullable=False, default=list)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    invited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_waitlist_tier_source", "tier", "source"),
+        Index("ix_waitlist_created", "created_at"),
+    )
+
+
 class RunbookDefinition(Base):
     """A runbook definition managed through /api/runbooks.
 
@@ -622,4 +683,249 @@ class UsageRecord(Base):
 
     __table_args__ = (
         Index("ix_usage_org_period", "org_id", "period", unique=True),
+    )
+
+
+class TeamRecord(Base):
+    """A team/workspace, as created through /teams.
+
+    Replaces `app/teams/store.py:TeamStore._teams`. That store's docstring said
+    "swap for database in production" and never was, while its router was wired
+    into the API — so a team created on one pod did not exist on any other, and
+    every team, membership and pending invitation was destroyed on each restart.
+
+    `slug` is unique here, which the dict version could not enforce: it
+    de-duplicated auto-generated slugs by scanning, but a caller-supplied slug
+    was accepted verbatim, so two teams could share one. `get_team_by_slug` then
+    returned whichever the scan reached first and the other team was
+    unreachable by its own URL.
+
+    Named `TeamRecord` rather than `Team` because `app/teams/models.py` already
+    owns `Team` — the Pydantic shape the API speaks in. This is the row behind it.
+    """
+
+    __tablename__ = "teams"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONType, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class TeamMemberRecord(Base):
+    """One user's membership in one team.
+
+    Replaces both `TeamStore._members` and `TeamStore._user_teams`. The second
+    was a parallel index from user to team ids, maintained by hand on every add,
+    remove and delete — the kind of bookkeeping that drifts. Here "which teams
+    is this user in" is a query against this table, so it cannot disagree with
+    the memberships themselves.
+
+    `(team_id, user_id)` is unique: "already a member" was a read-then-write
+    check, which two concurrent invitations both passed.
+    """
+
+    __tablename__ = "team_members"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_active: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_team_members_team_user", "team_id", "user_id", unique=True),
+        # "Which teams am I in" — the read that replaces the _user_teams index.
+        Index("ix_team_members_user", "user_id"),
+        Index("ix_team_members_team_email", "team_id", "email"),
+    )
+
+
+class TeamInvitationRecord(Base):
+    """An outstanding or resolved invitation to join a team.
+
+    Replaces `TeamStore._invitations`. Losing these on restart was the worst of
+    the three: an invitation is a promise made to someone outside the system,
+    who has already been given a link that stops resolving.
+
+    Expiry is evaluated on read and written back, as it was in memory — nothing
+    sweeps this table on a timer, so a row only becomes EXPIRED once somebody
+    looks at it. Accepting still re-checks `expires_at` rather than trusting the
+    status, so an unobserved expiry is not an accepted invitation.
+    """
+
+    __tablename__ = "team_invitations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    invited_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_team_invitations_team_status", "team_id", "status"),
+        # The invitee's own view: "what am I invited to", by address, across teams.
+        Index("ix_team_invitations_email_status", "email", "status"),
+    )
+
+
+class OAuthAccountRecord(Base):
+    """A provider identity (Google/GitHub) linked to a local user id.
+
+    Replaces `app.auth.oauth._OAUTH_ACCOUNTS`. This table is what makes a
+    returning user the *same* user: the callback in app/auth/endpoints.py looks
+    the account up and, on a miss, mints a fresh `user_id` from
+    `secrets.token_hex`. While the lookup was a per-process dict, every restart
+    was a miss, so every returning person silently became a new user id with the
+    same email address -- and everything keyed by user id (team_members.user_id
+    above, investigations, roles) was left pointing at an identity nobody could
+    sign in as again. Two replicas produced the same split without a restart.
+
+    `id` is the natural key `"{provider}:{provider_id}"` the dict was keyed by,
+    kept rather than replaced by a surrogate so the primary key itself enforces
+    "one local user per provider identity" -- the property the callback relies
+    on when it decides whether this is a returning user.
+    """
+
+    __tablename__ = "oauth_accounts"
+
+    id: Mapped[str] = mapped_column(String(320), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    avatar_url: Mapped[str | None] = mapped_column(Text())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_login: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # "Which identities does this user have" -- the read that replaces the
+        # _USER_ACCOUNTS index, which is why that dict gets no table of its own.
+        Index("ix_oauth_accounts_user", "user_id"),
+        # Account-matching by address on first sight of a new provider. Stored
+        # lower-cased, so this index is usable rather than decorative.
+        Index("ix_oauth_accounts_email", "email"),
+    )
+
+
+class OAuthStateRecord(Base):
+    """A pending OAuth CSRF state token, consumed exactly once.
+
+    Replaces `app.auth.oauth._OAUTH_STATES`. Unlike the other tables in this
+    file this one is not moved for durability -- it is moved because the flow is
+    inherently cross-process: the state is issued on the /auth/{provider}/login
+    request and presented back on /auth/{provider}/callback, an entirely
+    separate request that arrives from the provider's redirect. With the states
+    in a per-pod dict, any deployment with more than one replica fails every
+    login whose callback happens to land on a different pod than the redirect,
+    with "Invalid or expired state parameter" and nothing in the logs to
+    explain it.
+
+    Consume-once is a real security property here (it is what stops a captured
+    callback URL being replayed), so it is enforced with a DELETE ... rowcount
+    rather than a SELECT-then-DELETE, which two concurrent replays could both
+    pass.
+    """
+
+    __tablename__ = "oauth_states"
+
+    state: Mapped[str] = mapped_column(String(128), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # Sweeping expired states; the only non-key access path.
+        Index("ix_oauth_states_created", "created_at"),
+    )
+
+
+class AuditEventRecord(Base):
+    """One hash-chained audit event.
+
+    Replaces `app.audit_legacy._BUFFER`, a `deque(maxlen=2000)` that backed both
+    GET /audit and GET /audit/verify. The buffer failed as a tamper-evidence
+    control in two ways, and only one of them needed a second replica:
+
+    1.  It broke at 2001 events on a single pod. `verify_chain` recomputes from
+        a genesis of `prev_hash == ""`, but the deque evicts its oldest entry
+        once full, so the oldest surviving entry points at a hash that is no
+        longer there. From that event on the endpoint reported
+        `{"valid": false, "broken_at": 0}` permanently -- indistinguishable
+        from somebody having actually edited the trail.
+    2.  Below 2000 events it reported `valid: true` over whatever fraction of
+        events happened to land on the pod serving the request, since every
+        replica kept its own buffer and its own running hash.
+
+    So the control was wrong in both directions: falsely reassuring while
+    small, falsely alarming once full, and never covering more than one pod.
+
+    The chain is per-org and its position is explicit. `seq` is a per-org
+    counter starting at 0, and `(org_id, seq)` is unique, so two concurrent
+    appends cannot occupy the same position -- the loser gets an IntegrityError
+    and retries against the new head. That is the same optimistic pattern the
+    waitlist slice used for `MAX(position)+1`, and it is what lets a serial
+    hash chain be appended to from several processes at once.
+
+    Rows are never evicted, which is what makes verification meaningful: a gap
+    in `seq` or a hash that does not fold into its successor is now evidence,
+    not an artifact of the buffer having wrapped.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Chains are scoped per org: an auditor asks about one tenant, and scoping
+    # also keeps the append contention (see the retry above) per-tenant rather
+    # than global. '-' in single-tenant deployments, matching tenant_context.
+    org_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # `ts` is the string the entry was hashed with, kept verbatim rather than
+    # parsed into a DateTime: the hash is computed over the serialized entry, so
+    # re-formatting this value on the way in or out would break verification of
+    # every row after it.
+    ts: Mapped[str] = mapped_column(String(32), nullable=False)
+    event: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(128))
+    actor: Mapped[str | None] = mapped_column(String(255))
+    # The caller's **fields. Kept apart from the fixed columns so the entry can
+    # be reassembled exactly as it was hashed.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
+
+    prev_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        # The invariant the deque could not hold: one event per chain position.
+        UniqueConstraint("org_id", "seq", name="uq_audit_events_org_seq"),
+        # Verification and the read API both walk a chain in order.
+        Index("ix_audit_events_org_seq", "org_id", "seq"),
+        # GET /audit?event_prefix=... filters on this.
+        Index("ix_audit_events_event", "event"),
     )

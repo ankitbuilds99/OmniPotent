@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+# Invitations are valid for a week from the moment they are created. Kept here
+# rather than inlined in the default so the store can re-derive it when it
+# writes a row, and so a test can name the same number the product does.
+INVITATION_TTL = timedelta(days=7)
+
+
+def _now() -> datetime:
+    """Timezone-aware UTC now.
+
+    These models used `datetime.utcnow()`, which returns a *naive* datetime that
+    merely happens to hold UTC. Now that the rows round-trip through a database
+    that stores an offset, a naive default would compare unequal to what comes
+    back and raise outright when compared against an aware value.
+    """
+    return datetime.now(timezone.utc)
 
 
 class TeamRole(str, Enum):
@@ -32,8 +48,8 @@ class Team(BaseModel):
     name: str
     slug: str
     owner_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -44,7 +60,7 @@ class TeamMember(BaseModel):
     user_id: str
     email: str
     role: TeamRole = TeamRole.MEMBER
-    joined_at: datetime = Field(default_factory=datetime.utcnow)
+    joined_at: datetime = Field(default_factory=_now)
     last_active: datetime | None = None
 
 
@@ -56,10 +72,8 @@ class TeamInvitation(BaseModel):
     role: TeamRole = TeamRole.MEMBER
     invited_by: str
     status: InvitationStatus = InvitationStatus.PENDING
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    expires_at: datetime = Field(
-        default_factory=lambda: datetime.utcnow() + timedelta(days=7)
-    )
+    created_at: datetime = Field(default_factory=_now)
+    expires_at: datetime = Field(default_factory=lambda: _now() + INVITATION_TTL)
     accepted_at: datetime | None = None
 
 

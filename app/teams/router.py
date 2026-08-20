@@ -15,7 +15,8 @@ from app.teams.models import (
     TeamMemberResponse,
     InvitationResponse,
 )
-from app.teams.store import get_team_store
+from app.teams import store
+from app.teams.store import SlugTaken
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
@@ -61,12 +62,11 @@ def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
     )
 
 
-def _check_team_permission(
+async def _check_team_permission(
     team_id: str, user_id: str, required_roles: list[TeamRole]
 ) -> None:
     """Check if user has required role in team."""
-    store = get_team_store()
-    member = store.get_member(team_id, user_id)
+    member = await store.get_member(team_id, user_id)
     if not member:
         raise HTTPException(status_code=403, detail="Not a team member")
     if member.role not in required_roles:
@@ -81,14 +81,20 @@ async def create_team(
 ) -> TeamResponse:
     """Create a new team."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    team = store.create_team(
-        name=request.name,
-        owner_id=user["id"],
-        owner_email=user["email"],
-        slug=request.slug,
-    )
+    try:
+        team = await store.create_team(
+            name=request.name,
+            owner_id=user["id"],
+            owner_email=user["email"],
+            slug=request.slug,
+        )
+    except SlugTaken as exc:
+        # Only raised for a slug the caller chose. One we generate is
+        # disambiguated instead, since nobody is holding a link to it yet.
+        raise HTTPException(
+            status_code=409, detail=f"Slug already in use: {exc.slug}"
+        ) from None
 
     return TeamResponse(
         id=team.id,
@@ -107,9 +113,10 @@ async def list_teams(
 ) -> list[TeamResponse]:
     """List all teams the user belongs to."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    teams = store.get_user_teams(user["id"])
+    teams = await store.get_user_teams(user["id"])
+    # One grouped count for the whole listing rather than a query per team.
+    counts = await store.member_counts([team.id for team, _ in teams])
     return [
         TeamResponse(
             id=team.id,
@@ -117,7 +124,7 @@ async def list_teams(
             slug=team.slug,
             owner_id=team.owner_id,
             created_at=team.created_at,
-            member_count=len(store.get_members(team.id)),
+            member_count=counts.get(team.id, 0),
             role=role,
         )
         for team, role in teams
@@ -131,13 +138,12 @@ async def get_team(
 ) -> TeamResponse:
     """Get team details."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    team = store.get_team(team_id)
+    team = await store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    member = store.get_member(team_id, user["id"])
+    member = await store.get_member(team_id, user["id"])
     if not member:
         raise HTTPException(status_code=403, detail="Not a team member")
 
@@ -147,7 +153,7 @@ async def get_team(
         slug=team.slug,
         owner_id=team.owner_id,
         created_at=team.created_at,
-        member_count=len(store.get_members(team_id)),
+        member_count=await store.count_members(team_id),
         role=member.role,
     )
 
@@ -160,9 +166,8 @@ async def update_team(
 ) -> TeamResponse:
     """Update team settings. Requires admin or owner role."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
+    await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
 
     updates: dict[str, Any] = {}
     if request.name:
@@ -170,18 +175,18 @@ async def update_team(
     if request.settings:
         updates["settings"] = request.settings
 
-    team = store.update_team(team_id, updates)
+    team = await store.update_team(team_id, updates)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    member = store.get_member(team_id, user["id"])
+    member = await store.get_member(team_id, user["id"])
     return TeamResponse(
         id=team.id,
         name=team.name,
         slug=team.slug,
         owner_id=team.owner_id,
         created_at=team.created_at,
-        member_count=len(store.get_members(team_id)),
+        member_count=await store.count_members(team_id),
         role=member.role if member else None,
     )
 
@@ -193,11 +198,10 @@ async def delete_team(
 ) -> dict[str, str]:
     """Delete a team. Only owner can delete."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    _check_team_permission(team_id, user["id"], [TeamRole.OWNER])
+    await _check_team_permission(team_id, user["id"], [TeamRole.OWNER])
 
-    if not store.delete_team(team_id):
+    if not await store.delete_team(team_id):
         raise HTTPException(status_code=404, detail="Team not found")
 
     return {"message": "Team deleted"}
@@ -211,14 +215,13 @@ async def list_members(
 ) -> list[TeamMemberResponse]:
     """List all team members."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
     # Any member can view the member list
-    member = store.get_member(team_id, user["id"])
+    member = await store.get_member(team_id, user["id"])
     if not member:
         raise HTTPException(status_code=403, detail="Not a team member")
 
-    members = store.get_members(team_id)
+    members = await store.get_members(team_id)
     return [
         TeamMemberResponse(
             id=m.id,
@@ -241,19 +244,18 @@ async def update_member_role(
 ) -> TeamMemberResponse:
     """Update a member's role. Requires admin or owner."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
+    await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
 
     # Admins can't promote to admin or owner
-    current_user_member = store.get_member(team_id, user["id"])
+    current_user_member = await store.get_member(team_id, user["id"])
     if current_user_member and current_user_member.role == TeamRole.ADMIN:
         if request.role in [TeamRole.ADMIN, TeamRole.OWNER]:
             raise HTTPException(
                 status_code=403, detail="Admins cannot promote to admin or owner"
             )
 
-    member = store.update_member_role(team_id, user_id, request.role)
+    member = await store.update_member_role(team_id, user_id, request.role)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found or cannot change role")
 
@@ -275,13 +277,14 @@ async def remove_member(
 ) -> dict[str, str]:
     """Remove a member from team. Admins+ can remove, users can leave."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
     # Users can remove themselves (leave)
     if user_id != user["id"]:
-        _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
+        await _check_team_permission(
+            team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN]
+        )
 
-    if not store.remove_member(team_id, user_id):
+    if not await store.remove_member(team_id, user_id):
         raise HTTPException(
             status_code=400, detail="Cannot remove member (owner cannot be removed)"
         )
@@ -297,11 +300,10 @@ async def list_invitations(
 ) -> list[InvitationResponse]:
     """List pending invitations. Requires admin or owner."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
+    await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
 
-    invitations = store.get_invitations(team_id)
+    invitations = await store.get_invitations(team_id)
     return [
         InvitationResponse(
             id=inv.id,
@@ -323,19 +325,18 @@ async def invite_member(
 ) -> InvitationResponse:
     """Invite a new member. Requires admin or owner."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
+    await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
 
     # Admins can't invite as admin or owner
-    current_member = store.get_member(team_id, user["id"])
+    current_member = await store.get_member(team_id, user["id"])
     if current_member and current_member.role == TeamRole.ADMIN:
         if request.role in [TeamRole.ADMIN, TeamRole.OWNER]:
             raise HTTPException(
                 status_code=403, detail="Admins cannot invite as admin or owner"
             )
 
-    invitation = store.create_invitation(
+    invitation = await store.create_invitation(
         team_id=team_id,
         email=request.email,
         role=request.role,
@@ -368,11 +369,16 @@ async def cancel_invitation(
 ) -> dict[str, str]:
     """Cancel a pending invitation. Requires admin or owner."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
+    await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
 
-    if not store.cancel_invitation(invitation_id):
+    # Scoped to the team in the path: without this an admin of any team could
+    # cancel any invitation whose id they knew.
+    invitation = await store.get_invitation(invitation_id)
+    if invitation is None or invitation.team_id != team_id:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+
+    if not await store.cancel_invitation(invitation_id):
         raise HTTPException(status_code=404, detail="Invitation not found or already processed")
 
     return {"message": "Invitation cancelled"}
@@ -385,9 +391,8 @@ async def accept_invitation(
 ) -> dict[str, Any]:
     """Accept an invitation to join a team."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    invitation, member = store.accept_invitation(invitation_id, user["id"])
+    invitation, member = await store.accept_invitation(invitation_id, user["id"])
 
     if not invitation:
         raise HTTPException(status_code=404, detail="Invitation not found")
@@ -398,7 +403,7 @@ async def accept_invitation(
             detail=f"Cannot accept invitation (status: {invitation.status.value})",
         )
 
-    team = store.get_team(invitation.team_id)
+    team = await store.get_team(invitation.team_id)
     return {
         "message": "Invitation accepted",
         "team": {
@@ -414,9 +419,8 @@ async def get_my_invitations(
 ) -> list[dict[str, Any]]:
     """Get all pending invitations for the current user."""
     user = _get_user_from_header(authorization)
-    store = get_team_store()
 
-    invitations = store.get_user_pending_invitations(user["email"])
+    invitations = await store.get_user_pending_invitations(user["email"])
     return [
         {
             "invitation": InvitationResponse(

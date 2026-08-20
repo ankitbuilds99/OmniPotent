@@ -317,10 +317,18 @@ adding one is a pricing decision rather than a wiring decision.
 | Secrets Manager | ✅ Complete | `app/secrets_vault.py`, `app/secrets_advanced.py` |
 | Vault integration | ⚠️ Partial | Custom implementation, needs HashiCorp Vault client |
 | IAM/OIDC | ✅ Complete | `app/sso/`, `app/tenancy/oauth.py` |
-| RBAC | ✅ Complete | `app/rbac/` |
+| RBAC | ✅ Complete | `app/tenancy/models.py` (4 roles × 8 actions, `can()`), enforced by `require_perm()` on 21 routes in `app/api/main.py` |
 | Encryption | ✅ Complete | Multiple modules |
 | Key rotation | ✅ Complete | `app/security/secret_rotation.py` |
 | Zero Trust | ⚠️ Partial | Session binding exists, needs full implementation |
+
+The RBAC row previously cited `app/rbac/` — a second, entirely unwired implementation
+(5 roles, its own `PermissionSet`, a `BaseHTTPMiddleware` that was never installed, and
+`Team`/`TeamMembership` classes duplicating `app/teams/`). Nothing outside its own tests
+imported it, so no route had ever been gated by it. Authorization that is not reachable
+is not authorization, and a "✅ Complete" row pointing at it read as if 21 unprotected
+routes were protected. It was deleted on 2026-08-20; the row now names the matrix that
+is actually enforced.
 
 ### D. Human Collaboration Layer
 
@@ -404,8 +412,13 @@ requires prior history for that service/metric pair before it fires.
 | Investigation history & dashboard analytics | ✅ Postgres | `app/dashboard/metrics.py` → `investigations`, Alembic `003_investigations`; served by `GET /dashboard/metrics` and `/dashboard/trends` |
 | Planning graphs, coordinator DAG executions | ✅ Postgres | `app/planning/store.py` → `planning_graphs`, `app/coordinator/store.py` → `coordinator_executions`, Alembic `004_planning_coord` |
 | Runbook definitions & executions | ✅ Postgres | `app/runbooks/store.py` → `runbook_definitions` / `runbook_runs`, Alembic `005_runbooks`; built-ins seeded per org |
-| RBAC, waitlist, dedup, dep-graph, cost | ⚠️ In-process | 6 further module-level dicts, listed in `deploy/helm/copilot/values.yaml` |
-| In-flight execution control (cancel/pause/approve) | ⚠️ Per-pod, by nature | `ExecutionEngine._active_executions`, `DAGExecutor._pending_approvals` — live asyncio objects; needs a control channel, not a table |
+| Waitlist signups | ✅ Postgres | `app/waitlist/store.py` → `waitlist_signups`, Alembic `006_waitlist`; not org-scoped, positions from `MAX(position)+1` under a unique constraint |
+| Teams, memberships, invitations | ✅ Postgres | `app/teams/store.py` → `teams` / `team_members` / `team_invitations`, Alembic `007_teams`; `slug` and `(team_id, user_id)` unique, "which teams am I in" derived rather than indexed by hand |
+| OAuth identities & login state | ✅ Postgres | `app/auth/oauth.py` → `oauth_accounts` / `oauth_states`, Alembic `008_oauth`; the provider identity is the primary key, so racing first-logins resolve to one user, and state tokens are consumed exactly once by `DELETE ... RETURNING` rowcount |
+| Audit trail (hash-chained) | ✅ Postgres | `app/audit/store.py` → `audit_events`, Alembic `009_audit`; one chain per org, position held by a unique `(org_id, seq)` so replicas can append concurrently |
+| dedup, dep-graph, cost, SLO, GraphQL, webhook dedup | ⚠️ In-process | 12 module-level containers, listed in `deploy/helm/copilot/values.yaml` |
+| Status page, incidents stores | ⚠️ In-process | 6 dicts on singleton instances (`app/status_page/store.py`, `app/incidents/store.py`) |
+| In-flight execution control (cancel/pause/approve) | ⚠️ Per-pod, by nature | `ExecutionEngine._active_executions` / `._cancelled`, `DAGExecutor._pending_approvals` — live asyncio objects; needs a control channel, not a table |
 | LangGraph checkpointer | ⚠️ SQLite by default | Postgres when `COPILOT_CHECKPOINT_DB` is set |
 
 **Notes:** Authoritative business state lived in module-level Python dicts, which is
@@ -635,6 +648,191 @@ no command runner configured produces a **failed** execution carrying "refusing 
 success for an action that was not performed", where previously the status field simply
 never moved off `running`.
 
+#### Waitlist (fifth slice)
+
+The only table in this series that is **not** tenant-scoped, and deliberately so: a
+waitlist signup happens before the person has an organization, so there is nothing to
+scope it to. The waitlist is a property of the product.
+
+**What was being lost.** `_waitlist_store` and `_email_index` held leads — real email
+addresses submitted through the public landing page, along with company, role and
+use-case — in dicts emptied on every restart, deploy and scale-down. `export_waitlist`
+existed but nothing scheduled it, so no copy was ever taken before the dict went away.
+
+**`_position_counter` was worse than volatile.** It reset to 0 with the dicts, so the
+first signup after a deploy was handed position 1 — a position an earlier signup had
+already been promised. Position now comes from `MAX(position) + 1` computed inside the
+insert, with a `UNIQUE` constraint behind it so two concurrent signups reading the same
+maximum cannot both keep it: the loser takes an `IntegrityError`, re-reads, and retries.
+Failing loudly and retrying is the point; the alternative is two people quietly holding
+the same place in a queue.
+
+**Referrals had never worked.** `POST /waitlist` passed `req.referral_code` — a code like
+`REF1A2B3C4D` — as `referred_by`, and `add_to_waitlist` resolved that against
+`_email_index`, which is keyed by **email**. The lookup could not match, so no referral
+made through the public API was ever credited and the "3 referrals earns priority" rule
+had never once fired. `tests/test_waitlist.py` passed an *email* as `referred_by`, which
+is why it went unnoticed: the test exercised a path the API never took. Resolution now
+tries referral code first (the thing that actually travels in a share link) and email
+second, and both are covered.
+
+An unresolvable referrer is now dropped rather than stored. Keeping the raw string would
+have counted attribution that never landed toward `referral_rate` — a reported referral
+rate higher than the number of referrals actually credited.
+
+Everything the module exposes became `async`, including `WaitlistManager`; there is no
+in-process copy of the waitlist left to read synchronously. Stats are aggregated in SQL
+rather than by loading every row, because this is the one table here meant to grow
+without bound. `ip_hash` continues to store a truncated SHA-256 and never the address.
+
+#### Teams (sixth slice)
+
+**This one was never on the list.** The four dicts lived on a singleton's *instance*
+(`self._teams`, `self._members`, `self._invitations`, `self._user_teams`) rather than at
+module scope, so the scan that produced the store inventory did not see them — while
+`app/teams/router.py` had been mounted at `/api/teams` the whole time. Every team, every
+membership and every outstanding invitation was destroyed on each restart, deploy and
+scale-down. The invitations were the sharpest edge of it: an invitation is a promise made
+to somebody *outside* the system, who has already been handed a link that then stopped
+resolving.
+
+**Two invariants the dicts could not enforce.** Moving the data without them would have
+reproduced the same bugs in a table:
+
+- **`teams.slug` is unique.** Auto-generated slugs were de-duplicated by scanning every
+  team, but a caller-supplied slug was stored verbatim — so two teams could hold one,
+  `get_team_by_slug` returned whichever the scan reached first, and the other was
+  unreachable by its own URL. A slug the caller chose is now rejected with **409** if it
+  is taken (renaming it would silently break the link they were about to publish), while
+  one we generate is disambiguated with a counted suffix and the insert retried.
+- **`(team_id, user_id)` is unique.** "Already a member" was a read-then-write check that
+  two concurrent invitation accepts both passed. The constraint answers it now: one
+  membership, one `None`.
+
+**`_user_teams` got no table.** It was a hand-maintained index from user to team ids,
+updated at four call sites — the kind of bookkeeping that drifts out of step with the
+thing it indexes. "Which teams is this user in" is now a query over `team_members`, so it
+cannot disagree with the memberships it is derived from.
+
+**Two fixes carried along.** `update_team` applied any key that happened to be an
+attribute of the model, so `owner_id` was writable through a settings PATCH; it now
+writes `name` and `settings` only. And `DELETE /teams/{team_id}/invitations/{id}` checked
+the caller's role against the `team_id` in the path but cancelled by id alone — an admin
+of any team could cancel any invitation whose id they knew. The id is now scoped to the
+team it belongs to.
+
+Invitation expiry is still evaluated on read, as it was in memory — nothing sweeps the
+table on a timer — but it is now written back when observed, and `accept_invitation`
+re-checks `expires_at` rather than trusting the status, so an expiry nobody has looked at
+is not an acceptable invitation. Timestamps moved from `datetime.utcnow()` to aware UTC:
+these now round-trip through a column that carries an offset, and a naive value would
+compare wrong rather than fail.
+
+#### OAuth identity (seventh slice)
+
+**Also not on the list, and the most damaging one found.** Three dicts —
+`_OAUTH_ACCOUNTS`, `_OAUTH_STATES`, `_USER_ACCOUNTS` — behind `/auth/*`, which had been
+mounted the whole time. They failed in two independent ways.
+
+**Every restart quietly issued new identities.** The callback mints
+`user_{token_hex(8)}` whenever the account lookup misses. With the accounts in a process
+dict, every restart made every lookup miss, so each returning user came back as a
+brand-new user — and the team memberships persisted one slice earlier, along with their
+roles and history, stayed behind under an id nobody could sign in as again. Nothing
+raised, nothing logged; the login simply succeeded as the wrong person. This is the
+sharpest example of the pattern the whole exercise keeps turning up: the damage was not
+the lost dict, it was the *durable* rows the lost dict stranded.
+
+**Login was broken outright above one replica.** `_OAUTH_STATES` is written by
+`/auth/{provider}/login` and read by `/auth/{provider}/callback` — a separate request,
+arriving from the provider's redirect, that load-balances independently. Any pair that
+split across pods failed with "Invalid or expired state parameter" and nothing in the
+logs explaining why. So the CSRF state was not moved for durability; it was moved because
+the flow is inherently cross-process.
+
+**The identity is the primary key.** `oauth_accounts.id` keeps the natural key the dict
+was keyed by, `"{provider}:{provider_id}"`, rather than taking a surrogate — which makes
+"one local user per provider identity" a constraint the database enforces. Two racing
+first-ever logins each mint a candidate `user_id`; the insert that loses gets
+`IntegrityError`, re-reads, and returns the winner's id, and the callback adopts what it
+is handed instead of the id it minted. Without that, the outcome was whichever request
+committed last.
+
+**Three smaller fixes.** State tokens are now consumed exactly once — the delete's
+rowcount decides, because a `SELECT` then `DELETE` lets two concurrent replays both pass
+the read. `find_account_by_email` is ordered by `(created_at, id)`: it decides which
+existing user a newly-seen provider identity folds into, and an unordered `LIMIT 1` made
+that a coin flip. And `existing.last_login = ...` was writing to a detached copy of a
+row, so it updated nothing; `touch_last_login()` issues the write.
+
+**`_USER_ACCOUNTS` got no table.** Like `_user_teams` before it, it was a hand-maintained
+user → accounts index; it is a query now.
+
+**What this does not fix.** Deployments already running have no record of the ids they
+handed out, so the split identities cannot be reunited — the migration stops the bleeding
+from here on and says so in its docstring.
+
+#### Audit chain (eighth slice)
+
+**The only store so far that was already broken on one pod.** The audit events lived in
+a `deque(maxlen=2000)` and the running chain hash in a module-level `_LAST_HASH`. Both
+backed `GET /audit` and `GET /audit/verify`, and the pair failed in two opposite
+directions.
+
+**It reported tampering that had not happened.** `verify_chain` recomputes the chain from
+a genesis of `prev_hash == ""`. A bounded deque evicts its oldest entry once full, so
+from the 2001st event onward the oldest survivor pointed at a hash no longer present and
+the endpoint answered `{"valid": false, "broken_at": 0}` permanently — on a single
+replica, with nothing wrong. That is the worst available failure for this control: it is
+indistinguishable from a real detection, so the first genuine one would be read as the
+same known false alarm. Confirmed by running it: valid at 2000 events, broken at 2001.
+
+**And it attested to one pod's fraction of the trail.** Below 2000 events each replica
+verified its own buffer against its own `_LAST_HASH` and answered `valid: true` — about
+whichever slice of the events happened to land on the pod serving the request.
+
+The events matter more than the usual store: `approval.decided` is written from the
+websocket approval handler, so this is the record of who authorised which infrastructure
+change.
+
+**Position is now explicit, which is what makes concurrent appends safe.** A hash chain
+is strictly serial, so several replicas appending at once must still land at distinct
+positions each folding in the one before. `seq` counts from 0 within an org and
+`(org_id, seq)` is unique: the losing insert gets `IntegrityError`, re-reads the head and
+chains onto whatever landed. Same optimistic pattern as the waitlist's `MAX(position)+1`.
+Nothing is evicted, so a gap in `seq` or a hash that does not fold into its successor is
+now evidence rather than an artifact of the buffer having wrapped — the deque could not
+distinguish a deleted event from a legitimate eviction at all.
+
+**The first cut of that retry loop reintroduced the bug it was fixing**, and it is worth
+recording because the failure was invisible by construction. It retried a fixed 8 times
+with no backoff, then logged at ERROR and dropped the event. Two things were wrong. The
+retries were in lockstep — every writer that lost a race woke immediately and collided
+with the same participants — so six concurrent writers exhausted eight attempts often
+enough to fail the slice's own concurrency test once in three runs. And the drop was
+undetectable: a dropped event never claims a `seq`, so the entries around it stay dense
+and keep folding into one another, and `/audit/verify` answers `valid: true` over a trail
+that is quietly missing entries. That is the exact property `audit_events` exists to
+provide, defeated by the write path rather than the storage. Appends now back off with
+full jitter and, on exhaustion, raise `ContendedAppend` carrying what landed and what did
+not; `flush()` requeues only the remainder, so nothing is lost and nothing is written
+twice. Bounding the backlog is the queue's job, and it already counts what it sheds.
+
+**Two fixes carried along.** `GET /audit` was not tenant-scoped: it returned every org's
+events to whoever asked. It is scoped now, and `/audit/verify` reports per org, because a
+single `valid` flag over a multi-tenant deployment hides *which* tenant's trail is broken.
+
+**`record()` stays synchronous, and that is a deliberate trade.** Five of its 27 call
+sites sit in sync functions (`sanitize_query`, three `_audit_log` helpers,
+`record_feedback`) that would each have to become async and drag their callers with them,
+and a synchronous database write from the other 22 would block the event loop. So
+recording queues to a bounded hand-off buffer and a drain task started by the API
+lifespan writes the chain, flushing on read and on shutdown. The honest cost: events
+still queued when a process is killed are lost — a sub-second window, where before the
+loss was every event on every restart. Closing it entirely needs an await at the call
+site, which those five sync callers block. The queue is bounded and counts what it drops
+rather than evicting quietly.
+
 ---
 
 ## Remaining Gaps (Priority Order)
@@ -748,9 +946,34 @@ had invented.
 
 2. **Move authoritative state out of process memory**, in cost-of-loss order:
    customers/billing → investigation history → coordinator executions and planning
-   graphs → runbooks. *(All four done — see Platform Enablers §G. 6 module-level stores
-   remain, plus the two live-object stores that need a control channel rather than a
-   table; the replica pin lifts once those are handled.)*
+   graphs → runbooks → waitlist → teams → OAuth identity → the audit chain.
+   *(All eight done — see Platform Enablers §G.)*
+
+   **The inventory this step works from was wrong twice, in the same direction both
+   times.** Teams and OAuth were each found by the slice that moved them, not by the
+   list, and the reason was identical: the original scan matched only lower-case
+   module-level names bound to a dict literal. Authoritative state hides in four
+   shapes — module-level containers, instance attributes on a module-level singleton,
+   in-memory implementations behind a `get_*_store()` factory, and containers built by
+   a call (`defaultdict(list)`, `deque(maxlen=...)`) rather than written as a literal.
+   The list has been rebuilt by scanning every module reachable from
+   `app/api/main.py` in all four shapes and keeping what a wired endpoint reads or
+   writes: **21 stores remain**, not the 4 previously recorded here — 12 module-level,
+   6 on singleton instances, and 3 live-object stores that need a control channel
+   rather than a table.
+
+   The failure mode was not just an incomplete list, it was a *silently* incomplete
+   one: the pin test keeps an entry only if the scan still finds it, so an entry that
+   stops matching drops off and moves the pin one store closer to lifting.
+   `test_every_declared_store_still_resolves` now fails if any declared entry stops
+   resolving, so externalising a store is a deliberate two-part edit rather than
+   something a scanner change can simulate.
+
+   Worth stating plainly: reachable ≠ live. Several candidates were ruled out because
+   they are reachable only through a package `__init__` re-export with no endpoint
+   behind them (`app/observability/slo.py`, `app/oncall/compensation.py`), and caches
+   over a durable layer, per-pod control machinery and prefilled constants are
+   excluded on purpose — those are correct per-pod, and moving them would be wrong.
 
 3. **Enforce or remove the plan flags.** `PlanFeatures` declares 37 fields and 26 of
    them are referenced nowhere outside `app/billing/` — 22 boolean flags plus all four
@@ -776,5 +999,5 @@ the wrong layer.
 ---
 
 *Originally written against the codebase as of 2026-08-02; §4 Planning, §5 Coordinator,
-Platform Enablers §A, §F and §G, the runbooks slice, and these recommendations updated
-2026-08-20.*
+Platform Enablers §A, §F and §G, the runbooks, waitlist and teams slices, and these
+recommendations updated 2026-08-20.*
