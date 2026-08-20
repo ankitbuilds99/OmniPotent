@@ -18,14 +18,16 @@ resources:
 
 # Staging-specific patches
 patches:
-  # Reduce replicas for staging
+  # Replicas PINNED TO 1 — TEMPORARY; in-memory authoritative state. See
+  # deploy/helm/copilot/values.yaml for the store list and revert condition.
+  # RESTORE 2 WHEN those stores are externalised.
   - target:
       kind: Deployment
       name: omnipotent-api
     patch: |-
       - op: replace
         path: /spec/replicas
-        value: 2
+        value: 1
 
   # Lower resource limits for staging
   - target:
@@ -45,17 +47,20 @@ patches:
         path: /spec/template/spec/containers/0/resources/limits/memory
         value: "2Gi"
 
-  # Staging HPA settings
+  # Staging HPA settings — PINNED TO 1/1, TEMPORARY. This patch would otherwise
+  # override the pin in ../../hpa.yaml. Authoritative business state lives in
+  # module-level Python dicts; see deploy/helm/copilot/values.yaml for the store
+  # list and revert condition. RESTORE 2/5 WHEN those stores are externalised.
   - target:
       kind: HorizontalPodAutoscaler
       name: omnipotent-api
     patch: |-
       - op: replace
         path: /spec/minReplicas
-        value: 2
+        value: 1
       - op: replace
         path: /spec/maxReplicas
-        value: 5
+        value: 1
 
 # ConfigMap generator for staging-specific config
 configMapGenerator:

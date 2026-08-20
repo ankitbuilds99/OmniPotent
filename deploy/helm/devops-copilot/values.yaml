@@ -1,7 +1,9 @@
 # DevOps Copilot Helm Values
 # Override these for your environment
 
-replicaCount: 2
+# PINNED TO 1 — TEMPORARY; in-memory authoritative state. See
+# deploy/helm/copilot/values.yaml for the store list and revert condition.
+replicaCount: 1
 
 image:
   repository: omnipotent-api

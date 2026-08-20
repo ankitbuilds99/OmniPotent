@@ -427,10 +427,21 @@ _dispatcher: NotificationDispatcher | None = None
 
 
 def get_dispatcher() -> NotificationDispatcher:
-    """Get the global notification dispatcher."""
+    """Get the global notification dispatcher.
+
+    Default channel handlers are installed on first construction. Without them the
+    SLACK, WEBHOOK, SMS, VOICE, WHATSAPP and TEAMS branches below can never
+    deliver: each requires its handler slot to be populated, and nothing in the
+    codebase populated them, so every send returned "<channel> not configured"
+    however the deployment was set up. Imported here rather than at module scope
+    because app.notifications.handlers imports back into this package.
+    """
     global _dispatcher
     if _dispatcher is None:
+        from app.notifications.handlers import install_default_handlers
+
         _dispatcher = NotificationDispatcher()
+        install_default_handlers(_dispatcher)
     return _dispatcher
 
 

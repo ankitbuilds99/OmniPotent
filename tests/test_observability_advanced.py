@@ -570,6 +570,64 @@ class TestCostEstimation:
             "anthropic", "claude-sonnet-4-20250514", 1_000_000, 500_000
         ) == pytest.approx(3.0 + 7.5, abs=0.01)
 
+    def test_a_point_release_is_not_priced_as_the_release_before_it(self):
+        """``claude-opus-4-5`` must not inherit ``claude-opus-4``'s rate.
+
+        The catalog's prefix fallback exists for dated snapshots, but a bare
+        ``-`` boundary can't tell ``-20250514`` from ``-5``, so an uncatalogued
+        version bump was priced at its predecessor's rate — the same threefold
+        over-report as the substring bug, reached a different way. Only the
+        model whose price we actually verified may report a number.
+        """
+        from app.observability.metrics import _estimate_llm_cost
+
+        for unpriced in ("claude-opus-4-5", "claude-opus-4-7", "claude-sonnet-4-5"):
+            assert _estimate_llm_cost("anthropic", unpriced, 1_000_000, 0) is None
+
+    def test_an_unpriced_call_is_counted_rather_than_merely_skipped(self):
+        """A skipped cost metric and a free call look identical on a dashboard.
+
+        `copilot_llm_cost_dollars` is deliberately not emitted for a model with
+        no verified price, which is right — but an absent series graphs as zero,
+        and the warning explaining why is in the logs, where nobody reading a
+        cost graph is looking. The gap has to be visible in the same system as
+        the number it undercuts.
+        """
+        from app.observability.metrics import get_metrics_registry, record_llm_call
+
+        registry = get_metrics_registry()
+        registry.reset()
+
+        # The default Anthropic model, and deliberately unpriced: its row exists
+        # but carries no verified price, so this is the default configuration.
+        record_llm_call(
+            provider="anthropic",
+            model="claude-opus-4-8",
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            latency_seconds=1.0,
+        )
+        output = registry.render_prometheus()
+        assert (
+            'copilot_llm_calls_unpriced_total{model="claude-opus-4-8",'
+            'provider="anthropic"} 1.0' in output
+        )
+        assert "copilot_llm_cost_dollars{" not in output
+
+        # A priced model must not touch the gap counter — otherwise an alert on
+        # it fires constantly and stops meaning anything.
+        registry.reset()
+        record_llm_call(
+            provider="anthropic",
+            model="claude-sonnet-4",
+            input_tokens=1_000_000,
+            output_tokens=0,
+            latency_seconds=1.0,
+        )
+        output = registry.render_prometheus()
+        assert "copilot_llm_cost_dollars{" in output
+        assert "copilot_llm_calls_unpriced_total{" not in output
+
 
 class TestObservabilityModuleExports:
     """Tests for module exports."""

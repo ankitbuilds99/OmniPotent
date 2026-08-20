@@ -27,11 +27,18 @@ vendor's published pricing page, and update ``PRICING_LAST_VERIFIED``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 # Bump when any price below is checked against the vendor's pricing page.
 PRICING_LAST_VERIFIED = "2026-08-18"
+
+# What `resolve()` accepts as a dated snapshot suffix, e.g. the `20250514` in
+# `claude-sonnet-4-20250514`. Deliberately just a date: it is the one suffix
+# that names the *same* model, so it is the one suffix that may inherit that
+# model's price. `-5` or `-latest` name something else. See resolve().
+_SNAPSHOT_SUFFIX = re.compile(r"\d{8}")
 
 ModelStatus = Literal["current", "legacy", "retired"]
 
@@ -443,11 +450,25 @@ assert not (_BY_ID.keys() & _BY_ALIAS.keys()), "alias collides with a model id"
 def resolve(model_id: str | None) -> ModelInfo | None:
     """Look up a model, tolerating dated snapshot suffixes. None if unknown.
 
-    Resolution order is exact ID, then alias, then longest matching ID *prefix*
-    (so ``claude-sonnet-4-20250514`` finds ``claude-sonnet-4``). Prefix matching is
-    anchored at the start and requires a ``-`` boundary, unlike the substring
-    matching this replaces: ``claude-opus-4-8`` no longer resolves to
-    ``claude-opus-4``, which is what caused the threefold cost over-report.
+    Resolution order is exact ID, then alias, then the longest ID that the key
+    extends *by a dated snapshot stamp only* -- so ``claude-sonnet-4-20250514``
+    finds ``claude-sonnet-4``, and nothing else does.
+
+    That last restriction is the point. A bare ``-`` boundary cannot tell a date
+    stamp from a version bump: ``claude-opus-4-5`` and ``claude-opus-4-20250514``
+    are the same shape to it, so the fallback happily answered the Opus-4 row --
+    $15/$75 and a 32k output cap -- for a *different, newer model*. That is the
+    same threefold cost over-report the substring matching before it caused,
+    reached by a longer route. ``claude-opus-4-8`` reads correctly today only
+    because it has its own row, which is luck rather than a rule: every point
+    release not yet catalogued borrowed its predecessor's price, and did so
+    confidently, so nothing downstream ever saw the ``None`` that the unpriced
+    path is built to surface.
+
+    A snapshot stamp is a same-model rebuild, which is why inheriting the parent
+    row is sound there and only there. An unrecognised suffix returns ``None``:
+    the caller then gets "I do not know this model" instead of a neighbour's
+    numbers, and `PRICING_LAST_VERIFIED` above says what to do about it.
     """
     if not model_id:
         return None
@@ -460,9 +481,11 @@ def resolve(model_id: str | None) -> ModelInfo | None:
         return _BY_ALIAS[key]
     best: ModelInfo | None = None
     for candidate in MODELS:
-        if key.startswith(candidate.id + "-") and (
-            best is None or len(candidate.id) > len(best.id)
-        ):
+        if not key.startswith(candidate.id + "-"):
+            continue
+        if not _SNAPSHOT_SUFFIX.fullmatch(key[len(candidate.id) + 1 :]):
+            continue
+        if best is None or len(candidate.id) > len(best.id):
             best = candidate
     return best
 

@@ -60,6 +60,7 @@ jobs:
         run: |
           uv sync --extra dev
           uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 &
+          echo "APP_PID=$!" >> "$GITHUB_ENV"
           sleep 10
         env:
           REDIS_URL: redis://localhost:6379
@@ -74,6 +75,10 @@ jobs:
           k6 run --out json=smoke-results.json tests/load/smoke.js
         env:
           K6_BASE_URL: http://localhost:8000
+
+      - name: Stop application
+        if: always()
+        run: ./scripts/ci-stop-app.sh
 
       - name: Upload results
         uses: actions/upload-artifact@v4
@@ -122,6 +127,7 @@ jobs:
       - name: Start application
         run: |
           uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4 &
+          echo "APP_PID=$!" >> "$GITHUB_ENV"
           sleep 15
         env:
           REDIS_URL: redis://localhost:6379
@@ -142,6 +148,10 @@ jobs:
           K6_BASE_URL: http://localhost:8000
           K6_VUS: ${{ github.event.inputs.vus || '50' }}
           K6_DURATION: ${{ github.event.inputs.duration || '1m' }}
+
+      - name: Stop application
+        if: always()
+        run: ./scripts/ci-stop-app.sh
 
       - name: Parse results
         id: results
@@ -246,6 +256,7 @@ jobs:
       - name: Start application
         run: |
           uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4 &
+          echo "APP_PID=$!" >> "$GITHUB_ENV"
           sleep 15
         env:
           REDIS_URL: redis://localhost:6379
@@ -265,6 +276,10 @@ jobs:
         env:
           K6_BASE_URL: http://localhost:8000
         continue-on-error: true
+
+      - name: Stop application
+        if: always()
+        run: ./scripts/ci-stop-app.sh
 
       - name: Upload results
         uses: actions/upload-artifact@v4
@@ -315,6 +330,7 @@ jobs:
       - name: Start application
         run: |
           uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 4 &
+          echo "APP_PID=$!" >> "$GITHUB_ENV"
           sleep 15
         env:
           REDIS_URL: redis://localhost:6379
@@ -335,6 +351,10 @@ jobs:
           K6_BASE_URL: http://localhost:8000
           K6_DURATION: '1h'
           K6_VUS: '20'
+
+      - name: Stop application
+        if: always()
+        run: ./scripts/ci-stop-app.sh
 
       - name: Upload results
         uses: actions/upload-artifact@v4

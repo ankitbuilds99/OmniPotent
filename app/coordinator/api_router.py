@@ -1,20 +1,30 @@
 """API Router for DAG Coordinator.
 
 Exposes REST API for task graph management and execution.
+
+Executions live in Postgres (`app/coordinator/store.py`), not in a module-level
+dict. The dict this replaced was written only after `executor.execute()`
+returned, so `GET /executions/{id}` answered 404 for the whole run — the exact
+window a caller polls — and only started answering once the answer was stale.
+Here a row is written before the DAG starts and updated when it ends, so a poll
+mid-run sees the real state.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.coordinator import store
 from app.coordinator.dag_executor import (
     DAGExecution,
     DAGExecutor,
+    ExecutionState,
     TaskDAG,
     TaskNode,
     TaskPriority,
@@ -26,6 +36,7 @@ from app.coordinator.handlers import (
 )
 from app.coordinator.replanner import DynamicReplanner
 from app.coordinator.resource_pool import ResourcePool
+from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.coordinator.api")
 
@@ -34,7 +45,47 @@ router = APIRouter(prefix="/coordinator", tags=["coordinator"])
 _executor: DAGExecutor | None = None
 _resource_pool: ResourcePool | None = None
 _replanner: DynamicReplanner | None = None
-_active_executions: dict[str, DAGExecution] = {}
+
+
+async def _run_and_record(
+    executor: DAGExecutor,
+    dag: TaskDAG,
+    org_id: str,
+    execution_id: str,
+    context: dict[str, Any] | None = None,
+    resume_from: str | None = None,
+) -> None:
+    """Run a DAG, recording its state before it starts and after it ends.
+
+    The pre-run row is what makes polling work. The `except` is not swallowing a
+    bug: `execute()` re-raises after marking the execution FAILED, and this is a
+    background task with no caller to receive the exception, so the failure has
+    to be written down here or it is lost entirely.
+    """
+    await store.save_execution(
+        org_id,
+        DAGExecution(
+            id=execution_id,
+            dag_id=dag.id,
+            state=ExecutionState.RUNNING,
+            initial_context=dict(context or {}),
+            execution_levels=dag.get_execution_levels(),
+        ),
+    )
+
+    try:
+        execution = await executor.execute(
+            dag,
+            context=context,
+            execution_id=execution_id,
+            resume_from=resume_from,
+        )
+    except Exception:
+        log.exception("DAG execution %s failed", execution_id)
+        await store.mark_failed(org_id, execution_id)
+        return
+
+    await store.save_execution(org_id, execution)
 
 
 async def get_executor() -> DAGExecutor:
@@ -191,19 +242,28 @@ async def execute_dag(
     if errors:
         raise HTTPException(status_code=400, detail=f"Invalid DAG: {errors}")
 
-    async def run_dag() -> None:
-        execution = await executor.execute(
-            dag,
-            context=execute_input.context,
-            resume_from=execute_input.resume_from,
-        )
-        _active_executions[execution.id] = execution
+    # Resolved here, not inside the background task: a BackgroundTask can run
+    # after the middleware has reset the tenant contextvar, which would file the
+    # execution under the wrong org.
+    org_id = storage_org_id()
+    execution_id = f"exec_{uuid.uuid4().hex[:8]}"
 
-    background_tasks.add_task(run_dag)
+    background_tasks.add_task(
+        _run_and_record,
+        executor,
+        dag,
+        org_id,
+        execution_id,
+        execute_input.context,
+        execute_input.resume_from,
+    )
 
     return {
         "status": "started",
         "dag_id": dag_id,
+        # Returned so the caller can poll /executions/{id}. The previous version
+        # withheld it, leaving the listing endpoint as the only way to find a run.
+        "execution_id": execution_id,
         "message": "DAG execution started in background",
     }
 
@@ -221,16 +281,18 @@ async def start_investigation(
         severity=input.severity,
     )
 
-    async def run_investigation() -> None:
-        execution = await executor.execute(dag, context=input.context)
-        _active_executions[execution.id] = execution
+    org_id = storage_org_id()
+    execution_id = f"exec_{uuid.uuid4().hex[:8]}"
 
-    background_tasks.add_task(run_investigation)
+    background_tasks.add_task(
+        _run_and_record, executor, dag, org_id, execution_id, input.context
+    )
 
     return {
         "status": "started",
         "dag_id": dag.id,
         "dag_name": dag.name,
+        "execution_id": execution_id,
         "tasks": len(dag.tasks),
         "execution_levels": dag.get_execution_levels(),
     }
@@ -241,27 +303,36 @@ async def get_execution(
     execution_id: str,
 ) -> dict[str, Any]:
     """Get execution status."""
-    execution = _active_executions.get(execution_id)
+    # Scoped by org: execution ids are short random hex, and an unscoped lookup
+    # would let one tenant read another's DAG results by guessing or replaying one.
+    execution = await store.load_execution(storage_org_id(), execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
 
     return execution.to_dict()
 
 
+@router.delete("/executions/{execution_id}")
+async def delete_execution(execution_id: str) -> dict[str, Any]:
+    """Delete a stored execution record.
+
+    Executions are durable now, so there has to be a way to remove one; the
+    dict version was cleared by every restart.
+    """
+    deleted = await store.delete_execution(storage_org_id(), execution_id)
+    return {"deleted": deleted}
+
+
 @router.get("/executions")
-async def list_executions() -> dict[str, Any]:
-    """List all executions."""
+async def list_executions(limit: int = 100) -> dict[str, Any]:
+    """List this organization's executions, most recent first."""
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+
+    executions = await store.list_executions(storage_org_id(), limit=limit)
     return {
-        "executions": [
-            {
-                "id": exec_id,
-                "dag_id": execution.dag_id,
-                "state": execution.state.value,
-                "current_level": execution.current_level,
-            }
-            for exec_id, execution in _active_executions.items()
-        ],
-        "count": len(_active_executions),
+        "executions": executions,
+        "count": len(executions),
     }
 
 
@@ -272,7 +343,14 @@ async def approve_task(
     approval: ApprovalInput,
     executor: DAGExecutor = Depends(get_executor),
 ) -> dict[str, Any]:
-    """Approve or reject a pending task."""
+    """Approve or reject a pending task.
+
+    Acts on a live asyncio event inside the executor, so it only reaches a run
+    started by *this* process. Approval cannot be delivered by writing a row —
+    releasing a task waiting on another replica needs a control channel — which
+    is why the executor's pending-approval state stays on the single-replica
+    pin list even now that execution records are durable.
+    """
     success = await executor.approve_task(task_id, approval.approved)
 
     if not success:

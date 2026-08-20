@@ -13,9 +13,14 @@ with the new advanced audit logging system (AuditLogger, log_action, etc.).
 from app.audit_legacy import (
     record,
     verify_chain,
+    verify_org_chain,
+    verify_all_chains,
     recent,
     clear,
-    _BUFFER,
+    flush,
+    start_drain,
+    stop_drain,
+    dropped_count,
 )
 
 from app.audit.logger import (
@@ -51,7 +56,12 @@ __all__ = [
     "verify_chain",
     "recent",
     "clear",
-    "_BUFFER",
+    "verify_org_chain",
+    "verify_all_chains",
+    "flush",
+    "start_drain",
+    "stop_drain",
+    "dropped_count",
     # New advanced audit system
     "AuditLogger",
     "AuditEntry",

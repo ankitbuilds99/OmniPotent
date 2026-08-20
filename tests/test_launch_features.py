@@ -1,7 +1,27 @@
 """Tests for launch-critical features."""
 
+import asyncio
+
 import pytest
 from datetime import datetime, timezone, timedelta
+
+from app import config as cfg
+from app.database.engine import close_db
+
+
+@pytest.fixture(autouse=True)
+def _oauth_db(tmp_path, monkeypatch):
+    """Give the OAuth tests below their own database.
+
+    Linked accounts and pending states are rows since migration 008_oauth, so
+    these no longer read whatever the last test left in a module dict.
+    """
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    asyncio.run(close_db())
+    yield
+    asyncio.run(close_db())
+    cfg.get_settings.cache_clear()
 
 
 class TestOAuthModule:
@@ -35,20 +55,20 @@ class TestOAuthModule:
         assert payload["email"] == "test@example.com"
         assert payload["role"] == "admin"
 
-    def test_oauth_state_generation_and_verification(self):
+    async def test_oauth_state_generation_and_verification(self):
         """Test OAuth state parameter handling."""
         from app.auth.oauth import generate_oauth_state, verify_oauth_state
 
-        state = generate_oauth_state("google")
+        state = await generate_oauth_state("google")
         assert state
 
-        verified = verify_oauth_state(state)
+        verified = await verify_oauth_state(state)
         assert verified == "google"
 
-        verified_again = verify_oauth_state(state)
+        verified_again = await verify_oauth_state(state)
         assert verified_again is None
 
-    def test_account_linking(self):
+    async def test_account_linking(self):
         """Test OAuth account linking."""
         from app.auth.oauth import (
             OAuthUser,
@@ -64,15 +84,15 @@ class TestOAuthModule:
             name="Test Developer",
         )
 
-        account = link_oauth_account("user_test_123", user)
+        account = await link_oauth_account("user_test_123", user)
         assert account.user_id == "user_test_123"
         assert account.provider == "github"
 
-        found = find_account_by_provider("github", "12345")
+        found = await find_account_by_provider("github", "12345")
         assert found is not None
         assert found.email == "dev@example.com"
 
-        accounts = get_user_accounts("user_test_123")
+        accounts = await get_user_accounts("user_test_123")
         assert len(accounts) >= 1
 
 

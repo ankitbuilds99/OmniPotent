@@ -256,7 +256,14 @@ def _init_metrics() -> None:
     r.register(
         "copilot_llm_cost_dollars",
         MetricType.COUNTER,
-        "Estimated LLM cost in USD",
+        "Estimated LLM cost in USD (excludes models with no verified price -- "
+        "see copilot_llm_calls_unpriced_total)",
+    )
+    r.register(
+        "copilot_llm_calls_unpriced_total",
+        MetricType.COUNTER,
+        "LLM calls omitted from copilot_llm_cost_dollars because the model has "
+        "no verified price in the catalog. Non-zero means cost is understated.",
     )
     r.register(
         "copilot_llm_cache_hits_total",
@@ -451,9 +458,18 @@ def record_llm_call(
     # None = we have no verified price for this model. Recording a guess would
     # quietly corrupt every cost dashboard built on this counter, so skip it; the
     # token counters above still tell you the call happened and how big it was.
+    #
+    # But a skipped counter and a genuinely-free call are the same picture on a
+    # dashboard: absent series reads as zero, and the warning that explains it is
+    # in the logs, which is not where anyone looking at a cost graph is. So the
+    # gap is counted here, in the same system, next to the number it undercuts.
+    # Alert on it: `copilot_llm_calls_unpriced_total > 0` means the cost graph is
+    # understated, and its `model` label names the row to add to the catalog.
     cost = _estimate_llm_cost(provider, model, input_tokens, output_tokens)
     if cost is not None:
         _registry.counter_inc("copilot_llm_cost_dollars", cost, labels=labels)
+    else:
+        _registry.counter_inc("copilot_llm_calls_unpriced_total", labels=labels)
 
 
 def _estimate_llm_cost(

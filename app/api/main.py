@@ -381,6 +381,16 @@ async def lifespan(app: FastAPI):
         if get_settings().copilot_tenant_db.startswith(("postgres://", "postgresql://")) is False:
             log.warning("multi-tenant on SQLite is app-level isolated, not RLS-hard-isolated; "
                         "use Postgres + RLS for production tenant isolation")
+    # ORM schema (customers, trials, usage events, on-call). Had no caller at all
+    # before: init_db() existed and was never invoked, so on the default SQLite
+    # backend every table in app/database/models.py was unreachable. On Postgres
+    # this only verifies connectivity — Alembic owns the schema there.
+    from app.database.engine import close_db, ensure_schema
+    await ensure_schema()
+    # Drain queued audit events to the hash chain. `audit.record` is synchronous
+    # (five of its call sites are in sync functions), so it queues and this task
+    # writes. Started after ensure_schema so the first drain has a table.
+    audit.start_drain()
     # OpenTelemetry tracing (no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set).
     from app import otel
     otel.init_tracing()
@@ -410,6 +420,9 @@ async def lifespan(app: FastAPI):
     await start_live_status_polling()
     log.info("live status page polling started")
     yield
+    # Write whatever audit events are still queued before anything else shuts
+    # down; they are the record of what this process did.
+    await audit.stop_drain()
     # Stop live status polling first
     await stop_live_status_polling()
     for _task in (slo_task, job_task):
@@ -427,6 +440,9 @@ async def lifespan(app: FastAPI):
     except (TimeoutError, asyncio.TimeoutError):
         log.warning("shutdown drain timed out after 30s; forcing session cleanup")
         await _drain_and_close()
+    # Last: return pooled connections so a rolling deploy doesn't leave Postgres
+    # holding sessions for pods that are already gone.
+    await close_db()
 
 
 async def require_auth(request: Request) -> None:
@@ -555,6 +571,94 @@ def _record_slo(result: Any, latency_s: float) -> None:
         metrics().record(latency_s, result.tokens_used, success, abstained)
     except Exception:  # noqa: BLE001 — metrics must never break a request
         log.debug("SLO metric record failed", exc_info=True)
+
+
+# Org id used for investigation history when running single-tenant. Unlike
+# _current_org_id() this never raises: history is recorded on every deployment,
+# not just multi-tenant ones. Shared with the planning and coordinator stores,
+# which file their rows under the same key.
+_DEFAULT_HISTORY_ORG = tenant_context.DEFAULT_STORAGE_ORG
+
+
+def _history_org_id() -> str:
+    return tenant_context.storage_org_id()
+
+
+def _outcome_of(result: Any) -> Any:
+    """Map a TurnResult onto a dashboard outcome.
+
+    Note what is NOT derivable here: `RESOLVED` means the copilot fixed the
+    incident, and nothing in the pipeline observes whether a proposed action
+    actually resolved anything. Emitting it would turn every confident diagnosis
+    into a claimed fix, so this only ever returns the four outcomes the result
+    actually evidences.
+    """
+    from app.dashboard.metrics import InvestigationOutcome
+
+    if getattr(result, "status", "") == "error":
+        return InvestigationOutcome.FAILED
+    report = getattr(result, "report", None) or {}
+    if report.get("abstained"):
+        return InvestigationOutcome.ABSTAINED
+    if report.get("root_cause"):
+        return InvestigationOutcome.ROOT_CAUSE_FOUND
+    return InvestigationOutcome.PARTIAL_DIAGNOSIS
+
+
+async def _record_history(thread_id: str, result: Any, latency_s: float) -> None:
+    """Record a completed investigation to the dashboard history (best-effort).
+
+    Upserts one row per thread, so a multi-turn conversation stays one
+    investigation. Everything written is read off the result: `time_saved_minutes`
+    is deliberately left at its 0.0 default because nothing measures how long the
+    incident would have taken a human, and the dashboard turns that field
+    straight into a dollar figure.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from app.dashboard.metrics import record_investigation
+
+        report = getattr(result, "report", None) or {}
+        services = report.get("affected_services") or []
+        completed_at = datetime.now(timezone.utc)
+
+        await record_investigation(
+            org_id=_history_org_id(),
+            investigation_id=thread_id,
+            started_at=completed_at - timedelta(seconds=latency_s),
+            completed_at=completed_at,
+            outcome=_outcome_of(result),
+            tokens_used=getattr(result, "tokens_used", 0) or 0,
+            severity=str(report.get("severity") or "unknown"),
+            service=str(services[0]) if services else "",
+            hypotheses_generated=len(report.get("hypotheses") or []),
+            # Left empty: the trace is human-readable prose per graph node, not a
+            # structured tool list, and guessing tool names out of it would put
+            # invented data on the dashboard.
+            tools_used=None,
+        )
+    except Exception:  # noqa: BLE001 — analytics must never break a request
+        log.debug("investigation history record failed", exc_info=True)
+
+
+async def _record_history_from_stream(thread_id: str, ev: dict, latency_s: float) -> None:
+    """`_record_history` for the SSE paths, whose completion is a dict event.
+
+    The streaming endpoints ran investigations that never reached the dashboard
+    or the SLO metrics at all: only the non-streaming /chat had a recording hook,
+    so anything the UI ran through /chat/stream was invisible in both.
+    """
+    await _record_history(
+        thread_id,
+        TurnResult(
+            status="completed",
+            final_text=ev.get("final_text", "") or "",
+            report=ev.get("report"),
+            tokens_used=ev.get("tokens_used", 0) or 0,
+        ),
+        latency_s,
+    )
 
 
 async def quota_gate() -> None:
@@ -751,6 +855,22 @@ app.include_router(knowledge_router, prefix="/api")
 # Include event intelligence router for noise reduction and severity prediction.
 from app.event_intelligence.api_router import router as event_intelligence_router  # noqa: E402
 app.include_router(event_intelligence_router, prefix="/api")
+
+# Include the six-layer deduplication pipeline. Layer depth follows the caller's
+# plan flags (advanced_deduplication, cascade_detection, service_dependency_map).
+from app.deduplication.api_router import router as deduplication_router  # noqa: E402
+app.include_router(deduplication_router, prefix="/api")
+
+# Include the service dependency graph: discovery, blast radius and rendering.
+# Gated on service_dependency_map.
+from app.dependency_graph.api_router import router as dependency_graph_router  # noqa: E402
+app.include_router(dependency_graph_router, prefix="/api")
+
+# Include cost optimization: budgets and alerts, ROI attribution, LLM token
+# accounting and GPU fleet cost tracking. Distinct from the model router's cost
+# optimizer below, which prices individual LLM calls.
+from app.cost_optimizer.api_router import router as cost_optimizer_router  # noqa: E402
+app.include_router(cost_optimizer_router, prefix="/api")
 
 # Include model router for adaptive model routing and cost optimization.
 from app.model_router.api_router import router as model_router_api  # noqa: E402
@@ -1703,6 +1823,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             elif result.status == "completed":
                 await _meter_and_spend(result.tokens_used)
                 _record_slo(result, time.monotonic() - _t0)
+                await _record_history(tid, result, time.monotonic() - _t0)
     except HTTPException:
         raise  # 409/4xx should surface as real HTTP errors, not a 200 error body
     except Exception as exc:  # noqa: BLE001 — surface a clean error to the UI
@@ -1785,6 +1906,7 @@ async def approve(req: ApproveRequest) -> ChatResponse:
             )
         audit.record("approval.decided", thread=req.thread_id, approved=req.approved)
         try:
+            _t0 = time.monotonic()
             result = await session.resume(approved=req.approved, reason=req.reason)
             if result.status == "awaiting_approval":
                 _AWAITING.add(tid)
@@ -1792,6 +1914,10 @@ async def approve(req: ApproveRequest) -> ChatResponse:
                 _AWAITING.discard(tid)
                 if result.status == "completed":
                     await _meter_and_spend(result.tokens_used)
+                    _record_slo(result, time.monotonic() - _t0)
+                    # Upserts onto the row the original /chat turn created, so the
+                    # investigation keeps its true start time and counts once.
+                    await _record_history(tid, result, time.monotonic() - _t0)
         except Exception as exc:  # noqa: BLE001
             log.exception("approve/resume failed (thread=%s)", tid)
             return ChatResponse(
@@ -1905,6 +2031,7 @@ async def chat_stream(req: ChatRequest):
                         }
                         return
                     _AWAITING.discard(tid)
+                    _t0 = time.monotonic()
                     async for ev in session.ask_stream(req.message):
                         t = ev.get("type")
                         if t == "approval":
@@ -1912,6 +2039,9 @@ async def chat_stream(req: ChatRequest):
                         elif t == "done":
                             _AWAITING.discard(tid)
                             await _meter_and_spend(ev.get("tokens_used", 0))
+                            await _record_history_from_stream(
+                                tid, ev, time.monotonic() - _t0
+                            )
                         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
                 except Exception as exc:  # noqa: BLE001
                     log.exception("chat stream failed (thread=%s)", tid)
@@ -1988,6 +2118,7 @@ async def approve_stream(req: ApproveRequest):
                     return
                 audit.record("approval.decided", thread=req.thread_id, approved=req.approved)
                 try:
+                    _t0 = time.monotonic()
                     async for ev in session.resume_stream(
                         approved=req.approved, reason=req.reason
                     ):
@@ -1997,6 +2128,9 @@ async def approve_stream(req: ApproveRequest):
                         elif t == "done":
                             _AWAITING.discard(tid)
                             await _meter_and_spend(ev.get("tokens_used", 0))
+                            await _record_history_from_stream(
+                                tid, ev, time.monotonic() - _t0
+                            )
                         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
                 except Exception as exc:  # noqa: BLE001
                     log.exception("approve stream failed (thread=%s)", tid)
@@ -2378,7 +2512,7 @@ async def get_audit(limit: int = 100, event_prefix: str = "") -> dict:
         dict: List of audit events, newest first.
     """
     limit = max(1, min(limit, 1000))
-    return {"events": audit.recent(limit=limit, event_prefix=event_prefix)}
+    return {"events": await audit.recent(limit=limit, event_prefix=event_prefix)}
 
 
 @app.get(
@@ -2413,7 +2547,7 @@ async def audit_verify() -> dict:
     Returns:
         dict: Verification result with valid flag and count or broken index.
     """
-    return audit.verify_chain()
+    return await audit.verify_all_chains()
 
 
 # --------------------------------------------------------------------------- #
@@ -2963,6 +3097,7 @@ async def _run_triggered_investigation(incident: dict) -> None:
     try:
         async with _running_turn(thread_id):
             session = await _get_session(thread_id)
+            _t0 = time.monotonic()
             result = await session.ask(seed)
             if result.status == "awaiting_approval":
                 _AWAITING.add(thread_id)
@@ -2970,6 +3105,11 @@ async def _run_triggered_investigation(incident: dict) -> None:
                 # Meter the triggered path the same as the interactive one (no-op
                 # without a tenant); idem-keyed by the incident so a re-run can't double-bill.
                 await _meter_and_spend(result.tokens_used, idem=thread_id)
+                # Alert-triggered investigations are the ones an operator most
+                # wants counted in MTTR — they start when the page fires, not when
+                # someone gets to a keyboard.
+                _record_slo(result, time.monotonic() - _t0)
+                await _record_history(thread_id, result, time.monotonic() - _t0)
         await _post_to_slack(thread_id, title, result)
     except Exception:  # noqa: BLE001 — best-effort background trigger
         log.exception("triggered investigation failed (incident=%s)", incident.get("id"))
@@ -3520,6 +3660,9 @@ class WaitlistSignupRequest(BaseModel):
     team_size: str = ""
     use_case: str = ""
     source: str = "landing_page"
+    # The referral code of whoever sent this person here — `REF1A2B3C4D`, as
+    # printed in that person's share link. NOT the code issued to this signup,
+    # which is derived from their own email and returned in the response.
     referral_code: str = ""
     utm_source: str = ""
     utm_medium: str = ""
@@ -3569,7 +3712,7 @@ async def waitlist_signup(req: WaitlistSignupRequest, request: Request):
     if request.client:
         client_ip = request.client.host
 
-    entry, message = add_to_waitlist(
+    entry, message = await add_to_waitlist(
         email=req.email,
         source=source,
         company=req.company,
@@ -3613,7 +3756,7 @@ async def waitlist_position(email: str):
     from app.waitlist import WaitlistManager
 
     manager = WaitlistManager()
-    result = manager.get_position(email)
+    result = await manager.get_position(email)
 
     if not result.get("found"):
         raise HTTPException(404, "Email not found in waitlist")
@@ -3632,7 +3775,7 @@ async def waitlist_stats():
     """Get waitlist statistics."""
     from app.waitlist import get_waitlist_stats
 
-    return get_waitlist_stats()
+    return await get_waitlist_stats()
 
 
 # --------------------------------------------------------------------------- #
@@ -3677,7 +3820,7 @@ async def create_customer_endpoint(req: CustomerCreateRequest):
     from app.customers import CustomerManager
 
     manager = CustomerManager()
-    result = manager.create(
+    result = await manager.create(
         email=req.email,
         company=req.company,
         name=req.name,
@@ -3712,7 +3855,7 @@ async def customer_stats():
     """Get customer statistics."""
     from app.customers import get_customer_stats
 
-    return get_customer_stats()
+    return await get_customer_stats()
 
 
 @app.get(
@@ -3727,7 +3870,7 @@ async def customer_dashboard():
     from app.customers import CustomerManager
 
     manager = CustomerManager()
-    return manager.get_dashboard()
+    return await manager.get_dashboard()
 
 
 @app.get(
@@ -3741,7 +3884,7 @@ async def active_trials():
     """Get active trials."""
     from app.customers import get_active_trials
 
-    trials = get_active_trials()
+    trials = await get_active_trials()
     return {
         "count": len(trials),
         "trials": [t.to_dict() for t in trials],
@@ -3768,7 +3911,7 @@ async def record_customer_usage(req: RecordUsageRequest):
     """Record customer usage."""
     from app.customers import record_usage
 
-    success = record_usage(
+    success = await record_usage(
         customer_id=req.customer_id,
         event_type=req.event_type,
         investigation_id=req.investigation_id,
@@ -3809,7 +3952,7 @@ async def convert_trial_endpoint(req: ConvertTrialRequest):
     }
     tier = tier_map.get(req.tier.lower(), CustomerTier.STARTER)
 
-    success, message = convert_trial(
+    success, message = await convert_trial(
         customer_id=req.customer_id,
         tier=tier,
         mrr_cents=req.mrr_cents,
@@ -3827,6 +3970,108 @@ async def convert_trial_endpoint(req: ConvertTrialRequest):
     )
 
     return {"success": True, "message": message}
+
+
+# --------------------------------------------------------------------------- #
+# Investigation analytics — MTTR, ROI and outcome mix over recorded history.
+# --------------------------------------------------------------------------- #
+# The read side of the `investigations` table that /chat, /chat/stream, /approve
+# and the alert-triggered path all write to. Scoped to the calling tenant; in
+# single-tenant mode everything is recorded under one org.
+@app.get(
+    "/dashboard/metrics",
+    tags=["Dashboard"],
+    summary="Investigation analytics for the current organization",
+    description="""
+MTTR, ROI, usage and outcome statistics computed from recorded investigations.
+
+**On empty results:** a deployment that has run no investigations gets zeroes,
+not a sample. Two fields need reading carefully:
+
+- `mttr.improvement_percent` is `null` and `mttr.comparison_available` is `false`
+  until there is a *previous* period of real investigations to compare against.
+  No industry-baseline default is substituted.
+- `roi.*` is derived from measured time-saved, which the pipeline does not yet
+  record, so it reports 0 rather than an estimate.
+
+`health_score` is out of `health_score_max`, which drops to 75 when the MTTR
+trend cannot be judged.
+""",
+    dependencies=[Depends(require_perm("view"))],
+)
+async def dashboard_metrics(period_days: int = 30) -> dict:
+    """Investigation analytics for the calling organization."""
+    if not 1 <= period_days <= 365:
+        raise HTTPException(422, "period_days must be between 1 and 365")
+
+    from app.dashboard.metrics import get_dashboard_metrics
+
+    metrics = await get_dashboard_metrics(
+        org_id=_history_org_id(), period_days=period_days
+    )
+    return metrics.to_dict()
+
+
+@app.get(
+    "/dashboard/trends",
+    tags=["Dashboard"],
+    summary="Trend analysis over recorded investigations",
+    description="""
+Direction, anomaly and forecast per metric, computed by bucketing recorded
+investigations into days over the requested period.
+
+`direction` is stated in terms of health, not of the number: for MTTR and
+duration a falling value is `improving`. Each trend reports the `polarity` it was
+judged under so that reading is auditable.
+""",
+    dependencies=[Depends(require_perm("view"))],
+)
+async def dashboard_trends(period_days: int = 30) -> dict:
+    """Daily trends for investigation volume, duration and token spend."""
+    if not 1 <= period_days <= 365:
+        raise HTTPException(422, "period_days must be between 1 and 365")
+
+    from collections import defaultdict
+
+    from app.dashboard.metrics import get_investigation_series
+    from app.dashboard.trends import MetricPolarity, calculate_trends, generate_trend_report
+
+    series = await get_investigation_series(
+        org_id=_history_org_id(), period_days=period_days
+    )
+
+    daily_count: dict[Any, int] = defaultdict(int)
+    daily_duration: dict[Any, list[float]] = defaultdict(list)
+    daily_tokens: dict[Any, int] = defaultdict(int)
+    for started_at, duration_seconds, tokens in series:
+        day = started_at.replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_count[day] += 1
+        daily_duration[day].append(duration_seconds / 60)
+        daily_tokens[day] += tokens
+
+    metrics = {
+        "investigations_per_day": sorted(
+            (d, float(n)) for d, n in daily_count.items()
+        ),
+        "mttr_minutes": sorted(
+            (d, sum(v) / len(v)) for d, v in daily_duration.items()
+        ),
+        "tokens_per_day": sorted((d, float(n)) for d, n in daily_tokens.items()),
+    }
+
+    trends = calculate_trends(
+        metrics,
+        polarities={
+            # Stated rather than inferred from the name: more investigations is
+            # not self-evidently good or bad (it tracks incident volume as much as
+            # adoption), and token spend rising is bad even though "tokens" reads
+            # neutral.
+            "investigations_per_day": MetricPolarity.HIGHER_IS_BETTER,
+            "mttr_minutes": MetricPolarity.LOWER_IS_BETTER,
+            "tokens_per_day": MetricPolarity.LOWER_IS_BETTER,
+        },
+    )
+    return generate_trend_report(trends)
 
 
 # --------------------------------------------------------------------------- #

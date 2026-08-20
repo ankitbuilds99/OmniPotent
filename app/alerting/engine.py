@@ -90,6 +90,25 @@ class AlertEngine:
             return True
         return False
 
+    def has_metrics(self) -> bool:
+        """Whether this engine has ever been fed a metric.
+
+        Metric history is per-process and in memory, so an engine in a process that
+        no one calls :meth:`record_metric` on is empty rather than quiet. Callers
+        that did not feed it should check this before evaluating: with no history,
+        :meth:`get_metric_value` returns None for every service, and an ABSENCE rule
+        reads that as "No metrics received" and fires against a healthy service.
+        """
+        return any(self._metric_history.values())
+
+    def known_services(self) -> list[str]:
+        """Services this engine has recorded at least one metric for.
+
+        The correct argument for :meth:`evaluate_all` — evaluating a service the
+        engine has no data on can only produce a false ABSENCE alert.
+        """
+        return sorted({key.split(":", 1)[0] for key, hist in self._metric_history.items() if hist})
+
     def record_metric(
         self,
         service: str,
@@ -138,6 +157,19 @@ class AlertEngine:
         value = self.get_metric_value(service, rule.metric)
         if value is None:
             if rule.condition == AlertCondition.ABSENCE:
+                # "Absent" means a metric that WAS arriving stopped, which is not the
+                # same as one that was never sent. get_metric_value returns None for
+                # both: no history at all, and history with nothing inside the recent
+                # window. Only the second is an outage.
+                #
+                # Without this check the shipped `metrics-absence` default rule fires
+                # for every service on its first evaluation — it watches `heartbeat`
+                # on service "*", nothing in the codebase records a metric by that
+                # name, and it pages Slack and PagerDuty at high severity. Firing on
+                # never-observed metrics makes every rule of this kind a standing
+                # false page, which is worse than not having the rule.
+                if not self._metric_history.get(f"{service}:{rule.metric}"):
+                    return None
                 return self._create_alert(rule, service, 0, "No metrics received")
             return None
 

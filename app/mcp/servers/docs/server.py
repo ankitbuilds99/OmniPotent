@@ -622,7 +622,7 @@ kubectl exec -it {service_name}-xxx -- curl localhost:8080/health/db
 kubectl top pods -n production -l app={service_name}
 
 # Get memory details
-kubectl describe pod {service_name}-xxx | grep -A5 "Limits\|Requests"
+kubectl describe pod {service_name}-xxx | grep -A5 "Limits\\|Requests"
 ```
 
 """

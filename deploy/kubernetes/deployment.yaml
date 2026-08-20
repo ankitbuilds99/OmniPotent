@@ -7,7 +7,9 @@ metadata:
     app.kubernetes.io/name: omnipotent
     app.kubernetes.io/component: api
 spec:
-  replicas: 3
+  # PINNED TO 1 — TEMPORARY; in-memory authoritative state, see
+  # deploy/helm/copilot/values.yaml for the full store list and revert condition.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: omnipotent

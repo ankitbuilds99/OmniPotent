@@ -5,22 +5,43 @@ Provides:
 - GitHub OAuth2 login
 - Session management with JWT tokens
 - Account linking (multiple providers)
+
+Linked accounts and pending login states live in Postgres (migration
+008_oauth), not in this module. They used to be the dicts `_OAUTH_ACCOUNTS`,
+`_USER_ACCOUNTS` and `_OAUTH_STATES`, which made identity per-process: the
+callback in app/auth/endpoints.py mints a fresh `user_id` whenever the account
+lookup misses, and after a restart every lookup missed, so returning users came
+back as new people and left their memberships and history behind. The state
+dict additionally broke login outright on any deployment with more than one
+replica, since the redirect and the callback need not reach the same pod.
+
+Session tokens are still stateless JWTs -- there is nothing to store for those,
+and `create_session_token`/`verify_session_token` are unchanged.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
 from urllib.parse import urlencode
 
 import httpx
 import jwt
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.database.engine import ensure_schema, get_session
+from app.database.models import OAuthAccountRecord, OAuthStateRecord
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 log = logging.getLogger("omnipotent.auth.oauth")
 
@@ -107,41 +128,90 @@ def get_available_providers() -> list[str]:
     return list(OAUTH_CONFIGS.keys())
 
 
-_OAUTH_STATES: dict[str, tuple[str, datetime]] = {}
+#: How long an issued state stays usable. Unchanged from the dict version; it
+#: bounds how long a captured login redirect is worth replaying.
+STATE_TTL = timedelta(minutes=15)
 
 
-def generate_oauth_state(provider: str) -> str:
-    """Generate a secure state parameter for CSRF protection."""
+@asynccontextmanager
+async def _session() -> AsyncGenerator[AsyncSession, None]:
+    await ensure_schema()
+    async with get_session() as session:
+        yield session
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """Re-attach UTC to a value read back from SQLite, which drops the offset."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+async def generate_oauth_state(provider: str) -> str:
+    """Generate a secure state parameter for CSRF protection.
+
+    Stored in Postgres rather than in this process: the callback that presents
+    this state back is a separate request arriving from the provider's redirect,
+    which load-balances independently of the request being served now.
+    """
     state = secrets.token_urlsafe(32)
-    _OAUTH_STATES[state] = (provider, datetime.now(timezone.utc))
 
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
-    expired = [k for k, (_, ts) in _OAUTH_STATES.items() if ts < cutoff]
-    for k in expired:
-        del _OAUTH_STATES[k]
+    async with _session() as session:
+        session.add(OAuthStateRecord(state=state, provider=provider))
+        # Opportunistic sweep, as the dict version did on every issue. Nothing
+        # else deletes from this table, so without it expired rows accumulate
+        # for as long as the process runs.
+        await session.execute(
+            delete(OAuthStateRecord).where(
+                OAuthStateRecord.created_at < datetime.now(timezone.utc) - STATE_TTL
+            )
+        )
+        await session.commit()
 
     return state
 
 
-def verify_oauth_state(state: str) -> str | None:
-    """Verify and consume OAuth state. Returns provider if valid."""
-    if state not in _OAUTH_STATES:
-        return None
+async def verify_oauth_state(state: str) -> str | None:
+    """Verify and consume OAuth state. Returns provider if valid.
 
-    provider, ts = _OAUTH_STATES.pop(state)
-    if datetime.now(timezone.utc) - ts > timedelta(minutes=15):
+    The row is deleted as part of the check rather than after it: two replays of
+    the same captured callback can both pass a SELECT, but only one can be the
+    DELETE that reports a row.
+    """
+    async with _session() as session:
+        row = (
+            await session.execute(
+                select(OAuthStateRecord).where(OAuthStateRecord.state == state)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+
+        provider = row.provider
+        created_at = _utc(row.created_at) or datetime.now(timezone.utc)
+
+        deleted = await session.execute(
+            delete(OAuthStateRecord).where(OAuthStateRecord.state == state)
+        )
+        await session.commit()
+
+        # Somebody else consumed it between the read and the delete.
+        if cast("CursorResult[Any]", deleted).rowcount == 0:
+            return None
+
+    if datetime.now(timezone.utc) - created_at > STATE_TTL:
         return None
 
     return provider
 
 
-def get_authorization_url(provider: str, redirect_uri: str) -> str | None:
+async def get_authorization_url(provider: str, redirect_uri: str) -> str | None:
     """Get OAuth authorization URL for a provider."""
     config = get_oauth_config(provider)
     if not config:
         return None
 
-    state = generate_oauth_state(provider)
+    state = await generate_oauth_state(provider)
 
     params = {
         "client_id": config.client_id,
@@ -344,54 +414,158 @@ class OAuthAccount:
     last_login: datetime
 
 
-_OAUTH_ACCOUNTS: dict[str, OAuthAccount] = {}
-_USER_ACCOUNTS: dict[str, list[str]] = {}
+def _to_account(row: OAuthAccountRecord) -> OAuthAccount:
+    """Build the dataclass callers already expect from a row.
+
+    The result is a detached copy: assigning to it does not write anything back,
+    which is why refreshing `last_login` is `touch_last_login()` below rather
+    than an attribute assignment at the call site.
+    """
+    now = datetime.now(timezone.utc)
+    return OAuthAccount(
+        id=row.id,
+        user_id=row.user_id,
+        provider=row.provider,
+        provider_id=row.provider_id,
+        email=row.email,
+        name=row.name,
+        avatar_url=row.avatar_url,
+        created_at=_utc(row.created_at) or now,
+        last_login=_utc(row.last_login) or now,
+    )
 
 
-def link_oauth_account(
+async def link_oauth_account(
     user_id: str,
     oauth_user: OAuthUser,
 ) -> OAuthAccount:
-    """Link an OAuth account to a user."""
+    """Link an OAuth account to a user.
+
+    Idempotent on `{provider}:{provider_id}`: re-linking an identity that is
+    already claimed keeps the user id it is already attached to instead of
+    repointing it at `user_id`. Two sign-ins racing on a first-ever login would
+    otherwise each mint an id and the loser's would win the write, handing one
+    person's account to whichever request committed last.
+    """
     account_id = f"{oauth_user.provider}:{oauth_user.provider_id}"
+    now = datetime.now(timezone.utc)
 
-    account = OAuthAccount(
-        id=account_id,
-        user_id=user_id,
-        provider=oauth_user.provider,
-        provider_id=oauth_user.provider_id,
-        email=oauth_user.email,
-        name=oauth_user.name,
-        avatar_url=oauth_user.avatar_url,
-        created_at=datetime.now(timezone.utc),
-        last_login=datetime.now(timezone.utc),
-    )
+    async with _session() as session:
+        row = OAuthAccountRecord(
+            id=account_id,
+            user_id=user_id,
+            provider=oauth_user.provider,
+            provider_id=oauth_user.provider_id,
+            # Lower-cased on the way in so the email lookup can use its index
+            # rather than scanning and folding case in Python.
+            email=oauth_user.email.lower(),
+            name=oauth_user.name,
+            # Passed explicitly even though it is nullable: a column left out of
+            # the INSERT is not loaded on the instance, and reading it back to
+            # build the response would emit a lazy SELECT that raises here.
+            avatar_url=oauth_user.avatar_url,
+            created_at=now,
+            last_login=now,
+        )
+        session.add(row)
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+        else:
+            return _to_account(row)
 
-    _OAUTH_ACCOUNTS[account_id] = account
+        existing = (
+            await session.execute(
+                select(OAuthAccountRecord).where(OAuthAccountRecord.id == account_id)
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            # The conflict was not this row after all; nothing sensible to
+            # return, so let the caller see the original failure.
+            raise
 
-    if user_id not in _USER_ACCOUNTS:
-        _USER_ACCOUNTS[user_id] = []
-    if account_id not in _USER_ACCOUNTS[user_id]:
-        _USER_ACCOUNTS[user_id].append(account_id)
+        existing.email = oauth_user.email.lower()
+        existing.name = oauth_user.name
+        existing.avatar_url = oauth_user.avatar_url
+        existing.last_login = now
+        await session.commit()
+        return _to_account(existing)
 
-    return account
+
+async def touch_last_login(account_id: str) -> None:
+    """Record that a linked account was just used to sign in.
+
+    Its own function because the dict version updated this by mutating the
+    object `find_account_by_provider` handed back. That object is now a detached
+    copy, so the same assignment would be silently discarded.
+    """
+    async with _session() as session:
+        await session.execute(
+            update(OAuthAccountRecord)
+            .where(OAuthAccountRecord.id == account_id)
+            .values(last_login=datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
 
 
-def find_account_by_provider(provider: str, provider_id: str) -> OAuthAccount | None:
+async def find_account_by_provider(provider: str, provider_id: str) -> OAuthAccount | None:
     """Find an OAuth account by provider and provider ID."""
     account_id = f"{provider}:{provider_id}"
-    return _OAUTH_ACCOUNTS.get(account_id)
+    async with _session() as session:
+        row = (
+            await session.execute(
+                select(OAuthAccountRecord).where(OAuthAccountRecord.id == account_id)
+            )
+        ).scalar_one_or_none()
+    return _to_account(row) if row else None
 
 
-def find_account_by_email(email: str) -> OAuthAccount | None:
-    """Find an OAuth account by email."""
-    for account in _OAUTH_ACCOUNTS.values():
-        if account.email.lower() == email.lower():
-            return account
-    return None
+async def find_account_by_email(email: str) -> OAuthAccount | None:
+    """Find an OAuth account by email.
+
+    Ordered by creation: the dict version returned whichever match came first in
+    insertion order, and an unordered query would let the answer -- and so which
+    user id a new provider gets folded into -- vary between identical calls.
+    """
+    async with _session() as session:
+        row = (
+            await session.execute(
+                select(OAuthAccountRecord)
+                .where(OAuthAccountRecord.email == email.lower())
+                .order_by(OAuthAccountRecord.created_at, OAuthAccountRecord.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    return _to_account(row) if row else None
 
 
-def get_user_accounts(user_id: str) -> list[OAuthAccount]:
-    """Get all OAuth accounts linked to a user."""
-    account_ids = _USER_ACCOUNTS.get(user_id, [])
-    return [_OAUTH_ACCOUNTS[aid] for aid in account_ids if aid in _OAUTH_ACCOUNTS]
+async def get_user_accounts(user_id: str) -> list[OAuthAccount]:
+    """Get all OAuth accounts linked to a user.
+
+    Derived from the accounts themselves. The `_USER_ACCOUNTS` index this
+    replaces was maintained by hand on every link and could disagree with the
+    records it pointed at.
+    """
+    async with _session() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(OAuthAccountRecord)
+                    .where(OAuthAccountRecord.user_id == user_id)
+                    .order_by(OAuthAccountRecord.created_at, OAuthAccountRecord.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return [_to_account(row) for row in rows]
+
+
+async def clear() -> None:
+    """Drop every linked account and pending state. For tests."""
+    async with _session() as session:
+        await session.execute(delete(OAuthAccountRecord))
+        await session.execute(delete(OAuthStateRecord))
+        await session.commit()

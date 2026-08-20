@@ -111,6 +111,10 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.7.0",
     "mypy>=1.11.0",
+    # CI installs only this extra before running the suite, so anything with tests
+    # has to be reachable from here. The task queue is shipped (the worker runs from
+    # the app image) and tests/test_tasks_deployed.py imports it.
+    "omnipotent[tasks]",
 ]
 test = [
     "pytest>=8.3.0",

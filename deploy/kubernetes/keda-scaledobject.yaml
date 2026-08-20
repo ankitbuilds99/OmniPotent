@@ -8,11 +8,16 @@ spec:
     name: omnipotent
   pollingInterval: 15
   cooldownPeriod: 300
-  minReplicaCount: 3
-  maxReplicaCount: 50
+  # PINNED TO 1/1 — TEMPORARY. This was the widest blast radius of the in-memory
+  # state bug: 50 pods each holding their own private copy of the customer and
+  # billing-usage dicts, with KEDA free to destroy any of them on scale-down.
+  # See deploy/helm/copilot/values.yaml for the store list and revert condition.
+  # RESTORE 3/50 (fallback 5) WHEN: those stores are externalised.
+  minReplicaCount: 1
+  maxReplicaCount: 1
   fallback:
     failureThreshold: 3
-    replicas: 5
+    replicas: 1
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:

@@ -5,7 +5,142 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
-replicaCount: 2  # >1 requires Postgres checkpointer + Redis (see config below)
+# PINNED TO 1 — TEMPORARY. Do not raise this until the stores listed below are
+# externalised.
+#
+# This list was rebuilt twice, because twice a slice found a live store that was
+# not on it. The original scan looked only for lower-case module-level names
+# bound to a dict literal, and authoritative state hides in four shapes:
+# module-level dicts, instance attributes on a module-level singleton, in-memory
+# implementations behind a `get_*_store()` factory, and containers built by a
+# call (`defaultdict(list)`, `deque(maxlen=...)`) rather than written as a
+# literal. What follows is every module reachable by import from
+# app/api/main.py, scanned in all four shapes, filtered to what a wired endpoint
+# actually reads and writes. Caches over a durable layer, per-pod control
+# machinery (locks, rate limiters, circuit breakers) and prefilled constants are
+# deliberately excluded — those are correct per-pod.
+# tests/test_single_replica_until_state_externalised.py holds the machine-checked
+# copy and fails if any entry stops resolving.
+#
+# Module-level containers (12):
+#   app/deduplication/api_router.py    _pipelines  (per-org incidents/fingerprints)
+#   app/dependency_graph/api_router.py _graphs, _discovered_at
+#   app/cost_optimizer/api_router.py   _budget_managers, _roi_trackers,
+#                                      _token_optimizers, _gpu_trackers
+#   app/slo/tracker.py                 _SLOS, _SLI_DATA  (UPPER_CASE; the tracker
+#                                      is rebuilt per request, so the SLOs and
+#                                      the samples compliance is computed from
+#                                      live in these two dicts, not the tracker)
+#   app/api/graphql/schema.py          _investigations, _incidents
+#   app/api/main.py                    _SEEN_DELIVERIES  (webhook de-duplication:
+#                                      a redelivery landing on another replica is
+#                                      processed twice, which for an incident
+#                                      webhook is a duplicate investigation)
+# Not listed, and worth naming because a scan keeps finding it:
+# app/audit_legacy.py _PENDING is a bounded hand-off queue between the
+# synchronous audit record() and the drain that writes the chain. Every pod
+# drains its own into the same table, so it does not block a second replica.
+#
+# Instance state on a module-level singleton (6) — same remedy, a table; listed
+# apart only because finding them needs the instance-attribute scan:
+#   app/status_page/store.py  _components, _incidents, _maintenances, _subscribers
+#                             (the public status page resets on every deploy,
+#                             including the subscribers who asked to be told
+#                             about the next outage)
+#   app/incidents/store.py    _incidents, _investigations
+# Live-object state (3) — NOT fixable by adding a table:
+#   app/planning/execution_engine.py  ExecutionEngine._active_executions, _cancelled
+#   app/coordinator/dag_executor.py   DAGExecutor._pending_approvals
+# An in-flight execution is a live asyncio task and a pending approval is a live
+# future, so /planning/executions/{id}/cancel|pause and /coordinator/.../approve
+# act on objects owned by the pod running the DAG. A row in Postgres cannot be
+# cancelled or approved; cancel on the wrong replica records the intent and the
+# work carries on. Routing those commands needs a control channel (pub/sub or a
+# work queue), which is why persisting the execution *records* did not clear
+# these.
+#
+# Note AlertEngine._rules/_metric_history/_firing_alerts was previously listed
+# here. No HTTP router reaches it: its only callers are the MCP alerting server
+# and app/tasks/tasks.py, so it is out of scope for *this* pin. It is not fine,
+# though — those are two different processes sharing a module-level singleton
+# that exists separately in each, so a rule registered over MCP is already
+# invisible to the worker that evaluates it. Raising the API replica count
+# neither causes nor fixes that; it needs its own slice.
+#
+# With >1 replica and no sessionAffinity, requests round-robin across pods, so an
+# investigation recorded on pod A does not exist on pod B, and per-org state is
+# split per-pod and lost on every restart, deploy and scale-down. The Postgres
+# checkpointer + Redis note below covers only the LangGraph checkpointer; it does
+# NOT cover any of the stores above.
+#
+# DONE — now in Postgres, each behind an Alembic revision. Set
+# COPILOT_DATABASE_URL (or DATABASE_URL) to a Postgres instance and run
+# `alembic upgrade head`; with it unset the app falls back to SQLite under
+# COPILOT_STATE_DIR, which is single-node only and needs persistence.enabled
+# below.
+#   002_crm              app/customers — customers, trials, and the usage
+#                        records billing is computed from (crm_customers,
+#                        crm_trials, crm_usage_events)
+#   003_investigations   investigation history behind /dashboard/* (investigations)
+#   004_planning_coord   planning task graphs and coordinator DAG execution
+#                        records (planning_graphs, coordinator_executions)
+#   005_runbooks         runbook definitions and their execution records
+#                        (runbook_definitions, runbook_runs). The shipped
+#                        DEFAULT_RUNBOOKS are seeded per org, so one tenant
+#                        editing a built-in no longer changes every tenant's.
+#   006_waitlist         early-access signups (waitlist_signups). Not org-scoped,
+#                        unlike the rest: a signup happens before the person has
+#                        an organization. Positions come from MAX(position)+1
+#                        under a unique constraint, replacing a module counter
+#                        that reset to 0 on restart and reissued positions
+#                        earlier signups had already been promised.
+#   007_teams            teams, their membership lists and their outstanding
+#                        invitations (teams, team_members, team_invitations).
+#                        Held on a singleton's instance dicts rather than at
+#                        module scope, so it never appeared on the list above
+#                        despite its router being wired all along — every team,
+#                        membership and pending invitation was destroyed on each
+#                        restart, including invitations already emailed to
+#                        people outside the system. `teams.slug` and
+#                        `(team_id, user_id)` are now unique, which the dicts
+#                        could not enforce.
+#   008_oauth            OAuth identities and pending CSRF state tokens
+#                        (oauth_accounts, oauth_states). The worst one found so
+#                        far, and it was not on the list above either. The
+#                        callback mints a fresh `user_id` whenever the account
+#                        lookup misses, so with accounts in a dict every restart
+#                        returned each existing user as a brand-new one and
+#                        stranded their teams, roles and history under an id
+#                        nobody could sign in as again — silently, with nothing
+#                        logged. The state dict separately broke login outright
+#                        above one replica: the login redirect and the provider's
+#                        callback are separate requests that load-balance
+#                        independently, so every mismatched pair failed with
+#                        "Invalid or expired state parameter". Existing
+#                        deployments have no record of the ids already handed
+#                        out, so this stops the bleeding from here on; it cannot
+#                        reunite what was already split.
+#   009_audit            the tamper-evident audit trail (audit_events). This
+#                        one was already broken on a single pod: the events
+#                        lived in a deque(maxlen=2000), so at the 2001st event
+#                        it evicted the genesis entry and GET /audit/verify --
+#                        which recomputes from an empty prev_hash -- reported
+#                        the trail as tampered with, permanently, with nothing
+#                        wrong. A tamper-evidence control that cries wolf
+#                        forever is worse than none: the first real detection
+#                        reads as the same known false alarm. Below 2000 events
+#                        it failed the other way, attesting `valid: true` over
+#                        whichever replica's fraction of the trail served the
+#                        request. The chain is per-org now, its position held by
+#                        a unique (org_id, seq) so several replicas can append
+#                        to a serial chain at once, and GET /audit is scoped to
+#                        the calling tenant — it previously returned every org's
+#                        events to whoever asked.
+# REVERT TO 2 WHEN: every store listed above is externalised. That condition is
+# machine-checked — test_pin_is_lifted_once_state_is_externalised fails once the
+# list empties and hands over the exact knobs to restore. Do not lift the pin on
+# a reading of this comment alone: it has been wrong twice.
+replicaCount: 1
 
 # Non-secret configuration → rendered into a ConfigMap and injected as env.
 config:
@@ -48,14 +183,56 @@ resources:
     cpu: "1"
     memory: 1Gi
 
+# Dramatiq worker (deploy/helm/copilot/templates/worker-deployment.yaml): drains the
+# background task queues in its own pods, off the API's request path.
+#
+# Off by default because it is useless without a broker: the worker reads
+# COPILOT_REDIS_URL, and with none set app/tasks/broker.py falls back to a stub broker
+# and the pod runs healthy while processing nothing. Enable it together with
+#   --set worker.enabled=true --set-string config.COPILOT_REDIS_URL=redis://...
+#
+# replicaCount here is NOT subject to the pin on the API above. A worker holds no
+# authoritative state; Redis holds the queue and Dramatiq gives each message to one
+# consumer, so these scale horizontally today.
+#
+# What it actually runs: only send_notification and sync_usage_to_stripe do real work
+# from a separate process right now. The other actors need state that lives in the API
+# process — app/tasks/worker.py names each one and what unblocks it. There is no
+# scheduler deployment: its jobs were removed, and `--mode scheduler` exits 1 rather
+# than idling, so one would only CrashLoopBackOff.
+worker:
+  enabled: false
+  replicaCount: 1
+  # Dramatiq's own defaults are 8 processes / 8 threads, which is heavy for the
+  # workload here (outbound HTTP with retries). Sized to the resources below.
+  processes: 2
+  threads: 8
+  # Above the longest actor time_limit (run_investigation, 300s) so an in-flight
+  # message can finish on shutdown rather than being redelivered from the top.
+  terminationGracePeriodSeconds: 330
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# DISABLED — TEMPORARY, paired with replicaCount: 1 above. Autoscaling is the
+# acute form of the in-memory-state bug: every scale-up serves requests from a
+# pod with empty stores, and every scale-down silently destroys the usage records
+# that pod accumulated. Re-enable together with replicaCount.
 autoscaling:
-  enabled: true
+  enabled: false
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 
+# Disabled while replicaCount is 1: a PDB with minAvailable 1 over a single
+# replica permits zero voluntary evictions, which blocks node drains and cluster
+# upgrades indefinitely. Re-enable with replicaCount.
 podDisruptionBudget:
-  enabled: true
+  enabled: false
   minAvailable: 1
 
 # Liveness/readiness map to the app's probes (app/api/main.py).
