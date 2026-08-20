@@ -87,7 +87,7 @@ jobs:
 
       - name: Validate migration syntax
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           echo "Checking migration files syntax..."
           uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; ScriptDirectory.from_config(Config('alembic.ini'))"
@@ -96,7 +96,7 @@ jobs:
       - name: Check for pending migrations
         id: check-pending
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           # Apply all migrations to fresh database
           uv run alembic upgrade head
@@ -120,7 +120,7 @@ jobs:
 
       - name: Test migration reversibility
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           echo "Testing migration up/down cycle..."
 
@@ -140,25 +140,37 @@ jobs:
 
       - name: Verify model-migration consistency
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           echo "Checking for unmigrated model changes..."
 
-          # Generate migration to check for differences
-          OUTPUT=$(uv run alembic revision --autogenerate -m "check_consistency" 2>&1 || true)
+          # alembic.ini sets `script_location = migrations`; there is no
+          # `alembic/` directory in this repo and never has been. The old
+          # `ls -t alembic/versions/*.py` therefore always came back empty, the
+          # `if` never ran, and this step reported success having inspected
+          # nothing. Pin the revision id so the generated file is found by name
+          # instead of guessed at by mtime -- with the path merely corrected,
+          # a failed autogenerate would leave `ls -t` pointing at a real
+          # migration, which the branch below would warn about and then delete.
+          uv run alembic revision --autogenerate \
+            --rev-id ci_consistency_check -m "check_consistency" || {
+            echo "::error::alembic autogenerate failed; consistency is unknown"
+            exit 1
+          }
 
-          # Check if the generated migration has actual changes
-          LATEST_MIGRATION=$(ls -t alembic/versions/*.py 2>/dev/null | head -1)
-          if [ -n "$LATEST_MIGRATION" ]; then
-            if grep -q "pass" "$LATEST_MIGRATION" && ! grep -q "op\." "$LATEST_MIGRATION"; then
-              echo "Models and migrations are in sync"
-              rm -f "$LATEST_MIGRATION"
-            else
-              echo "::warning::Detected model changes without corresponding migrations"
-              cat "$LATEST_MIGRATION"
-              rm -f "$LATEST_MIGRATION"
-            fi
+          GENERATED=$(ls migrations/versions/ci_consistency_check_*.py 2>/dev/null | head -1)
+          if [ -z "$GENERATED" ]; then
+            echo "::error::autogenerate wrote no revision file; consistency is unknown"
+            exit 1
           fi
+
+          if grep -qE '^[[:space:]]+op\.' "$GENERATED"; then
+            echo "::warning::Detected model changes without corresponding migrations"
+            cat "$GENERATED"
+          else
+            echo "Models and migrations are in sync"
+          fi
+          rm -f "$GENERATED"
 
       - name: Migration summary
         run: |
@@ -184,8 +196,10 @@ jobs:
       - name: Check for new migrations
         id: new-migrations
         run: |
-          # Find new migration files in this PR
-          NEW_MIGRATIONS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '^alembic/versions/.*\.py$' || true)
+          # Find new migration files in this PR. Same wrong prefix as above:
+          # migrations live in `migrations/versions/`, so this matched nothing
+          # and the review checklist below was never once posted to a PR.
+          NEW_MIGRATIONS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '^migrations/versions/.*\.py$' || true)
 
           if [ -n "$NEW_MIGRATIONS" ]; then
             echo "has_new=true" >> $GITHUB_OUTPUT
@@ -275,7 +289,7 @@ jobs:
         id: current-state
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
@@ -284,7 +298,7 @@ jobs:
       - name: Run migrations
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           ACTION="${{ github.event.inputs.action || 'upgrade' }}"
           TARGET="${{ github.event.inputs.target || 'head' }}"
@@ -312,7 +326,7 @@ jobs:
       - name: Verify migration state
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           NEW_STATE=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "Migration state after: $NEW_STATE"
@@ -390,7 +404,7 @@ jobs:
       - name: Get current migration state
         id: current-state
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         run: |
           CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
@@ -398,7 +412,7 @@ jobs:
 
       - name: Run migrations with timeout
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         timeout-minutes: 30
         run: |
           ACTION="${{ github.event.inputs.action }}"
@@ -426,7 +440,7 @@ jobs:
 
       - name: Verify migration state
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         run: |
           NEW_STATE=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "Migration state after: $NEW_STATE"
