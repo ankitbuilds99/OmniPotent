@@ -173,6 +173,41 @@ class TestItScansWhatIsActuallyBeingCommitted:
         assert result.returncode == 1, result.stdout + result.stderr
 
 
+class TestItIsQuietEnoughToBeRead:
+    """A hook nobody reads is a hook nobody has.
+
+    On its first real run this reported 70 findings on a commit containing no
+    secrets, because the PagerDuty pattern was `[a-zA-Z0-9+/]{20}` -- twenty
+    alphanumerics in a row and nothing else. Every file path matched. That is
+    the same failure mode as the audit chain reporting `valid: false` forever:
+    an alarm that is always on carries no information, and the first true
+    positive arrives looking exactly like the 70 before it.
+    """
+
+    def test_ordinary_source_paths_are_not_flagged_as_credentials(self, repo: Path):
+        (repo / "notes.md").write_text(
+            "| Latency | Complete | `app/observability/metrics.py` |\n"
+            "See https://github.com/some-org/some-repo for details.\n"
+            "from app.security.headers import SecurityHeadersMiddleware\n"
+        )
+        _git(repo, "add", "notes.md")
+
+        result = _run_scanner(repo)
+
+        assert result.returncode == 0, result.stdout
+        assert "No secrets detected" in result.stdout
+
+    def test_a_real_looking_pagerduty_key_is_still_caught(self):
+        # Narrowing the pattern must not silence it: with the keyword and a
+        # 32-character value present, it still fires.
+        findings = SecretsScanner().scan_content(
+            'PAGERDUTY_ROUTING_KEY = "' + "r02" + "a1b2c3d4e5f60718293a4b5c6d7e8f" + '"'
+        )
+        assert any(f.secret_type.value == "pagerduty_key" for f in findings), [
+            f.description for f in findings
+        ]
+
+
 class TestItFailsClosed:
     def test_a_scan_that_cannot_run_blocks_rather_than_passing(self, tmp_path: Path):
         """Not a git repo -> the scan cannot run -> it must not report clean.

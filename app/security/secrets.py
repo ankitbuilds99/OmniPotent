@@ -227,10 +227,22 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         SecretType.PAGERDUTY_KEY,
-        re.compile(r"[a-zA-Z0-9+/]{20}", re.IGNORECASE),
+        # Was `[a-zA-Z0-9+/]{20}` -- twenty alphanumerics in a row, with nothing
+        # else required. That matches essentially every file path, import line,
+        # and long identifier in the repository: installing the hook produced 70
+        # findings on a commit that contained no secrets, including
+        # `app/observability/metrics.py` and this project's own GitHub URL. A
+        # detector at that signal-to-noise ratio does not get read, it gets
+        # switched off -- and it was never a PagerDuty pattern in the first
+        # place, just a length. Real routing/integration keys are 32
+        # alphanumerics, so require that plus the context keyword, which is the
+        # same shape the generic patterns below already use.
+        re.compile(
+            r'(?i)(pagerduty|routing[_-]?key|integration[_-]?key|service[_-]?key)'
+            r'\s*[=:]\s*["\']?([a-z0-9]{32})["\']?'
+        ),
         "Possible PagerDuty Integration Key",
         "medium",
-        ["base64", "encoded"],
     ),
     SecretPattern(
         SecretType.SENTRY_DSN,
