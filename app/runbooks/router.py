@@ -155,7 +155,7 @@ async def approve_execution(execution_id: str) -> ExecutionResponse:
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Execution not found")
-    if result == "conflict":
+    if isinstance(result, str):  # the "conflict" sentinel; isinstance narrows, == does not
         raise HTTPException(status_code=400, detail="Execution is not pending approval")
     return _execution(result)
 

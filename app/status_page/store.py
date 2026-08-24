@@ -433,7 +433,7 @@ class StatusStore:
             return _to_component(row)
 
     async def delete_component(self, component_id: str) -> bool:
-        from app.database.engine import get_session
+        from app.database.engine import get_session, rows_affected
         from app.database.models import StatusComponent, StatusUptimeRecord
 
         async with get_session() as session:
@@ -444,7 +444,7 @@ class StatusStore:
                     StatusComponent.component_id == component_id,
                 )
             )
-            if not result.rowcount:
+            if not rows_affected(result):
                 await session.rollback()
                 return False
             await session.execute(
@@ -1108,7 +1108,7 @@ class StatusStore:
         return subscribers
 
     async def delete_subscriber(self, subscriber_id: str) -> bool:
-        from app.database.engine import get_session
+        from app.database.engine import get_session, rows_affected
         from app.database.models import StatusSubscriber
 
         async with get_session() as session:
@@ -1119,7 +1119,7 @@ class StatusStore:
                     StatusSubscriber.subscriber_id == subscriber_id,
                 )
             )
-            if not result.rowcount:
+            if not rows_affected(result):
                 await session.rollback()
                 return False
             await session.commit()

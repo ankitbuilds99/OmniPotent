@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, overload
 
 from sqlalchemy import select
 
@@ -267,6 +267,18 @@ async def list_executions(
         return [_to_execution(row) for row in rows]
 
 
+@overload
+async def set_execution_status(
+    execution_id: str, status: StepStatus
+) -> RunbookExecution | None: ...
+
+
+@overload
+async def set_execution_status(
+    execution_id: str, status: StepStatus, *, expect: set[StepStatus]
+) -> RunbookExecution | None | Literal["conflict"]: ...
+
+
 async def set_execution_status(
     execution_id: str, status: StepStatus, *, expect: set[StepStatus] | None = None
 ) -> RunbookExecution | None | str:
@@ -275,6 +287,10 @@ async def set_execution_status(
     Returns the updated execution, None if this org has no such execution, or
     the string "conflict" if `expect` is given and the current status is not in
     it — which is how the router tells 404 apart from 400.
+
+    Overloaded because "conflict" is only reachable when `expect` is passed;
+    callers that omit it would otherwise have to handle a case that cannot
+    happen, and the router does exactly that in one place and not the other.
     """
     from app.database.engine import get_session
     from app.database.models import RunbookExecution as ExecutionRow

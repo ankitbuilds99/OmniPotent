@@ -535,7 +535,7 @@ class DatabaseBillingStore:
         """
         from sqlalchemy.exc import IntegrityError
 
-        from app.database.engine import get_session
+        from app.database.engine import get_session, rows_affected
         from app.database.models import BillingUsageSummary
 
         if field not in _SUMMARY_FIELDS:
@@ -554,7 +554,7 @@ class DatabaseBillingStore:
         async with get_session() as session:
             await ensure_org(session, org_id)
             result = await session.execute(bump)
-            if result.rowcount:
+            if rows_affected(result):
                 await session.commit()
                 return
 

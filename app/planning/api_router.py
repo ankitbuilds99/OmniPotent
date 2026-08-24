@@ -26,7 +26,7 @@ from app.planning.execution_engine import (
     ExecutionEngine,
     create_default_tools,
 )
-from app.tenancy.scoping import scoped
+from app.tenancy.scoping import ScopedRegistry, scoped
 
 log = logging.getLogger("omnipotent.planning.api")
 
@@ -43,7 +43,7 @@ def _build_execution_engine() -> ExecutionEngine:
 # One set per org. Task graphs describe a tenant's services and the remediation
 # steps to run against them, and the engine holds their live execution results;
 # a shared process global let any tenant read, edit and run another's plans.
-_graph_stores = scoped(dict)
+_graph_stores: ScopedRegistry[dict[str, Any]] = scoped(dict)
 _engines = scoped(_build_execution_engine)
 _decomposers = scoped(lambda: GoalDecomposer(use_templates=True))
 

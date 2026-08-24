@@ -129,12 +129,15 @@ async def list_providers() -> list[AuthProviderInfo]:
     return [PROVIDER_INFO[p] for p in available if p in PROVIDER_INFO]
 
 
-@router.get("/{provider}/login")
+# response_model=None because the return type is a union of a Pydantic model
+# and a Response: FastAPI would otherwise try to validate the RedirectResponse
+# against LoginResponse.
+@router.get("/{provider}/login", response_model=None)
 async def oauth_login(
     provider: str,
     request: Request,
     redirect_uri: str = "",
-) -> LoginResponse:
+) -> LoginResponse | RedirectResponse:
     """Initiate OAuth login flow.
 
     Args:

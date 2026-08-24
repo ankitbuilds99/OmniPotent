@@ -210,7 +210,7 @@ class AlertRule(Base):
     duration_seconds: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
     severity: Mapped[str] = mapped_column(String(16), default="high", nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    notification_channels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    notification_channels: Mapped[list[str]] = mapped_column(JSONB, default=list)
     labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -269,7 +269,7 @@ class Runbook(Base):
     service: Mapped[str] = mapped_column(String(128), nullable=False)
     trigger: Mapped[str] = mapped_column(String(64), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
-    steps: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    steps: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -346,9 +346,9 @@ class Incident(Base):
     acknowledged_by: Mapped[str | None] = mapped_column(String(256))
     resolved_by: Mapped[str | None] = mapped_column(String(256))
     assignee: Mapped[str | None] = mapped_column(String(256))
-    tags: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
-    timeline: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
-    related_alerts: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    tags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    timeline: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    related_alerts: Mapped[list[str]] = mapped_column(JSONB, default=list)
     impact: Mapped[str | None] = mapped_column(Text)
     customer_impact: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
@@ -385,9 +385,9 @@ class IncidentInvestigation(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     overall_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     root_cause: Mapped[str | None] = mapped_column(Text)
-    recommended_actions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    recommended_actions: Mapped[list[str]] = mapped_column(JSONB, default=list)
     agents: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    safety_gates: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    safety_gates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
 
     incident: Mapped["Incident"] = relationship(back_populates="investigation")
 
@@ -532,7 +532,7 @@ class BillingInvoice(Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    line_items: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    line_items: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

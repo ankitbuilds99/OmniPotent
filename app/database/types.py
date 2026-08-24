@@ -13,6 +13,8 @@ native uuid column — and fall back to portable equivalents elsewhere.
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import JSON, Uuid
 from sqlalchemy.dialects.postgresql import JSONB as _PostgresJSONB
 
@@ -20,10 +22,14 @@ from sqlalchemy.dialects.postgresql import JSONB as _PostgresJSONB
 JSONB = _PostgresJSONB().with_variant(JSON(), "sqlite")
 
 
-def UUID(as_uuid: bool = True) -> Uuid:
+def UUID(as_uuid: bool = True) -> Uuid[Any]:
     """UUID column, native on Postgres and CHAR(32) elsewhere.
 
     Callable rather than a constant because the models spell it
     `UUID(as_uuid=True)`, matching `postgresql.UUID`'s signature.
     """
-    return Uuid(as_uuid=as_uuid)
+    # Branching rather than passing `as_uuid` straight through: Uuid's
+    # overloads are keyed on Literal[True]/Literal[False], because the flag
+    # decides whether the column yields uuid.UUID or str. A plain bool matches
+    # neither, so forwarding it fails to type-check.
+    return Uuid(as_uuid=True) if as_uuid else Uuid(as_uuid=False)

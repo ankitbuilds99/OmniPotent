@@ -15,9 +15,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, cast
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult, Result
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -145,6 +146,20 @@ async def session_dependency() -> AsyncGenerator[AsyncSession, None]:
     """
     async with get_session() as session:
         yield session
+
+
+def rows_affected(result: Result[Any]) -> int:
+    """How many rows an UPDATE or DELETE actually touched.
+
+    `AsyncSession.execute` is annotated as returning the read-side `Result`,
+    which has no `rowcount`; a DML statement produces a `CursorResult` at
+    runtime, which does. The cast lives here rather than at each call site so
+    the reason is written down once.
+
+    Callers use this to tell "no such row" apart from "row updated" without a
+    prior SELECT, which is what makes the update atomic.
+    """
+    return cast("CursorResult[Any]", result).rowcount
 
 
 def _ensure_sqlite_directory(url: str) -> None:
