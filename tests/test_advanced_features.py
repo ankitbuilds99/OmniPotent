@@ -169,95 +169,11 @@ class TestAuditLogging:
         assert "by_category" in summary
 
 
-class TestSLOTracking:
-    """Tests for SLO/SLI tracking."""
-
-    def test_slo_creation(self):
-        """Test creating SLOs."""
-        from app.slo.tracker import create_slo, SLIType, SLOWindow
-
-        slo = create_slo(
-            org_id="org_slo_test",
-            name="API Availability",
-            service="api-gateway",
-            sli_type=SLIType.AVAILABILITY,
-            target=0.999,
-            window=SLOWindow.ROLLING_30D,
-        )
-
-        assert slo.name == "API Availability"
-        assert slo.target == 0.999
-
-    def test_sli_recording(self):
-        """Test recording SLI measurements."""
-        from app.slo.tracker import create_slo, record_sli, SLIType
-
-        slo = create_slo(
-            org_id="org_sli_test",
-            name="Test SLO",
-            service="test-service",
-            sli_type=SLIType.AVAILABILITY,
-            target=0.99,
-        )
-
-        sli = record_sli(
-            org_id="org_sli_test",
-            slo_id=slo.id,
-            good_count=990,
-            total_count=1000,
-        )
-
-        assert sli is not None
-        assert sli.value == 0.99
-
-    def test_error_budget_calculation(self):
-        """Test error budget calculation."""
-        from app.slo.tracker import (
-            create_slo,
-            record_sli,
-            calculate_error_budget,
-            SLIType,
-        )
-
-        slo = create_slo(
-            org_id="org_budget_test",
-            name="Budget Test SLO",
-            service="test-service",
-            sli_type=SLIType.AVAILABILITY,
-            target=0.99,
-        )
-
-        record_sli("org_budget_test", slo.id, good_count=995, total_count=1000)
-
-        budget = calculate_error_budget("org_budget_test", slo.id)
-
-        assert budget is not None
-        assert budget.total_budget == pytest.approx(0.01, rel=0.01)
-
-    def test_slo_status(self):
-        """Test getting SLO status."""
-        from app.slo.tracker import (
-            create_slo,
-            record_sli,
-            get_slo_status,
-            SLIType,
-        )
-
-        slo = create_slo(
-            org_id="org_status_test",
-            name="Status Test SLO",
-            service="test-service",
-            sli_type=SLIType.LATENCY,
-            target=0.95,
-        )
-
-        record_sli("org_status_test", slo.id, good_count=960, total_count=1000)
-
-        status = get_slo_status("org_status_test", slo.id)
-
-        assert status is not None
-        assert "slo" in status
-        assert "error_budget" in status
+# SLO/SLI tracking used to be tested here against `_SLOS` and `_SLI_DATA`, two
+# module dicts. Those moved to the `slos` and `sli_measurements` tables and the
+# tracker is async now, so the same behaviour — plus the org filter, the
+# retention pass and the timestamp handling the dicts never needed — is covered
+# against a real database in tests/test_slo_store.py.
 
 
 class TestOnCallScheduler:

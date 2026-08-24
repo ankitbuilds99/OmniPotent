@@ -152,7 +152,7 @@ async def list_slos(
 ) -> list[SLOResponse]:
     """List all SLOs."""
     tracker = _get_tracker()
-    slos = tracker.list_slos(service=service, team_id=team_id)
+    slos = await tracker.list_slos(service=service, team_id=team_id)
     return [_slo_to_response(s) for s in slos]
 
 
@@ -173,7 +173,7 @@ async def create_slo(
     except ValueError:
         raise HTTPException(400, f"Invalid window: {request.window}")
 
-    slo = tracker.create_slo(
+    slo = await tracker.create_slo(
         name=request.name,
         description=request.description,
         service=request.service,
@@ -195,7 +195,7 @@ async def get_slo(
 ) -> SLOResponse:
     """Get an SLO by ID."""
     tracker = _get_tracker()
-    slo = tracker.get_slo(slo_id)
+    slo = await tracker.get_slo(slo_id)
 
     if not slo:
         raise HTTPException(404, f"SLO not found: {slo_id}")
@@ -212,7 +212,7 @@ async def update_slo(
     tracker = _get_tracker()
 
     updates = request.model_dump(exclude_none=True)
-    slo = tracker.update_slo(slo_id, **updates)
+    slo = await tracker.update_slo(slo_id, **updates)
 
     if not slo:
         raise HTTPException(404, f"SLO not found: {slo_id}")
@@ -227,7 +227,7 @@ async def delete_slo(
     """Delete an SLO."""
     tracker = _get_tracker()
 
-    if not tracker.delete_slo(slo_id):
+    if not await tracker.delete_slo(slo_id):
         raise HTTPException(404, f"SLO not found: {slo_id}")
 
 
@@ -239,7 +239,7 @@ async def record_sli(
     """Record an SLI measurement."""
     tracker = _get_tracker()
 
-    sli = tracker.record_sli(
+    sli = await tracker.record_sli(
         slo_id=slo_id,
         good_count=request.good_count,
         total_count=request.total_count,
@@ -269,7 +269,7 @@ async def get_sli_data(
     """Get SLI measurements for an SLO."""
     tracker = _get_tracker()
 
-    data = tracker.get_sli_data(slo_id, start_time=start_time, end_time=end_time)
+    data = await tracker.get_sli_data(slo_id, start_time=start_time, end_time=end_time)
 
     return [
         SLIResponse(
@@ -291,7 +291,7 @@ async def get_error_budget(
     """Get error budget status for an SLO."""
     tracker = _get_tracker()
 
-    budget = tracker.calculate_error_budget(slo_id)
+    budget = await tracker.calculate_error_budget(slo_id)
 
     if not budget:
         raise HTTPException(404, f"SLO not found: {slo_id}")
@@ -317,7 +317,7 @@ async def get_burn_rate(
     """Get multi-window burn rate for an SLO."""
     tracker = _get_tracker()
 
-    burn_rates = tracker.calculate_burn_rate(slo_id)
+    burn_rates = await tracker.calculate_burn_rate(slo_id)
 
     if not burn_rates:
         raise HTTPException(404, f"SLO not found: {slo_id}")

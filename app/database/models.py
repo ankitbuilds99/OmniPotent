@@ -698,3 +698,78 @@ class KnowledgeDocument(Base):
         Index("ix_knowledge_documents_org_doc", "org_id", "doc_id", unique=True),
         Index("ix_knowledge_documents_org_updated", "org_id", "updated_at"),
     )
+
+
+class SLO(Base):
+    """A Service Level Objective owned by one org.
+
+    `slo_id` is the id the API exposes ("slo_<hex>"); it is random per creation
+    and never reused across orgs, but the primary key stays a surrogate so the
+    identity is (org_id, slo_id) like every other feature table here.
+    """
+
+    __tablename__ = "slos"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    slo_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    service: Mapped[str] = mapped_column(String(128), nullable=False)
+    sli_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target: Mapped[float] = mapped_column(Float, nullable=False)
+    window: Mapped[str] = mapped_column(String(32), nullable=False)
+    team_id: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    owner: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    alert_burn_rate_threshold: Mapped[float] = mapped_column(
+        Float, default=1.0, nullable=False
+    )
+    alert_channels: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_slos_org_slo", "org_id", "slo_id", unique=True),
+        Index("ix_slos_org_service", "org_id", "service"),
+    )
+
+
+class SLIMeasurement(Base):
+    """One SLI sample against an SLO.
+
+    Deliberately not a foreign key to `slos`: `runbook_executions` sets the
+    precedent of referencing its parent by the API-visible string id, and the
+    tracker prunes and deletes these explicitly so it does not rely on a cascade.
+    Every query carries `org_id` as well, so a sample can only be read by the org
+    that recorded it.
+    """
+
+    __tablename__ = "sli_measurements"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    slo_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    sli_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    good_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+
+    __table_args__ = (
+        Index("ix_sli_measurements_org_slo_ts", "org_id", "slo_id", "timestamp"),
+    )

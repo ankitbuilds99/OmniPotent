@@ -27,13 +27,20 @@ SINGLE_TENANT_ORG = UUID("00000000-0000-0000-0000-000000000000")
 
 
 def org_uuid() -> UUID:
-    """The org that owns rows written by, and visible to, this request.
+    """The org that owns rows written by, and visible to, this request."""
+    return org_uuid_for(tenant_id())
+
+
+def org_uuid_for(org: str) -> UUID:
+    """The org id for a tenant's string org id.
 
     Tenant org ids are opaque strings and the columns are UUIDs, so a tenant id
     that is already a UUID is used directly and anything else is hashed into one
     (uuid5, stable across restarts and processes).
+
+    `SLOTracker` is constructed with the org string rather than reading the
+    request context, so it needs this without going through `org_uuid()`.
     """
-    org = tenant_id()
     if org in ("", "-"):
         return SINGLE_TENANT_ORG
     try:
