@@ -15,13 +15,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, date, timedelta
 from typing import Any
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
 
 from app.database.engine import session_dependency as get_async_session
+from app.database.orgs import ensure_org_row, org_uuid
 from app.oncall.schedule_service import get_schedule_service
 from app.oncall.escalation_service import get_escalation_service
 from app.oncall.ai_oncall_service import get_ai_oncall_service
@@ -33,67 +33,17 @@ from app.oncall.models import (
     OncallSwapRequest,
     OncallAlert,
 )
-from app.tenant_context import tenant_id
 
 log = logging.getLogger("omnipotent.oncall.api")
 
 router = APIRouter(prefix="/oncall", tags=["oncall"])
 
-# Namespace for deriving a stable org UUID from a tenant's string org id.
-_ORG_NAMESPACE = UUID("6ba7b812-9dad-11d1-80b4-00c04fd430c8")
-# Single-tenant deployments have no org; everything they own lives under this.
-_SINGLE_TENANT_ORG = UUID("00000000-0000-0000-0000-000000000000")
-
-
-def _org_uuid() -> UUID:
-    """The org that owns rows written by, and visible to, this request.
-
-    Every row used to be created with the nil UUID and no query filtered on it,
-    so one tenant's on-call teams, schedules, escalation policies and alerts
-    were another tenant's too — including paging their responders. The org_id
-    column existed the whole time; nothing set it.
-
-    Tenant org ids are opaque strings and the column is a UUID, so a tenant id
-    that is already a UUID is used directly and anything else is hashed into one
-    (uuid5, stable across restarts and processes).
-    """
-    org = tenant_id()
-    if org in ("", "-"):
-        return _SINGLE_TENANT_ORG
-    try:
-        return UUID(org)
-    except ValueError:
-        return uuid5(_ORG_NAMESPACE, org)
-
-
-async def _ensure_org_row(db: Any) -> UUID:
-    """Return the current org's id, creating its `organizations` row if absent.
-
-    On-call rows carry a foreign key to `organizations`, but tenants are
-    registered in the separate tenant-auth store, which never writes that table.
-    On Postgres that makes the first team insert a foreign-key violation; SQLite
-    only hides it because it does not enforce foreign keys by default.
-    """
-    from sqlalchemy import select
-
-    from app.database.models import Organization
-
-    org = _org_uuid()
-    result = await db.execute(select(Organization.id).where(Organization.id == org))
-    if result.scalar_one_or_none() is not None:
-        return org
-
-    tenant = tenant_id()
-    slug = "default" if tenant in ("", "-") else tenant[:64]
-    db.add(Organization(id=org, slug=slug, name=slug))
-    try:
-        await db.commit()
-    except IntegrityError:
-        # Two first-requests for the same tenant raced; the other one won.
-        await db.rollback()
-    else:
-        log.info("created organizations row for tenant %s", slug)
-    return org
+# Every on-call row used to be created with the nil UUID and no query filtered
+# on it, so one tenant's teams, schedules, escalation policies and alerts were
+# another tenant's too — including paging their responders. The org_id column
+# existed the whole time; nothing set it. `_org_uuid()` is what sets it now.
+_org_uuid = org_uuid
+_ensure_org_row = ensure_org_row
 
 
 async def _owned_team(db: Any, team_id: UUID) -> OncallTeam:

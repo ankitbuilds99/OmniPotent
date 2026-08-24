@@ -49,7 +49,16 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import audit, feedback, metering, metrics_source, observability, runtime, tenant_context
+from app import (
+    audit,
+    feedback,
+    investigation_history,
+    metering,
+    metrics_source,
+    observability,
+    runtime,
+    tenant_context,
+)
 from app.config import ROOT, get_settings
 from app.integrations import pagerduty as pd_webhook
 from app.integrations import slack
@@ -584,18 +593,46 @@ async def _meter_and_spend(tokens: int, idem: str = "") -> None:
     await _record_spend(tokens)
 
 
-def _record_slo(result: Any, latency_s: float) -> None:
+def _record_slo_fields(
+    report: dict | None, final_text: str, tokens_used: int, latency_s: float
+) -> None:
     """Record a completed investigation to the SLO metrics (best-effort)."""
     try:
         from app.slo_metrics import metrics
-        report = result.report or {}
+        report = report or {}
         abstained = bool(report.get("abstained"))
         # "success" = produced a report and didn't error (abstention still counts as
         # a healthy, honest outcome).
-        success = bool(report) or bool(result.final_text)
-        metrics().record(latency_s, result.tokens_used, success, abstained)
+        success = bool(report) or bool(final_text)
+        metrics().record(latency_s, tokens_used, success, abstained)
     except Exception:  # noqa: BLE001 — metrics must never break a request
         log.debug("SLO metric record failed", exc_info=True)
+
+
+def _record_slo(result: Any, latency_s: float) -> None:
+    """Record a completed investigation from a non-streaming TurnResult."""
+    _record_slo_fields(
+        result.report, result.final_text, result.tokens_used, latency_s
+    )
+
+
+async def _record_history(req: Any, result: Any, latency_s: float) -> None:
+    """Persist a finished investigation so it shows up on the history page.
+
+    Stores the client's thread id, not the tenant-scoped internal key: the row
+    already carries org_id, and the history page links back using the id the
+    client knows.
+    """
+    report = result.report or {}
+    await investigation_history.record(
+        req.thread_id,
+        req.message,
+        status=result.status,
+        summary=report.get("root_cause") or result.final_text or None,
+        report=report or None,
+        tokens_used=result.tokens_used,
+        latency_ms=int(latency_s * 1000),
+    )
 
 
 async def quota_gate() -> None:
@@ -1672,6 +1709,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             elif result.status == "completed":
                 await _meter_and_spend(result.tokens_used)
                 _record_slo(result, time.monotonic() - _t0)
+                await _record_history(req, result, time.monotonic() - _t0)
     except HTTPException:
         raise  # 409/4xx should surface as real HTTP errors, not a 200 error body
     except Exception as exc:  # noqa: BLE001 — surface a clean error to the UI
@@ -1874,6 +1912,7 @@ async def chat_stream(req: ChatRequest):
                         }
                         return
                     _AWAITING.discard(tid)
+                    _t0 = time.monotonic()
                     async for ev in session.ask_stream(req.message):
                         t = ev.get("type")
                         if t == "approval":
@@ -1881,6 +1920,28 @@ async def chat_stream(req: ChatRequest):
                         elif t == "done":
                             _AWAITING.discard(tid)
                             await _meter_and_spend(ev.get("tokens_used", 0))
+                            # This is the path the UI actually uses. It recorded
+                            # neither an SLO sample nor a history row, which is
+                            # why the SLO dashboard read as zero investigations
+                            # and the history page had nothing to list.
+                            elapsed = time.monotonic() - _t0
+                            _record_slo_fields(
+                                ev.get("report"),
+                                ev.get("final_text", ""),
+                                ev.get("tokens_used", 0),
+                                elapsed,
+                            )
+                            await investigation_history.record(
+                                req.thread_id,
+                                req.message,
+                                status="completed",
+                                summary=(ev.get("report") or {}).get("root_cause")
+                                or ev.get("final_text")
+                                or None,
+                                report=ev.get("report"),
+                                tokens_used=ev.get("tokens_used", 0),
+                                latency_ms=int(elapsed * 1000),
+                            )
                         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
                 except Exception as exc:  # noqa: BLE001
                     log.exception("chat stream failed (thread=%s)", tid)
@@ -2176,38 +2237,14 @@ async def list_investigations(
     Returns:
         dict: List of investigations.
     """
-    from app.api.graphql.schema import _investigations
-
-    results = list(_investigations.values())
-
-    if status:
-        results = [r for r in results if r.get("status") == status]
-
-    results.sort(key=lambda x: x.get("started_at", ""), reverse=True)
-
-    investigations = []
-    for r in results[offset:offset + limit]:
-        investigations.append({
-            "id": r.get("id", ""),
-            "thread_id": r.get("thread_id", ""),
-            "query": r.get("incident_summary", ""),
-            "summary": r.get("root_cause"),
-            "status": r.get("status", "unknown"),
-            "tokens_used": r.get("tokens_used", 0),
-            "latency_ms": None,
-            "feedback_rating": None,
-            "created_at": r.get("started_at"),
-            "completed_at": r.get("completed_at"),
-            "report": {
-                "root_cause": r.get("root_cause"),
-                "confidence": r.get("confidence"),
-                "hypotheses": r.get("hypotheses", []),
-                "evidence": r.get("evidence", []),
-                "affected_services": r.get("affected_services", []),
-            } if r.get("root_cause") else None,
-        })
-
-    return {"investigations": investigations}
+    # Reads the `investigations` table. This used to import a module-level dict
+    # from app/api/graphql/schema.py, which imports strawberry — not a
+    # dependency — so the history page got a 500 on every load.
+    return {
+        "investigations": await investigation_history.recent(
+            status=status, limit=limit, offset=offset
+        )
+    }
 
 
 @app.post(
@@ -2251,6 +2288,9 @@ async def submit_feedback(req: FeedbackRequest) -> dict:
         entry = feedback.record_feedback(req.thread_id, req.rating, req.comment, req.question)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # Also stamp the history row, so the history page can show which
+    # investigations were rated. Best-effort: the feedback itself is recorded.
+    await investigation_history.set_feedback(req.thread_id, req.rating, req.comment)
     return {"status": "recorded", "feedback": entry}
 
 
@@ -2955,6 +2995,7 @@ async def _run_triggered_investigation(incident: dict) -> None:
     try:
         async with _running_turn(thread_id):
             session = await _get_session(thread_id)
+            _t0 = time.monotonic()
             result = await session.ask(seed)
             if result.status == "awaiting_approval":
                 _AWAITING.add(thread_id)
@@ -2962,6 +3003,18 @@ async def _run_triggered_investigation(incident: dict) -> None:
                 # Meter the triggered path the same as the interactive one (no-op
                 # without a tenant); idem-keyed by the incident so a re-run can't double-bill.
                 await _meter_and_spend(result.tokens_used, idem=thread_id)
+                elapsed = time.monotonic() - _t0
+                _record_slo(result, elapsed)
+                report = result.report or {}
+                await investigation_history.record(
+                    thread_id,
+                    seed,
+                    status=result.status,
+                    summary=report.get("root_cause") or result.final_text or None,
+                    report=report or None,
+                    tokens_used=result.tokens_used,
+                    latency_ms=int(elapsed * 1000),
+                )
         await _post_to_slack(thread_id, title, result)
     except Exception:  # noqa: BLE001 — best-effort background trigger
         log.exception("triggered investigation failed (incident=%s)", incident.get("id"))
