@@ -15,6 +15,7 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 import signal
 import sys
@@ -843,7 +844,19 @@ class TestWorkerConfiguration:
 
 
 class TestSchedulerConfiguration:
-    """Tests for scheduler configuration."""
+    """Tests for scheduler configuration.
+
+    Skipped without apscheduler, the same way the module skips without dramatiq.
+    Both ship in the optional `tasks` extra, but they are separate distributions
+    and CI installs only `--extra dev`, so the dramatiq guard at the top of the
+    file does not cover these two. `run_scheduler` imports apscheduler inside the
+    function body, so the failure landed here rather than at collection.
+    """
+
+    pytestmark = pytest.mark.skipif(
+        importlib.util.find_spec("apscheduler") is None,
+        reason="apscheduler not installed (optional `tasks` extra)",
+    )
 
     def test_run_scheduler_adds_jobs(self):
         """Should add periodic jobs to scheduler."""

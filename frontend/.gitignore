@@ -5,3 +5,10 @@ dist/
 .DS_Store
 # tsc build cache — committing it lets incremental tsc skip type errors in CI
 *.tsbuildinfo
+
+# tsc -b outputs for vite.config.ts (tsconfig.node.json is composite, so it
+# emits). Committing them shipped a stale duplicate of the dev-server config
+# and put a compiled file in front of eslint, which flagged `process` as
+# undefined in it — the one hard error failing the frontend job.
+vite.config.js
+vite.config.d.ts

@@ -29,11 +29,20 @@ export default defineConfig({
         'src/main.tsx',
         'src/vite-env.d.ts',
       ],
+      // A floor to ratchet upward, not a target. These were 70/70/60/70
+      // against an actual 0.99% line coverage — two test files for twenty
+      // page components — so the step failed on every run and was kept off
+      // the critical path with continue-on-error. That silenced real test
+      // failures too, which is the part that mattered.
+      //
+      // Set just under what the suite measures today, so the step passes and
+      // a genuine failure fails the build. Raise these as tests get written;
+      // the numbers are meant to be embarrassing enough to prompt that.
       thresholds: {
-        lines: 70,
-        functions: 70,
-        branches: 60,
-        statements: 70,
+        lines: 0.9,
+        functions: 10,
+        branches: 40,
+        statements: 0.9,
       },
     },
   },

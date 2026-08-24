@@ -80,7 +80,7 @@ jobs:
             --cov-report=xml \
             --cov-report=html \
             --cov-report=term-missing \
-            --cov-fail-under=38 \
+            --cov-fail-under=48 \
             -q
 
       - name: Upload coverage to Codecov
@@ -137,7 +137,6 @@ jobs:
 
       - name: Vitest with coverage
         run: npm run test -- --coverage
-        continue-on-error: true
 
       - name: Check coverage thresholds
         run: |
