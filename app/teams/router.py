@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Header
 from typing import Any
 
@@ -16,15 +18,19 @@ from app.teams.models import (
     InvitationResponse,
 )
 from app.teams.store import get_team_store
+from app.tenancy.supabase_auth import verify_jwt
+
+log = logging.getLogger("omnipotent.teams.router")
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
 
 def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
-    """Extract user info from auth header.
+    """Resolve the caller's identity from the Authorization header.
 
-    In production with Supabase, decode and verify the JWT token.
-    For now, extract user info from Bearer token claims.
+    The signature is verified. A previous version base64-decoded the JWT payload
+    without checking the signature, so anyone who knew a user's `sub` could forge
+    `header.payload.ANYTHING` and act as that user — including deleting their teams.
     """
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization required")
@@ -34,31 +40,18 @@ def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
 
     token = authorization[7:]  # Remove "Bearer " prefix
 
-    # In production: verify JWT signature with Supabase secret
-    # and extract claims. For now, we check if token is present.
-    try:
-        import base64
-        import json
+    claims = verify_jwt(token)
+    if claims is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token. Please authenticate.",
+        )
 
-        # JWT has 3 parts: header.payload.signature
-        parts = token.split(".")
-        if len(parts) >= 2:
-            # Decode payload (add padding if needed)
-            payload = parts[1]
-            payload += "=" * (4 - len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            return {
-                "id": claims.get("sub", ""),
-                "email": claims.get("email", ""),
-            }
-    except Exception:
-        pass
+    user_id = claims.get("sub", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token is missing a subject claim")
 
-    # If JWT parsing fails, require proper authentication
-    raise HTTPException(
-        status_code=401,
-        detail="Invalid or expired token. Please authenticate.",
-    )
+    return {"id": user_id, "email": claims.get("email", "")}
 
 
 def _check_team_permission(
@@ -386,6 +379,27 @@ async def accept_invitation(
     """Accept an invitation to join a team."""
     user = _get_user_from_header(authorization)
     store = get_team_store()
+
+    # The invitation id is not a bearer credential: it is returned to the inviter
+    # and listed by the API. Without this check any authenticated user who learns
+    # an invitation id can redeem an invite addressed to somebody else.
+    pending = store.get_invitation(invitation_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+
+    invited_email = (pending.email or "").strip().lower()
+    caller_email = (user.get("email") or "").strip().lower()
+    if not caller_email or invited_email != caller_email:
+        log.warning(
+            "Rejected invitation %s: addressed to %r, redeemed by %r",
+            invitation_id,
+            pending.email,
+            user.get("email"),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="This invitation was issued to a different email address.",
+        )
 
     invitation, member = store.accept_invitation(invitation_id, user["id"])
 

@@ -10,8 +10,6 @@ from uuid import UUID
 from app.billing.models import (
     BillingCycle,
     MetricType,
-    Subscription,
-    SubscriptionStatus,
 )
 from app.billing.plans import PlanManager
 from app.billing.feature_gate import FeatureGateService
@@ -19,6 +17,14 @@ from app.billing.usage_tracker import UsageTracker, UsageReporter
 from app.billing.stripe_integration import StripeBillingService
 
 log = logging.getLogger("omnipotent.billing.api")
+
+
+class BillingUnavailableError(RuntimeError):
+    """Raised when an operation needs Stripe but billing is not configured.
+
+    Callers must surface this as 503 rather than silently succeeding: an
+    unconfigured payment processor means the payment did not happen.
+    """
 
 
 @dataclass
@@ -252,24 +258,15 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe checkout session."""
         if not self._stripe:
-            # Demo mode: create/update subscription in store and redirect to success URL
-            log.info("Stripe not configured - using demo checkout for plan %s", plan_name)
-            plan = self._plan_manager.get_plan(plan_name)
-            if plan:
-                cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
-                sub = Subscription(
-                    org_id=org_id,
-                    plan_id=plan.plan_id,
-                    status=SubscriptionStatus.ACTIVE,
-                    billing_cycle=cycle,
-                )
-                await self._store.save_subscription(sub)
-            # Redirect to success URL or a demo confirmation page
-            redirect_url = success_url or "/?upgrade=success"
-            return {
-                "checkout_url": redirect_url,
-                "session_id": f"demo_session_{org_id}_{plan_name}",
-            }
+            # Fail closed. This previously activated the requested paid plan in the
+            # store and returned a fake session id, i.e. any caller could grant
+            # themselves the most expensive plan without paying.
+            log.error(
+                "Refusing checkout for plan %s: Stripe is not configured", plan_name
+            )
+            raise BillingUnavailableError(
+                "Payments are not available: billing is not configured on this deployment."
+            )
 
         cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
 
@@ -309,7 +306,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Change subscription plan."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         cycle = None
         if billing_cycle:
@@ -353,7 +350,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Cancel subscription."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         subscription = await self._stripe.cancel_subscription(
             org_id=org_id,
@@ -370,7 +367,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Reactivate canceled subscription."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         subscription = await self._stripe.reactivate_subscription(org_id)
         return subscription.to_dict()
@@ -462,7 +459,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Handle Stripe webhook."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         result = await self._stripe.handle_webhook(payload, signature)
         return {

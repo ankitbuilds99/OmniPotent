@@ -261,6 +261,22 @@ async def get_user_info(provider: str, access_token: str) -> OAuthUser | None:
         return None
 
 
+def _session_signing_key() -> str:
+    """Return the key used to sign/verify OAuth session JWTs.
+
+    Fails closed: there is deliberately no development fallback. A hardcoded
+    default here would let anyone forge an owner session, and the same value is
+    the KEK that wraps every tenant's integration secrets (app/secrets_vault.py).
+    """
+    secret = get_settings().copilot_secret_key
+    if not secret:
+        raise RuntimeError(
+            "COPILOT_SECRET_KEY must be set to issue or verify OAuth session tokens. "
+            "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+    return secret
+
+
 def create_session_token(
     user_id: str,
     org_id: str,
@@ -269,8 +285,7 @@ def create_session_token(
     expires_hours: int = 24,
 ) -> str:
     """Create a JWT session token."""
-    s = get_settings()
-    secret = s.copilot_secret_key or "dev-secret-key"
+    secret = _session_signing_key()
 
     now = datetime.now(timezone.utc)
     payload = {
@@ -288,8 +303,11 @@ def create_session_token(
 
 def verify_session_token(token: str) -> dict[str, Any] | None:
     """Verify and decode a session token."""
-    s = get_settings()
-    secret = s.copilot_secret_key or "dev-secret-key"
+    try:
+        secret = _session_signing_key()
+    except RuntimeError:
+        log.error("Cannot verify session token: COPILOT_SECRET_KEY is not set")
+        return None
 
     try:
         payload = jwt.decode(token, secret, algorithms=["HS256"])

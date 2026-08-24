@@ -204,10 +204,31 @@ def test_signup_disabled_returns_403(mt, monkeypatch):
     assert mt["client"].post("/signup", json={"org_name": "X", "email": "a@b.com"}).status_code == 403
 
 
-def test_billing_requires_owner(mt):
+def test_plan_change_requires_operator_not_tenant(mt, monkeypatch):
+    """No tenant key may set its own plan tier — not even the org owner.
+
+    `manage_billing` resolves to the owner role and every self-serve signup issues
+    an owner key, so a role check here would let any free account grant itself the
+    most expensive plan. Plan changes are operator/back-office only; customers move
+    tiers through Stripe checkout and the webhook.
+    """
     c = mt["client"]
-    # admin cannot change plan (manage_billing => owner)
-    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["admin"])).status_code == 403
-    # owner can
-    r = c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"]))
+    monkeypatch.setenv("COPILOT_OPERATOR_TOKEN", "op-token")
+    cfg.get_settings.cache_clear()
+
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["admin"])).status_code == 401
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"])).status_code == 401
+
+    r = c.patch(
+        f"/admin/plan?org_id={mt['org_a']}",
+        json={"plan": "enterprise"},
+        headers=_auth("op-token"),
+    )
     assert r.status_code == 200 and r.json()["plan"] == "enterprise"
+
+
+def test_plan_change_disabled_without_operator_token(mt):
+    """With COPILOT_OPERATOR_TOKEN unset the endpoint is closed, not open."""
+    c = mt["client"]
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"])).status_code == 403
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}).status_code == 403

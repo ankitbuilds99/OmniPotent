@@ -1,6 +1,6 @@
 """Slack Bot Router - @mention support and slash commands."""
 
-from fastapi import APIRouter, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 import hmac
@@ -12,12 +12,24 @@ import logging
 import httpx
 import os
 
-router = APIRouter(prefix="/slack", tags=["slack"])
 logger = logging.getLogger(__name__)
 
 
 class SlackConfig:
-    """Slack app configuration - loaded from environment variables."""
+    """Slack app configuration - loaded from environment variables.
+
+    Read via the properties below rather than the class attributes: the class
+    attributes are bound at import time, so a secret exported after import (tests,
+    lazily-loaded env files) would be silently missed.
+    """
+
+    @staticmethod
+    def signing_secret() -> str:
+        return os.getenv("SLACK_SIGNING_SECRET", "")
+
+    @staticmethod
+    def bot_token() -> str:
+        return os.getenv("SLACK_BOT_TOKEN", "")
 
     SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
     BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
@@ -28,17 +40,57 @@ def verify_slack_signature(
     body: bytes, timestamp: str, signature: str, signing_secret: str
 ) -> bool:
     """Verify Slack request signature."""
-    if abs(time.time() - int(timestamp)) > 60 * 5:
+    if not signing_secret or not signature or not timestamp:
         return False
 
-    sig_basestring = f"v0:{timestamp}:{body.decode()}"
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+
+    if abs(time.time() - ts) > 60 * 5:
+        return False
+
+    sig_basestring = b"v0:" + timestamp.encode() + b":" + body
     computed = "v0=" + hmac.new(
         signing_secret.encode(),
-        sig_basestring.encode(),
+        sig_basestring,
         hashlib.sha256
     ).hexdigest()
 
     return hmac.compare_digest(computed, signature)
+
+
+async def enforce_slack_signature(request: Request) -> None:
+    """Router-level gate: every Slack route must carry a valid Slack signature.
+
+    Fails closed when SLACK_SIGNING_SECRET is unset — an unconfigured secret must
+    not mean "accept everything" on routes that mutate incidents and escalations.
+    """
+    secret = SlackConfig.signing_secret()
+    if not secret:
+        logger.error("Rejecting Slack request: SLACK_SIGNING_SECRET is not configured")
+        raise HTTPException(
+            status_code=503, detail="Slack integration is not configured."
+        )
+
+    body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    if not verify_slack_signature(body, timestamp, signature, secret):
+        logger.warning("Rejected Slack request with invalid signature")
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+
+# Every route on this router mutates incident/escalation state or triggers an
+# investigation, so the signature gate is attached at the router level rather
+# than per-handler — a new route cannot forget it.
+router = APIRouter(
+    prefix="/slack",
+    tags=["slack"],
+    dependencies=[Depends(enforce_slack_signature)],
+)
 
 
 class SlackEventPayload(BaseModel):
@@ -344,13 +396,8 @@ async def run_investigation(
 @router.post("/events")
 async def slack_events(request: Request, background_tasks: BackgroundTasks):
     """Handle Slack Events API - mentions and messages."""
+    # Signature already verified by the router-level enforce_slack_signature gate.
     body = await request.body()
-
-    # Verify signature in production
-    # timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-    # signature = request.headers.get("X-Slack-Signature", "")
-    # if not verify_slack_signature(body, timestamp, signature, SlackConfig.SIGNING_SECRET):
-    #     raise HTTPException(status_code=401, detail="Invalid signature")
 
     payload = SlackEventPayload(**json.loads(body))
 

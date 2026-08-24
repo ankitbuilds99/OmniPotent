@@ -266,6 +266,12 @@ class Settings(BaseSettings):
     copilot_scim_token: str = ""
     copilot_scim_org: str = ""
     copilot_scim_default_role: str = "responder"
+    # Deployment-level operator token for billing-controlled mutations (PATCH
+    # /admin/plan). This is deliberately NOT a tenant role: every self-serve signup
+    # is an org owner, so gating the plan tier on the owner role would let anyone
+    # grant themselves an enterprise plan for free. Empty = the endpoint is disabled
+    # and the plan can only change through the Stripe webhook.
+    copilot_operator_token: str = ""
 
     # --- Agent behavior ---
     # Max agent (LLM) calls per turn — bounds the agent<->tools loop.

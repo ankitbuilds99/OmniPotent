@@ -14,10 +14,12 @@ Tests cover:
 import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 import pytest
 from fastapi import HTTPException
 
+from app.config import get_settings
 from app.auth.endpoints import (
     AuthProviderInfo,
     LoginResponse,
@@ -41,6 +43,26 @@ from app.auth.oauth import (
     link_oauth_account,
     verify_session_token,
 )
+
+
+TEST_SIGNING_KEY = "test-signing-key-32-bytes-minimum-length"
+TEST_ALLOWED_ORIGIN = "https://myapp.com"
+
+
+@pytest.fixture(autouse=True)
+def _auth_settings(monkeypatch):
+    """Give every test in this module a signing key and an allowed redirect origin.
+
+    Session signing deliberately has no development fallback — a hardcoded default
+    would let anyone forge an owner session — so tests must supply a key the way a
+    real deployment does. TEST_ALLOWED_ORIGIN is registered as a CORS origin so the
+    redirect_uri tests exercise the allowed path; rejection is covered separately.
+    """
+    monkeypatch.setenv("COPILOT_SECRET_KEY", TEST_SIGNING_KEY)
+    monkeypatch.setenv("CORS_ORIGINS", TEST_ALLOWED_ORIGIN)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _run(coro):
@@ -372,8 +394,7 @@ class TestSessionTokenFunctions:
         import jwt
         from app.config import get_settings
 
-        s = get_settings()
-        secret = s.copilot_secret_key or "dev-secret-key"
+        secret = get_settings().copilot_secret_key
 
         # Create token with wrong type
         token = jwt.encode(
@@ -572,13 +593,41 @@ class TestListProvidersEndpoint:
 class TestOAuthLoginEndpoint:
     """Tests for GET /auth/{provider}/login endpoint."""
 
-    def test_oauth_login_returns_redirect_url(self):
-        """oauth_login returns authorization URL."""
+    def test_oauth_login_redirects_to_provider(self):
+        """oauth_login 302s to the provider.
+
+        The browser navigates to this endpoint directly, so a JSON body would just
+        render raw JSON at the user and the OAuth flow would never start.
+        """
+        from app.auth.endpoints import oauth_login
+        from fastapi.responses import RedirectResponse
+
+        async def scenario():
+            mock_request = MagicMock()
+            mock_request.base_url = "https://app.example.com/"
+            mock_request.headers = {}
+
+            with patch("app.auth.endpoints.get_available_providers") as mock_providers, \
+                 patch("app.auth.endpoints.get_authorization_url") as mock_auth_url:
+                mock_providers.return_value = ["google"]
+                mock_auth_url.return_value = "https://accounts.google.com/oauth?state=abc"
+
+                result = await oauth_login("google", mock_request)
+
+                assert isinstance(result, RedirectResponse)
+                assert result.status_code == 302
+                assert "accounts.google.com" in result.headers["location"]
+
+        _run(scenario())
+
+    def test_oauth_login_returns_json_when_requested(self):
+        """oauth_login returns the URL as JSON for API clients that ask for it."""
         from app.auth.endpoints import oauth_login
 
         async def scenario():
             mock_request = MagicMock()
             mock_request.base_url = "https://app.example.com/"
+            mock_request.headers = {"accept": "application/json"}
 
             with patch("app.auth.endpoints.get_available_providers") as mock_providers, \
                  patch("app.auth.endpoints.get_authorization_url") as mock_auth_url:
@@ -589,6 +638,29 @@ class TestOAuthLoginEndpoint:
 
                 assert isinstance(result, LoginResponse)
                 assert "accounts.google.com" in result.redirect_url
+
+        _run(scenario())
+
+    def test_oauth_login_rejects_offsite_redirect_uri(self):
+        """oauth_login refuses a redirect_uri outside the allowed origins.
+
+        The callback appends the session token to this URI, so an unvalidated value
+        would hand a valid session to an attacker-controlled domain.
+        """
+        from app.auth.endpoints import oauth_login
+
+        async def scenario():
+            mock_request = MagicMock()
+            mock_request.base_url = "https://app.example.com/"
+            mock_request.headers = {}
+
+            with patch("app.auth.endpoints.get_available_providers") as mock_providers:
+                mock_providers.return_value = ["google"]
+
+                with pytest.raises(HTTPException) as exc_info:
+                    await oauth_login("google", mock_request, redirect_uri="https://evil.example/steal")
+
+                assert exc_info.value.status_code == 400
 
         _run(scenario())
 
@@ -638,17 +710,19 @@ class TestOAuthLoginEndpoint:
         async def scenario():
             mock_request = MagicMock()
             mock_request.base_url = "https://app.example.com/"
+            mock_request.headers = {}
 
             with patch("app.auth.endpoints.get_available_providers") as mock_providers, \
                  patch("app.auth.endpoints.get_authorization_url") as mock_auth_url:
                 mock_providers.return_value = ["github"]
                 mock_auth_url.return_value = "https://github.com/login/oauth"
 
-                await oauth_login("github", mock_request, redirect_uri="https://myapp.com")
+                await oauth_login("github", mock_request, redirect_uri=TEST_ALLOWED_ORIGIN)
 
-                # Verify callback URL includes redirect_uri parameter
+                # Verify callback URL includes redirect_uri parameter (URL-encoded, so
+                # a redirect_uri carrying its own query string can't inject params).
                 call_args = mock_auth_url.call_args
-                assert "redirect_uri=https://myapp.com" in call_args[0][1]
+                assert f"redirect_uri={quote(TEST_ALLOWED_ORIGIN, safe='')}" in call_args[0][1]
 
         _run(scenario())
 
@@ -1267,8 +1341,7 @@ class TestSecurityValidations:
         import jwt
         from app.config import get_settings
 
-        s = get_settings()
-        secret = s.copilot_secret_key or "dev-secret-key"
+        secret = get_settings().copilot_secret_key
 
         # Create token with wrong type
         wrong_type_token = jwt.encode(

@@ -14,6 +14,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
@@ -37,6 +38,36 @@ from app.config import get_settings
 log = logging.getLogger("omnipotent.auth.endpoints")
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+def _validate_redirect_uri(redirect_uri: str) -> str:
+    """Reject redirect targets that are not an allowed origin.
+
+    The callback appends the session token to this URI, so an unvalidated value
+    hands a valid session to any attacker-controlled domain. Relative paths are
+    allowed; absolute URLs must match a configured origin exactly.
+    """
+    if not redirect_uri:
+        return ""
+
+    # Relative paths stay on our own origin. Reject protocol-relative ("//evil.com")
+    # and backslash variants, which browsers normalise to absolute URLs.
+    if redirect_uri.startswith("/"):
+        if redirect_uri.startswith(("//", "/\\")):
+            raise HTTPException(400, "Invalid redirect_uri")
+        return redirect_uri
+
+    parsed = urlsplit(redirect_uri)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(400, "Invalid redirect_uri")
+
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    allowed = {o.rstrip("/") for o in get_settings().allowed_origins}
+    if origin not in allowed:
+        log.warning("Rejected redirect_uri to non-allowed origin: %s", origin)
+        raise HTTPException(400, "redirect_uri is not an allowed origin")
+
+    return redirect_uri
 
 
 class AuthProviderInfo(BaseModel):
@@ -117,17 +148,25 @@ async def oauth_login(
     if provider not in available:
         raise HTTPException(400, f"Provider '{provider}' is not configured")
 
+    redirect_uri = _validate_redirect_uri(redirect_uri)
+
     base_url = str(request.base_url).rstrip("/")
     callback_url = f"{base_url}/auth/{provider}/callback"
 
     if redirect_uri:
-        callback_url += f"?redirect_uri={redirect_uri}"
+        callback_url += f"?redirect_uri={quote(redirect_uri, safe='')}"
 
     auth_url = get_authorization_url(provider, callback_url)
     if not auth_url:
         raise HTTPException(500, "Failed to generate authorization URL")
 
-    return LoginResponse(redirect_url=auth_url)
+    # This endpoint is navigated to directly by the browser (window.location.href),
+    # so it must redirect. Returning a JSON body renders raw JSON at the user and
+    # the OAuth flow never starts. Clients that want the URL can send Accept: json.
+    accept = request.headers.get("accept", "")
+    if "application/json" in accept:
+        return LoginResponse(redirect_url=auth_url)
+    return RedirectResponse(auth_url, status_code=302)
 
 
 @router.get("/{provider}/callback")
@@ -145,10 +184,12 @@ async def oauth_callback(
     and exchanges it for an access token. On success, creates a session
     and redirects to the app.
     """
+    redirect_uri = _validate_redirect_uri(redirect_uri)
+
     if error:
         log.warning("OAuth error from %s: %s", provider, error)
         if redirect_uri:
-            return RedirectResponse(f"{redirect_uri}?error={error}")
+            return RedirectResponse(f"{redirect_uri}?error={quote(error, safe='')}")
         raise HTTPException(400, f"OAuth error: {error}")
 
     if not code:
@@ -164,7 +205,7 @@ async def oauth_callback(
     base_url = str(request.base_url).rstrip("/")
     callback_url = f"{base_url}/auth/{provider}/callback"
     if redirect_uri:
-        callback_url += f"?redirect_uri={redirect_uri}"
+        callback_url += f"?redirect_uri={quote(redirect_uri, safe='')}"
 
     token_data = await exchange_code_for_token(provider, code, callback_url)
     if not token_data:

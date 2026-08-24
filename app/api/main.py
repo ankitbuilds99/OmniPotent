@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -230,6 +231,10 @@ _gate = _ConfigGate()
 _OPEN_PATHS = frozenset({"/healthz", "/readyz", "/metrics/slo", "/frontend-config", "/auth/providers"})
 # Auth callback paths need to be open for OAuth redirects
 _AUTH_PATH_PREFIXES = ("/auth/",)
+# Back-office paths authenticated by COPILOT_OPERATOR_TOKEN rather than a tenant API
+# key. These skip tenant-key resolution in require_auth; each route still carries
+# _operator_guard, which fails closed when the token is unset or wrong.
+_OPERATOR_PATHS = frozenset({"/admin/plan"})
 
 # --- In-memory per-IP fixed-window rate limiter (single-instance only) ---
 # {ip: (window_start_epoch, count)}. Good enough for one process; a multi-instance
@@ -433,6 +438,11 @@ async def require_auth(request: Request) -> None:
     # SCIM provisioning authenticates with its own IdP-issued bearer token, checked
     # in the handler (not the shared app token).
     if request.url.path.startswith("/scim/"):
+        return
+    # Operator/back-office endpoints carry COPILOT_OPERATOR_TOKEN instead of a tenant
+    # key, and _operator_guard checks it. Skipping here only skips the tenant-key
+    # resolution below; the route's own dependency still fails closed.
+    if request.url.path in _OPERATOR_PATHS:
         return
     # Self-serve signup is how a new tenant GETS its first credential, so it can't
     # require one. It stays out of _OPEN_PATHS so the IP rate-limiter still applies
@@ -2601,13 +2611,32 @@ async def admin_set_integration(req: SetIntegrationRequest) -> dict:
     return {"status": "saved", "name": name}
 
 
+def _operator_guard(request: Request) -> None:
+    """Authenticate a deployment-operator request via COPILOT_OPERATOR_TOKEN.
+
+    Used for mutations that decide what a tenant has paid for. A tenant permission
+    is not sufficient here: `manage_billing` resolves to the owner role, and every
+    self-serve signup issues an owner key, so a role check would let a free account
+    grant itself the most expensive plan. Raises 403 when unconfigured, 401 on a bad
+    token.
+    """
+    s = get_settings()
+    if not s.copilot_operator_token:
+        raise HTTPException(403, "Operator endpoints are not configured on this deployment.")
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not secrets.compare_digest(token, s.copilot_operator_token):
+        raise HTTPException(401, "Invalid operator token.")
+
+
 @app.patch(
     "/admin/plan",
     tags=["Admin"],
-    summary="Update organization plan",
-    description="Change the organization's subscription plan. Typically called by "
-    "billing webhooks. Requires manage_billing permission.",
-    dependencies=[Depends(require_perm("manage_billing"))],
+    summary="Update organization plan (operator only)",
+    description="Change an organization's subscription plan. This is an operator/back-office "
+    "endpoint: it requires COPILOT_OPERATOR_TOKEN, not a tenant API key. Customer-driven "
+    "plan changes go through billing (Stripe checkout and the webhook), never through here.",
+    dependencies=[Depends(_operator_guard)],
     responses={
         200: {
             "description": "Plan updated",
@@ -2617,21 +2646,25 @@ async def admin_set_integration(req: SetIntegrationRequest) -> dict:
                 }
             },
         },
+        401: {"description": "Invalid operator token"},
+        403: {"description": "Operator endpoints not configured"},
     },
 )
-async def admin_set_plan(req: SetPlanRequest) -> dict:
-    """Update the organization plan.
+async def admin_set_plan(req: SetPlanRequest, org_id: str = "") -> dict:
+    """Update an organization's plan.
 
     Args:
         req: New plan tier.
+        org_id: Target organization. Defaults to the ambient tenant when omitted,
+            which is the single-tenant case.
 
     Returns:
         dict: Updated plan.
     """
-    org_id = _current_org_id()
+    target = org_id.strip() or _current_org_id()
     plan = tn_models.normalize_plan(req.plan)
-    await tenant_auth.get_store().set_plan(org_id, plan)
-    audit.record("plan.changed", org=org_id, plan=plan)
+    await tenant_auth.get_store().set_plan(target, plan)
+    audit.record("plan.changed", org=target, plan=plan, actor="operator")
     return {"plan": plan}
 
 

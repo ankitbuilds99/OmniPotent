@@ -14,9 +14,15 @@ class TestOAuthModule:
         providers = get_available_providers()
         assert isinstance(providers, list)
 
-    def test_session_token_creation_and_verification(self):
+    def test_session_token_creation_and_verification(self, monkeypatch):
         """Test JWT session token creation and verification."""
         from app.auth.oauth import create_session_token, verify_session_token
+        from app.config import get_settings
+
+        # Session signing has no development fallback on purpose — a hardcoded
+        # default would let anyone forge an owner session — so supply a key.
+        monkeypatch.setenv("COPILOT_SECRET_KEY", "test-signing-key-32-bytes-minimum-length")
+        get_settings.cache_clear()
 
         token = create_session_token(
             user_id="user_123",

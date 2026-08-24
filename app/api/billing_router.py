@@ -6,7 +6,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.billing import (
@@ -14,12 +14,18 @@ from app.billing import (
     InMemoryBillingStore,
     StripeBillingService,
 )
+from app.billing.api import BillingUnavailableError
 from app.config import get_settings
 from app import tenant_context
 
 log = logging.getLogger("omnipotent.api.billing")
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
+
+
+def _unavailable(exc: BillingUnavailableError) -> HTTPException:
+    """Map an unconfigured-billing failure to 503 (never a silent success)."""
+    return HTTPException(status_code=503, detail=str(exc))
 
 # Billing service singletons (initialized lazily)
 _BILLING_STORE: InMemoryBillingStore | None = None
@@ -130,7 +136,10 @@ async def change_subscription(req: ChangePlanRequest) -> dict[str, Any]:
     """Change subscription plan."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.change_plan(org_id, req.plan_name, req.billing_cycle)
+    try:
+        return await api.change_plan(org_id, req.plan_name, req.billing_cycle)
+    except BillingUnavailableError as e:
+        raise _unavailable(e) from e
 
 
 @router.post("/subscription/cancel")
@@ -138,7 +147,10 @@ async def cancel_subscription(req: CancelRequest) -> dict[str, Any]:
     """Cancel subscription."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.cancel_subscription(org_id, req.reason, req.immediate, req.feedback)
+    try:
+        return await api.cancel_subscription(org_id, req.reason, req.immediate, req.feedback)
+    except BillingUnavailableError as e:
+        raise _unavailable(e) from e
 
 
 @router.post("/subscription/reactivate")
@@ -146,7 +158,10 @@ async def reactivate_subscription() -> dict[str, Any]:
     """Reactivate canceled subscription."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.reactivate_subscription(org_id)
+    try:
+        return await api.reactivate_subscription(org_id)
+    except BillingUnavailableError as e:
+        raise _unavailable(e) from e
 
 
 @router.get("/subscription/proration")
@@ -212,14 +227,17 @@ async def create_checkout(req: CheckoutRequest) -> dict[str, Any]:
     """Create a Stripe checkout session."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.create_checkout(
-        org_id,
-        req.plan_name,
-        req.billing_cycle,
-        req.email,
-        req.success_url,
-        req.cancel_url,
-    )
+    try:
+        return await api.create_checkout(
+            org_id,
+            req.plan_name,
+            req.billing_cycle,
+            req.email,
+            req.success_url,
+            req.cancel_url,
+        )
+    except BillingUnavailableError as e:
+        raise _unavailable(e) from e
 
 
 @router.post("/portal")
@@ -227,7 +245,10 @@ async def create_portal(req: PortalRequest) -> dict[str, Any]:
     """Create a Stripe customer portal session."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.create_portal(org_id, req.return_url)
+    try:
+        return await api.create_portal(org_id, req.return_url)
+    except BillingUnavailableError as e:
+        raise _unavailable(e) from e
 
 
 # Invoice and payment method endpoints
@@ -289,4 +310,7 @@ async def handle_stripe_webhook(request: Request) -> dict[str, Any]:
     api = _get_billing_api()
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
-    return await api.handle_webhook(payload, signature)
+    try:
+        return await api.handle_webhook(payload, signature)
+    except BillingUnavailableError as e:
+        raise _unavailable(e) from e
