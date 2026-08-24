@@ -73,15 +73,28 @@ class CopilotSession:
         }
 
     async def pending_interrupt(self) -> bool:
-        """True if this thread is paused mid-run (awaiting human approval).
+        """True if this thread is paused awaiting human approval.
 
-        After a normal completion the graph's `next` is empty; after an
-        `interrupt()` it holds the paused node. Used to (a) reject a fresh /chat
-        on a paused thread and (b) tell a reconstructed session whether there's
-        actually something to resume.
+        Used to (a) reject a fresh /chat on a paused thread and (b) tell a
+        reconstructed session whether there's actually something to resume.
+
+        This looks for a real interrupt payload rather than a non-empty `next`.
+        A turn that dies mid-run — bad API key, network blip — also leaves `next`
+        pointing at the node it failed on, with no interrupt attached. Treating
+        that as "awaiting approval" bricked the thread permanently: every later
+        message was refused with "approve or reject the pending action first",
+        while /approve had nothing to resume.
         """
         snapshot = await self._graph.aget_state(self._config)
-        return bool(getattr(snapshot, "next", ()))
+        interrupts = getattr(snapshot, "interrupts", None)
+        if interrupts is None:
+            # Older LangGraph exposes interrupts on the pending tasks instead.
+            interrupts = tuple(
+                i
+                for task in getattr(snapshot, "tasks", ())
+                for i in getattr(task, "interrupts", ())
+            )
+        return bool(interrupts)
 
     async def ask(self, question: str) -> TurnResult:
         """Start a new investigation turn (non-streaming; used by CLI/evals)."""

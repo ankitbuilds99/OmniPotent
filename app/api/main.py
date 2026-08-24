@@ -38,7 +38,8 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocketException
+from starlette.requests import HTTPConnection
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -419,35 +420,69 @@ async def lifespan(app: FastAPI):
         await _drain_and_close()
 
 
-async def require_auth(request: Request) -> None:
+def _auth_header(conn: HTTPConnection) -> str:
+    """Return the Authorization header, or its WebSocket equivalent.
+
+    Browsers cannot set an Authorization header on a WebSocket handshake, so the
+    token arrives as an `auth-<token>` entry in Sec-WebSocket-Protocol instead
+    (kept out of the query string, which gets written to access logs). Normalising
+    it to `Bearer <token>` lets both transports run the same checks.
+    """
+    header = conn.headers.get("authorization", "")
+    if header or conn.scope.get("type") != "websocket":
+        return header
+    for proto in conn.headers.get("sec-websocket-protocol", "").split(","):
+        proto = proto.strip()
+        if proto.startswith("auth-"):
+            return f"Bearer {proto[5:]}"
+    return ""
+
+
+def _reject(conn: HTTPConnection, detail: str) -> Exception:
+    """Build the right rejection for the transport.
+
+    An HTTPException raised during a WebSocket handshake has no response to be
+    written to, so websockets get a policy-violation close instead.
+    """
+    if conn.scope.get("type") == "websocket":
+        return WebSocketException(code=1008, reason=detail)
+    return HTTPException(401, detail)
+
+
+async def require_auth(conn: HTTPConnection) -> None:
     """Bearer-token gate for every route except probes and CORS preflight.
 
     When COPILOT_API_TOKEN is unset the API is open (local-dev default); set it
     in production and the frontend must send `Authorization: Bearer <token>`.
     (The static SPA mount is a sub-app, so it bypasses this dependency entirely.)
+
+    Takes an HTTPConnection, not a Request, so it can also gate WebSocket routes:
+    FastAPI cannot supply a Request to a websocket handler, and asking for one
+    made every /ws/* handshake fail with a TypeError before the route was reached.
     """
-    if request.method == "OPTIONS" or request.url.path in _OPEN_PATHS:
+    # WebSocket scopes carry no method, and CORS preflight never reaches a handler.
+    if conn.scope.get("method") == "OPTIONS" or conn.url.path in _OPEN_PATHS:
         return
     # Auth routes need to be open for OAuth login/callback flows.
-    if any(request.url.path.startswith(p) for p in _AUTH_PATH_PREFIXES):
+    if any(conn.url.path.startswith(p) for p in _AUTH_PATH_PREFIXES):
         return
     # Webhooks authenticate via their own provider signatures (HMAC), not the
     # shared bearer token — PagerDuty/Slack don't send it.
-    if request.url.path.startswith("/webhooks/"):
+    if conn.url.path.startswith("/webhooks/"):
         return
     # SCIM provisioning authenticates with its own IdP-issued bearer token, checked
     # in the handler (not the shared app token).
-    if request.url.path.startswith("/scim/"):
+    if conn.url.path.startswith("/scim/"):
         return
     # Operator/back-office endpoints carry COPILOT_OPERATOR_TOKEN instead of a tenant
     # key, and _operator_guard checks it. Skipping here only skips the tenant-key
     # resolution below; the route's own dependency still fails closed.
-    if request.url.path in _OPERATOR_PATHS:
+    if conn.url.path in _OPERATOR_PATHS:
         return
     # Self-serve signup is how a new tenant GETS its first credential, so it can't
     # require one. It stays out of _OPEN_PATHS so the IP rate-limiter still applies
     # (abuse guard); the handler itself enforces multi-tenant + the enabled flag.
-    if request.url.path == "/signup":
+    if conn.url.path == "/signup":
         return
 
     s = get_settings()
@@ -455,7 +490,7 @@ async def require_auth(request: Request) -> None:
     # TenantConfig + actor on the contextvar. Task-isolated, so it's scoped to
     # this request and read by runtime.py / the agent for the rest of the call.
     if s.copilot_multi_tenant:
-        provided = request.headers.get("authorization", "")
+        provided = _auth_header(conn)
         token = provided[7:].strip() if provided.startswith("Bearer ") else provided.strip()
         # A `dcp_…` value is a tenant API key; anything with two dots is a JWT
         # (Supabase/SSO login). Both resolve to the same TenantConfig + actor.
@@ -466,7 +501,7 @@ async def require_auth(request: Request) -> None:
         else:
             resolved = None
         if resolved is None:
-            raise HTTPException(401, "Invalid or revoked credential.")
+            raise _reject(conn, "Invalid or revoked credential.")
         cfg, actor = resolved
         tenant_context.set_tenant(cfg)
         tenant_context.set_actor(actor)
@@ -475,10 +510,10 @@ async def require_auth(request: Request) -> None:
     expected = s.copilot_api_token
     if not expected:
         return  # auth disabled (dev)
-    provided = request.headers.get("authorization", "")
+    provided = _auth_header(conn)
     # Constant-time compare so the token can't be recovered via response timing.
     if not hmac.compare_digest(provided, f"Bearer {expected}"):
-        raise HTTPException(401, "Missing or invalid API token.")
+        raise _reject(conn, "Missing or invalid API token.")
 
 
 def require_perm(action: str):

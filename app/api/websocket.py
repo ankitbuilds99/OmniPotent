@@ -234,16 +234,14 @@ async def websocket_chat(websocket: WebSocket, thread_id: str):
         await websocket.close(code=4000, reason="WebSocket disabled")
         return
 
-    # Extract auth token from subprotocol (secure - not logged in access logs)
+    # The token itself was already verified by the app-level require_auth gate,
+    # which reads the same `auth-<token>` subprotocol and closes the handshake with
+    # 1008 on a bad credential. This check only covers the copilot_require_auth
+    # flag, which demands a token even in deployments where auth is otherwise off.
     token = _extract_token_from_subprotocol(websocket)
-
-    # Validate token if required
     if settings.copilot_require_auth and not token:
         await websocket.close(code=4001, reason="Authentication required")
         return
-
-    # TODO: Validate token against tenant auth if multi-tenant
-    # For now, presence of token is sufficient (matches SSE behavior)
 
     # Extract session_id from query params for reconnection support
     query_params = dict(websocket.query_params)

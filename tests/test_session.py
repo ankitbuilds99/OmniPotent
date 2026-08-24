@@ -76,3 +76,55 @@ def test_confidence_gate_allows_well_evidenced_auto_approval(monkeypatch):
     monkeypatch.setattr(s, "_pending_gate", _ok)
     approved, _ = asyncio.run(s._apply_confidence_gate(True, "", auto=True))
     assert approved is True
+
+
+# --------------------------------------------------------------------------- #
+# pending_interrupt must mean "a human owes us a decision", not "the graph has
+# a next node". A crashed turn also leaves `next` set, and conflating the two
+# bricked the thread: /chat refused every later message as "awaiting approval"
+# while /approve had nothing to resume.
+# --------------------------------------------------------------------------- #
+class _Snapshot:
+    def __init__(self, next_nodes=(), interrupts=()):
+        self.next = next_nodes
+        self.interrupts = interrupts
+        self.tasks = ()
+
+
+class _FakeGraph:
+    def __init__(self, snapshot):
+        self._snapshot = snapshot
+
+    async def aget_state(self, _config):
+        return self._snapshot
+
+
+def _pending(snapshot) -> bool:
+    s = CopilotSession(thread_id="t")
+    s._graph = _FakeGraph(snapshot)
+    return asyncio.run(s.pending_interrupt())
+
+
+def test_pending_interrupt_true_for_real_approval_pause():
+    assert _pending(_Snapshot(next_nodes=("approval",), interrupts=({"action": "deploy"},))) is True
+
+
+def test_pending_interrupt_false_after_crashed_turn():
+    """The graph died at `plan` with no interrupt attached — nothing to approve."""
+    assert _pending(_Snapshot(next_nodes=("plan",), interrupts=())) is False
+
+
+def test_pending_interrupt_false_after_normal_completion():
+    assert _pending(_Snapshot(next_nodes=(), interrupts=())) is False
+
+
+def test_pending_interrupt_reads_task_interrupts_when_snapshot_lacks_them():
+    """Older LangGraph hangs interrupts off the pending tasks instead."""
+    class _Task:
+        name = "approval"
+        interrupts = ({"action": "deploy"},)
+
+    snap = _Snapshot(next_nodes=("approval",))
+    del snap.interrupts
+    snap.tasks = (_Task(),)
+    assert _pending(snap) is True

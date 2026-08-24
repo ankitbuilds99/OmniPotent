@@ -203,3 +203,49 @@ def test_session_queue_limit():
         assert len(pending) == 100
 
     asyncio.run(test())
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end handshake. The app-level require_auth dependency used to ask for a
+# Request, which FastAPI cannot supply to a websocket route, so every /ws/chat
+# handshake died with `TypeError: require_auth() missing 1 required positional
+# argument: 'request'` before the handler was ever reached.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def ws_client(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.config import get_settings
+
+    monkeypatch.delenv("COPILOT_API_TOKEN", raising=False)
+    monkeypatch.setenv("COPILOT_MULTI_TENANT", "false")
+    get_settings.cache_clear()
+    yield TestClient(app, raise_server_exceptions=False)
+    get_settings.cache_clear()
+
+
+def test_websocket_handshake_succeeds(ws_client):
+    with ws_client.websocket_connect("/ws/chat/t1") as ws:
+        frame = ws.receive_json()
+    assert frame["type"] == "connected"
+    assert frame["thread_id"] == "t1"
+
+
+def test_websocket_rejects_bad_token(ws_client, monkeypatch):
+    """The token in the subprotocol is verified, not merely present."""
+    from starlette.websockets import WebSocketDisconnect
+    from app.config import get_settings
+
+    monkeypatch.setenv("COPILOT_API_TOKEN", "right-token")
+    get_settings.cache_clear()
+
+    with pytest.raises(WebSocketDisconnect):
+        with ws_client.websocket_connect(
+            "/ws/chat/t1", subprotocols=["copilot-v1", "auth-wrong-token"]
+        ) as ws:
+            ws.receive_json()
+
+    with ws_client.websocket_connect(
+        "/ws/chat/t1", subprotocols=["copilot-v1", "auth-right-token"]
+    ) as ws:
+        assert ws.receive_json()["type"] == "connected"
