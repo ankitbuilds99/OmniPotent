@@ -301,6 +301,12 @@ class SLOTracker:
         end_time: datetime | None = None,
     ) -> list[SLI]:
         """Get SLI measurements for an SLO."""
+        # Via get_slo, not _SLI_DATA directly: `_SLI_DATA` is keyed by SLO id
+        # alone and shared by every org, so reading it unchecked returned
+        # another tenant's measurement series to anyone holding the id.
+        if self.get_slo(slo_id) is None:
+            return []
+
         data = _SLI_DATA.get(slo_id, [])
 
         if start_time:

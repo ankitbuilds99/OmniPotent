@@ -5,12 +5,16 @@ REST API and GraphQL endpoint for the knowledge graph.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Request, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
 from pydantic import BaseModel
 
+from app.tenant_context import tenant_id
+from app.tenancy.scoping import scoped
 from app.knowledge_graph.neo4j_backend import (
     Neo4jKnowledgeGraph,
     ServiceNode,
@@ -28,44 +32,104 @@ log = logging.getLogger("omnipotent.knowledge_graph.api")
 
 router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 
-# NOT tenant-isolated, unlike the other feature routers.
-#
-# These are a connection to one shared Neo4j database, not an in-process store,
-# so giving each org its own client would open N connections to the same data
-# and isolate nothing. Real isolation needs an org property on every node and an
-# org filter in every Cypher query in neo4j_backend.py (which has none today),
-# plus a migration for existing graphs — a larger change than this pass.
-#
-# Until that lands, treat /api/knowledge-graph as shared across tenants: do not
-# enable it on a deployment serving more than one customer. It is inert unless
-# NEO4J_URI is configured, so the default deployment is unaffected.
-_graph: Neo4jKnowledgeGraph | None = None
-_sync_engine: ContinuousSyncEngine | None = None
 _graphql_app: Any = None
 
 
-async def get_graph() -> Neo4jKnowledgeGraph:
-    """Get or create knowledge graph instance."""
-    global _graph
-    if _graph is None:
+class _OrgGraph:
+    """One graph client and sync engine for one org, connected exactly once.
+
+    `Neo4jKnowledgeGraph.connect()` falls back to a per-instance in-memory store
+    when the neo4j driver or server is absent — which is the default deployment,
+    since nothing in `app/config.py` defines neo4j settings at all. That store
+    used to live on a single process-wide instance, so every org read and wrote
+    the same services, incidents, changes and alerts. Giving each org its own
+    instance isolates the fallback completely.
+
+    A *real* Neo4j connection is a different matter: N clients against one
+    database isolate nothing, because no Cypher query in neo4j_backend.py
+    carries an org filter. `require_isolated()` below refuses to serve a tenant
+    in that configuration rather than leak across orgs.
+    """
+
+    def __init__(self) -> None:
         settings = get_settings()
-        _graph = Neo4jKnowledgeGraph(
+        self.graph = Neo4jKnowledgeGraph(
             uri=getattr(settings, "neo4j_uri", "bolt://localhost:7687"),
             username=getattr(settings, "neo4j_username", "neo4j"),
             password=getattr(settings, "neo4j_password", ""),
             database=getattr(settings, "neo4j_database", "neo4j"),
         )
-        await _graph.connect()
-    return _graph
+        self.engine = ContinuousSyncEngine(self.graph)
+        # connect() resets the in-memory store, so it must run once per instance
+        # even if several requests for a new org arrive together.
+        self._lock = asyncio.Lock()
+        self._ready = False
+        self._live_neo4j = False
+
+    async def ready(self) -> _OrgGraph:
+        if not self._ready:
+            async with self._lock:
+                if not self._ready:
+                    self._live_neo4j = await self.graph.connect()
+                    self._ready = True
+        return self
+
+    def require_isolated(self) -> None:
+        org = tenant_id()
+        if self._live_neo4j and org not in ("", "-"):
+            raise HTTPException(
+                503,
+                "The knowledge graph is backed by a shared Neo4j database with no "
+                "per-org partitioning, so it cannot serve a multi-tenant deployment. "
+                "Unset the neo4j settings to use the isolated in-process graph.",
+            )
+
+
+_GRAPHS = scoped(_OrgGraph)
+
+
+async def _org_graph() -> _OrgGraph:
+    holder = await _GRAPHS.get().ready()
+    holder.require_isolated()
+    return holder
+
+
+async def get_graph() -> Neo4jKnowledgeGraph:
+    """The current org's knowledge graph."""
+    return (await _org_graph()).graph
 
 
 async def get_sync_engine() -> ContinuousSyncEngine:
-    """Get or create sync engine instance."""
-    global _sync_engine
-    if _sync_engine is None:
-        graph = await get_graph()
-        _sync_engine = ContinuousSyncEngine(graph)
-    return _sync_engine
+    """The current org's sync engine."""
+    return (await _org_graph()).engine
+
+
+def _check_sync_url(field: str, url: str) -> None:
+    """Reject a sync-source URL the operator has not allow-listed.
+
+    These URLs are fetched server-side from inside the deployment network, so
+    accepting an arbitrary one lets any authenticated user — a viewer included —
+    reach internal services and the cloud metadata endpoint. Blocking private
+    ranges is not an option here: a Prometheus at 10.x or `localhost:9090` is
+    the *normal* configuration. So the allow-list is the control, and it is
+    empty until an operator names their own hosts.
+    """
+    if not url:
+        return
+
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(400, f"{field} must be an http(s) URL")
+
+    allowed = get_settings().sync_allowed_hosts
+    host = parsed.hostname.lower()
+    candidates = {host, f"{host}:{parsed.port}" if parsed.port else host}
+    if not allowed or not (candidates & allowed):
+        raise HTTPException(
+            403,
+            f"{field} host '{host}' is not allowed. Set COPILOT_SYNC_ALLOWED_HOSTS "
+            "to the observability hosts this deployment may fetch from.",
+        )
 
 
 async def get_graphql_context(request: Request) -> dict[str, Any]:
@@ -442,9 +506,13 @@ async def configure_sync_source(
             trail_name=cfg.get("trail_name"),
         )
     elif source == "prometheus":
+        prometheus_url = cfg.get("prometheus_url", "http://localhost:9090")
+        alertmanager_url = cfg.get("alertmanager_url", "http://localhost:9093")
+        _check_sync_url("prometheus_url", prometheus_url)
+        _check_sync_url("alertmanager_url", alertmanager_url)
         engine.add_prometheus(
-            prometheus_url=cfg.get("prometheus_url", "http://localhost:9090"),
-            alertmanager_url=cfg.get("alertmanager_url", "http://localhost:9093"),
+            prometheus_url=prometheus_url,
+            alertmanager_url=alertmanager_url,
         )
     elif source == "kubernetes":
         engine.add_kubernetes(
@@ -453,9 +521,9 @@ async def configure_sync_source(
             namespace=cfg.get("namespace"),
         )
     elif source == "jaeger":
-        engine.add_jaeger(
-            jaeger_url=cfg.get("jaeger_url", "http://localhost:16686"),
-        )
+        jaeger_url = cfg.get("jaeger_url", "http://localhost:16686")
+        _check_sync_url("jaeger_url", jaeger_url)
+        engine.add_jaeger(jaeger_url=jaeger_url)
     else:
         return {"error": f"Unknown source: {source}"}
 

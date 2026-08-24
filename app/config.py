@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # Empty = the project root, which keeps the bundled sample data working while
     # preventing the agent from being aimed at arbitrary host paths.
     copilot_sources_root: str = ""
+    # Comma-separated `host` or `host:port` values that a request may point a
+    # knowledge-graph sync source at (Prometheus, Alertmanager, Jaeger). Empty =
+    # no request may set one, which is the safe default: those URLs are fetched
+    # from inside the deployment network, so accepting an arbitrary one turns
+    # any authenticated user into an SSRF primitive against internal services
+    # and the cloud metadata endpoint. An operator naming their own observability
+    # hosts here is the only thing that should widen it.
+    copilot_sync_allowed_hosts: str = ""
 
     # --- URLs (configurable for different environments) ---
     # Frontend URL for redirects (Stripe, OAuth, etc.)
@@ -526,6 +534,15 @@ class Settings(BaseSettings):
         base = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
         extra = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
         return base + extra
+
+    @property
+    def sync_allowed_hosts(self) -> set[str]:
+        """Hosts a sync-source URL may name, as lowercase `host` or `host:port`."""
+        return {
+            h.strip().lower()
+            for h in self.copilot_sync_allowed_hosts.split(",")
+            if h.strip()
+        }
 
     @property
     def repo_path(self) -> Path:

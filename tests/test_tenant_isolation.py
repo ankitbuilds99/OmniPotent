@@ -70,7 +70,32 @@ def test_audit_lines_are_tenant_and_actor_stamped():
         reset_tenant(token)
         set_actor("-")
 
-    events = {e["event"]: e for e in audit.recent()}
-    assert events["test.event_no_tenant"]["org_id"] == "-"
-    assert events["test.event_with_tenant"]["org_id"] == "acme"
-    assert events["test.event_with_tenant"]["actor"] == "key:ci"
+    # recent() reads one org's trail, so ask for each explicitly.
+    untenanted = {e["event"]: e for e in audit.recent(org_id="-")}
+    acme = {e["event"]: e for e in audit.recent(org_id="acme")}
+
+    assert untenanted["test.event_no_tenant"]["org_id"] == "-"
+    assert acme["test.event_with_tenant"]["org_id"] == "acme"
+    assert acme["test.event_with_tenant"]["actor"] == "key:ci"
+
+
+def test_audit_trails_do_not_cross_tenants():
+    audit.clear()
+    for org in ("acme", "globex"):
+        token = set_tenant(TenantConfig(org_id=org))
+        set_actor(f"key:{org}")
+        try:
+            audit.record(f"test.{org}_only")
+        finally:
+            reset_tenant(token)
+            set_actor("-")
+
+    # The buffer is one process-wide deque, so without scoping GET /audit
+    # handed every tenant every other tenant's trail, actor addresses included.
+    token = set_tenant(TenantConfig(org_id="acme"))
+    try:
+        visible = {e["event"] for e in audit.recent()}
+    finally:
+        reset_tenant(token)
+
+    assert visible == {"test.acme_only"}

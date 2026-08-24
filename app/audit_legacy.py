@@ -82,10 +82,21 @@ def verify_chain(events: list[dict] | None = None) -> dict:
     return {"valid": True, "count": len(items)}
 
 
-def recent(limit: int = 100, event_prefix: str = "") -> list[dict]:
+def recent(
+    limit: int = 100, event_prefix: str = "", org_id: str | None = None
+) -> list[dict]:
     """Return the most recent audit events (newest first), optionally filtered by
-    an event-name prefix (e.g. "approval", "security", "feedback")."""
-    items = list(_BUFFER)
+    an event-name prefix (e.g. "approval", "security", "feedback").
+
+    Scoped to one org. Every entry is stamped with the tenant that produced it,
+    but the buffer is shared by the whole process, so returning it unfiltered
+    handed any authenticated tenant every other tenant's audit trail — actor
+    email addresses, thread ids, approval decisions and security events. Pass
+    `org_id` to read a specific org's trail; the default is the caller's, which
+    in a single-tenant deployment is '-' for every entry and so changes nothing.
+    """
+    org = tenant_context.tenant_id() if org_id is None else org_id
+    items = [e for e in _BUFFER if e.get("org_id", "-") == org]
     if event_prefix:
         items = [e for e in items if str(e.get("event", "")).startswith(event_prefix)]
     return items[-limit:][::-1]
