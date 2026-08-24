@@ -31,10 +31,10 @@ from sqlalchemy import (
     Numeric,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models import Base
+from app.database.types import JSONB, UUID
 
 
 # ============================================================================

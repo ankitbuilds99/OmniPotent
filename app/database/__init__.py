@@ -46,6 +46,7 @@ if TYPE_CHECKING or _HAS_SQLALCHEMY:
     from app.database.engine import (
         get_engine,
         get_session,
+        session_dependency,
         init_db,
         close_db,
         check_db_health,
@@ -63,6 +64,7 @@ if TYPE_CHECKING or _HAS_SQLALCHEMY:
         # SQLAlchemy
         "get_engine",
         "get_session",
+        "session_dependency",
         "init_db",
         "close_db",
         "check_db_health",

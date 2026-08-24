@@ -15,12 +15,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, date, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
-from app.database.engine import get_session as get_async_session
+from app.database.engine import session_dependency as get_async_session
 from app.oncall.schedule_service import get_schedule_service
 from app.oncall.escalation_service import get_escalation_service
 from app.oncall.ai_oncall_service import get_ai_oncall_service
@@ -32,10 +33,207 @@ from app.oncall.models import (
     OncallSwapRequest,
     OncallAlert,
 )
+from app.tenant_context import tenant_id
 
 log = logging.getLogger("omnipotent.oncall.api")
 
 router = APIRouter(prefix="/oncall", tags=["oncall"])
+
+# Namespace for deriving a stable org UUID from a tenant's string org id.
+_ORG_NAMESPACE = UUID("6ba7b812-9dad-11d1-80b4-00c04fd430c8")
+# Single-tenant deployments have no org; everything they own lives under this.
+_SINGLE_TENANT_ORG = UUID("00000000-0000-0000-0000-000000000000")
+
+
+def _org_uuid() -> UUID:
+    """The org that owns rows written by, and visible to, this request.
+
+    Every row used to be created with the nil UUID and no query filtered on it,
+    so one tenant's on-call teams, schedules, escalation policies and alerts
+    were another tenant's too — including paging their responders. The org_id
+    column existed the whole time; nothing set it.
+
+    Tenant org ids are opaque strings and the column is a UUID, so a tenant id
+    that is already a UUID is used directly and anything else is hashed into one
+    (uuid5, stable across restarts and processes).
+    """
+    org = tenant_id()
+    if org in ("", "-"):
+        return _SINGLE_TENANT_ORG
+    try:
+        return UUID(org)
+    except ValueError:
+        return uuid5(_ORG_NAMESPACE, org)
+
+
+async def _ensure_org_row(db: Any) -> UUID:
+    """Return the current org's id, creating its `organizations` row if absent.
+
+    On-call rows carry a foreign key to `organizations`, but tenants are
+    registered in the separate tenant-auth store, which never writes that table.
+    On Postgres that makes the first team insert a foreign-key violation; SQLite
+    only hides it because it does not enforce foreign keys by default.
+    """
+    from sqlalchemy import select
+
+    from app.database.models import Organization
+
+    org = _org_uuid()
+    result = await db.execute(select(Organization.id).where(Organization.id == org))
+    if result.scalar_one_or_none() is not None:
+        return org
+
+    tenant = tenant_id()
+    slug = "default" if tenant in ("", "-") else tenant[:64]
+    db.add(Organization(id=org, slug=slug, name=slug))
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two first-requests for the same tenant raced; the other one won.
+        await db.rollback()
+    else:
+        log.info("created organizations row for tenant %s", slug)
+    return org
+
+
+async def _owned_team(db: Any, team_id: UUID) -> OncallTeam:
+    """Load a team, 404ing if it belongs to another org.
+
+    404 rather than 403: whether a team id exists at all is itself the other
+    tenant's information.
+    """
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(OncallTeam).where(
+            OncallTeam.id == team_id, OncallTeam.org_id == _org_uuid()
+        )
+    )
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return team
+
+
+async def _owned_schedule(db: Any, schedule_id: UUID):
+    """Load a schedule via its team, 404ing if it belongs to another org.
+
+    Schedules, shifts and overrides carry no org_id of their own — they hang off
+    a team — so ownership is checked one join up.
+    """
+    from sqlalchemy import select
+
+    from app.oncall.models import OncallSchedule
+
+    result = await db.execute(
+        select(OncallSchedule)
+        .join(OncallTeam, OncallTeam.id == OncallSchedule.team_id)
+        .where(OncallSchedule.id == schedule_id, OncallTeam.org_id == _org_uuid())
+    )
+    schedule = result.scalar_one_or_none()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return schedule
+
+
+async def _owned_shift(db: Any, shift_id: UUID) -> OncallShift:
+    """Load a shift via schedule → team, 404ing if it belongs to another org."""
+    from sqlalchemy import select
+
+    from app.oncall.models import OncallSchedule
+
+    result = await db.execute(
+        select(OncallShift)
+        .join(OncallSchedule, OncallSchedule.id == OncallShift.schedule_id)
+        .join(OncallTeam, OncallTeam.id == OncallSchedule.team_id)
+        .where(OncallShift.id == shift_id, OncallTeam.org_id == _org_uuid())
+    )
+    shift = result.scalar_one_or_none()
+    if not shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+    return shift
+
+
+async def _owned_override(db: Any, override_id: UUID) -> OncallOverride:
+    """Load an override via schedule → team, 404ing if it belongs to another org."""
+    from sqlalchemy import select
+
+    from app.oncall.models import OncallSchedule
+
+    result = await db.execute(
+        select(OncallOverride)
+        .join(OncallSchedule, OncallSchedule.id == OncallOverride.schedule_id)
+        .join(OncallTeam, OncallTeam.id == OncallSchedule.team_id)
+        .where(OncallOverride.id == override_id, OncallTeam.org_id == _org_uuid())
+    )
+    override = result.scalar_one_or_none()
+    if not override:
+        raise HTTPException(status_code=404, detail="Override not found")
+    return override
+
+
+async def _owned_swap(db: Any, swap_id: UUID) -> OncallSwapRequest:
+    """Load a swap request via its shift, 404ing if it belongs to another org.
+
+    Accepting or declining a swap changes who is paged for an outage, so this is
+    one of the endpoints where cross-tenant write access matters most.
+    """
+    from sqlalchemy import select
+
+    from app.oncall.models import OncallSchedule
+
+    result = await db.execute(
+        select(OncallSwapRequest)
+        .join(OncallShift, OncallShift.id == OncallSwapRequest.from_shift_id)
+        .join(OncallSchedule, OncallSchedule.id == OncallShift.schedule_id)
+        .join(OncallTeam, OncallTeam.id == OncallSchedule.team_id)
+        .where(OncallSwapRequest.id == swap_id, OncallTeam.org_id == _org_uuid())
+    )
+    swap = result.scalar_one_or_none()
+    if not swap:
+        raise HTTPException(status_code=404, detail="Swap request not found")
+    return swap
+
+
+async def _owned_policy(db: Any, policy_id: UUID):
+    """Load an escalation policy via its team, 404ing if another org owns it."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.oncall.models import OncallEscalationPolicy
+
+    result = await db.execute(
+        select(OncallEscalationPolicy)
+        .join(OncallTeam, OncallTeam.id == OncallEscalationPolicy.team_id)
+        .where(
+            OncallEscalationPolicy.id == policy_id,
+            OncallTeam.org_id == _org_uuid(),
+        )
+        .options(selectinload(OncallEscalationPolicy.steps))
+    )
+    policy = result.scalar_one_or_none()
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return policy
+
+
+async def _owned_alert(db: Any, alert_id: UUID) -> OncallAlert:
+    """Load an alert, 404ing if it belongs to another org.
+
+    Alerts carry their own org_id, so this is a direct filter — but nothing set
+    that column before, so every alert in the table read as the nil org.
+    """
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(OncallAlert).where(
+            OncallAlert.id == alert_id, OncallAlert.org_id == _org_uuid()
+        )
+    )
+    alert = result.scalar_one_or_none()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return alert
 
 
 # ============================================================================
@@ -188,14 +386,19 @@ async def create_team(
     """Create a new on-call team."""
     from sqlalchemy import select
 
+    org = await _ensure_org_row(db)
+    # Slugs are unique per org (uq_oncall_team_slug), so the collision check has
+    # to be too — otherwise one tenant taking "platform" blocks it for everyone.
     result = await db.execute(
-        select(OncallTeam).where(OncallTeam.slug == request.slug)
+        select(OncallTeam).where(
+            OncallTeam.slug == request.slug, OncallTeam.org_id == org
+        )
     )
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Team slug already exists")
 
     team = OncallTeam(
-        org_id=UUID("00000000-0000-0000-0000-000000000000"),
+        org_id=org,
         name=request.name,
         slug=request.slug,
         description=request.description,
@@ -213,11 +416,13 @@ async def create_team(
 async def list_teams(
     db=Depends(get_async_session),
 ) -> list[TeamResponse]:
-    """List all on-call teams."""
+    """List this org's on-call teams."""
     from sqlalchemy import select
 
     result = await db.execute(
-        select(OncallTeam).where(OncallTeam.is_active.is_(True))
+        select(OncallTeam).where(
+            OncallTeam.is_active.is_(True), OncallTeam.org_id == _org_uuid()
+        )
     )
     teams = result.scalars().all()
     return [TeamResponse.model_validate(t) for t in teams]
@@ -239,7 +444,7 @@ async def get_team(
             selectinload(OncallTeam.schedules),
             selectinload(OncallTeam.escalation_policies),
         )
-        .where(OncallTeam.id == team_id)
+        .where(OncallTeam.id == team_id, OncallTeam.org_id == _org_uuid())
     )
     team = result.scalar_one_or_none()
     if not team:
@@ -254,6 +459,8 @@ async def add_team_member(
     db=Depends(get_async_session),
 ):
     """Add a member to the team."""
+    await _owned_team(db, team_id)
+
     member = OncallTeamMember(
         team_id=team_id,
         user_id=request.user_id,
@@ -276,6 +483,8 @@ async def get_current_oncall(
     db=Depends(get_async_session),
 ):
     """Get current on-call for a team."""
+    await _owned_team(db, team_id)
+
     service = await get_schedule_service(db)
     return await service.get_current_oncall(team_id, at_time)
 
@@ -290,6 +499,8 @@ async def create_schedule(
     db=Depends(get_async_session),
 ):
     """Create a new on-call schedule."""
+    await _owned_team(db, request.team_id)
+
     service = await get_schedule_service(db)
     schedule = await service.create_schedule(
         team_id=request.team_id,
@@ -313,6 +524,8 @@ async def get_schedule(
     db=Depends(get_async_session),
 ):
     """Get schedule details."""
+    await _owned_schedule(db, schedule_id)
+
     service = await get_schedule_service(db)
     schedule = await service.get_schedule(schedule_id)
     if not schedule:
@@ -327,6 +540,8 @@ async def reorder_rotation(
     db=Depends(get_async_session),
 ):
     """Reorder rotation participants (drag-and-drop)."""
+    await _owned_schedule(db, schedule_id)
+
     service = await get_schedule_service(db)
     await service.update_rotation_order(schedule_id, request.participant_order)
     return {"success": True}
@@ -339,6 +554,8 @@ async def generate_shifts(
     db=Depends(get_async_session),
 ):
     """Generate shifts for a schedule."""
+    await _owned_schedule(db, schedule_id)
+
     service = await get_schedule_service(db)
     shifts = await service.generate_shifts(
         schedule_id=schedule_id,
@@ -357,6 +574,8 @@ async def detect_schedule_gaps(
     db=Depends(get_async_session),
 ):
     """Detect coverage gaps in schedule."""
+    await _owned_schedule(db, schedule_id)
+
     service = await get_schedule_service(db)
     return await service.detect_gaps(schedule_id, start_date, end_date)
 
@@ -370,6 +589,8 @@ async def list_schedule_shifts(
 ) -> list[ShiftResponse]:
     """List shifts for a schedule."""
     from sqlalchemy import select
+
+    await _owned_schedule(db, schedule_id)
 
     result = await db.execute(
         select(OncallShift)
@@ -394,6 +615,8 @@ async def create_override(
     db=Depends(get_async_session),
 ):
     """Create a schedule override."""
+    await _owned_schedule(db, request.schedule_id)
+
     override = OncallOverride(
         schedule_id=request.schedule_id,
         original_user_id=request.original_user_id,
@@ -419,15 +642,7 @@ async def cancel_override(
     db=Depends(get_async_session),
 ):
     """Cancel an override."""
-    from sqlalchemy import select
-
-    result = await db.execute(
-        select(OncallOverride).where(OncallOverride.id == override_id)
-    )
-    override = result.scalar_one_or_none()
-
-    if not override:
-        raise HTTPException(status_code=404, detail="Override not found")
+    override = await _owned_override(db, override_id)
 
     override.status = "cancelled"
     await db.commit()
@@ -446,15 +661,7 @@ async def create_swap_request(
     db=Depends(get_async_session),
 ):
     """Create a shift swap request."""
-    from sqlalchemy import select
-
-    result = await db.execute(
-        select(OncallShift).where(OncallShift.id == request.from_shift_id)
-    )
-    shift = result.scalar_one_or_none()
-
-    if not shift:
-        raise HTTPException(status_code=404, detail="Shift not found")
+    shift = await _owned_shift(db, request.from_shift_id)
 
     swap = OncallSwapRequest(
         from_shift_id=request.from_shift_id,
@@ -480,15 +687,7 @@ async def accept_swap(
     db=Depends(get_async_session),
 ):
     """Accept a swap request."""
-    from sqlalchemy import select
-
-    result = await db.execute(
-        select(OncallSwapRequest).where(OncallSwapRequest.id == swap_id)
-    )
-    swap = result.scalar_one_or_none()
-
-    if not swap:
-        raise HTTPException(status_code=404, detail="Swap request not found")
+    swap = await _owned_swap(db, swap_id)
 
     if swap.status != "pending":
         raise HTTPException(status_code=400, detail=f"Swap request is already {swap.status}")
@@ -511,15 +710,7 @@ async def decline_swap(
     db=Depends(get_async_session),
 ):
     """Decline a swap request."""
-    from sqlalchemy import select
-
-    result = await db.execute(
-        select(OncallSwapRequest).where(OncallSwapRequest.id == swap_id)
-    )
-    swap = result.scalar_one_or_none()
-
-    if not swap:
-        raise HTTPException(status_code=404, detail="Swap request not found")
+    swap = await _owned_swap(db, swap_id)
 
     if swap.status != "pending":
         raise HTTPException(status_code=400, detail=f"Swap request is already {swap.status}")
@@ -543,11 +734,13 @@ async def get_open_swaps(
     """Get open swap requests for a schedule."""
     from sqlalchemy import select
 
+    schedule = await _owned_schedule(db, schedule_id)
+
     result = await db.execute(
         select(OncallSwapRequest, OncallShift)
         .join(OncallShift, OncallSwapRequest.from_shift_id == OncallShift.id)
         .where(
-            OncallShift.schedule_id == schedule_id,
+            OncallShift.schedule_id == schedule.id,
             OncallSwapRequest.status == "pending",
             OncallSwapRequest.to_user_id.is_(None),
             OncallSwapRequest.expires_at > datetime.utcnow(),
@@ -582,9 +775,10 @@ async def create_escalation_policy(
     db=Depends(get_async_session),
 ):
     """Create an escalation policy."""
+    team = await _owned_team(db, request.team_id)
     service = await get_escalation_service(db)
     policy = await service.create_escalation_policy(
-        team_id=request.team_id,
+        team_id=team.id,
         name=request.name,
         description=request.description,
         steps=request.steps,
@@ -602,8 +796,9 @@ async def get_team_policies(
     db=Depends(get_async_session),
 ):
     """Get escalation policies for a team."""
+    team = await _owned_team(db, team_id)
     service = await get_escalation_service(db)
-    policies = await service.get_team_policies(team_id)
+    policies = await service.get_team_policies(team.id)
     return [
         {
             "id": p.id,
@@ -621,10 +816,7 @@ async def get_policy(
     db=Depends(get_async_session),
 ):
     """Get escalation policy details."""
-    service = await get_escalation_service(db)
-    policy = await service.get_policy(policy_id)
-    if not policy:
-        raise HTTPException(status_code=404, detail="Policy not found")
+    policy = await _owned_policy(db, policy_id)
     return {
         "id": policy.id,
         "name": policy.name,
@@ -655,9 +847,10 @@ async def create_alert(
     db=Depends(get_async_session),
 ):
     """Create and trigger an alert."""
+    team = await _owned_team(db, request.team_id)
     alert = OncallAlert(
-        org_id=UUID("00000000-0000-0000-0000-000000000000"),
-        team_id=request.team_id,
+        org_id=await _ensure_org_row(db),
+        team_id=team.id,
         title=request.title,
         description=request.description,
         severity=request.severity,
@@ -673,9 +866,21 @@ async def create_alert(
     await db.commit()
     await db.refresh(alert)
 
-    async def start_escalation():
-        service = await get_escalation_service(db)
-        await service.start_escalation(alert)
+    alert_id = alert.id
+
+    async def start_escalation() -> None:
+        # A fresh session, not `db`: since FastAPI 0.106 a yield-dependency's
+        # cleanup runs before background tasks, so `db` is already closed here
+        # and `alert` is detached. start_escalation() commits, so it needs a
+        # live session and an attached row.
+        from app.database.engine import get_session
+
+        async with get_session() as session:
+            escalating = await session.get(OncallAlert, alert_id)
+            if escalating is None:
+                return
+            service = await get_escalation_service(session)
+            await service.start_escalation(escalating)
 
     background_tasks.add_task(start_escalation)
 
@@ -690,6 +895,7 @@ async def acknowledge_alert(
     db=Depends(get_async_session),
 ):
     """Acknowledge an alert."""
+    await _owned_alert(db, alert_id)
     service = await get_escalation_service(db)
     alert = await service.acknowledge_alert(alert_id, user_id)
     return {"id": alert.id, "status": alert.status}
@@ -703,6 +909,7 @@ async def resolve_alert(
     db=Depends(get_async_session),
 ):
     """Resolve an alert."""
+    await _owned_alert(db, alert_id)
     service = await get_escalation_service(db)
     alert = await service.resolve_alert(alert_id, user_id, notes)
     return {"id": alert.id, "status": alert.status}
@@ -720,7 +927,7 @@ async def list_alerts(
     """List alerts."""
     from sqlalchemy import select
 
-    query = select(OncallAlert)
+    query = select(OncallAlert).where(OncallAlert.org_id == _org_uuid())
 
     if team_id:
         query = query.where(OncallAlert.team_id == team_id)
@@ -748,14 +955,7 @@ async def ai_route_alert(
     db=Depends(get_async_session),
 ):
     """Get AI recommendation for alert routing."""
-    from sqlalchemy import select
-
-    result = await db.execute(
-        select(OncallAlert).where(OncallAlert.id == alert_id)
-    )
-    alert = result.scalar_one_or_none()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
+    alert = await _owned_alert(db, alert_id)
 
     if not alert.team_id:
         raise HTTPException(status_code=400, detail="Alert has no team")
@@ -774,9 +974,10 @@ async def ai_find_coverage(
     db=Depends(get_async_session),
 ):
     """AI-powered coverage finder."""
+    schedule = await _owned_schedule(db, schedule_id)
     service = await get_ai_oncall_service(db)
     return await service.find_optimal_coverage(
-        schedule_id=schedule_id,
+        schedule_id=schedule.id,
         start_time=start_time,
         end_time=end_time,
         exclude_user_id=exclude_user_id,
@@ -791,8 +992,9 @@ async def detect_alert_fatigue(
     db=Depends(get_async_session),
 ):
     """Detect alert fatigue patterns."""
+    team = await _owned_team(db, team_id)
     service = await get_ai_oncall_service(db)
-    return await service.detect_alert_fatigue(team_id, window_hours)
+    return await service.detect_alert_fatigue(team.id, window_hours)
 
 
 @router.get("/ai/teams/{team_id}/workload")
@@ -802,8 +1004,9 @@ async def analyze_workload(
     db=Depends(get_async_session),
 ):
     """Analyze workload balance."""
+    team = await _owned_team(db, team_id)
     service = await get_ai_oncall_service(db)
-    return await service.analyze_workload_balance(team_id, period_days)
+    return await service.analyze_workload_balance(team.id, period_days)
 
 
 # ============================================================================
@@ -1036,8 +1239,10 @@ async def create_override_with_reason(
             detail=f"Invalid reason. Valid options: {[r.value for r in OverrideReason]}"
         )
 
+    schedule = await _owned_schedule(db, request.schedule_id)
+
     override = OncallOverride(
-        schedule_id=request.schedule_id,
+        schedule_id=schedule.id,
         original_user_id=request.original_user_id,
         override_user_id=request.override_user_id,
         start_time=request.start_time,
@@ -1077,15 +1282,7 @@ async def approve_override(
     db=Depends(get_async_session),
 ):
     """Approve a pending override."""
-    from sqlalchemy import select
-
-    result = await db.execute(
-        select(OncallOverride).where(OncallOverride.id == override_id)
-    )
-    override = result.scalar_one_or_none()
-
-    if not override:
-        raise HTTPException(status_code=404, detail="Override not found")
+    override = await _owned_override(db, override_id)
 
     if override.status != "pending":
         raise HTTPException(status_code=400, detail=f"Override is already {override.status}")
@@ -1111,7 +1308,9 @@ async def list_schedule_overrides(
     """List overrides for a schedule with optional filtering."""
     from sqlalchemy import select
 
-    query = select(OncallOverride).where(OncallOverride.schedule_id == schedule_id)
+    schedule = await _owned_schedule(db, schedule_id)
+
+    query = select(OncallOverride).where(OncallOverride.schedule_id == schedule.id)
 
     if status:
         query = query.where(OncallOverride.status == status)
@@ -1165,11 +1364,13 @@ async def analyze_schedule_gaps(
     from sqlalchemy import select
     from app.oncall.schedules import GapDetector, ScheduleShift
 
+    schedule = await _owned_schedule(db, schedule_id)
+
     # Fetch shifts for the period
     result = await db.execute(
         select(OncallShift)
         .where(
-            OncallShift.schedule_id == schedule_id,
+            OncallShift.schedule_id == schedule.id,
             OncallShift.status.in_(["scheduled", "active"]),
             OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
             OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
@@ -1327,10 +1528,12 @@ async def view_schedule_in_timezone(
     from sqlalchemy import select
     from app.oncall.schedules import TimezoneManager
 
+    schedule = await _owned_schedule(db, schedule_id)
+
     result = await db.execute(
         select(OncallShift)
         .where(
-            OncallShift.schedule_id == schedule_id,
+            OncallShift.schedule_id == schedule.id,
             OncallShift.status.in_(["scheduled", "active"]),
             OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
             OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
@@ -1369,17 +1572,9 @@ async def get_dst_transitions(
 
     Alerts about potential issues during daylight saving time changes.
     """
-    from sqlalchemy import select
     from app.oncall.schedules import TimezoneManager
-    from app.oncall.models import OncallSchedule
 
-    result = await db.execute(
-        select(OncallSchedule).where(OncallSchedule.id == schedule_id)
-    )
-    schedule = result.scalar_one_or_none()
-
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    schedule = await _owned_schedule(db, schedule_id)
 
     transitions = TimezoneManager.get_dst_transitions(
         schedule.timezone,
@@ -1416,16 +1611,8 @@ async def get_schedule_ical_feed(
     from sqlalchemy import select
     from fastapi.responses import Response
     from app.oncall.schedules import CalendarExporter, ScheduleShift
-    from app.oncall.models import OncallSchedule
 
-    # Get schedule
-    result = await db.execute(
-        select(OncallSchedule).where(OncallSchedule.id == schedule_id)
-    )
-    schedule = result.scalar_one_or_none()
-
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    schedule = await _owned_schedule(db, schedule_id)
 
     # Default to next 30 days
     if not start_date:
@@ -1435,7 +1622,7 @@ async def get_schedule_ical_feed(
 
     # Get shifts
     query = select(OncallShift).where(
-        OncallShift.schedule_id == schedule_id,
+        OncallShift.schedule_id == schedule.id,
         OncallShift.status.in_(["scheduled", "active"]),
         OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
         OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
@@ -1491,16 +1678,7 @@ async def get_ical_subscription_url(
     Returns a URL that can be added to calendar applications
     for automatic syncing.
     """
-    from sqlalchemy import select
-    from app.oncall.models import OncallSchedule
-
-    result = await db.execute(
-        select(OncallSchedule).where(OncallSchedule.id == schedule_id)
-    )
-    schedule = result.scalar_one_or_none()
-
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    schedule = await _owned_schedule(db, schedule_id)
 
     # Build subscription URL
     base_url = "/api/v1/oncall"  # In production, use actual base URL
@@ -1543,10 +1721,12 @@ async def analyze_schedule_workload(
     from sqlalchemy import select
     from app.oncall.schedules import ScheduleAnalyzer, ScheduleShift
 
+    schedule = await _owned_schedule(db, schedule_id)
+
     result = await db.execute(
         select(OncallShift)
         .where(
-            OncallShift.schedule_id == schedule_id,
+            OncallShift.schedule_id == schedule.id,
             OncallShift.status.in_(["scheduled", "active", "completed"]),
             OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
             OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
@@ -1618,9 +1798,11 @@ async def create_enhanced_escalation_policy(
     )
     from uuid import uuid4
 
+    team = await _owned_team(db, request.team_id)
+
     policy_id = uuid4()
     builder = EscalationPolicyBuilder(request.name, policy_id)
-    builder.for_team(request.team_id)
+    builder.for_team(team.id)
     builder.with_description(request.description)
 
     # Add default steps
@@ -1679,7 +1861,7 @@ async def create_enhanced_escalation_policy(
     # Store in database (using existing escalation service)
     service = await get_escalation_service(db)
     db_policy = await service.create_escalation_policy(
-        team_id=request.team_id,
+        team_id=team.id,
         name=request.name,
         description=request.description,
         steps=[s.to_dict() for s in policy.steps],
@@ -1722,6 +1904,8 @@ async def create_policy_from_template(
     )
     from uuid import uuid4
 
+    team = await _owned_team(db, team_id)
+
     policy_id = uuid4()
 
     if template_type == "simple":
@@ -1755,7 +1939,7 @@ async def create_policy_from_template(
     # Store in database
     service = await get_escalation_service(db)
     db_policy = await service.create_escalation_policy(
-        team_id=team_id,
+        team_id=team.id,
         name=policy.name,
         description=policy.description,
         steps=[s.to_dict() for s in policy.steps],

@@ -378,6 +378,16 @@ async def lifespan(app: FastAPI):
         if get_settings().copilot_tenant_db.startswith(("postgres://", "postgresql://")) is False:
             log.warning("multi-tenant on SQLite is app-level isolated, not RLS-hard-isolated; "
                         "use Postgres + RLS for production tenant isolation")
+    # ORM tables (on-call, organizations, ...). Nothing called init_db before,
+    # so those tables never existed and every DB-backed endpoint answered 500
+    # against a missing table. Failure is logged rather than fatal: the bulk of
+    # the app (chat, investigations, incidents) does not touch this database,
+    # and refusing to boot over it would be a worse outcome than today's.
+    from app.database.engine import init_db
+    try:
+        await init_db()
+    except Exception:
+        log.exception("database init failed; DB-backed endpoints (on-call) will not work")
     # OpenTelemetry tracing (no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set).
     from app import otel
     otel.init_tracing()

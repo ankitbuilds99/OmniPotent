@@ -14,6 +14,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
 
 from sqlalchemy import text
@@ -133,22 +134,53 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         await session.close()
 
 
+async def session_dependency() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency yielding a session.
+
+    `get_session` is an @asynccontextmanager, which FastAPI cannot consume as a
+    dependency — it tries to iterate the returned context-manager object and
+    raises "'_AsyncGeneratorContextManager' object is not an async iterator".
+    The on-call router used it directly, so every /oncall/* endpoint answered
+    500. FastAPI wants a bare async generator, which is what this is.
+    """
+    async with get_session() as session:
+        yield session
+
+
+def _ensure_sqlite_directory(url: str) -> None:
+    """Create the directory holding a file-backed SQLite database.
+
+    The default URL is `sqlite+aiosqlite:///data/copilot.db`; SQLite will not
+    create `data/` itself, it just fails to open the file.
+    """
+    path = url.split("///", 1)[-1].split("?", 1)[0]
+    if not path or path == ":memory:":
+        return
+    parent = Path(path).parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+
+
 async def init_db() -> None:
     """Initialize database tables and run migrations.
 
     Called during application startup. Creates tables if they don't exist
     (dev mode) or verifies migration state (production).
     """
+    # Importing the model modules is what registers their tables on the shared
+    # metadata; create_all only creates what has been imported.
     from app.database.models import Base
+    import app.oncall.models  # noqa: F401
 
     engine = get_engine()
     url = _get_database_url()
     is_sqlite = "sqlite" in url
 
     if is_sqlite:
+        _ensure_sqlite_directory(url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        log.info("SQLite database initialized (tables created)")
+        log.info("SQLite database initialized (%d tables)", len(Base.metadata.tables))
     else:
         log.info("PostgreSQL database ready (use Alembic for migrations)")
 
