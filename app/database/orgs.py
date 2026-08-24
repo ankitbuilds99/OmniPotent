@@ -44,15 +44,27 @@ def org_uuid() -> UUID:
 
 async def ensure_org_row(db: Any) -> UUID:
     """Return the current org's id, creating its `organizations` row if absent."""
+    return await ensure_org(db, org_uuid())
+
+
+async def ensure_org(db: Any, org: UUID) -> UUID:
+    """As `ensure_org_row`, for a caller that already knows the org id.
+
+    The billing store is org-parameterized rather than context-driven, so it
+    needs the same foreign-key parent without going back through the request's
+    tenant context.
+    """
     from app.database.models import Organization
 
-    org = org_uuid()
     result = await db.execute(select(Organization.id).where(Organization.id == org))
     if result.scalar_one_or_none() is not None:
         return org
 
     tenant = tenant_id()
     slug = "default" if tenant in ("", "-") else tenant[:64]
+    if org != org_uuid():
+        # Not this request's org; the slug has to stay unique.
+        slug = str(org)[:64]
     db.add(Organization(id=org, slug=slug, name=slug))
     try:
         await db.commit()

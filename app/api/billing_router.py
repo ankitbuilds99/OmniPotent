@@ -11,12 +11,12 @@ from pydantic import BaseModel
 
 from app.billing import (
     BillingAPI,
-    InMemoryBillingStore,
+    DatabaseBillingStore,
     StripeBillingService,
 )
 from app.billing.api import BillingUnavailableError
 from app.config import get_settings
-from app import tenant_context
+from app.database.orgs import org_uuid
 
 log = logging.getLogger("omnipotent.api.billing")
 
@@ -27,16 +27,18 @@ def _unavailable(exc: BillingUnavailableError) -> HTTPException:
     """Map an unconfigured-billing failure to 503 (never a silent success)."""
     return HTTPException(status_code=503, detail=str(exc))
 
-# Billing service singletons (initialized lazily)
-_BILLING_STORE: InMemoryBillingStore | None = None
+# Billing service singletons (initialized lazily). The store holds no state of
+# its own — every row it reads and writes is in the `billing_*` tables — so one
+# instance for the process is enough.
+_BILLING_STORE: DatabaseBillingStore | None = None
 _STRIPE_SERVICE: StripeBillingService | None = None
 _BILLING_API: BillingAPI | None = None
 
 
-def _get_store() -> InMemoryBillingStore:
+def _get_store() -> DatabaseBillingStore:
     global _BILLING_STORE
     if _BILLING_STORE is None:
-        _BILLING_STORE = InMemoryBillingStore()
+        _BILLING_STORE = DatabaseBillingStore()
     return _BILLING_STORE
 
 
@@ -69,12 +71,15 @@ def _get_billing_api() -> BillingAPI:
 
 
 def _current_org_id() -> UUID:
-    """Get current organization ID from tenant context."""
-    cfg = tenant_context.get_tenant()
-    if cfg is None:
-        # In single-tenant mode, use a fixed org ID
-        return UUID("00000000-0000-0000-0000-000000000000")
-    return UUID(cfg.org_id)
+    """The org that owns this request's billing rows.
+
+    Tenant org ids are opaque strings; this read `UUID(cfg.org_id)` directly and
+    raised ValueError — a 500 on every /billing/* route — for any tenant whose id
+    was not already a UUID. `org_uuid()` is the same derivation the rest of the
+    DB-backed features use, so billing rows land under the same org as the
+    incidents and runbooks beside them.
+    """
+    return org_uuid()
 
 
 # Request/Response models

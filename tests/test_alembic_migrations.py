@@ -39,6 +39,13 @@ CORE_TABLES = {
     "incidents",
     "incident_investigations",
     "usage_records",
+    "billing_organizations",
+    "billing_subscriptions",
+    "billing_invoices",
+    "billing_payment_methods",
+    "billing_usage_records",
+    "billing_usage_summaries",
+    "billing_feature_overrides",
 }
 ONCALL_TABLES = {
     "oncall_alerts",

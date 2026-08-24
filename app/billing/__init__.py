@@ -76,6 +76,10 @@ from app.billing.store import (
     FakeStripeClient,
 )
 
+from app.billing.db_store import (
+    DatabaseBillingStore,
+)
+
 from app.billing.api import (
     BillingAPI,
     PlanResponse,
@@ -138,6 +142,7 @@ __all__ = [
     "WebhookResult",
     "verify_stripe_signature",
     # Store
+    "DatabaseBillingStore",
     "InMemoryBillingStore",
     "FakeStripeClient",
     # API
