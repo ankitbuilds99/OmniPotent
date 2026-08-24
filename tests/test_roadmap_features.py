@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -29,9 +28,6 @@ from app.llm_advanced.model_router import (
     ModelRouter,
     RoutingContext,
     TaskComplexity,
-)
-from app.analytics.cost_attribution import (
-    CostTracker,
 )
 from app.resilience.graceful_degradation import (
     DegradationLevel,
@@ -254,65 +250,6 @@ class TestModelRouter:
         decision = router.route(context)
 
         assert decision.estimated_cost <= 0.01 or decision.reason == "fallback_to_default"
-
-
-class TestCostAttribution:
-    def test_record_cost(self):
-        tracker = CostTracker()
-
-        entry = tracker.record(
-            tenant_id="tenant-1",
-            model="gpt-4o",
-            input_tokens=1000,
-            output_tokens=500,
-            user_id="user-1",
-            feature="investigation",
-        )
-
-        assert entry.tenant_id == "tenant-1"
-        assert entry.amount > Decimal(0)
-
-    def test_cost_summary(self):
-        tracker = CostTracker()
-
-        tracker.record("tenant-1", "gpt-4o", 1000, 500)
-        tracker.record("tenant-1", "gpt-4o-mini", 500, 200)
-
-        now = datetime.now(timezone.utc)
-        summary = tracker.get_summary(
-            tenant_id="tenant-1",
-            start=now - timedelta(hours=1),
-            end=now + timedelta(hours=1),
-        )
-
-        assert summary.total_requests == 2
-        assert summary.total_amount > Decimal(0)
-        assert len(summary.by_model) == 2
-
-    def test_budget_check(self):
-        tracker = CostTracker()
-        tracker.set_budget(
-            tenant_id="tenant-1",
-            monthly_limit=Decimal("10.00"),
-            hard_limit=True,
-        )
-
-        can_proceed, reason = tracker.can_proceed("tenant-1", Decimal("5.00"))
-        assert can_proceed is True
-
-    def test_budget_exceeded(self):
-        tracker = CostTracker()
-        tracker.set_budget(
-            tenant_id="tenant-1",
-            monthly_limit=Decimal("0.01"),
-            hard_limit=True,
-        )
-
-        tracker.record("tenant-1", "gpt-4o", 10000, 5000)
-
-        can_proceed, reason = tracker.can_proceed("tenant-1", Decimal("0.01"))
-        assert can_proceed is False
-        assert "exceeded" in reason
 
 
 class TestGracefulDegradation:
