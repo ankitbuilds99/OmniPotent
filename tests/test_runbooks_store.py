@@ -214,3 +214,56 @@ def test_terminal_status_stamps_completed_at(db):
 
     failed = _as("acme", lambda: store.set_execution_status(execution.id, StepStatus.FAILED))
     assert failed.completed_at is not None
+
+
+def test_execution_timestamps_come_back_as_utc_aware(db):
+    """An execution's timestamps must not disagree with each other.
+
+    SQLite has no timezone type, so a `DateTime(timezone=True)` column round
+    trips naive. The per-step timestamps are parsed from ISO strings in the
+    JSON results and keep their offset, so without normalisation one response
+    carried both conventions — and any comparison against
+    `datetime.now(utc)` raised TypeError.
+    """
+    rb = _runbook()
+    _as("acme", lambda: store.create_runbook(rb))
+    execution = _as(
+        "acme", lambda: store.record_execution(rb, StepStatus.RUNNING, {})
+    )
+    _as("acme", lambda: store.set_execution_status(execution.id, StepStatus.SUCCESS))
+
+    # Read back through the database rather than using the object just built.
+    listed = _as("acme", lambda: store.list_executions())[0]
+
+    assert listed.started_at.tzinfo is not None
+    assert listed.completed_at.tzinfo is not None
+    assert (listed.completed_at - listed.started_at).total_seconds() >= 0
+
+
+def test_an_execution_can_hold_any_trigger_its_runbook_can(db):
+    """`record_execution` copies the runbook's trigger into the execution row.
+
+    `runbooks.trigger` is 64 wide and the execution column was 32, with nothing
+    capping the trigger on the way in — `CreateRunbookRequest.trigger` is a
+    plain str. A runbook with a 40-character trigger therefore saved fine and
+    then could not record a single execution: on Postgres the insert raises
+    StringDataRightTruncation and POST /api/runbooks/{id}/execute 500s, so the
+    audit trail for a script that runs against production has a hole in it.
+    SQLite ignores VARCHAR lengths, which is why the columns are compared here
+    as well as exercised.
+    """
+    from app.database.models import Runbook as RunbookRow, RunbookExecution
+
+    assert (
+        RunbookExecution.__table__.c.trigger.type.length
+        >= RunbookRow.__table__.c.trigger.type.length
+    )
+
+    long_trigger = "alertmanager:payments-checkout-latency-p99"  # 41 characters
+    rb = _runbook()
+    rb.trigger = long_trigger
+    _as("acme", lambda: store.create_runbook(rb))
+
+    _as("acme", lambda: store.record_execution(rb, StepStatus.PENDING, {}))
+
+    assert _as("acme", lambda: store.list_executions())

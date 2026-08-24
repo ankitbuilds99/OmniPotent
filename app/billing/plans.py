@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid5
 
 from app.billing.models import (
     PricingPlan,
@@ -13,6 +13,30 @@ from app.billing.models import (
 )
 
 log = logging.getLogger("omnipotent.billing.plans")
+
+# Namespace for deriving a plan's UUID from its name, the same trick
+# app/database/orgs.py uses for orgs.
+PLAN_NAMESPACE = UUID("3f2a6c18-4d5b-5e7a-9c31-2b8e0f6a4d17")
+
+
+def plan_uuid(name: str) -> UUID:
+    """The id of the plan called `name`, the same in every process.
+
+    These were `uuid4()`, evaluated when this module was imported. The plan
+    objects live in memory, but `billing_subscriptions.plan_id` is a column:
+    an org that checked out Business had that run's random id written to the
+    row, and after a restart — or on any other worker — `get_plan()` scanned a
+    freshly generated set of ids, matched nothing, and returned None. Both
+    `BillingAPI.get_subscription` and `FeatureGateService.get_organization_plan`
+    treat that as "no plan" and fall back to the free tier, so a paying
+    customer lost every gated feature and got capped at 25 investigations a
+    month. In-memory storage hid it: the subscription and the plan were the
+    same process's objects.
+
+    Deriving the id from the name makes the stored value mean something on the
+    other side of a restart.
+    """
+    return uuid5(PLAN_NAMESPACE, name)
 
 
 def _create_starter_features() -> PlanFeatures:
@@ -191,7 +215,7 @@ def _create_enterprise_features() -> PlanFeatures:
 
 PRICING_PLANS: dict[str, PricingPlan] = {
     "starter": PricingPlan(
-        plan_id=uuid4(),
+        plan_id=plan_uuid("starter"),
         name="starter",
         display_name="Starter",
         description="Perfect for individual developers and small projects",
@@ -206,7 +230,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         trial_days=0,
     ),
     "team": PricingPlan(
-        plan_id=uuid4(),
+        plan_id=plan_uuid("team"),
         name="team",
         display_name="Team",
         description="For growing teams that need more power",
@@ -221,7 +245,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         trial_days=14,
     ),
     "growth": PricingPlan(
-        plan_id=uuid4(),
+        plan_id=plan_uuid("growth"),
         name="growth",
         display_name="Growth",
         description="For scaling organizations with advanced needs",
@@ -236,7 +260,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         trial_days=14,
     ),
     "business": PricingPlan(
-        plan_id=uuid4(),
+        plan_id=plan_uuid("business"),
         name="business",
         display_name="Business",
         description="For mid-size organizations with compliance needs",
@@ -251,7 +275,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         trial_days=14,
     ),
     "scale": PricingPlan(
-        plan_id=uuid4(),
+        plan_id=plan_uuid("scale"),
         name="scale",
         display_name="Scale",
         description="For larger organizations scaling their AI operations",
@@ -266,7 +290,7 @@ PRICING_PLANS: dict[str, PricingPlan] = {
         trial_days=14,
     ),
     "enterprise": PricingPlan(
-        plan_id=uuid4(),
+        plan_id=plan_uuid("enterprise"),
         name="enterprise",
         display_name="Enterprise",
         description="Custom solutions for large organizations",

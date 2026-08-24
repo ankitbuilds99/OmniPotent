@@ -296,7 +296,13 @@ class RunbookExecution(Base):
     runbook_id: Mapped[str] = mapped_column(String(128), nullable=False)
     runbook_name: Mapped[str] = mapped_column(String(256), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
-    trigger: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
+    # 64, matching `runbooks.trigger` above: the store copies the runbook's
+    # trigger straight into the execution row, and `CreateRunbookRequest`
+    # puts no limit on it. At 32 a runbook created with a 40-character
+    # trigger stored fine and then failed to record any execution — a
+    # StringDataRightTruncation on Postgres, invisible on SQLite, which
+    # ignores VARCHAR lengths.
+    trigger: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)
     triggered_by: Mapped[str | None] = mapped_column(String(256))
     variables: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     results: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)

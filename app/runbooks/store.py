@@ -39,6 +39,21 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _utc(value: Any) -> Any:
+    """Read a timestamp back as UTC-aware.
+
+    SQLite — the default database — has no timezone type, so a
+    `DateTime(timezone=True)` column round trips to a *naive* datetime. Without
+    this an execution's two timestamps disagree within one response: the step
+    timestamps are parsed from ISO strings in the JSON results and keep their
+    offset, while `started_at` and `completed_at` come off columns and lose
+    theirs. It also makes any comparison against `_now()` a TypeError.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
 def _to_runbook(row: Any) -> Runbook:
     return Runbook.from_dict(
         {
@@ -62,8 +77,8 @@ def _to_execution(row: Any) -> RunbookExecution:
         runbook_name=row.runbook_name,
         status=StepStatus(row.status),
         triggered_by=row.triggered_by or "manual",
-        started_at=row.started_at,
-        completed_at=row.completed_at,
+        started_at=_utc(row.started_at),
+        completed_at=_utc(row.completed_at),
         steps=[
             StepExecution(
                 step_id=s["step_id"],

@@ -198,3 +198,41 @@ def test_investigation_is_not_readable_by_another_tenant(db):
         )
         is None
     )
+
+
+def test_timestamps_come_back_as_utc_aware(db):
+    """One response must not mix two timezone conventions.
+
+    SQLite has no timezone type, so a `DateTime(timezone=True)` column round
+    trips naive. The timeline entries are JSON and keep their offset, so
+    without normalisation `triggered_at` was serialised with no offset next to
+    timeline entries that had one — and a client reading the offset-less value
+    as local time is hours out. Any comparison against `datetime.now(utc)`
+    was a TypeError too.
+    """
+    created = _declare("acme", "checkout down")
+    _as("acme", lambda: get_incident_store().acknowledge_incident(created.id, "sam"))
+    resolved = _as(
+        "acme", lambda: get_incident_store().resolve_incident(created.id, "sam", "rolled back")
+    )
+
+    # A fresh instance, so every value has been through the database.
+    fetched = _as("acme", lambda: IncidentStore().get_incident(created.id))
+
+    assert fetched.triggered_at.tzinfo is not None
+    assert fetched.acknowledged_at.tzinfo is not None
+    assert fetched.resolved_at.tzinfo is not None
+    assert resolved.resolved_at.tzinfo is not None
+    # The same convention as the JSON timeline in the same payload.
+    assert all(e.timestamp.tzinfo is not None for e in fetched.timeline)
+    # And usable in the arithmetic the API does on them.
+    assert (fetched.resolved_at - fetched.triggered_at).total_seconds() >= 0
+
+
+def test_investigation_timestamps_come_back_as_utc_aware(db):
+    created = _declare("acme", "checkout down")
+    started = _as("acme", lambda: get_incident_store().start_investigation(created.id))
+
+    fetched = _as("acme", lambda: IncidentStore().get_investigation(started.id))
+
+    assert fetched.started_at.tzinfo is not None

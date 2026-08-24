@@ -40,6 +40,23 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _utc(value: Any) -> Any:
+    """Read a timestamp back as UTC-aware.
+
+    SQLite — the default database — has no timezone type, so a
+    `DateTime(timezone=True)` column round trips to a *naive* datetime. Every
+    timestamp written here is UTC, but without this the API emits
+    `triggered_at` with no offset while the timeline entries in the same
+    response, which are JSON and keep their offset, carry one: two conventions
+    in one payload, and a client that reads the offset-less one as local time
+    is hours out. It is also a TypeError waiting to happen — any
+    naive-vs-aware comparison against `_now()` raises.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
 def _dump(model: Any) -> Any:
     """Pydantic → JSON-safe primitives, for the JSON document columns."""
     return model.model_dump(mode="json")
@@ -49,8 +66,8 @@ def _to_investigation(row: Any) -> Investigation:
     return Investigation(
         id=row.id,
         incident_id=row.incident_id,
-        started_at=row.started_at,
-        completed_at=row.completed_at,
+        started_at=_utc(row.started_at),
+        completed_at=_utc(row.completed_at),
         overall_confidence=row.overall_confidence,
         root_cause=row.root_cause,
         recommended_actions=list(row.recommended_actions or []),
@@ -70,9 +87,9 @@ def _to_incident(row: Any) -> Incident:
         severity=IncidentSeverity(row.severity),
         status=IncidentStatus(row.status),
         service=row.service,
-        triggered_at=row.triggered_at,
-        acknowledged_at=row.acknowledged_at,
-        resolved_at=row.resolved_at,
+        triggered_at=_utc(row.triggered_at),
+        acknowledged_at=_utc(row.acknowledged_at),
+        resolved_at=_utc(row.resolved_at),
         acknowledged_by=row.acknowledged_by,
         resolved_by=row.resolved_by,
         assignee=row.assignee,

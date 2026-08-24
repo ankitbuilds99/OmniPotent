@@ -22,7 +22,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.billing.models import (
     BillingCycle,
@@ -516,28 +516,67 @@ class DatabaseBillingStore:
     async def increment_summary_field(
         self, org_id: UUID, year_month: str, field: str, increment: int
     ) -> None:
+        """Add to one month's counter, without reading it first.
+
+        The obvious version — load the row, `setattr(row, field, old + n)`,
+        commit — is a read-modify-write with an await between the read and the
+        write, so two concurrent requests both read the same old value and the
+        second overwrites the first. Ten concurrent `+1`s landed as `+2`. The
+        in-memory store it replaced had no await in that gap, so making the
+        counters durable is exactly what opened the window. These numbers back
+        `check_usage_limit` and metered billing: lost increments mean quotas
+        that never trip and usage that is never charged.
+
+        `UPDATE ... SET col = col + n` computes the new value in the database,
+        so concurrent statements serialize on the row instead of racing. The
+        insert only runs when the month has no row yet, and loses a race to
+        the unique index on (org_id, year_month) rather than to whoever
+        committed last.
+        """
+        from sqlalchemy.exc import IntegrityError
+
         from app.database.engine import get_session
         from app.database.models import BillingUsageSummary
 
         if field not in _SUMMARY_FIELDS:
             raise ValueError(f"not a usage summary field: {field}")
 
+        column = getattr(BillingUsageSummary, field)
+        bump = (
+            update(BillingUsageSummary)
+            .where(
+                BillingUsageSummary.org_id == org_id,
+                BillingUsageSummary.year_month == year_month,
+            )
+            .values({column: column + increment, BillingUsageSummary.updated_at: _now()})
+        )
+
         async with get_session() as session:
             await ensure_org(session, org_id)
-            row = await self._summary_row(session, org_id, year_month)
-            if row is None:
-                row = BillingUsageSummary(
-                    summary_id=uuid4(), org_id=org_id, year_month=year_month
-                )
-                session.add(row)
-                # Defaults are applied at flush, so the counters are still None
-                # here; a += against that would fail.
-                for name in _SUMMARY_FIELDS:
-                    setattr(row, name, 0)
+            result = await session.execute(bump)
+            if result.rowcount:
+                await session.commit()
+                return
 
-            setattr(row, field, getattr(row, field) + increment)
-            row.updated_at = _now()
-            await session.commit()
+            # No row for this month yet.
+            session.add(
+                BillingUsageSummary(
+                    summary_id=uuid4(),
+                    org_id=org_id,
+                    year_month=year_month,
+                    **{name: (increment if name == field else 0) for name in _SUMMARY_FIELDS},
+                    updated_at=_now(),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Another worker created the month between the UPDATE and the
+                # INSERT. Its row is there now, so the increment is an update
+                # after all — and this one must not be dropped.
+                await session.rollback()
+                await session.execute(bump)
+                await session.commit()
 
     async def get_usage_history(self, org_id: UUID, months: int) -> list[UsageSummary]:
         from app.database.engine import get_session

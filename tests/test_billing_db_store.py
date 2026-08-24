@@ -65,7 +65,7 @@ def _subscription(org_id, **kwargs) -> Subscription:
     now = datetime.now(timezone.utc)
     return Subscription(
         org_id=org_id,
-        plan_id=uuid4(),
+        plan_id=kwargs.pop("plan_id", uuid4()),
         status=kwargs.pop("status", SubscriptionStatus.ACTIVE),
         billing_cycle=kwargs.pop("billing_cycle", BillingCycle.MONTHLY),
         current_period_start=now,
@@ -246,6 +246,52 @@ def test_incrementing_a_summary_creates_it_then_accumulates(db):
     assert _run(lambda: store.get_usage_summary(ORG_B, "2026-03")) is None
 
 
+def test_concurrent_increments_are_not_lost(db):
+    """Ten requests each adding one must leave ten, not two.
+
+    The counter used to be read into Python, added to, and written back, with
+    an `await` in the gap — so two overlapping requests both read the same old
+    value and the second overwrote the first. Ten concurrent `+1`s landed as
+    `+2`. These counters back `check_usage_limit` and metered billing, so the
+    lost ones are quota that never trips and usage nobody is charged for.
+    """
+    store = DatabaseBillingStore()
+
+    async def hammer():
+        # The row does not exist yet: the first arrivals race to create it too.
+        await asyncio.gather(
+            *(
+                store.increment_summary_field(ORG_A, "2026-05", "api_calls_count", 1)
+                for _ in range(10)
+            )
+        )
+
+    asyncio.run(hammer())
+
+    summary = _run(lambda: DatabaseBillingStore().get_usage_summary(ORG_A, "2026-05"))
+    assert summary.api_calls_count == 10
+
+
+def test_concurrent_increments_to_different_counters_do_not_clobber_each_other(db):
+    """Two counters on one row, bumped at once, both survive."""
+    store = DatabaseBillingStore()
+
+    async def hammer():
+        await asyncio.gather(
+            *(
+                store.increment_summary_field(ORG_A, "2026-05", field, 1)
+                for field in ("api_calls_count", "alerts_processed_count")
+                for _ in range(5)
+            )
+        )
+
+    asyncio.run(hammer())
+
+    summary = _run(lambda: DatabaseBillingStore().get_usage_summary(ORG_A, "2026-05"))
+    assert summary.api_calls_count == 5
+    assert summary.alerts_processed_count == 5
+
+
 def test_increment_rejects_a_field_that_is_not_a_counter(db):
     """The field name comes from the caller and reaches a column; the in-memory
     version fed it straight to setattr()."""
@@ -327,3 +373,50 @@ def test_plans_are_still_served_from_code(db):
     assert _run(lambda: store.get_all_plans())
     team = _run(lambda: store.get_plan_by_name("team"))
     assert _run(lambda: store.get_plan(team.plan_id)).name == "team"
+
+
+def test_a_plan_id_means_the_same_thing_in_every_process():
+    """The stored plan_id has to survive a restart.
+
+    Plan ids were `uuid4()` evaluated at import. The plan objects are in
+    memory, but the subscription's plan_id is a column: it was written with
+    one run's random id and, on the next process, matched nothing.
+    """
+    import subprocess
+    import sys
+
+    read_id = "from app.billing.plans import PRICING_PLANS; print(PRICING_PLANS['business'].plan_id)"
+    first = subprocess.run(
+        [sys.executable, "-c", read_id], capture_output=True, text=True, check=True
+    )
+    second = subprocess.run(
+        [sys.executable, "-c", read_id], capture_output=True, text=True, check=True
+    )
+
+    assert first.stdout.strip() == second.stdout.strip()
+
+
+def test_a_paid_subscription_still_resolves_to_its_plan_after_a_restart(db):
+    """The whole point of storing plan_id: reading it back gets the plan.
+
+    A fresh store instance stands in for a fresh process. This returned None
+    before — and both `BillingAPI.get_subscription` and
+    `FeatureGateService.get_organization_plan` read that as "no plan" and hand
+    back the free tier, so a paying customer lost every gated feature.
+    """
+    from app.billing.plans import PRICING_PLANS
+
+    business = PRICING_PLANS["business"]
+    _run(
+        lambda: DatabaseBillingStore().save_subscription(
+            _subscription(ORG_A, plan_id=business.plan_id)
+        )
+    )
+
+    restarted = DatabaseBillingStore()
+    stored = _run(lambda: restarted.get_subscription(ORG_A))
+    plan = _run(lambda: restarted.get_plan(stored.plan_id))
+
+    assert plan is not None
+    assert plan.name == "business"
+    assert plan.features.sso_saml is True
