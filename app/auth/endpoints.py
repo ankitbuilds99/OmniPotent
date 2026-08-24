@@ -242,10 +242,13 @@ async def oauth_callback(
         expires_hours=24,
     )
 
-    if redirect_uri:
-        response = RedirectResponse(f"{redirect_uri}?token={session_token}")
-    else:
-        response = RedirectResponse(f"/?token={session_token}")
+    # The token rides in the URL fragment, not the query string. Fragments are
+    # never sent to a server, so the session stays out of access logs, proxy
+    # logs and the Referer header on the next navigation. The SPA reads it from
+    # location.hash and clears it.
+    target = redirect_uri or "/"
+    separator = "&" if "#" in target else "#"
+    response = RedirectResponse(f"{target}{separator}token={session_token}")
 
     response.set_cookie(
         key="session",

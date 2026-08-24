@@ -18,7 +18,7 @@ import {
   RefreshCw
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface ServiceNode {
   id: string;
@@ -452,7 +452,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
       } else {
         // Try Kubernetes API
         try {
-          const k8sRes = await fetch(`${API_BASE}/api/kubernetes/services`);
+          const k8sRes = await apiFetch(`/api/kubernetes/services`);
           if (k8sRes.ok) {
             const services = await k8sRes.json();
             services.forEach((svc: { name: string; namespace: string; type: string }) => {
@@ -474,10 +474,10 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
       if (serviceMetrics.size === 0) {
         setDataSource("fallback");
 
-        const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+        const incidentsRes = await apiFetch(`/api/incidents`);
         const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
-        const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
+        const alertsRes = await apiFetch(`/oncall/alerts?limit=50`);
         const alerts = alertsRes.ok ? await alertsRes.json() : [];
 
         incidents.forEach((inc: Record<string, unknown>) => {

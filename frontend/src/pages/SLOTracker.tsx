@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface SLOAlert {
   id: string;
@@ -375,7 +375,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
   const fetchSLOs = useCallback(async () => {
     try {
       // Try to fetch from real SLO API first
-      const sloRes = await fetch(`${API_BASE}/api/slos`);
+      const sloRes = await apiFetch(`/api/slos`);
       if (sloRes.ok) {
         const sloData = await sloRes.json();
         if (sloData.length > 0) {
@@ -384,7 +384,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
             sloData.map(async (slo: Record<string, unknown>) => {
               let budget = { remaining: 43.2, total: 43.2, burn_rate: 0.5, status: "healthy" };
               try {
-                const budgetRes = await fetch(`${API_BASE}/api/slos/${slo.id}/budget`);
+                const budgetRes = await apiFetch(`/api/slos/${slo.id}/budget`);
                 if (budgetRes.ok) {
                   const budgetData = await budgetRes.json();
                   budget = {
@@ -426,10 +426,10 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
       }
 
       // Fallback: derive SLOs from incidents/alerts
-      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+      const incidentsRes = await apiFetch(`/api/incidents`);
       const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
-      const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=50`);
+      const alertsRes = await apiFetch(`/oncall/alerts?limit=50`);
       const alerts = alertsRes.ok ? await alertsRes.json() : [];
 
       const serviceMap = new Map<string, { incidents: number; alerts: Record<string, unknown>[] }>();
@@ -505,7 +505,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
   const handleCreateSLO = async (sloData: Partial<SLO>) => {
     try {
       // Call real API to create SLO
-      const response = await fetch(`${API_BASE}/api/slos`, {
+      const response = await apiFetch(`/api/slos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

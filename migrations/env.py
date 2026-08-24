@@ -19,6 +19,12 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.database.models import Base
 
+# Importing the model modules is what puts their tables on Base.metadata;
+# autogenerate only sees what has been imported. Without this the 17 oncall_*
+# tables were absent from every generated revision — and would have been
+# dropped by one, since autogenerate reads absence as "delete this table".
+import app.oncall.models  # noqa: E402,F401
+
 config = context.config
 
 if config.config_file_name is not None:
@@ -29,7 +35,10 @@ target_metadata = Base.metadata
 
 def get_url() -> str:
     """Get database URL from environment or config."""
-    url = os.environ.get("COPILOT_DATABASE_URL", "")
+    # DATABASE_URL is what Render, Heroku and docker-compose inject; falling
+    # back to it stops `alembic upgrade` from silently migrating the local
+    # SQLite file while the app talks to Postgres.
+    url = os.environ.get("COPILOT_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not url:
         url = config.get_main_option("sqlalchemy.url", "sqlite:///data/copilot.db")
 

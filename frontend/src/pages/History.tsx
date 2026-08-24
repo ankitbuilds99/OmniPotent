@@ -26,6 +26,7 @@ import { downloadInvestigation } from '../utils/exportReport'
 import { shareToSlack } from '../api'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
 import { initSupabase } from '../lib/supabase'
+import { apiFetch } from "../lib/apiClient";
 
 interface Investigation {
   id: string
@@ -69,7 +70,7 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
       const supabase = await initSupabase()
       if (!supabase) {
         // Fallback to API if Supabase not configured
-        const res = await fetch('/api/investigations?limit=50')
+        const res = await apiFetch('/api/investigations?limit=50')
         if (res.ok) {
           const data = await res.json()
           setInvestigations(data.investigations || [])

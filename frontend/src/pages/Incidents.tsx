@@ -21,7 +21,7 @@ import {
   Loader2
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface AgentResult {
   agent_type: "knowledge" | "reasoning" | "action" | "learning" | "collaboration" | "ambient";
@@ -533,7 +533,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
 
   const fetchIncidents = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/incidents`);
+      const res = await apiFetch(`/api/incidents`);
       if (res.ok) {
         const data = await res.json();
         const transformed: Incident[] = data.map((inc: Record<string, unknown>) => ({
@@ -571,7 +571,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
 
   const handleAcknowledge = async (incidentId: string) => {
     try {
-      await fetch(`${API_BASE}/api/incidents/${incidentId}/acknowledge`, { method: "POST" });
+      await apiFetch(`/api/incidents/${incidentId}/acknowledge`, { method: "POST" });
       fetchIncidents();
       setSelectedIncident(null);
     } catch (error) {
@@ -581,7 +581,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
 
   const handleResolve = async (incidentId: string) => {
     try {
-      await fetch(`${API_BASE}/api/incidents/${incidentId}/resolve`, { method: "POST" });
+      await apiFetch(`/api/incidents/${incidentId}/resolve`, { method: "POST" });
       fetchIncidents();
       setSelectedIncident(null);
     } catch (error) {

@@ -46,6 +46,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import audit, feedback, metering, metrics_source, observability, runtime, tenant_context
@@ -740,10 +741,15 @@ app.add_middleware(LimitsMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Allow the React dev server plus any origins configured via CORS_ORIGINS.
+# The method list has to cover every verb the API actually exposes: with only
+# GET/POST/OPTIONS the browser's preflight rejected every PUT, PATCH and DELETE,
+# so editing or deleting anything from the UI failed before the request was
+# sent. allow_credentials pairs with the explicit (never wildcard) origin list.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().allowed_origins,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -3807,5 +3813,41 @@ async def convert_trial_endpoint(req: ConvertTrialRequest):
 # build) the dist dir is absent and this mount is simply skipped.
 _FRONTEND_DIST = ROOT / "frontend" / "dist"
 if _FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="spa")
-    log.info("serving built frontend from %s", _FRONTEND_DIST)
+    # First path segment of every route registered above. An unknown path under
+    # one of these is a mistyped API call, not a client-side route, and should
+    # keep answering 404 JSON rather than 200 HTML — otherwise a typo'd endpoint
+    # looks like a success to any client that only checks the status code.
+    _API_SEGMENTS = {
+        p.split("/")[1]
+        for p in (getattr(r, "path", "") for r in app.routes)
+        if p.count("/") >= 1 and len(p.split("/")) > 1 and p.split("/")[1]
+    }
+
+    class _SPAStaticFiles(StaticFiles):
+        """StaticFiles that falls back to index.html for unknown paths.
+
+        `html=True` only serves index.html for *directory* paths, so a deep link
+        like /dashboard, /login or /settings/billing returned a 404 JSON body.
+        Stripe's default success_url is `{frontend_url}/settings/billing?...`,
+        so a user finishing checkout landed on a hard 404. Handing those to
+        index.html lets the client-side router take over, which is what every
+        SPA deployment needs.
+        """
+
+        async def get_response(self, path: str, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                # Real missing assets should still 404 — falling back for them
+                # would hand JS/CSS requests an HTML body and produce a
+                # confusing MIME-type error in the console instead.
+                if "." in path.rsplit("/", 1)[-1]:
+                    raise
+                if path.split("/")[0] in _API_SEGMENTS:
+                    raise
+                return await super().get_response("index.html", scope)
+
+    app.mount("/", _SPAStaticFiles(directory=str(_FRONTEND_DIST), html=True), name="spa")
+    log.info("serving built frontend from %s (SPA fallback enabled)", _FRONTEND_DIST)

@@ -127,8 +127,10 @@ class TestContractCompliance:
         from app.api.main import app
 
         client = TestClient(app)
-        # Request an endpoint that doesn't exist
-        response = client.get("/nonexistent")
+        # Must be an API path. Unknown paths that are *not* API paths now fall
+        # through to the SPA fallback and serve index.html, so that a deep link
+        # like /dashboard reaches the client-side router instead of 404ing.
+        response = client.get("/api/nonexistent")
 
         assert response.status_code == 404
         data = response.json()

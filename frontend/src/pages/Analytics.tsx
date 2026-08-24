@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface MetricCard {
   title: string;
@@ -369,15 +369,15 @@ export function Analytics({ onBack }: { onBack: () => void }) {
     setLoading(true);
     try {
       // Fetch incidents for metrics
-      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
+      const incidentsRes = await apiFetch(`/api/incidents`);
       const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
 
       // Fetch alerts for additional data
-      const alertsRes = await fetch(`${API_BASE}/oncall/alerts?limit=100`);
+      const alertsRes = await apiFetch(`/oncall/alerts?limit=100`);
       const alerts = alertsRes.ok ? await alertsRes.json() : [];
 
       // Fetch teams for team metrics
-      const teamsRes = await fetch(`${API_BASE}/oncall/teams`);
+      const teamsRes = await apiFetch(`/oncall/teams`);
       const teamsData = teamsRes.ok ? await teamsRes.json() : [];
 
       // Calculate metrics from real data

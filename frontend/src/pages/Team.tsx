@@ -19,6 +19,7 @@ import {
   X
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { apiFetch } from "../lib/apiClient";
 
 interface TeamMember {
   id: string
@@ -62,7 +63,7 @@ export function Team({ onBack }: TeamProps) {
     setLoading(true)
     try {
       // Fetch team members from API
-      const res = await fetch('/api/team/members')
+      const res = await apiFetch('/api/team/members')
       if (res.ok) {
         const data = await res.json()
         setMembers(data.members || [])

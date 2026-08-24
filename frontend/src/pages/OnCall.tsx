@@ -16,7 +16,7 @@ import {
   Loader2
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface OnCallUser {
   id: string;
@@ -578,18 +578,18 @@ export function OnCall({ onBack }: { onBack: () => void }) {
   const fetchData = useCallback(async () => {
     try {
       // Fetch teams
-      const teamsRes = await fetch(`${API_BASE}/oncall/teams`);
+      const teamsRes = await apiFetch(`/oncall/teams`);
       const teams = teamsRes.ok ? await teamsRes.json() : [];
 
       if (teams.length > 0) {
         const teamId = teams[0].id;
 
         // Fetch current on-call for team
-        const oncallRes = await fetch(`${API_BASE}/oncall/teams/${teamId}/current-oncall`);
+        const oncallRes = await apiFetch(`/oncall/teams/${teamId}/current-oncall`);
         const currentOncall = oncallRes.ok ? await oncallRes.json() : null;
 
         // Fetch escalation policies
-        const policiesRes = await fetch(`${API_BASE}/oncall/teams/${teamId}/escalation-policies`);
+        const policiesRes = await apiFetch(`/oncall/teams/${teamId}/escalation-policies`);
         const policies = policiesRes.ok ? await policiesRes.json() : [];
 
         // Transform current on-call data into schedule format
@@ -625,7 +625,7 @@ export function OnCall({ onBack }: { onBack: () => void }) {
         // Set escalation policy
         if (policies.length > 0) {
           const policyId = policies[0].id;
-          const policyDetailRes = await fetch(`${API_BASE}/oncall/escalation-policies/${policyId}`);
+          const policyDetailRes = await apiFetch(`/oncall/escalation-policies/${policyId}`);
           if (policyDetailRes.ok) {
             const policyDetail = await policyDetailRes.json();
             setEscalationPolicy({
@@ -663,7 +663,7 @@ export function OnCall({ onBack }: { onBack: () => void }) {
     if (!schedule) return;
 
     try {
-      await fetch(`${API_BASE}/oncall/overrides`, {
+      await apiFetch(`/oncall/overrides`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -683,7 +683,7 @@ export function OnCall({ onBack }: { onBack: () => void }) {
   const handleCreateSchedule = async (name: string, timezone: string) => {
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const res = await fetch(`${API_BASE}/oncall/teams`, {
+      const res = await apiFetch(`/oncall/teams`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

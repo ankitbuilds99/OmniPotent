@@ -19,7 +19,7 @@ import {
   type LucideIcon
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface ChannelConfig {
   id: string;
@@ -257,7 +257,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
   const fetchPreferences = useCallback(async () => {
     try {
       // Verify backend is reachable
-      await fetch(`${API_BASE}/oncall/teams`);
+      await apiFetch(`/oncall/teams`);
 
       // Default channels based on what the system supports
       const defaultChannels: ChannelConfig[] = [

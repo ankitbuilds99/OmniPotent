@@ -2,6 +2,24 @@ import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Sparkles, Loader2, CheckCircle, XCircle } from 'lucide-react'
 import { initSupabase, checkSupabaseConfigured } from '../lib/supabase'
+import { setSessionToken } from '../lib/authToken'
+
+/** Pull the session token the backend OAuth callback handed us and store it.
+ *
+ *  Two shapes: `#token=` (current — fragments stay out of server logs) and
+ *  `?token=` (older links still in flight). Either way the token is stripped
+ *  from the address bar afterwards so it isn't left in history or shared by a
+ *  copy-pasted URL. Returns true when a token was consumed. */
+function consumeTokenFromUrl(): boolean {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+  const query = new URLSearchParams(window.location.search)
+  const token = hash.get('token') || query.get('token')
+  if (!token) return false
+
+  setSessionToken(token)
+  window.history.replaceState({}, '', window.location.pathname)
+  return true
+}
 
 interface AuthCallbackProps {
   onSuccess: () => void
@@ -14,9 +32,19 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
 
   useEffect(() => {
     const handleCallback = async () => {
-      console.log('AuthCallback: checking Supabase config...')
+      // The backend OAuth flow (GET /auth/{provider}/callback) redirects here
+      // with the session token attached. Check that before Supabase: this used
+      // to fall straight through to the Supabase branch and report "not
+      // configured", so signing in with GitHub or Google ended on an error
+      // screen even though the login had succeeded.
+      if (consumeTokenFromUrl()) {
+        setStatus('success')
+        setMessage('Welcome! Redirecting to console...')
+        setTimeout(onSuccess, 1000)
+        return
+      }
+
       const configured = await checkSupabaseConfigured()
-      console.log('AuthCallback: configured =', configured)
       if (!configured) {
         setStatus('error')
         setMessage('Supabase is not configured')
@@ -43,6 +71,9 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
         }
 
         if (data.session) {
+          // Persist it where every API call looks; Supabase keeps its own copy
+          // under a different key that the fetch wrapper does not read.
+          setSessionToken(data.session.access_token)
           setStatus('success')
           setMessage('Welcome! Redirecting to console...')
           setTimeout(onSuccess, 1500)

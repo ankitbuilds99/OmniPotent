@@ -16,7 +16,7 @@ import {
   Users,
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface OnboardingStep {
   id: string;
@@ -107,7 +107,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
       // Try to run a real investigation via the streaming API
       const demoPrompt = "Investigate: High error rate detected in checkout-service. 5xx errors increased 300% in the last 10 minutes.";
 
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      const response = await apiFetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: demoPrompt }),
