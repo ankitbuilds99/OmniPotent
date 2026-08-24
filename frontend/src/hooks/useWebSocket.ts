@@ -11,8 +11,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "../types";
 
+import { wsProtocols } from "../lib/authToken";
+
 const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
 // Convert HTTP URL to WebSocket URL
 function getWsUrl(): string {
@@ -144,10 +145,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     // Use subprotocol for auth token (not logged in access logs)
     // Format: ["copilot-v1", "auth-<token>"] or just ["copilot-v1"] if no token
-    const protocols: string[] = ["copilot-v1"];
-    if (TOKEN) {
-      protocols.push(`auth-${TOKEN}`);
-    }
+    const protocols = wsProtocols();
 
     try {
       const ws = new WebSocket(wsUrl, protocols);
@@ -334,10 +332,7 @@ export async function probeWebSocket(threadId: string): Promise<boolean> {
     const wsUrl = `${getWsUrl()}/ws/chat/${threadId}`;
 
     // Use subprotocol for auth token (secure - not in URL/logs)
-    const protocols: string[] = ["copilot-v1"];
-    if (TOKEN) {
-      protocols.push(`auth-${TOKEN}`);
-    }
+    const protocols = wsProtocols();
 
     try {
       const ws = new WebSocket(wsUrl, protocols);

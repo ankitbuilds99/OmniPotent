@@ -4,6 +4,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { initSupabase, checkSupabaseConfigured } from '../lib/supabase'
+import { clearAuthToken, setSessionToken } from '../lib/authToken'
 
 interface User {
   id: string
@@ -44,6 +45,16 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
   const [client, setClient] = useState<any>(null)
   const [isConfigured, setIsConfigured] = useState(false)
 
+  // Adopt a Supabase session into both React state and the shared token store.
+  // The backend accepts the access token as a bearer credential, but the API
+  // clients read from authToken — without mirroring it there, a signed-in user
+  // still sends no credential and every request comes back 401.
+  const adoptSession = useCallback((sess: Session | null) => {
+    setSession(sess)
+    setUser(sess?.user ?? null)
+    if (sess?.access_token) setSessionToken(sess.access_token)
+  }, [])
+
   useEffect(() => {
     let mounted = true
     let unsubscribe: (() => void) | null = null
@@ -68,8 +79,7 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
 
         supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => {
           if (mounted) {
-            setSession(data.session)
-            setUser(data.session?.user ?? null)
+            adoptSession(data.session)
             setLoading(false)
           }
         })
@@ -77,8 +87,7 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
           (_event: string, sess: Session | null) => {
             if (mounted) {
-              setSession(sess)
-              setUser(sess?.user ?? null)
+              adoptSession(sess)
               setLoading(false)
             }
           }
@@ -92,7 +101,7 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
       mounted = false
       unsubscribe?.()
     }
-  }, [])
+  }, [adoptSession])
 
   const signInWithGitHub = useCallback(async () => {
     if (!client) return
@@ -143,6 +152,11 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
   }, [client])
 
   const signOut = useCallback(async () => {
+    // Clear the shared token first, and unconditionally: Supabase may not be the
+    // thing that authenticated this session (backend OAuth and self-serve signup
+    // write to the same store), and a stale credential would keep the app logged
+    // in after the user asked to leave.
+    clearAuthToken()
     if (!client) return
     setError(null)
     const { error: err } = await client.auth.signOut()

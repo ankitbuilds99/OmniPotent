@@ -19,12 +19,9 @@ import type {
   MetricType,
 } from '../types/billing';
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? '';
+import { authHeaders } from '../lib/authToken';
 
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return TOKEN ? { ...extra, Authorization: `Bearer ${TOKEN}` } : { ...extra };
-}
+const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });

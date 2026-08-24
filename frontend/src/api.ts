@@ -2,13 +2,9 @@
 
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-// Optional bearer token (set VITE_API_TOKEN when the backend has COPILOT_API_TOKEN).
-const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+import { authHeaders } from "./lib/authToken";
 
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return TOKEN ? { ...extra, Authorization: `Bearer ${TOKEN}` } : { ...extra };
-}
+const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -244,9 +240,7 @@ export function getWebSocketUrl(): string {
 }
 
 /** Get the auth token for WebSocket connections. */
-export function getAuthToken(): string {
-  return TOKEN;
-}
+export { getAuthToken } from "./lib/authToken";
 
 /** Health check response type with WebSocket info. */
 export interface HealthResponse {
