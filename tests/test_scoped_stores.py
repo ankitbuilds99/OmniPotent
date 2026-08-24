@@ -1,0 +1,171 @@
+"""Per-tenant feature stores — the isolation that `scoped()` is there to provide.
+
+The feature routers keep their state in process memory with no org column, so the
+only thing stopping tenant B from reading tenant A's incidents, runbooks and task
+graphs is that they hold different instances. These tests pin that: same org ⇒
+same instance, different org ⇒ different instance, no tenant ⇒ the shared
+single-tenant bucket.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from app.incidents.store import get_incident_store
+from app.knowledge_base.api_router import get_knowledge_base
+from app.planning.api_router import _graphs
+from app.runbooks.router import _executions, _runbooks
+from app.status_page.store import get_status_store
+from app.teams.store import get_team_store
+from app.tenancy.scoping import ScopedRegistry, scoped
+from app.tenant_context import TenantConfig, reset_tenant, set_tenant
+
+
+class _Counter:
+    """Factory that records how many instances were built."""
+
+    built = 0
+
+    def __init__(self) -> None:
+        type(self).built += 1
+
+
+@pytest.fixture
+def as_org():
+    """Run a block as a given org, restoring the previous context afterwards."""
+    tokens = []
+
+    def _enter(org_id: str | None):
+        cfg = TenantConfig(org_id=org_id) if org_id is not None else None
+        tokens.append(set_tenant(cfg))
+
+    yield _enter
+
+    for token in reversed(tokens):
+        reset_tenant(token)
+
+
+def test_same_org_reuses_one_instance(as_org):
+    _Counter.built = 0
+    registry = ScopedRegistry(_Counter)
+
+    as_org("acme")
+    first = registry.get()
+    second = registry.get()
+
+    assert first is second
+    assert _Counter.built == 1
+
+
+def test_different_orgs_never_share_an_instance():
+    registry = ScopedRegistry(_Counter)
+
+    a = registry.for_org("acme")
+    b = registry.for_org("umbrella")
+
+    assert a is not b
+    assert registry.for_org("acme") is a  # and A keeps its own across lookups
+
+
+def test_no_tenant_falls_back_to_one_shared_bucket(as_org):
+    """Single-tenant deployments and background jobs have no org; they must all
+    land on the same instance or the existing non-tenant behaviour breaks."""
+    registry = ScopedRegistry(_Counter)
+
+    as_org(None)
+    first = registry.get()
+    second = registry.for_org("")
+
+    assert first is second
+
+
+def test_capacity_evicts_least_recently_used_org():
+    registry = ScopedRegistry(_Counter, max_tenants=2)
+
+    a = registry.for_org("a")
+    registry.for_org("b")
+    registry.for_org("a")  # touch A so B is now the least recently used
+    registry.for_org("c")  # evicts B, not A
+
+    assert len(registry) == 2
+    assert registry.for_org("a") is a  # A survived
+    assert registry.for_org("b") is not a  # B was rebuilt from scratch
+
+
+def test_scoped_registers_for_reset():
+    """`scoped()` returns a working registry and records it for reset_all()."""
+    from app.tenancy import scoping
+
+    registry = scoped(_Counter)
+    assert registry in scoping._REGISTRIES
+
+    registry.for_org("acme")
+    assert len(registry) == 1
+    scoping.reset_all()
+    assert len(registry) == 0
+
+
+# --- the real stores, not just the mechanism ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "get_store",
+    [
+        pytest.param(get_incident_store, id="incidents"),
+        pytest.param(get_team_store, id="teams"),
+        pytest.param(get_status_store, id="status_page"),
+        pytest.param(get_knowledge_base, id="knowledge_base"),
+        pytest.param(_runbooks, id="runbooks"),
+        pytest.param(_executions, id="runbook_executions"),
+        pytest.param(_graphs, id="planning_graphs"),
+    ],
+)
+def test_feature_stores_are_per_org(get_store, as_org):
+    as_org("acme")
+    acme = get_store()
+
+    reset_tenant(set_tenant(TenantConfig(org_id="acme")))  # no-op, same org
+    assert get_store() is acme
+
+    as_org("umbrella")
+    assert get_store() is not acme
+
+
+def test_one_orgs_incident_is_invisible_to_another(as_org):
+    """The end-to-end shape of the leak: create in A, look in B."""
+    from app.incidents.models import IncidentSeverity
+
+    as_org("acme")
+    created = get_incident_store().create_incident(
+        title="checkout down", severity=IncidentSeverity.CRITICAL, service="pay"
+    )
+    assert get_incident_store().get_incident(created.id) is not None
+
+    as_org("umbrella")
+    assert get_incident_store().get_incident(created.id) is None
+    assert all(i.title != "checkout down" for i in get_incident_store().list_incidents())
+
+
+def test_seeded_demo_data_is_not_shared(as_org):
+    """Each org gets its own copy of the seeded incidents. Sharing one meant
+    resolving a demo incident resolved it for every other tenant too."""
+    as_org("acme")
+    acme_ids = {i.id for i in get_incident_store().list_incidents()}
+
+    as_org("umbrella")
+    umbrella_ids = {i.id for i in get_incident_store().list_incidents()}
+
+    assert acme_ids and umbrella_ids
+    assert not (acme_ids & umbrella_ids)
+
+
+def test_runbook_deleted_by_one_org_survives_for_another(as_org):
+    as_org("acme")
+    victim_ids = set(_runbooks())
+    assert victim_ids  # seeded defaults
+
+    as_org("umbrella")
+    _runbooks().clear()  # umbrella nukes its own runbooks
+
+    as_org("acme")
+    assert set(_runbooks()) == victim_ids

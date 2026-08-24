@@ -13,22 +13,29 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.knowledge_base.rag import KnowledgeBase, Document, DocumentType
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.knowledge_base.api")
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
-# Global knowledge base instance
-_kb: KnowledgeBase | None = None
+
+def _build_knowledge_base() -> KnowledgeBase:
+    kb = KnowledgeBase()
+    _seed_default_documents(kb)
+    return kb
+
+
+# One knowledge base per org. Runbook write-ups and postmortems are the most
+# sensitive text a customer uploads here — architecture, credentials-adjacent
+# procedures, outage detail — and a shared instance made every document
+# searchable by every other tenant.
+_bases = scoped(_build_knowledge_base)
 
 
 def get_knowledge_base() -> KnowledgeBase:
-    """Get or create the knowledge base singleton."""
-    global _kb
-    if _kb is None:
-        _kb = KnowledgeBase()
-        _seed_default_documents(_kb)
-    return _kb
+    """The knowledge base for the org on the current request."""
+    return _bases.get()
 
 
 def _seed_default_documents(kb: KnowledgeBase) -> None:

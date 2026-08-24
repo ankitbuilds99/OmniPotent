@@ -21,36 +21,31 @@ from app.event_intelligence.severity_predictor import (
     IncidentContext,
 )
 from app.event_intelligence.feature_store import FeatureStore
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.event_intelligence.api")
 
 router = APIRouter(prefix="/event-intelligence", tags=["event-intelligence"])
 
-# Global instances
-_noise_engine: NoiseReductionEngine | None = None
-_severity_predictor: SeverityPredictor | None = None
-_feature_store: FeatureStore | None = None
+# One instance per org. These are not stateless helpers: the noise engine
+# accumulates alert fingerprints, the predictor learns from submitted incidents,
+# and the feature store holds per-service history. Shared, one tenant's alert
+# volume shapes another's severity predictions and leaks service names back.
+_noise_engines = scoped(NoiseReductionEngine)
+_severity_predictors = scoped(SeverityPredictor)
+_feature_stores = scoped(FeatureStore)
 
 
 def get_noise_engine() -> NoiseReductionEngine:
-    global _noise_engine
-    if _noise_engine is None:
-        _noise_engine = NoiseReductionEngine()
-    return _noise_engine
+    return _noise_engines.get()
 
 
 def get_severity_predictor() -> SeverityPredictor:
-    global _severity_predictor
-    if _severity_predictor is None:
-        _severity_predictor = SeverityPredictor()
-    return _severity_predictor
+    return _severity_predictors.get()
 
 
 def get_feature_store() -> FeatureStore:
-    global _feature_store
-    if _feature_store is None:
-        _feature_store = FeatureStore()
-    return _feature_store
+    return _feature_stores.get()
 
 
 class NoiseCheckRequest(BaseModel):

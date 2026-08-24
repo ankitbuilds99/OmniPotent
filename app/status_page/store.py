@@ -25,6 +25,8 @@ from app.status_page.models import (
     Subscriber,
     SubscriptionType,
 )
+from app.tenancy.scoping import scoped
+from app.tenant_context import tenant_id
 
 log = logging.getLogger("omnipotent.status_page.store")
 
@@ -761,19 +763,17 @@ class InMemoryStatusStore(StatusStore):
         }
 
 
-# Global store instance
-_store: StatusStore | None = None
+# One store per org. A status page carries a customer's component names, incident
+# history and — via subscribers — their users' email addresses and phone numbers.
+# Sharing one instance published all of that to every other tenant.
+_stores = scoped(InMemoryStatusStore)
 
 
 def get_status_store() -> StatusStore:
-    """Get the default status store."""
-    global _store
-    if _store is None:
-        _store = InMemoryStatusStore()
-    return _store
+    """The status store for the org on the current request."""
+    return _stores.get()
 
 
 def set_status_store(store: StatusStore) -> None:
-    """Set a custom status store (for testing or database-backed storage)."""
-    global _store
-    _store = store
+    """Point the current org at a custom store (testing, or a DB-backed swap-in)."""
+    _stores.set_for_org(tenant_id(), store)

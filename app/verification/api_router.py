@@ -19,33 +19,35 @@ from app.verification.verification_agent import (
     VerificationStatus,
     create_verification_agent,
 )
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.verification.api")
 
 router = APIRouter(prefix="/verification", tags=["verification"])
 
-_agent: VerificationAgent | None = None
+def _build_agent() -> VerificationAgent:
+    settings = get_settings()
+    return create_verification_agent(
+        prometheus_url=getattr(settings, "prometheus_url", None),
+        loki_url=getattr(settings, "loki_url", None),
+        elasticsearch_url=getattr(settings, "elasticsearch_url", None),
+        k8s_client=None,
+        github_token=getattr(settings, "github_token", None),
+        knowledge_graph=None,
+        redis_client=None,
+        llm_client=None,
+    )
+
+
+# One agent per org. It caches collected evidence and calibration history keyed
+# by claim, so a shared instance served one tenant's metric and log excerpts as
+# the evidence behind another tenant's verification.
+_agents = scoped(_build_agent)
 
 
 async def get_agent() -> VerificationAgent:
-    """Get or create verification agent."""
-    global _agent
-
-    if _agent is None:
-        settings = get_settings()
-
-        _agent = create_verification_agent(
-            prometheus_url=getattr(settings, "prometheus_url", None),
-            loki_url=getattr(settings, "loki_url", None),
-            elasticsearch_url=getattr(settings, "elasticsearch_url", None),
-            k8s_client=None,
-            github_token=getattr(settings, "github_token", None),
-            knowledge_graph=None,
-            redis_client=None,
-            llm_client=None,
-        )
-
-    return _agent
+    """The verification agent for the org on the current request."""
+    return _agents.get()
 
 
 class ClaimInput(BaseModel):

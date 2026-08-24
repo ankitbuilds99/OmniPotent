@@ -13,6 +13,7 @@ from app.teams.models import (
     TeamRole,
     InvitationStatus,
 )
+from app.tenancy.scoping import scoped
 
 
 class TeamStore:
@@ -305,13 +306,11 @@ class TeamStore:
         return result
 
 
-# Global store instance
-_store: TeamStore | None = None
+# One store per org. Team names, memberships and pending invitations are tenant
+# data; a single process-wide instance put every customer's roster in one bag.
+_stores = scoped(TeamStore)
 
 
 def get_team_store() -> TeamStore:
-    """Get the global team store instance."""
-    global _store
-    if _store is None:
-        _store = TeamStore()
-    return _store
+    """The team store for the org on the current request."""
+    return _stores.get()

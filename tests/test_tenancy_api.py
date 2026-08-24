@@ -232,3 +232,61 @@ def test_plan_change_disabled_without_operator_token(mt):
     c = mt["client"]
     assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"])).status_code == 403
     assert c.patch("/admin/plan", json={"plan": "enterprise"}).status_code == 403
+
+
+def test_feature_data_does_not_cross_tenants(mt):
+    """Org A's runbooks, planning graphs and incidents are invisible to org B.
+
+    These routers keep their state in process memory with no org column, so this
+    is the behaviour that proves the per-org store split actually landed — over
+    HTTP, through the real auth path, not just at the registry level.
+    """
+    c, a, b = mt["client"], _auth(mt["owner"]), _auth(mt["b"])
+
+    created = c.post("/api/runbooks", headers=a, json={
+        "name": "acme-rollback", "description": "internal", "service": "pay"})
+    assert created.status_code == 200
+    rb_id = created.json()["id"]
+
+    assert rb_id in {r["id"] for r in c.get("/api/runbooks", headers=a).json()}
+    assert rb_id not in {r["id"] for r in c.get("/api/runbooks", headers=b).json()}
+    assert c.get(f"/api/runbooks/{rb_id}", headers=b).status_code == 404
+    # B cannot delete what it cannot see, and A's copy is untouched by the attempt.
+    assert c.delete(f"/api/runbooks/{rb_id}", headers=b).status_code == 404
+    assert c.get(f"/api/runbooks/{rb_id}", headers=a).status_code == 200
+
+    assert c.post("/api/planning/graphs", headers=a,
+                  json={"graph_id": "acme-plan"}).status_code == 200
+    assert c.get("/api/planning/graphs/acme-plan", headers=a).status_code == 200
+    assert c.get("/api/planning/graphs/acme-plan", headers=b).status_code == 404
+
+    a_incidents = {i["id"] for i in c.get("/api/incidents", headers=a).json()}
+    b_incidents = {i["id"] for i in c.get("/api/incidents", headers=b).json()}
+    assert a_incidents and b_incidents
+    assert not (a_incidents & b_incidents)  # seeded demo data is per-org
+
+
+def test_slo_org_id_cannot_be_chosen_by_the_caller(mt):
+    """`/api/slos` used to take `?org_id=` and trust it.
+
+    SLOTracker does filter its store by org, but the org came from a query
+    parameter defaulting to "default" — so any tenant could read, edit and delete
+    another's SLOs by naming them in the URL. The org comes from the credential
+    now, and the parameter is gone rather than ignored.
+    """
+    c, a, b = mt["client"], _auth(mt["owner"]), _auth(mt["b"])
+
+    created = c.post("/api/slos", headers=a, json={
+        "name": "acme-checkout", "service": "checkout", "target": 0.999})
+    assert created.status_code == 201
+    slo_id = created.json()["id"]
+
+    assert [s["name"] for s in c.get("/api/slos", headers=a).json()] == ["acme-checkout"]
+    assert c.get("/api/slos", headers=b).json() == []
+
+    assert c.get(f"/api/slos/{slo_id}", headers=b).status_code == 404
+    # …including when B names A's org explicitly, the old way in.
+    assert c.get(f"/api/slos/{slo_id}?org_id={mt['org_a']}", headers=b).status_code == 404
+    assert c.delete(f"/api/slos/{slo_id}?org_id={mt['org_a']}", headers=b).status_code == 404
+
+    assert c.get(f"/api/slos/{slo_id}", headers=a).status_code == 200

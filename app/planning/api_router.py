@@ -26,32 +26,40 @@ from app.planning.execution_engine import (
     ExecutionEngine,
     create_default_tools,
 )
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.planning.api")
 
 router = APIRouter(prefix="/planning", tags=["planning"])
 
-_graphs: dict[str, TaskGraph] = {}
-_execution_engine: ExecutionEngine | None = None
-_goal_decomposer: GoalDecomposer | None = None
+
+def _build_execution_engine() -> ExecutionEngine:
+    engine = ExecutionEngine()
+    for name, handler in create_default_tools().items():
+        engine.register_tool(name, handler)
+    return engine
+
+
+# One set per org. Task graphs describe a tenant's services and the remediation
+# steps to run against them, and the engine holds their live execution results;
+# a shared process global let any tenant read, edit and run another's plans.
+_graph_stores = scoped(dict)
+_engines = scoped(_build_execution_engine)
+_decomposers = scoped(lambda: GoalDecomposer(use_templates=True))
+
+
+def _graphs() -> dict[str, TaskGraph]:
+    return _graph_stores.get()
 
 
 def get_execution_engine() -> ExecutionEngine:
-    """Get or create execution engine."""
-    global _execution_engine
-    if _execution_engine is None:
-        _execution_engine = ExecutionEngine()
-        for name, handler in create_default_tools().items():
-            _execution_engine.register_tool(name, handler)
-    return _execution_engine
+    """The execution engine for the org on the current request."""
+    return _engines.get()
 
 
 def get_goal_decomposer() -> GoalDecomposer:
-    """Get or create goal decomposer."""
-    global _goal_decomposer
-    if _goal_decomposer is None:
-        _goal_decomposer = GoalDecomposer(use_templates=True)
-    return _goal_decomposer
+    """The goal decomposer for the org on the current request."""
+    return _decomposers.get()
 
 
 class CreateGraphInput(BaseModel):
@@ -101,7 +109,7 @@ class CreateIncidentGraphInput(BaseModel):
 async def create_graph(input: CreateGraphInput) -> dict[str, Any]:
     """Create a new task graph."""
     graph = TaskGraph(input.graph_id)
-    _graphs[graph.id] = graph
+    _graphs()[graph.id] = graph
     return {
         "graph_id": graph.id,
         "created": True,
@@ -111,16 +119,16 @@ async def create_graph(input: CreateGraphInput) -> dict[str, Any]:
 @router.get("/graphs/{graph_id}")
 async def get_graph(graph_id: str) -> dict[str, Any]:
     """Get a task graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
-    return _graphs[graph_id].to_dict()
+    return _graphs()[graph_id].to_dict()
 
 
 @router.delete("/graphs/{graph_id}")
 async def delete_graph(graph_id: str) -> dict[str, Any]:
     """Delete a task graph."""
-    if graph_id in _graphs:
-        del _graphs[graph_id]
+    if graph_id in _graphs():
+        del _graphs()[graph_id]
     return {"deleted": True}
 
 
@@ -134,19 +142,19 @@ async def list_graphs() -> dict[str, Any]:
                 "task_count": len(g.nodes),
                 "progress": g.get_progress(),
             }
-            for g in _graphs.values()
+            for g in _graphs().values()
         ],
-        "count": len(_graphs),
+        "count": len(_graphs()),
     }
 
 
 @router.post("/graphs/{graph_id}/tasks")
 async def add_task(graph_id: str, input: AddTaskInput) -> dict[str, Any]:
     """Add a task to a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    graph = _graphs[graph_id]
+    graph = _graphs()[graph_id]
 
     try:
         task_type = TaskType(input.task_type)
@@ -179,10 +187,10 @@ async def add_task(graph_id: str, input: AddTaskInput) -> dict[str, Any]:
 @router.get("/graphs/{graph_id}/tasks/{task_id}")
 async def get_task(graph_id: str, task_id: str) -> dict[str, Any]:
     """Get a task from a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    task = _graphs[graph_id].get_task(task_id)
+    task = _graphs()[graph_id].get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -192,21 +200,21 @@ async def get_task(graph_id: str, task_id: str) -> dict[str, Any]:
 @router.delete("/graphs/{graph_id}/tasks/{task_id}")
 async def remove_task(graph_id: str, task_id: str) -> dict[str, Any]:
     """Remove a task from a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    _graphs[graph_id].remove_task(task_id)
+    _graphs()[graph_id].remove_task(task_id)
     return {"removed": True}
 
 
 @router.post("/graphs/{graph_id}/dependencies")
 async def add_dependency(graph_id: str, input: AddDependencyInput) -> dict[str, Any]:
     """Add a dependency between tasks."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
     try:
-        _graphs[graph_id].add_dependency(input.task_id, input.depends_on)
+        _graphs()[graph_id].add_dependency(input.task_id, input.depends_on)
         return {"added": True}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -215,30 +223,30 @@ async def add_dependency(graph_id: str, input: AddDependencyInput) -> dict[str, 
 @router.get("/graphs/{graph_id}/plan")
 async def get_execution_plan(graph_id: str) -> dict[str, Any]:
     """Get execution plan for a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    plan = _graphs[graph_id].get_execution_plan()
+    plan = _graphs()[graph_id].get_execution_plan()
     return plan.to_dict()
 
 
 @router.get("/graphs/{graph_id}/progress")
 async def get_progress(graph_id: str) -> dict[str, Any]:
     """Get execution progress for a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    return _graphs[graph_id].get_progress()
+    return _graphs()[graph_id].get_progress()
 
 
 @router.get("/graphs/{graph_id}/visualize")
 async def visualize_graph(graph_id: str) -> dict[str, Any]:
     """Get ASCII visualization of a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
     return {
-        "visualization": _graphs[graph_id].visualize_dag(),
+        "visualization": _graphs()[graph_id].visualize_dag(),
     }
 
 
@@ -249,11 +257,11 @@ async def execute_graph(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     """Execute a task graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
     engine = get_execution_engine()
-    graph = _graphs[graph_id]
+    graph = _graphs()[graph_id]
 
     async def run_execution() -> None:
         result = await engine.execute(
@@ -278,11 +286,11 @@ async def execute_graph_sync(
     input: ExecuteGraphInput,
 ) -> dict[str, Any]:
     """Execute a task graph synchronously."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
     engine = get_execution_engine()
-    graph = _graphs[graph_id]
+    graph = _graphs()[graph_id]
 
     result = await engine.execute(
         graph,
@@ -297,10 +305,10 @@ async def execute_graph_sync(
 @router.post("/graphs/{graph_id}/checkpoint")
 async def create_checkpoint(graph_id: str) -> dict[str, Any]:
     """Create a checkpoint for a graph."""
-    if graph_id not in _graphs:
+    if graph_id not in _graphs():
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    checkpoint = _graphs[graph_id].create_checkpoint()
+    checkpoint = _graphs()[graph_id].create_checkpoint()
     return checkpoint
 
 
@@ -318,7 +326,7 @@ async def decompose_goal(input: CreateGoalInput) -> dict[str, Any]:
         priority = TaskPriority.MEDIUM
 
     goal = Goal(
-        id=f"goal_{len(_graphs)}",
+        id=f"goal_{len(_graphs())}",
         description=input.description,
         category=category,
         context=input.context,
@@ -330,7 +338,7 @@ async def decompose_goal(input: CreateGoalInput) -> dict[str, Any]:
     decomposer = get_goal_decomposer()
     result = await decomposer.decompose(goal)
 
-    _graphs[result.task_graph.id] = result.task_graph
+    _graphs()[result.task_graph.id] = result.task_graph
 
     return result.to_dict()
 
@@ -344,7 +352,7 @@ async def create_incident_graph(input: CreateIncidentGraphInput) -> dict[str, An
         severity=input.severity,
     )
 
-    _graphs[graph.id] = graph
+    _graphs()[graph.id] = graph
 
     return graph.to_dict()
 

@@ -22,19 +22,39 @@ from app.runbooks.models import (
     StepType,
     DEFAULT_RUNBOOKS,
 )
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.runbooks.api")
 
 router = APIRouter(prefix="/runbooks", tags=["runbooks"])
 
-# In-memory storage (would be DB in production)
-_runbooks: dict[str, Runbook] = {}
-_executions: dict[str, RunbookExecution] = {}
 
-# Initialize with default runbooks
-for rb_data in DEFAULT_RUNBOOKS:
-    rb = Runbook.from_dict(rb_data)
-    _runbooks[rb.id] = rb
+class _RunbookState:
+    """One org's runbooks and execution history (in memory; DB in production).
+
+    Previously two module-level dicts shared by the whole process, which meant a
+    runbook is a script one tenant can run against another tenant's
+    infrastructure — anyone could edit or delete a competitor's remediation
+    steps, and read every execution's output.
+    """
+
+    def __init__(self) -> None:
+        self.runbooks: dict[str, Runbook] = {}
+        self.executions: dict[str, RunbookExecution] = {}
+        for rb_data in DEFAULT_RUNBOOKS:
+            rb = Runbook.from_dict(rb_data)
+            self.runbooks[rb.id] = rb
+
+
+_state = scoped(_RunbookState)
+
+
+def _runbooks() -> dict[str, Runbook]:
+    return _state.get().runbooks
+
+
+def _executions() -> dict[str, RunbookExecution]:
+    return _state.get().executions
 
 
 class RunbookResponse(BaseModel):
@@ -96,7 +116,7 @@ async def list_runbooks(
 ) -> list[RunbookResponse]:
     """List all runbooks with optional filtering."""
     result = []
-    for rb in _runbooks.values():
+    for rb in _runbooks().values():
         if service and rb.service != "*" and rb.service != service:
             continue
         if trigger and rb.trigger != trigger:
@@ -120,7 +140,7 @@ async def list_runbooks(
 @router.get("/{runbook_id}")
 async def get_runbook(runbook_id: str) -> RunbookDetailResponse:
     """Get a specific runbook by ID."""
-    rb = _runbooks.get(runbook_id)
+    rb = _runbooks().get(runbook_id)
     if not rb:
         raise HTTPException(status_code=404, detail="Runbook not found")
     return RunbookDetailResponse(
@@ -167,7 +187,7 @@ async def create_runbook(req: CreateRunbookRequest) -> RunbookDetailResponse:
         labels=req.labels,
         enabled=True,
     )
-    _runbooks[runbook_id] = rb
+    _runbooks()[runbook_id] = rb
 
     return RunbookDetailResponse(
         id=rb.id,
@@ -185,9 +205,9 @@ async def create_runbook(req: CreateRunbookRequest) -> RunbookDetailResponse:
 @router.delete("/{runbook_id}")
 async def delete_runbook(runbook_id: str) -> dict[str, str]:
     """Delete a runbook."""
-    if runbook_id not in _runbooks:
+    if runbook_id not in _runbooks():
         raise HTTPException(status_code=404, detail="Runbook not found")
-    del _runbooks[runbook_id]
+    del _runbooks()[runbook_id]
     return {"status": "deleted"}
 
 
@@ -198,7 +218,7 @@ async def execute_runbook(
     background_tasks: BackgroundTasks,
 ) -> ExecutionResponse:
     """Execute a runbook."""
-    rb = _runbooks.get(runbook_id)
+    rb = _runbooks().get(runbook_id)
     if not rb:
         raise HTTPException(status_code=404, detail="Runbook not found")
 
@@ -221,7 +241,7 @@ async def execute_runbook(
             **req.params,
         },
     )
-    _executions[execution_id] = execution
+    _executions()[execution_id] = execution
 
     return ExecutionResponse(
         id=execution.id,
@@ -243,7 +263,7 @@ async def list_executions(
 ) -> list[ExecutionResponse]:
     """List runbook executions."""
     result = []
-    for exec_ in sorted(_executions.values(), key=lambda e: e.started_at, reverse=True):
+    for exec_ in sorted(_executions().values(), key=lambda e: e.started_at, reverse=True):
         if runbook_id and exec_.runbook_id != runbook_id:
             continue
         if status and exec_.status.value != status:
@@ -266,7 +286,7 @@ async def list_executions(
 @router.post("/executions/{execution_id}/approve")
 async def approve_execution(execution_id: str) -> ExecutionResponse:
     """Approve a pending execution."""
-    exec_ = _executions.get(execution_id)
+    exec_ = _executions().get(execution_id)
     if not exec_:
         raise HTTPException(status_code=404, detail="Execution not found")
 
@@ -290,7 +310,7 @@ async def approve_execution(execution_id: str) -> ExecutionResponse:
 @router.post("/executions/{execution_id}/reject")
 async def reject_execution(execution_id: str) -> ExecutionResponse:
     """Reject a pending execution."""
-    exec_ = _executions.get(execution_id)
+    exec_ = _executions().get(execution_id)
     if not exec_:
         raise HTTPException(status_code=404, detail="Execution not found")
 

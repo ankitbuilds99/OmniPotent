@@ -18,6 +18,7 @@ from app.incidents.models import (
     SafetyGateStatus,
     TimelineEntry,
 )
+from app.tenancy.scoping import scoped
 
 AGENT_TYPES = ["knowledge", "reasoning", "action", "learning", "collaboration", "ambient"]
 
@@ -455,11 +456,12 @@ class IncidentStore:
         return investigation
 
 
-_store: IncidentStore | None = None
+# One store per org. A single process-wide instance let any authenticated tenant
+# read, acknowledge and resolve every other tenant's incidents — the store has no
+# org column to filter on, so isolation comes from the instance itself.
+_stores = scoped(IncidentStore)
 
 
 def get_incident_store() -> IncidentStore:
-    global _store
-    if _store is None:
-        _store = IncidentStore()
-    return _store
+    """The incident store for the org on the current request."""
+    return _stores.get()

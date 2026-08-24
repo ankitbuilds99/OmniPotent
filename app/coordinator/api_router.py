@@ -26,35 +26,31 @@ from app.coordinator.handlers import (
 )
 from app.coordinator.replanner import DynamicReplanner
 from app.coordinator.resource_pool import ResourcePool
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.coordinator.api")
 
 router = APIRouter(prefix="/coordinator", tags=["coordinator"])
 
-_executor: DAGExecutor | None = None
-_resource_pool: ResourcePool | None = None
-_replanner: DynamicReplanner | None = None
-_active_executions: dict[str, DAGExecution] = {}
 
+class _CoordinatorState:
+    """One org's DAG executor, resource pool, replanner and execution history.
 
-async def get_executor() -> DAGExecutor:
-    """Get or create DAG executor."""
-    global _executor, _resource_pool, _replanner
+    Shared across the process these were a cross-tenant channel in both
+    directions: executions carry investigation output (log lines, metric values,
+    service names) that `GET /executions` handed to anyone, and a single
+    ResourcePool meant one tenant's parallel DAGs starved everyone else's.
+    """
 
-    if _executor is None:
+    def __init__(self) -> None:
         settings = get_settings()
 
-        _resource_pool = ResourcePool(
-            cpu_cores=8,
-            memory_mb=16384,
-            gpus=0,
-        )
-
-        _executor = DAGExecutor(
+        self.resource_pool = ResourcePool(cpu_cores=8, memory_mb=16384, gpus=0)
+        self.executor = DAGExecutor(
             handlers={},
             redis_client=None,
             max_parallel=10,
-            resource_pool=_resource_pool,
+            resource_pool=self.resource_pool,
         )
 
         investigation_handlers = create_investigation_handlers(
@@ -63,26 +59,29 @@ async def get_executor() -> DAGExecutor:
             knowledge_graph=None,
             llm_client=None,
         )
-
         remediation_handlers = create_remediation_handlers(
             k8s_client=None,
             prometheus_url=getattr(settings, "prometheus_url", None),
             knowledge_graph=None,
             llm_client=None,
         )
+        for name, handler in {**investigation_handlers, **remediation_handlers}.items():
+            self.executor.register_handler(name, handler)
 
-        for name, handler in investigation_handlers.items():
-            _executor.register_handler(name, handler)
+        self.replanner = DynamicReplanner(llm_client=None, knowledge_graph=None)
+        self.active_executions: dict[str, DAGExecution] = {}
 
-        for name, handler in remediation_handlers.items():
-            _executor.register_handler(name, handler)
 
-        _replanner = DynamicReplanner(
-            llm_client=None,
-            knowledge_graph=None,
-        )
+_state = scoped(_CoordinatorState)
 
-    return _executor
+
+def _active_executions() -> dict[str, DAGExecution]:
+    return _state.get().active_executions
+
+
+async def get_executor() -> DAGExecutor:
+    """The DAG executor for the org on the current request."""
+    return _state.get().executor
 
 
 class TaskNodeInput(BaseModel):
@@ -197,7 +196,7 @@ async def execute_dag(
             context=execute_input.context,
             resume_from=execute_input.resume_from,
         )
-        _active_executions[execution.id] = execution
+        _active_executions()[execution.id] = execution
 
     background_tasks.add_task(run_dag)
 
@@ -223,7 +222,7 @@ async def start_investigation(
 
     async def run_investigation() -> None:
         execution = await executor.execute(dag, context=input.context)
-        _active_executions[execution.id] = execution
+        _active_executions()[execution.id] = execution
 
     background_tasks.add_task(run_investigation)
 
@@ -241,7 +240,7 @@ async def get_execution(
     execution_id: str,
 ) -> dict[str, Any]:
     """Get execution status."""
-    execution = _active_executions.get(execution_id)
+    execution = _active_executions().get(execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
 
@@ -259,9 +258,9 @@ async def list_executions() -> dict[str, Any]:
                 "state": execution.state.value,
                 "current_level": execution.current_level,
             }
-            for exec_id, execution in _active_executions.items()
+            for exec_id, execution in _active_executions().items()
         ],
-        "count": len(_active_executions),
+        "count": len(_active_executions()),
     }
 
 
@@ -290,13 +289,8 @@ async def approve_task(
 
 @router.get("/resources")
 async def get_resource_usage() -> dict[str, Any]:
-    """Get current resource usage."""
-    global _resource_pool
-
-    if _resource_pool is None:
-        return {"error": "Resource pool not initialized"}
-
-    return await _resource_pool.get_usage()
+    """Get current resource usage for the org on the current request."""
+    return await _state.get().resource_pool.get_usage()
 
 
 @router.get("/handlers")

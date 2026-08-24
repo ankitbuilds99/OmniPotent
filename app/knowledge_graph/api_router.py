@@ -28,6 +28,17 @@ log = logging.getLogger("omnipotent.knowledge_graph.api")
 
 router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 
+# NOT tenant-isolated, unlike the other feature routers.
+#
+# These are a connection to one shared Neo4j database, not an in-process store,
+# so giving each org its own client would open N connections to the same data
+# and isolate nothing. Real isolation needs an org property on every node and an
+# org filter in every Cypher query in neo4j_backend.py (which has none today),
+# plus a migration for existing graphs — a larger change than this pass.
+#
+# Until that lands, treat /api/knowledge-graph as shared across tenants: do not
+# enable it on a deployment serving more than one customer. It is inert unless
+# NEO4J_URI is configured, so the default deployment is unaffected.
 _graph: Neo4jKnowledgeGraph | None = None
 _sync_engine: ContinuousSyncEngine | None = None
 _graphql_app: Any = None

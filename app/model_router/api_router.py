@@ -19,36 +19,31 @@ from app.model_router.adaptive_router import (
 )
 from app.model_router.complexity_analyzer import ComplexityAnalyzer
 from app.model_router.cost_optimizer import CostOptimizer
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.model_router.api")
 
 router = APIRouter(prefix="/model-router", tags=["model-router"])
 
-# Global instances
-_router: AdaptiveModelRouter | None = None
-_complexity_analyzer: ComplexityAnalyzer | None = None
-_cost_optimizer: CostOptimizer | None = None
+# One instance per org. The router and the cost optimizer accumulate routing
+# decisions and spend per tenant, and the /model-router stats endpoints read
+# them back: shared, one customer's query volume and LLM bill were visible to
+# every other customer, and their budget caps applied to everyone.
+_routers = scoped(AdaptiveModelRouter)
+_complexity_analyzers = scoped(ComplexityAnalyzer)
+_cost_optimizers = scoped(CostOptimizer)
 
 
 def get_router() -> AdaptiveModelRouter:
-    global _router
-    if _router is None:
-        _router = AdaptiveModelRouter()
-    return _router
+    return _routers.get()
 
 
 def get_complexity_analyzer() -> ComplexityAnalyzer:
-    global _complexity_analyzer
-    if _complexity_analyzer is None:
-        _complexity_analyzer = ComplexityAnalyzer()
-    return _complexity_analyzer
+    return _complexity_analyzers.get()
 
 
 def get_cost_optimizer() -> CostOptimizer:
-    global _cost_optimizer
-    if _cost_optimizer is None:
-        _cost_optimizer = CostOptimizer()
-    return _cost_optimizer
+    return _cost_optimizers.get()
 
 
 class RouteRequest(BaseModel):
