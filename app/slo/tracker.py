@@ -524,7 +524,14 @@ class SLOTracker:
         current_sli = total_good / total_count if total_count > 0 else 1.0
 
         total_budget = 1 - slo.target
-        consumed = max(0, slo.target - current_sli)
+        # The budget is spent by errors, so what is consumed is the error rate.
+        # This was `max(0, target - current_sli)`, which is the error rate minus
+        # the whole budget: it read 0 for any service meeting or beating its
+        # target — including one sitting exactly on it, with nothing left — and
+        # understated every other service by exactly 100% of its budget. A 99.9%
+        # SLO running at 99.95% reported a full budget remaining when half of it
+        # was gone.
+        consumed = 1 - current_sli
         remaining = max(0, total_budget - consumed)
         remaining_percent = (remaining / total_budget * 100) if total_budget > 0 else 100
 
@@ -578,7 +585,19 @@ class SLOTracker:
         short_data = await self.get_sli_data(slo_id, now - short_window, now)
         long_data = await self.get_sli_data(slo_id, now - long_window, now)
 
-        def calc_burn(data: list[SLI], window: timedelta) -> float:
+        def calc_burn(data: list[SLI]) -> float:
+            """How many times faster than the budget allows this window is burning.
+
+            1.0 means this window's error rate would spend exactly the whole
+            budget over the full SLO window, so the rate is the error rate over
+            the allowed error and nothing else. The window's own length does not
+            enter into it: this used to divide by `allowed_error * (window /
+            slo_window)`, which scaled a 1-hour window against a 30-day
+            objective by 720 and a 6-hour window by 120. The thresholds below —
+            14.4 and 6, the SRE workbook's numbers — already assume this
+            definition, so a single bad request in an hour cleared 14.4 and
+            paged as "critical".
+            """
             if not data:
                 return 0.0
             total_good = sum(s.good_count for s in data)
@@ -586,18 +605,13 @@ class SLOTracker:
             if total_count == 0:
                 return 0.0
 
-            current_sli = total_good / total_count
-            error_rate = 1 - current_sli
+            error_rate = 1 - (total_good / total_count)
             allowed_error = 1 - slo.target
 
-            slo_window = slo.get_window_duration()
-            time_fraction = window.total_seconds() / slo_window.total_seconds()
-            expected_error = allowed_error * time_fraction
+            return error_rate / allowed_error if allowed_error > 0 else 0
 
-            return error_rate / expected_error if expected_error > 0 else 0
-
-        short_burn = calc_burn(short_data, short_window)
-        long_burn = calc_burn(long_data, long_window)
+        short_burn = calc_burn(short_data)
+        long_burn = calc_burn(long_data)
 
         is_alerting = False
         severity = "none"
@@ -686,7 +700,11 @@ class SLOTracker:
         achieved = total_good / total_count if total_count > 0 else 1.0
         compliant = achieved >= slo.target
 
-        error_budget_consumed = max(0, (slo.target - achieved) / (1 - slo.target)) if slo.target < 1 else 0
+        # The share of the error budget the period spent: the error rate over
+        # the allowed error. The numerator was `slo.target - achieved`, the
+        # error rate minus the whole budget, which is exactly 1.0 too low — a
+        # service that had spent its budget down to nothing reported 0.
+        error_budget_consumed = ((1 - achieved) / (1 - slo.target)) if slo.target < 1 else 0
 
         bad_events = total_count - total_good
         downtime_minutes = int(bad_events * 60 / (total_count / ((end_time - start_time).total_seconds() / 60))) if total_count > 0 else 0
