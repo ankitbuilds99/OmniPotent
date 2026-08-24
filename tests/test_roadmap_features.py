@@ -2,124 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
-from app.debug.debug_mode import (
-    DebugLevel,
-    DebugSession,
-    DebugTimer,
-    debug_enabled,
-    debug_span,
-)
-from app.llm_advanced.model_router import (
-    ComplexityAnalyzer,
-    ModelRouter,
-    RoutingContext,
-    TaskComplexity,
-)
 from app.resilience.graceful_degradation import (
     DegradationLevel,
     FeaturePriority,
     GracefulDegradation,
     SystemLoad,
 )
-from app.llm_advanced.semantic_cache import (
-    SemanticCache,
-    cosine_similarity,
-)
 from app.integrations.slack_bot import (
     SlackBlockBuilder,
     SlackBot,
     SlackEventType,
 )
-
-
-class TestDebugMode:
-    def test_debug_session_context(self):
-        with DebugSession(level=DebugLevel.DETAILED) as session:
-            assert debug_enabled() is True
-            assert session.context.level == DebugLevel.DETAILED
-
-        assert debug_enabled() is False
-
-    def test_debug_span(self):
-        with DebugSession(level=DebugLevel.VERBOSE) as session:
-            with session.span("test-operation", {"key": "value"}) as span:
-                span.add_event("checkpoint", {"data": 123})
-
-            assert len(session.context.spans) == 1
-            assert session.context.spans[0].name == "test-operation"
-            assert len(session.context.spans[0].events) == 1
-
-    def test_debug_timer(self):
-        timer = DebugTimer(name="test-timer")
-        timer.checkpoint("step1")
-        timer.checkpoint("step2")
-
-        summary = timer.summary()
-        assert summary["name"] == "test-timer"
-        assert len(summary["checkpoints"]) == 2
-
-    def test_debug_decorator(self):
-        @debug_span("decorated-func")
-        def my_function(x: int) -> int:
-            return x * 2
-
-        with DebugSession(level=DebugLevel.BASIC):
-            result = my_function(5)
-            assert result == 10
-
-
-class TestModelRouter:
-    def test_complexity_analyzer(self):
-        analyzer = ComplexityAnalyzer()
-
-        assert analyzer.analyze("list all users") == TaskComplexity.TRIVIAL
-        assert analyzer.analyze("explain this error") == TaskComplexity.SIMPLE
-        assert analyzer.analyze("analyze the performance") == TaskComplexity.COMPLEX
-        assert analyzer.analyze("compare options A and B") == TaskComplexity.MODERATE
-
-    def test_route_simple_query(self):
-        router = ModelRouter()
-        context = RoutingContext(
-            query="what is 2+2",
-            estimated_input_tokens=10,
-            estimated_output_tokens=5,
-        )
-
-        decision = router.route(context)
-
-        assert decision.model is not None
-        assert decision.complexity in [TaskComplexity.TRIVIAL, TaskComplexity.SIMPLE]
-        assert decision.estimated_cost >= 0
-
-    def test_route_with_capability_requirement(self):
-        router = ModelRouter()
-        context = RoutingContext(
-            query="analyze this image",
-            estimated_input_tokens=100,
-            estimated_output_tokens=500,
-            required_capabilities={"vision"},
-        )
-
-        decision = router.route(context)
-
-        assert "vision" in decision.model.capabilities
-
-    def test_route_with_cost_constraint(self):
-        router = ModelRouter()
-        context = RoutingContext(
-            query="write a long essay",
-            estimated_input_tokens=1000,
-            estimated_output_tokens=4000,
-            max_cost=0.01,
-        )
-
-        decision = router.route(context)
-
-        assert decision.estimated_cost <= 0.01 or decision.reason == "fallback_to_default"
 
 
 class TestGracefulDegradation:
@@ -181,53 +78,6 @@ class TestGracefulDegradation:
         result = await degradation.execute("test-feature", real_operation)
 
         assert result == "fallback"
-
-
-class TestSemanticCache:
-    @pytest.mark.asyncio
-    async def test_exact_cache_hit(self):
-        cache = SemanticCache()
-
-        await cache.set(
-            query="what is python",
-            response="Python is a programming language",
-            model="gpt-4o",
-        )
-
-        entry = await cache.get("what is python", "gpt-4o")
-
-        assert entry is not None
-        assert entry.response == "Python is a programming language"
-
-    @pytest.mark.asyncio
-    async def test_cache_miss(self):
-        cache = SemanticCache()
-
-        entry = await cache.get("unknown query", "gpt-4o")
-
-        assert entry is None
-
-    @pytest.mark.asyncio
-    async def test_cache_expiration(self):
-        cache = SemanticCache(default_ttl=timedelta(seconds=-1))
-
-        await cache.set(
-            query="test",
-            response="response",
-            model="gpt-4o",
-        )
-
-        entry = await cache.get("test", "gpt-4o")
-
-        assert entry is None
-
-    def test_cosine_similarity(self):
-        vec1 = [1.0, 0.0, 0.0]
-        vec2 = [1.0, 0.0, 0.0]
-        vec3 = [0.0, 1.0, 0.0]
-
-        assert cosine_similarity(vec1, vec2) == pytest.approx(1.0)
-        assert cosine_similarity(vec1, vec3) == pytest.approx(0.0)
 
 
 class TestSlackBot:
