@@ -652,3 +652,49 @@ class BillingFeatureOverride(Base):
     __table_args__ = (
         Index("ix_billing_override_org_key", "org_id", "feature_key", unique=True),
     )
+
+
+class KnowledgeDocument(Base):
+    """A knowledge base document owned by one org.
+
+    `doc_id` is the id the API exposes, and the seeded built-ins reuse the same
+    ids ("kb-001") in every org, so the primary key is a surrogate and the
+    identity is (org_id, doc_id).
+
+    There is no embedding column on purpose. `KnowledgeBase._generate_embedding`
+    is a word-frequency placeholder derived entirely from `content` — storing it
+    would persist a value that has to be invalidated on every edit and that a
+    real embedding model would replace anyway. The search index is rebuilt from
+    `content` on each query instead.
+    """
+
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    doc_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    doc_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    tags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    service: Mapped[str | None] = mapped_column(String(128))
+    author: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    # `metadata` is taken on a declarative class; the column keeps the name.
+    meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    # Stamped in Python, not by the server: the document list is ordered by
+    # `updated_at`, and SQLite's CURRENT_TIMESTAMP has one-second resolution, so
+    # a server default would give every seeded document the same instant and an
+    # arbitrary order.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_knowledge_documents_org_doc", "org_id", "doc_id", unique=True),
+        Index("ix_knowledge_documents_org_updated", "org_id", "updated_at"),
+    )

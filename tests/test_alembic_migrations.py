@@ -46,6 +46,7 @@ CORE_TABLES = {
     "billing_usage_records",
     "billing_usage_summaries",
     "billing_feature_overrides",
+    "knowledge_documents",
 }
 ONCALL_TABLES = {
     "oncall_alerts",

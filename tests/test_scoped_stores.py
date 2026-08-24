@@ -6,16 +6,16 @@ task graphs is that they hold different instances. These tests pin that: same
 org ⇒ same instance, different org ⇒ different instance, no tenant ⇒ the shared
 single-tenant bucket.
 
-Incidents and runbooks are not here any more — they moved to the `incidents`
-and `runbooks` tables, where isolation is an org_id filter rather than an
-instance. See tests/test_incidents_store.py and tests/test_runbooks_store.py.
+Incidents, runbooks and the knowledge base are not here any more — they moved
+to the `incidents`, `runbooks` and `knowledge_documents` tables, where isolation
+is an org_id filter rather than an instance. See tests/test_incidents_store.py,
+tests/test_runbooks_store.py and tests/test_knowledge_base_store.py.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from app.knowledge_base.api_router import get_knowledge_base
 from app.planning.api_router import _graphs
 from app.status_page.store import get_status_store
 from app.teams.store import get_team_store
@@ -115,7 +115,6 @@ def test_scoped_registers_for_reset():
     [
         pytest.param(get_team_store, id="teams"),
         pytest.param(get_status_store, id="status_page"),
-        pytest.param(get_knowledge_base, id="knowledge_base"),
         pytest.param(_graphs, id="planning_graphs"),
     ],
 )
