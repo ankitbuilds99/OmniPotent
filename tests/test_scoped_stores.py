@@ -1,17 +1,20 @@
 """Per-tenant feature stores — the isolation that `scoped()` is there to provide.
 
-The feature routers keep their state in process memory with no org column, so the
-only thing stopping tenant B from reading tenant A's incidents, runbooks and task
-graphs is that they hold different instances. These tests pin that: same org ⇒
-same instance, different org ⇒ different instance, no tenant ⇒ the shared
+The remaining feature routers keep their state in process memory with no org
+column, so the only thing stopping tenant B from reading tenant A's runbooks and
+task graphs is that they hold different instances. These tests pin that: same
+org ⇒ same instance, different org ⇒ different instance, no tenant ⇒ the shared
 single-tenant bucket.
+
+Incidents are not here any more — they moved to the `incidents` table, where
+isolation is an org_id filter rather than an instance. See
+tests/test_incidents_store.py.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from app.incidents.store import get_incident_store
 from app.knowledge_base.api_router import get_knowledge_base
 from app.planning.api_router import _graphs
 from app.runbooks.router import _executions, _runbooks
@@ -111,7 +114,6 @@ def test_scoped_registers_for_reset():
 @pytest.mark.parametrize(
     "get_store",
     [
-        pytest.param(get_incident_store, id="incidents"),
         pytest.param(get_team_store, id="teams"),
         pytest.param(get_status_store, id="status_page"),
         pytest.param(get_knowledge_base, id="knowledge_base"),
@@ -129,34 +131,6 @@ def test_feature_stores_are_per_org(get_store, as_org):
 
     as_org("umbrella")
     assert get_store() is not acme
-
-
-def test_one_orgs_incident_is_invisible_to_another(as_org):
-    """The end-to-end shape of the leak: create in A, look in B."""
-    from app.incidents.models import IncidentSeverity
-
-    as_org("acme")
-    created = get_incident_store().create_incident(
-        title="checkout down", severity=IncidentSeverity.CRITICAL, service="pay"
-    )
-    assert get_incident_store().get_incident(created.id) is not None
-
-    as_org("umbrella")
-    assert get_incident_store().get_incident(created.id) is None
-    assert all(i.title != "checkout down" for i in get_incident_store().list_incidents())
-
-
-def test_seeded_demo_data_is_not_shared(as_org):
-    """Each org gets its own copy of the seeded incidents. Sharing one meant
-    resolving a demo incident resolved it for every other tenant too."""
-    as_org("acme")
-    acme_ids = {i.id for i in get_incident_store().list_incidents()}
-
-    as_org("umbrella")
-    umbrella_ids = {i.id for i in get_incident_store().list_incidents()}
-
-    assert acme_ids and umbrella_ids
-    assert not (acme_ids & umbrella_ids)
 
 
 def test_runbook_deleted_by_one_org_survives_for_another(as_org):

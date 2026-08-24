@@ -36,7 +36,7 @@ async def auto_investigate(incident_id: str) -> None:
     from uuid import UUID
     try:
         store = get_incident_store()
-        store.start_investigation(UUID(incident_id))
+        await store.start_investigation(UUID(incident_id))
         log.info("Auto-investigation started for incident %s", incident_id)
     except Exception as e:
         log.error("Failed to start auto-investigation: %s", e)
@@ -76,7 +76,7 @@ async def pagerduty_webhook(
             )
 
             store = get_incident_store()
-            incident = store.create_incident(
+            incident = await store.create_incident(
                 title=incident_data.get("title", "PagerDuty Alert"),
                 description=incident_data.get("description"),
                 severity=severity,
@@ -130,7 +130,7 @@ async def alertmanager_webhook(
         )
 
         store = get_incident_store()
-        incident = store.create_incident(
+        incident = await store.create_incident(
             title=labels.get("alertname", "Prometheus Alert"),
             description=annotations.get("description") or annotations.get("summary"),
             severity=severity,
@@ -173,7 +173,7 @@ async def datadog_webhook(
     )
 
     store = get_incident_store()
-    incident = store.create_incident(
+    incident = await store.create_incident(
         title=data.get("title", "Datadog Alert"),
         description=data.get("body"),
         severity=severity,
@@ -223,7 +223,7 @@ async def grafana_webhook(
     )
 
     store = get_incident_store()
-    incident = store.create_incident(
+    incident = await store.create_incident(
         title=data.get("title", data.get("ruleName", "Grafana Alert")),
         description=data.get("message"),
         severity=severity,
@@ -285,7 +285,7 @@ async def generic_webhook(
     tags.append("generic-webhook")
 
     store = get_incident_store()
-    incident = store.create_incident(
+    incident = await store.create_incident(
         title=title,
         description=description,
         severity=severity,

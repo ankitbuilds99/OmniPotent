@@ -52,7 +52,7 @@ async def list_incidents(
 ) -> list[IncidentResponse]:
     """List incidents with optional filters."""
     store = get_incident_store()
-    incidents = store.list_incidents(
+    incidents = await store.list_incidents(
         status=status,
         severity=severity,
         service=service,
@@ -65,7 +65,7 @@ async def list_incidents(
 async def get_incident(incident_id: UUID) -> IncidentDetailResponse:
     """Get incident details including investigation."""
     store = get_incident_store()
-    incident = store.get_incident(incident_id)
+    incident = await store.get_incident(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     return IncidentDetailResponse(
@@ -78,7 +78,7 @@ async def get_incident(incident_id: UUID) -> IncidentDetailResponse:
 async def create_incident(request: CreateIncidentRequest) -> IncidentResponse:
     """Create a new incident."""
     store = get_incident_store()
-    incident = store.create_incident(
+    incident = await store.create_incident(
         title=request.title,
         description=request.description,
         severity=request.severity,
@@ -99,7 +99,7 @@ async def update_incident(
     """Update incident fields."""
     store = get_incident_store()
     updates = request.model_dump(exclude_none=True)
-    incident = store.update_incident(incident_id, updates)
+    incident = await store.update_incident(incident_id, updates)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     log.info("Updated incident %s", incident_id)
@@ -113,7 +113,7 @@ async def acknowledge_incident(
 ) -> dict:
     """Acknowledge an incident."""
     store = get_incident_store()
-    incident = store.acknowledge_incident(incident_id, user)
+    incident = await store.acknowledge_incident(incident_id, user)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     log.info("Incident %s acknowledged by %s", incident_id, user)
@@ -128,7 +128,7 @@ async def resolve_incident(
 ) -> dict:
     """Resolve an incident."""
     store = get_incident_store()
-    incident = store.resolve_incident(incident_id, user, notes)
+    incident = await store.resolve_incident(incident_id, user, notes)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     log.info("Incident %s resolved by %s", incident_id, user)
@@ -139,7 +139,7 @@ async def resolve_incident(
 async def start_investigation(incident_id: UUID) -> dict:
     """Start AI investigation for an incident."""
     store = get_incident_store()
-    investigation = store.start_investigation(incident_id)
+    investigation = await store.start_investigation(incident_id)
     if not investigation:
         raise HTTPException(status_code=404, detail="Incident not found")
     log.info("Started investigation %s for incident %s", investigation.id, incident_id)
@@ -154,7 +154,7 @@ async def start_investigation(incident_id: UUID) -> dict:
 async def get_investigation(incident_id: UUID) -> dict:
     """Get investigation status for an incident."""
     store = get_incident_store()
-    incident = store.get_incident(incident_id)
+    incident = await store.get_incident(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     if not incident.investigation:
@@ -202,7 +202,7 @@ async def get_investigation(incident_id: UUID) -> dict:
 async def get_timeline(incident_id: UUID) -> list[dict]:
     """Get incident timeline."""
     store = get_incident_store()
-    incident = store.get_incident(incident_id)
+    incident = await store.get_incident(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     return [

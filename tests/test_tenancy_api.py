@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import app.api.main as api
 import app.config as cfg
 from app import runtime, tenant_context
+from app.database import engine as db_engine
 from app.tenancy import auth as tenant_auth
 
 
@@ -32,19 +33,27 @@ async def _provision(store):
 def mt(tmp_path, monkeypatch):
     monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
     monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
+    # Incidents are a real table now, so these need a real database. `with`
+    # TestClient runs the lifespan, which is what creates the schema.
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/app.db")
     cfg.get_settings.cache_clear()
     tenant_auth.reset_store_cache()
     tenant_context.current_tenant.set(None)
     api._RL.clear()
     runtime.reset()
+    db_engine._engine = None
+    db_engine._session_factory = None
     data = asyncio.run(_provision(tenant_auth.get_store()))
-    data["client"] = TestClient(api.app)
-    yield data
+    with TestClient(api.app) as client:
+        data["client"] = client
+        yield data
     cfg.get_settings.cache_clear()
     tenant_auth.reset_store_cache()
     tenant_context.current_tenant.set(None)
     api._RL.clear()
     runtime.reset()
+    db_engine._engine = None
+    db_engine._session_factory = None
 
 
 def _auth(key: str) -> dict:
@@ -260,10 +269,22 @@ def test_feature_data_does_not_cross_tenants(mt):
     assert c.get("/api/planning/graphs/acme-plan", headers=a).status_code == 200
     assert c.get("/api/planning/graphs/acme-plan", headers=b).status_code == 404
 
-    a_incidents = {i["id"] for i in c.get("/api/incidents", headers=a).json()}
-    b_incidents = {i["id"] for i in c.get("/api/incidents", headers=b).json()}
-    assert a_incidents and b_incidents
-    assert not (a_incidents & b_incidents)  # seeded demo data is per-org
+    # Incidents are persisted and org-filtered in SQL, so a new org starts empty
+    # rather than with a copy of the seeded demo rows.
+    assert c.get("/api/incidents", headers=b).json() == []
+    declared = c.post("/api/incidents", headers=a, json={
+        "title": "checkout down", "severity": "critical", "service": "pay"})
+    assert declared.status_code == 200
+    inc_id = declared.json()["id"]
+
+    assert inc_id in {i["id"] for i in c.get("/api/incidents", headers=a).json()}
+    assert c.get("/api/incidents", headers=b).json() == []
+    assert c.get(f"/api/incidents/{inc_id}", headers=b).status_code == 404
+    # B cannot resolve what it cannot see, and A's incident is untouched.
+    assert c.post(f"/api/incidents/{inc_id}/resolve?user=mallory",
+                  headers=b).status_code == 404
+    assert c.get(f"/api/incidents/{inc_id}", headers=a).json()[
+        "incident"]["status"] == "triggered"
 
 
 def test_slo_org_id_cannot_be_chosen_by_the_caller(mt):

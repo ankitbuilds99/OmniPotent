@@ -272,6 +272,86 @@ class RunbookExecution(Base):
     )
 
 
+class Incident(Base):
+    """A declared incident.
+
+    The nested documents — timeline, agent states, safety gates — are stored as
+    JSON rather than child tables: they are appended to and read back whole, and
+    never queried across incidents. The columns that *are* filtered on (org,
+    status, severity, service, time) are real columns.
+    """
+
+    __tablename__ = "incidents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="triggered", nullable=False)
+    service: Mapped[str] = mapped_column(String(256), nullable=False)
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[str | None] = mapped_column(String(256))
+    resolved_by: Mapped[str | None] = mapped_column(String(256))
+    assignee: Mapped[str | None] = mapped_column(String(256))
+    tags: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    timeline: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    related_alerts: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    impact: Mapped[str | None] = mapped_column(Text)
+    customer_impact: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    investigation: Mapped["IncidentInvestigation | None"] = relationship(
+        back_populates="incident", cascade="all, delete-orphan", uselist=False
+    )
+
+    __table_args__ = (
+        Index("ix_incidents_org_triggered", "org_id", "triggered_at"),
+        Index("ix_incidents_org_status", "org_id", "status"),
+    )
+
+
+class IncidentInvestigation(Base):
+    """The multi-agent investigation attached to one incident."""
+
+    __tablename__ = "incident_investigations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("incidents.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    overall_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    root_cause: Mapped[str | None] = mapped_column(Text)
+    recommended_actions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    agents: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    safety_gates: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+
+    incident: Mapped["Incident"] = relationship(back_populates="investigation")
+
+    __table_args__ = (
+        Index("ix_incident_investigations_org", "org_id"),
+    )
+
+
 class UsageRecord(Base):
     """Per-tenant usage metering for billing."""
 
