@@ -3823,6 +3823,12 @@ if _FRONTEND_DIST.is_dir():
         if p.count("/") >= 1 and len(p.split("/")) > 1 and p.split("/")[1]
     }
 
+    # Client-side routes that live under an API segment anyway. Only one: the
+    # OAuth provider redirects the *browser* here, and it must render the SPA.
+    # There is no backend route at this path — `auth` is a segment because of
+    # /auth/providers, /auth/{provider}/login and friends.
+    _SPA_PATHS = {"auth/callback"}
+
     class _SPAStaticFiles(StaticFiles):
         """StaticFiles that falls back to index.html for unknown paths.
 
@@ -3845,7 +3851,7 @@ if _FRONTEND_DIST.is_dir():
                 # confusing MIME-type error in the console instead.
                 if "." in path.rsplit("/", 1)[-1]:
                     raise
-                if path.split("/")[0] in _API_SEGMENTS:
+                if path.split("/")[0] in _API_SEGMENTS and path not in _SPA_PATHS:
                     raise
                 return await super().get_response("index.html", scope)
 
