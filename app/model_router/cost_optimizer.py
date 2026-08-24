@@ -102,7 +102,65 @@ class CostOptimizer:
             input_cost_per_1k=0.00015,
             output_cost_per_1k=0.0006,
         ),
+        # The dated ids the rest of the app actually passes to the SDK. The
+        # table above held only `-latest` aliases, so every real call missed
+        # it and was priced at exactly $0.00 — see `_cost_for`.
+        "claude-opus-4-20250514": ModelCost(
+            model_id="claude-opus-4-20250514",
+            input_cost_per_1k=0.015,
+            output_cost_per_1k=0.075,
+            cached_input_cost_per_1k=0.0015,
+        ),
+        "claude-sonnet-4-20250514": ModelCost(
+            model_id="claude-sonnet-4-20250514",
+            input_cost_per_1k=0.003,
+            output_cost_per_1k=0.015,
+            cached_input_cost_per_1k=0.0003,
+        ),
+        "claude-haiku-4-20250514": ModelCost(
+            model_id="claude-haiku-4-20250514",
+            input_cost_per_1k=0.001,
+            output_cost_per_1k=0.005,
+            cached_input_cost_per_1k=0.0001,
+        ),
+        "claude-3-5-sonnet-20241022": ModelCost(
+            model_id="claude-3-5-sonnet-20241022",
+            input_cost_per_1k=0.003,
+            output_cost_per_1k=0.015,
+            cached_input_cost_per_1k=0.0003,
+        ),
+        "claude-3-5-sonnet-20240620": ModelCost(
+            model_id="claude-3-5-sonnet-20240620",
+            input_cost_per_1k=0.003,
+            output_cost_per_1k=0.015,
+            cached_input_cost_per_1k=0.0003,
+        ),
+        "claude-3-5-haiku-20241022": ModelCost(
+            model_id="claude-3-5-haiku-20241022",
+            input_cost_per_1k=0.001,
+            output_cost_per_1k=0.005,
+            cached_input_cost_per_1k=0.0001,
+        ),
+        "claude-3-opus-20240229": ModelCost(
+            model_id="claude-3-opus-20240229",
+            input_cost_per_1k=0.015,
+            output_cost_per_1k=0.075,
+            cached_input_cost_per_1k=0.0015,
+        ),
+        "claude-3-haiku-20240307": ModelCost(
+            model_id="claude-3-haiku-20240307",
+            input_cost_per_1k=0.00025,
+            output_cost_per_1k=0.00125,
+            cached_input_cost_per_1k=0.00003,
+        ),
     }
+
+    # What an unknown model is priced at. Deliberately the most expensive
+    # entry in the table rather than zero: this number is what `check_budget`
+    # compares a limit against, so guessing low means a customer whose model
+    # is not listed never hits their cap. Guessing high stops spending that
+    # might have been affordable, which is the recoverable mistake.
+    _FALLBACK_COST_KEY = "claude-3-opus-latest"
 
     def __init__(
         self,
@@ -120,8 +178,42 @@ class CostOptimizer:
         self._customer_usage: dict[str, list[UsageRecord]] = defaultdict(list)
 
     def get_model_cost(self, model_id: str) -> ModelCost | None:
-        """Get cost structure for a model."""
+        """Get cost structure for a model, if it is one we have a price for."""
         return self.model_costs.get(model_id)
+
+    def _cost_for(self, model_id: str) -> ModelCost:
+        """A price for `model_id`, guessing high rather than free.
+
+        A miss used to be worth $0.00: `estimate_cost` returned a zero
+        estimate and `record_usage` filed the call as costing nothing, so
+        `check_budget` summed those zeros and every limit passed. That is not
+        a rare edge — the table shipped with only `-latest` aliases while the
+        rest of the app calls dated ids like `claude-sonnet-4-20250514`, so
+        the models the product actually runs on were all free. A cost tracker
+        that reports zero is worse than one that reports nothing, because the
+        number looks like an answer.
+
+        An unknown model is priced at the most expensive one we know, and
+        logged so the table can be corrected.
+        """
+        cost_info = self.model_costs.get(model_id)
+        if cost_info is not None:
+            return cost_info
+
+        fallback = self.model_costs.get(self._FALLBACK_COST_KEY) or max(
+            self.model_costs.values(), key=lambda c: c.avg_cost_per_1k
+        )
+        log.warning(
+            "no price for model; charging at the most expensive known rate",
+            extra={"unpriced_model": model_id, "priced_as": fallback.model_id},
+        )
+        return ModelCost(
+            model_id=model_id,
+            input_cost_per_1k=fallback.input_cost_per_1k,
+            output_cost_per_1k=fallback.output_cost_per_1k,
+            cached_input_cost_per_1k=fallback.cached_input_cost_per_1k,
+            batch_discount=fallback.batch_discount,
+        )
 
     def add_model_cost(self, cost: ModelCost) -> None:
         """Add or update model cost structure."""
@@ -147,14 +239,7 @@ class CostOptimizer:
         Returns:
             CostEstimate with cost breakdown
         """
-        cost_info = self.model_costs.get(model_id)
-        if not cost_info:
-            return CostEstimate(
-                model_id=model_id,
-                estimated_input_tokens=input_tokens,
-                estimated_output_tokens=output_tokens or input_tokens * 3,
-                estimated_cost=0.0,
-            )
+        cost_info = self._cost_for(model_id)
 
         if output_tokens is None:
             output_tokens = input_tokens * 3
@@ -189,14 +274,11 @@ class CostOptimizer:
         request_type: str = "inference",
     ) -> UsageRecord:
         """Record model usage."""
-        cost_info = self.model_costs.get(model_id)
-        if cost_info:
-            cost = (
-                (input_tokens / 1000) * cost_info.input_cost_per_1k
-                + (output_tokens / 1000) * cost_info.output_cost_per_1k
-            )
-        else:
-            cost = 0.0
+        cost_info = self._cost_for(model_id)
+        cost = (
+            (input_tokens / 1000) * cost_info.input_cost_per_1k
+            + (output_tokens / 1000) * cost_info.output_cost_per_1k
+        )
 
         record = UsageRecord(
             model_id=model_id,
