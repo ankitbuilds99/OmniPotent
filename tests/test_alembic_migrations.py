@@ -49,6 +49,12 @@ CORE_TABLES = {
     "knowledge_documents",
     "slos",
     "sli_measurements",
+    "status_components",
+    "status_uptime_records",
+    "status_incidents",
+    "status_incident_updates",
+    "status_maintenances",
+    "status_subscribers",
 }
 ONCALL_TABLES = {
     "oncall_alerts",

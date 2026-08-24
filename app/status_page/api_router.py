@@ -316,22 +316,24 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
             if not comp:
                 raise HTTPException(400, f"Invalid component ID: {comp_id}")
 
-    # Create subscription
+    # TODO: Send verification email/webhook
+    # For now, auto-verify webhooks and mark emails as pending
+    is_webhook = subscription_type == SubscriptionType.WEBHOOK
+
+    # The preferences and the auto-verify go in with the row. They used to be
+    # assigned to the returned object afterwards, which only stored anything
+    # because that object was the one in the dict.
     subscriber = await store.create_subscriber(
         subscription_type=subscription_type,
         target=target,
         components=request.components,
+        verified=is_webhook,
+        notify_on_incidents=request.notify_on_incidents,
+        notify_on_maintenance=request.notify_on_maintenance,
+        notify_on_resolved=request.notify_on_resolved,
     )
 
-    # Update preferences
-    subscriber.notify_on_incidents = request.notify_on_incidents
-    subscriber.notify_on_maintenance = request.notify_on_maintenance
-    subscriber.notify_on_resolved = request.notify_on_resolved
-
-    # TODO: Send verification email/webhook
-    # For now, auto-verify webhooks and mark emails as pending
-    if subscription_type == SubscriptionType.WEBHOOK:
-        subscriber.verified = True
+    if is_webhook:
         message = "Webhook subscription created and verified."
     else:
         message = "Subscription created. Please check your email to verify."
@@ -425,7 +427,11 @@ async def update_component(
                 event_type="component_status_change",
                 title=f"Component Status Change: {component.name}",
                 message=f"{component.name} status changed to {request.status}",
-                severity="warning" if request.status == "degraded_performance" else "critical",
+                # ComponentStatus.DEGRADED is "degraded"; this read
+                # "degraded_performance", which no status ever equals, so a
+                # component dropping to degraded notified subscribers as
+                # critical.
+                severity="warning" if request.status == ComponentStatus.DEGRADED.value else "critical",
                 affected_components=[component.name],
             )
             await notifier.notify_subscribers(subscribers, payload)

@@ -29,9 +29,7 @@ from app.status_page.models import (
 )
 from app.status_page.store import (
     StatusStore,
-    InMemoryStatusStore,
     get_status_store,
-    set_status_store,
 )
 from app.status_page.notifications import (
     StatusNotifier,
@@ -88,9 +86,7 @@ __all__ = [
     "Subscriber",
     "SubscriptionType",
     "StatusStore",
-    "InMemoryStatusStore",
     "get_status_store",
-    "set_status_store",
     "StatusNotifier",
     "NotificationPayload",
     "get_status_notifier",

@@ -773,3 +773,244 @@ class SLIMeasurement(Base):
     __table_args__ = (
         Index("ix_sli_measurements_org_slo_ts", "org_id", "slo_id", "timestamp"),
     )
+
+
+class StatusComponent(Base):
+    """A component shown on an org's public status page.
+
+    `component_id` is the id the API and the public page expose. The five
+    seeded built-ins use fixed ids ("api", "database") that repeat in every org,
+    so the primary key is a surrogate and the identity is
+    (org_id, component_id).
+
+    `group` is a reserved word in SQL, so the column is `group_name`; the API
+    field stays `group`.
+    """
+
+    __tablename__ = "status_components"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    component_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_name: Mapped[str | None] = mapped_column(String(128))
+    display_order: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # When the current status began, which is not the same as when the row was
+    # last touched: renaming a component must not shorten the outage it is in
+    # the middle of. Uptime intervals are measured from here.
+    status_since: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_status_components_org_component", "org_id", "component_id", unique=True),
+        Index("ix_status_components_org_order", "org_id", "display_order", "name"),
+    )
+
+
+class StatusUptimeRecord(Base):
+    """One interval a component spent operational, or not.
+
+    Written when a component changes status: the row covers the time it sat in
+    the *previous* status. `calculate_uptime` sums the durations over a window,
+    which is why the interval is stored rather than the sample.
+
+    Bounded by age, not by count. The in-memory version kept the last 10,000
+    tuples per component; nothing reads further back than the 90-day figure on
+    the status page, so the store prunes past that instead — a component that
+    flaps 10,000 times in a day no longer pushes last week off the end.
+    """
+
+    __tablename__ = "status_uptime_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    component_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_minutes: Mapped[float] = mapped_column(Float, nullable=False)
+    was_operational: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_status_uptime_org_component_at",
+            "org_id",
+            "component_id",
+            "recorded_at",
+        ),
+    )
+
+
+class StatusIncident(Base):
+    """An incident published on an org's status page.
+
+    Distinct from `incidents`, which is the internal incident record: this one
+    is customer-facing, carries no responder or severity taxonomy beyond
+    minor/major/critical, and its timeline is `status_incident_updates`.
+    """
+
+    __tablename__ = "status_incidents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    incident_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    affected_components: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_status_incidents_org_incident", "org_id", "incident_id", unique=True),
+        Index("ix_status_incidents_org_created", "org_id", "created_at"),
+    )
+
+
+class StatusIncidentUpdate(Base):
+    """One entry on a status page incident's timeline.
+
+    Referenced by the API-visible `incident_id` rather than by a foreign key,
+    the same way `runbook_executions` points at its runbook. Every query carries
+    `org_id`, so an update is only readable by the org that posted it.
+    """
+
+    __tablename__ = "status_incident_updates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    update_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    incident_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(256))
+    # The timeline is ordered by `created_at`, and two updates posted in the
+    # same second are common when an incident is resolved from a script. This
+    # breaks the tie so the order is total and stable.
+    sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_status_incident_updates_org_incident",
+            "org_id",
+            "incident_id",
+            "created_at",
+            "sequence",
+        ),
+    )
+
+
+class StatusMaintenance(Base):
+    """A scheduled maintenance window on an org's status page."""
+
+    __tablename__ = "status_maintenances"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    maintenance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    affected_components: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    scheduled_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    scheduled_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    actual_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    actual_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_status_maintenances_org_maintenance",
+            "org_id",
+            "maintenance_id",
+            unique=True,
+        ),
+        Index("ix_status_maintenances_org_start", "org_id", "scheduled_start"),
+    )
+
+
+class StatusSubscriber(Base):
+    """Someone subscribed to an org's status page updates.
+
+    This table holds customers' customers: email addresses and webhook URLs
+    belonging to the people an org notifies. `target` is unique per org so a
+    second subscribe with the same address returns the existing subscription
+    instead of creating a duplicate that would be notified twice.
+    """
+
+    __tablename__ = "status_subscribers"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    subscriber_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    subscription_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target: Mapped[str] = mapped_column(String(512), nullable=False)
+    components: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verification_token: Mapped[str | None] = mapped_column(String(128))
+    notify_on_incidents: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    notify_on_maintenance: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    notify_on_resolved: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "ix_status_subscribers_org_subscriber",
+            "org_id",
+            "subscriber_id",
+            unique=True,
+        ),
+        Index("ix_status_subscribers_org_target", "org_id", "target", unique=True),
+    )
