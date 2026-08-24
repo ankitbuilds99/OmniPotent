@@ -246,9 +246,10 @@ def test_plan_change_disabled_without_operator_token(mt):
 def test_feature_data_does_not_cross_tenants(mt):
     """Org A's runbooks, planning graphs and incidents are invisible to org B.
 
-    These routers keep their state in process memory with no org column, so this
-    is the behaviour that proves the per-org store split actually landed — over
-    HTTP, through the real auth path, not just at the registry level.
+    Runbooks and incidents are org-filtered in SQL now; planning graphs are
+    still a per-org store in process memory. This asserts the isolation from
+    outside either way — over HTTP, through the real auth path, rather than at
+    the registry level.
     """
     c, a, b = mt["client"], _auth(mt["owner"]), _auth(mt["b"])
 

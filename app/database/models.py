@@ -246,6 +246,43 @@ class AlertEvent(Base):
     )
 
 
+class Runbook(Base):
+    """A remediation runbook owned by one org.
+
+    `runbook_id` is the id the API exposes and the built-ins reuse across orgs
+    ("restart-service"), so the primary key is a surrogate and the identity is
+    (org_id, runbook_id).
+    """
+
+    __tablename__ = "runbooks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    runbook_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    service: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(64), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    steps: Mapped[dict[str, Any]] = mapped_column(JSONB, default=list)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_runbooks_org_runbook", "org_id", "runbook_id", unique=True),
+    )
+
+
 class RunbookExecution(Base):
     """Runbook execution history."""
 

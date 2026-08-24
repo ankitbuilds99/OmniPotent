@@ -6,9 +6,9 @@ task graphs is that they hold different instances. These tests pin that: same
 org ⇒ same instance, different org ⇒ different instance, no tenant ⇒ the shared
 single-tenant bucket.
 
-Incidents are not here any more — they moved to the `incidents` table, where
-isolation is an org_id filter rather than an instance. See
-tests/test_incidents_store.py.
+Incidents and runbooks are not here any more — they moved to the `incidents`
+and `runbooks` tables, where isolation is an org_id filter rather than an
+instance. See tests/test_incidents_store.py and tests/test_runbooks_store.py.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import pytest
 
 from app.knowledge_base.api_router import get_knowledge_base
 from app.planning.api_router import _graphs
-from app.runbooks.router import _executions, _runbooks
 from app.status_page.store import get_status_store
 from app.teams.store import get_team_store
 from app.tenancy.scoping import ScopedRegistry, scoped
@@ -117,8 +116,6 @@ def test_scoped_registers_for_reset():
         pytest.param(get_team_store, id="teams"),
         pytest.param(get_status_store, id="status_page"),
         pytest.param(get_knowledge_base, id="knowledge_base"),
-        pytest.param(_runbooks, id="runbooks"),
-        pytest.param(_executions, id="runbook_executions"),
         pytest.param(_graphs, id="planning_graphs"),
     ],
 )
@@ -131,15 +128,3 @@ def test_feature_stores_are_per_org(get_store, as_org):
 
     as_org("umbrella")
     assert get_store() is not acme
-
-
-def test_runbook_deleted_by_one_org_survives_for_another(as_org):
-    as_org("acme")
-    victim_ids = set(_runbooks())
-    assert victim_ids  # seeded defaults
-
-    as_org("umbrella")
-    _runbooks().clear()  # umbrella nukes its own runbooks
-
-    as_org("acme")
-    assert set(_runbooks()) == victim_ids
