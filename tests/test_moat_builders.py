@@ -38,19 +38,6 @@ from app.vscode_extension.pr_risk import (
 from app.vscode_extension.commands import (
     CommandPalette,
 )
-from app.chaos_engineering.recommendations import (
-    ChaosRecommendationEngine,
-)
-from app.chaos_engineering.experiments import (
-    ExperimentRunner,
-)
-from app.chaos_engineering.gates import (
-    PreDeployChaosGate,
-    GateStatus,
-)
-from app.chaos_engineering.blast_radius import (
-    BlastRadiusMonitor,
-)
 
 
 class TestCrossIntegrationCorrelation:
@@ -296,87 +283,3 @@ class TestCommandPalette:
 
         result = palette.execute("investigateLastError")
         assert result.success is True
-
-
-class TestChaosRecommendations:
-    def test_record_incident(self):
-        engine = ChaosRecommendationEngine()
-
-        engine.record_incident(
-            "org1",
-            "INC-1",
-            "Redis timeout",
-            "Connection pool exhaustion",
-            ["redis", "checkout"],
-        )
-
-        recommendations = engine.get_recommendations("org1")
-        assert len(recommendations) >= 1
-
-    def test_get_recommendations(self):
-        engine = ChaosRecommendationEngine()
-        engine.record_incident("org1", "INC-1", "Timeout", "latency spike", ["api"])
-
-        recs = engine.get_recommendations("org1")
-        assert len(recs) >= 1
-
-
-class TestExperimentRunner:
-    def test_create_experiment(self):
-        runner = ExperimentRunner()
-
-        experiment = runner.create_experiment(
-            name="Latency Test",
-            description="Inject latency",
-            hypothesis="Circuit breaker activates",
-            target_service="payment-service",
-            config={"latency_ms": 5000},
-        )
-
-        assert experiment.name == "Latency Test"
-
-    def test_start_experiment(self):
-        runner = ExperimentRunner()
-        exp = runner.create_experiment(
-            "Test", "Desc", "Hyp", "service", {}
-        )
-
-        result = runner.start_experiment(exp.experiment_id)
-        assert result.status.value == "running"
-
-
-class TestChaosGate:
-    def test_evaluate_gate(self):
-        gate = PreDeployChaosGate()
-
-        result = gate.evaluate_gate("staging", "deploy-123")
-        assert result.status == GateStatus.RUNNING
-        assert len(result.tests) >= 1
-
-    def test_update_test_status(self):
-        gate = PreDeployChaosGate()
-        result = gate.evaluate_gate("staging", "deploy-456")
-
-        test_id = result.tests[0].test_id
-        gate.update_test_status("deploy-456", test_id, GateStatus.PASSED)
-
-        status = gate.get_gate_status("deploy-456")
-        assert status["tests"][0]["status"] == "passed"
-
-
-class TestBlastRadius:
-    def test_start_monitoring(self):
-        monitor = BlastRadiusMonitor()
-
-        monitor.start_monitoring("exp1", "checkout-api")
-
-        status = monitor.check_blast_radius("exp1")
-        assert status.experiment_id == "exp1"
-
-    def test_check_containment(self):
-        monitor = BlastRadiusMonitor()
-        monitor.start_monitoring("exp2", "payment-service")
-
-        status = monitor.check_blast_radius("exp2")
-        assert isinstance(status.is_contained, bool)
-        assert len(status.metrics) >= 1

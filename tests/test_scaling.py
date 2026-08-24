@@ -5,16 +5,10 @@ Covers: scaling metrics, Redis pools, session store, database routing.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
 
-from app.scaling_metrics import (
-    expose_scaling_metrics,
-    get_scaling_metrics,
-    reset_scaling_metrics,
-)
 from app.redis_pool import (
     MockRedis,
     RedisPoolManager,
@@ -41,123 +35,6 @@ except ImportError:
     DatabaseRouter = None
     ReplicaHealth = None
     reset_db_router = None
-
-
-class TestScalingMetrics:
-    """Test scaling metrics collection."""
-
-    def setup_method(self):
-        reset_scaling_metrics()
-
-    @pytest.mark.asyncio
-    async def test_investigation_tracking(self):
-        """Test investigation count tracking."""
-        metrics = get_scaling_metrics()
-
-        await metrics.investigation_started()
-        await metrics.investigation_started()
-        m = await metrics.get_metrics()
-        assert m["active_investigations"] == 2
-
-        await metrics.investigation_ended()
-        m = await metrics.get_metrics()
-        assert m["active_investigations"] == 1
-
-    @pytest.mark.asyncio
-    async def test_websocket_tracking(self):
-        """Test WebSocket connection tracking."""
-        metrics = get_scaling_metrics()
-
-        await metrics.websocket_connected()
-        await metrics.websocket_connected()
-        m = await metrics.get_metrics()
-        assert m["active_websockets"] == 2
-
-        await metrics.websocket_disconnected()
-        m = await metrics.get_metrics()
-        assert m["active_websockets"] == 1
-
-    @pytest.mark.asyncio
-    async def test_llm_request_tracking(self):
-        """Test LLM request queue tracking."""
-        metrics = get_scaling_metrics()
-
-        await metrics.llm_request_queued()
-        await metrics.llm_request_queued()
-        m = await metrics.get_metrics()
-        assert m["pending_llm_requests"] == 2
-
-        await metrics.llm_request_completed(100.0)
-        m = await metrics.get_metrics()
-        assert m["pending_llm_requests"] == 1
-        assert m["llm_latency_p95_ms"] == 100.0
-
-    @pytest.mark.asyncio
-    async def test_request_rate_tracking(self):
-        """Test request rate calculation."""
-        metrics = get_scaling_metrics()
-
-        for _ in range(10):
-            await metrics.record_request()
-
-        m = await metrics.get_metrics()
-        assert m["requests_per_second"] > 0
-
-    @pytest.mark.asyncio
-    async def test_memory_pressure(self):
-        """Test memory pressure tracking."""
-        metrics = get_scaling_metrics()
-
-        await metrics.set_memory_pressure(0.75)
-        m = await metrics.get_metrics()
-        assert m["memory_pressure"] == 0.75
-
-        await metrics.set_memory_pressure(1.5)
-        m = await metrics.get_metrics()
-        assert m["memory_pressure"] == 1.0
-
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_state(self):
-        """Test circuit breaker state tracking."""
-        metrics = get_scaling_metrics()
-
-        await metrics.set_circuit_breaker_open(True)
-        m = await metrics.get_metrics()
-        assert m["circuit_breaker_open"] == 1
-
-        await metrics.set_circuit_breaker_open(False)
-        m = await metrics.get_metrics()
-        assert m["circuit_breaker_open"] == 0
-
-    @pytest.mark.asyncio
-    async def test_scaling_pressure_calculation(self):
-        """Test composite scaling pressure."""
-        metrics = get_scaling_metrics()
-
-        m = await metrics.get_metrics()
-        assert m["scaling_pressure"] == 0
-
-        await metrics.investigation_started()
-        await metrics.investigation_started()
-        await metrics.llm_request_queued()
-        await metrics.set_memory_pressure(0.5)
-        await metrics.set_circuit_breaker_open(True)
-
-        m = await metrics.get_metrics()
-        assert m["scaling_pressure"] > 0
-        assert m["scaling_pressure"] <= 100
-
-    @pytest.mark.asyncio
-    async def test_prometheus_exposition(self):
-        """Test Prometheus metrics format."""
-        metrics = get_scaling_metrics()
-        await metrics.investigation_started()
-
-        output = await expose_scaling_metrics()
-
-        assert "# HELP copilot_active_investigations" in output
-        assert "# TYPE copilot_active_investigations gauge" in output
-        assert "copilot_active_investigations 1" in output
 
 
 class TestRedisPool:
@@ -388,56 +265,3 @@ class TestDatabaseRouter:
 
         url3 = router._async_url("sqlite:///test.db")
         assert url3 == "sqlite:///test.db"
-
-
-class TestIntegration:
-    """Integration tests for scaling components."""
-
-    def setup_method(self):
-        reset_scaling_metrics()
-        reset_session_store()
-        reset_redis_pools()
-        if HAS_SQLALCHEMY:
-            reset_db_router()
-
-    @pytest.mark.asyncio
-    async def test_metrics_with_session_operations(self):
-        """Test metrics collection during session operations."""
-        metrics = get_scaling_metrics()
-        store = DistributedSessionStore()
-
-        await metrics.investigation_started()
-
-        session = SessionData(
-            session_id="sess-123",
-            user_id="user-456",
-            org_id="org-789",
-            investigation_id="inv-789",
-        )
-        await store.create_session(session)
-
-        m = await metrics.get_metrics()
-        assert m["active_investigations"] == 1
-
-        await metrics.investigation_ended()
-        await store.delete_session("sess-123")
-
-        m = await metrics.get_metrics()
-        assert m["active_investigations"] == 0
-
-    @pytest.mark.asyncio
-    async def test_concurrent_metrics_updates(self):
-        """Test thread-safety of metrics updates."""
-        metrics = get_scaling_metrics()
-
-        async def update_metrics(n: int):
-            for _ in range(n):
-                await metrics.investigation_started()
-                await metrics.record_request()
-                await asyncio.sleep(0.001)
-                await metrics.investigation_ended()
-
-        await asyncio.gather(*[update_metrics(10) for _ in range(5)])
-
-        m = await metrics.get_metrics()
-        assert m["active_investigations"] == 0

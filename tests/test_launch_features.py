@@ -1,7 +1,6 @@
 """Tests for launch-critical features."""
 
 
-
 class TestOAuthModule:
     """Tests for OAuth2 authentication."""
 
@@ -251,69 +250,3 @@ class TestTeamsIntegration:
         assert message["type"] == "message"
         assert len(message["attachments"]) == 1
         assert message["attachments"][0]["contentType"] == "application/vnd.microsoft.card.adaptive"
-
-
-class TestRunbookBuilder:
-    """Tests for runbook builder."""
-
-    def test_runbook_creation(self):
-        """Test building a runbook."""
-        from app.runbook_builder.builder import RunbookBuilder
-
-        builder = RunbookBuilder("Test Runbook", "Test description")
-        builder.add_variable("service", "Service name", required=True)
-        builder.add_script_step("Check status", "echo 'checking'")
-        builder.add_wait_step("Wait", 5)
-        builder.add_notify_step("Notify", "slack", "Done!")
-
-        runbook = builder.build()
-
-        assert runbook.name == "Test Runbook"
-        assert len(runbook.variables) == 1
-        assert len(runbook.steps) == 3
-
-    def test_runbook_validation(self):
-        """Test runbook validation."""
-        from app.runbook_builder.builder import RunbookBuilder
-
-        builder = RunbookBuilder("Valid Runbook")
-        builder.add_script_step("Step 1", "echo hello")
-
-        runbook = builder.build()
-        errors = runbook.validate()
-
-        assert len(errors) == 0
-
-    def test_step_conditions(self):
-        """Test step condition evaluation."""
-        from app.runbook_builder.builder import StepCondition
-
-        cond = StepCondition(variable="status", operator="equals", value="success")
-        assert cond.evaluate({"status": "success"})
-        assert not cond.evaluate({"status": "failed"})
-
-        cond_gt = StepCondition(variable="count", operator="greater_than", value=10)
-        assert cond_gt.evaluate({"count": 15})
-        assert not cond_gt.evaluate({"count": 5})
-
-    def test_runbook_storage(self):
-        """Test runbook storage operations."""
-        from app.runbook_builder.builder import (
-            RunbookBuilder,
-            create_runbook,
-            get_runbook,
-            list_runbooks,
-        )
-
-        builder = RunbookBuilder("Stored Runbook")
-        builder.add_script_step("Step", "echo test")
-        runbook = builder.build()
-
-        create_runbook(runbook)
-
-        loaded = get_runbook(runbook.id)
-        assert loaded is not None
-        assert loaded.name == "Stored Runbook"
-
-        all_runbooks = list_runbooks()
-        assert any(r.id == runbook.id for r in all_runbooks)

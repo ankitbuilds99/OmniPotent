@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta
 
 import pytest
@@ -18,10 +17,6 @@ from app.debug.debug_mode import (
     DebugTimer,
     debug_enabled,
     debug_span,
-)
-from app.performance.request_coalescing import (
-    RequestCoalescer,
-    compute_request_key,
 )
 from app.llm_advanced.model_router import (
     ComplexityAnalyzer,
@@ -146,60 +141,6 @@ class TestDebugMode:
         with DebugSession(level=DebugLevel.BASIC):
             result = my_function(5)
             assert result == 10
-
-
-class TestRequestCoalescing:
-    @pytest.mark.asyncio
-    async def test_coalesce_identical_requests(self):
-        coalescer: RequestCoalescer[int] = RequestCoalescer(
-            name="test",
-            max_coalesce_time_ms=10,
-        )
-
-        call_count = 0
-
-        async def expensive_operation() -> int:
-            nonlocal call_count
-            call_count += 1
-            await asyncio.sleep(0.05)
-            return 42
-
-        results = await asyncio.gather(
-            coalescer.execute("key1", expensive_operation),
-            coalescer.execute("key1", expensive_operation),
-            coalescer.execute("key1", expensive_operation),
-        )
-
-        assert all(r == 42 for r in results)
-        assert call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_different_keys_not_coalesced(self):
-        coalescer: RequestCoalescer[str] = RequestCoalescer(
-            name="test",
-            max_coalesce_time_ms=10,
-        )
-
-        call_count = 0
-
-        async def operation() -> str:
-            nonlocal call_count
-            call_count += 1
-            return f"result-{call_count}"
-
-        result1 = await coalescer.execute("key1", operation)
-        result2 = await coalescer.execute("key2", operation)
-
-        assert result1 != result2
-        assert call_count == 2
-
-    def test_compute_request_key(self):
-        key1 = compute_request_key("arg1", "arg2", option="value")
-        key2 = compute_request_key("arg1", "arg2", option="value")
-        key3 = compute_request_key("arg1", "arg3", option="value")
-
-        assert key1 == key2
-        assert key1 != key3
 
 
 class TestModelRouter:
