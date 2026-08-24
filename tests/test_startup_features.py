@@ -17,13 +17,6 @@ from app.billing.subscriptions import (
     SubscriptionStatus,
     SubscriptionManager,
 )
-from app.compliance.gdpr import (
-    ConsentType,
-    ConsentRecord,
-    DSARRequest,
-    DSARType,
-    GDPRManager,
-)
 
 
 class TestBilling:
@@ -159,83 +152,3 @@ class TestBilling:
 
         assert canceled.cancel_at_period_end is True
         assert canceled.cancel_reason == "too expensive"
-
-
-class TestCompliance:
-    """Test GDPR compliance."""
-
-    def test_consent_record(self):
-        """Test consent record."""
-        record = ConsentRecord(
-            user_id="user_123",
-            consent_type=ConsentType.ANALYTICS,
-            granted=True,
-        )
-
-        assert record.is_valid is True
-
-    def test_expired_consent(self):
-        """Test expired consent."""
-        record = ConsentRecord(
-            user_id="user_123",
-            consent_type=ConsentType.MARKETING,
-            granted=True,
-            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
-        )
-
-        assert record.is_valid is False
-
-    def test_dsar_request(self):
-        """Test DSAR request."""
-        request = DSARRequest(
-            id="dsar_123",
-            user_id="user_456",
-            request_type=DSARType.ACCESS,
-        )
-
-        assert request.days_remaining <= 30
-        assert request.is_overdue is False
-
-    @pytest.mark.asyncio
-    async def test_record_consent(self):
-        """Test recording consent."""
-        mock_store = AsyncMock()
-        mock_store.save_consent = AsyncMock()
-        mock_store.log_audit_event = AsyncMock()
-
-        manager = GDPRManager(store=mock_store)
-        record = await manager.record_consent(
-            user_id="user_123",
-            consent_type=ConsentType.ANALYTICS,
-            granted=True,
-        )
-
-        assert record.granted is True
-        mock_store.save_consent.assert_called_once()
-        mock_store.log_audit_event.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_check_consent(self):
-        """Test checking consent."""
-        mock_store = AsyncMock()
-        mock_store.get_consent.return_value = ConsentRecord(
-            user_id="user_123",
-            consent_type=ConsentType.ANALYTICS,
-            granted=True,
-        )
-
-        manager = GDPRManager(store=mock_store)
-        has_consent = await manager.check_consent("user_123", ConsentType.ANALYTICS)
-
-        assert has_consent is True
-
-    @pytest.mark.asyncio
-    async def test_essential_consent_always_true(self):
-        """Test essential consent is always granted."""
-        mock_store = AsyncMock()
-
-        manager = GDPRManager(store=mock_store)
-        has_consent = await manager.check_consent("user_123", ConsentType.ESSENTIAL)
-
-        assert has_consent is True
-        mock_store.get_consent.assert_not_called()

@@ -49,6 +49,8 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.security.headers import SecurityHeadersMiddleware
+
 from app import (
     audit,
     feedback,
@@ -788,6 +790,19 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+)
+
+# Added LAST, so it is the OUTERMOST middleware and stamps every response —
+# including the 4xx that CORS and the limiter generate themselves, which the
+# inner middleware never gets to touch.
+#
+# HSTS only in production. It is a browser-side pin: once a browser sees the
+# header for a host it refuses plain HTTP to that host until max-age expires,
+# and a year of that pointed at localhost breaks every developer who ever runs
+# the app over http://localhost.
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    enable_hsts=get_settings().copilot_hsts_enabled and get_settings().is_production,
 )
 
 # Include WebSocket router for real-time communication (alternative to SSE).

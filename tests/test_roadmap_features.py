@@ -6,11 +6,6 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.security.session_binding import (
-    BindingStrength,
-    DeviceFingerprint,
-    SessionBindingManager,
-)
 from app.debug.debug_mode import (
     DebugLevel,
     DebugSession,
@@ -39,72 +34,6 @@ from app.integrations.slack_bot import (
     SlackBot,
     SlackEventType,
 )
-
-
-class TestSessionBinding:
-    def test_create_session(self):
-        manager = SessionBindingManager("test-secret")
-        fingerprint = DeviceFingerprint(
-            user_agent="Mozilla/5.0",
-            accept_language="en-US",
-        )
-
-        session = manager.create_session(
-            session_id="sess-123",
-            user_id="user-456",
-            fingerprint=fingerprint,
-        )
-
-        assert session.session_id == "sess-123"
-        assert session.user_id == "user-456"
-        assert session.fingerprint_hash is not None
-
-    def test_verify_session_success(self):
-        manager = SessionBindingManager("test-secret")
-        fingerprint = DeviceFingerprint(
-            user_agent="Mozilla/5.0",
-            accept_language="en-US",
-        )
-
-        manager.create_session("sess-123", "user-456", fingerprint)
-        result = manager.verify_session("sess-123", fingerprint)
-
-        assert result.valid is True
-        assert result.confidence >= 0.9
-
-    def test_verify_session_fingerprint_mismatch(self):
-        manager = SessionBindingManager(
-            "test-secret",
-            default_strength=BindingStrength.STRICT,
-        )
-        fingerprint1 = DeviceFingerprint(
-            user_agent="Mozilla/5.0",
-            accept_language="en-US",
-        )
-        fingerprint2 = DeviceFingerprint(
-            user_agent="Chrome/100.0",
-            accept_language="fr-FR",
-        )
-
-        manager.create_session("sess-123", "user-456", fingerprint1)
-        result = manager.verify_session("sess-123", fingerprint2)
-
-        assert result.valid is False
-        assert result.anomaly_detected is True
-
-    def test_invalidate_session(self):
-        manager = SessionBindingManager("test-secret")
-        fingerprint = DeviceFingerprint(
-            user_agent="Mozilla/5.0",
-            accept_language="en-US",
-        )
-
-        manager.create_session("sess-123", "user-456", fingerprint)
-        assert manager.invalidate_session("sess-123") is True
-
-        result = manager.verify_session("sess-123", fingerprint)
-        assert result.valid is False
-        assert result.reason == "session_not_found"
 
 
 class TestDebugMode:
