@@ -31,19 +31,34 @@ from app.graph.prompts import (
 from app.graph.sandbox import run_counterfactual
 from app.graph.state import AgentState
 from app.llm import cached_system, get_llm
+from app.model_router import usage_ledger
 
 log = logging.getLogger("omnipotent.agent")
 
 
 def _log_usage(node: str, resp) -> int:
     """Log per-call LLM token usage so cost is observable (carries the request-id
-    via the logging filter) and RETURN this call's total tokens so the node can
-    add it to the run budget. usage_metadata is absent on some providers — 0 then."""
+    via the logging filter), RECORD its dollar cost to the spend ledger, and
+    RETURN this call's total tokens so the node can add it to the run budget.
+    usage_metadata is absent on some providers — 0 then."""
     um = getattr(resp, "usage_metadata", None)
     if not um:
         return 0
     details = um.get("input_token_details") or {}
     total = um.get("total_tokens") or 0
+    # A log line is not accounting: this used to be the ONLY trace of what the
+    # product spent, so /usage and /stats reported on nothing but hand-POSTed
+    # test data. The ledger is flushed to `llm_usage_records` at the end of the
+    # turn (app/api/main.py:_meter_and_spend).
+    try:
+        usage_ledger.note(
+            usage_ledger.model_id_of(resp),
+            um.get("input_tokens") or 0,
+            um.get("output_tokens") or 0,
+            request_type=node,
+        )
+    except Exception:  # noqa: BLE001 — cost bookkeeping must not fail a node
+        log.debug("could not record LLM spend for node=%s", node, exc_info=True)
     # Surface BOTH cache_read and cache_creation: if prompt caching is enabled but
     # cache_creation stays 0 across a run (e.g. the cacheable prefix is below the
     # model's minimum because the tool set was narrowed), the cache_control marker

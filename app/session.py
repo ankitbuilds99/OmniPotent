@@ -6,6 +6,8 @@ human-in-the-loop interrupts so the caller can approve/reject write actions.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -18,6 +20,12 @@ from app import policy
 from app.config import get_settings
 from app.graph.builder import build_graph, make_checkpointer
 from app.mcp.client import load_mcp_tools
+
+log = logging.getLogger("omnipotent.session")
+
+# How long to wait for the resource-owner task to release the MCP subprocesses
+# before cancelling it outright. Teardown talks to ~20 stdio subprocesses.
+_CLOSE_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -39,24 +47,89 @@ class CopilotSession:
 
     def __init__(self, thread_id: str = "default"):
         self.thread_id = thread_id
-        self._stack = AsyncExitStack()
         self._graph: Any = None  # compiled LangGraph, built in __aenter__
         self._mcp_client: Any = None
+        self._tools: list = []
+        # Dedicated task that owns the MCP stdio sessions + checkpointer for the
+        # whole session lifetime, plus the event that tells it to let go.
+        self._owner: asyncio.Task | None = None
+        self._close: asyncio.Event | None = None
 
     async def __aenter__(self) -> "CopilotSession":
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future = loop.create_future()
+        self._close = asyncio.Event()
+        # create_task (not a nursery/task-group child) on purpose: see _own_resources.
+        # The task inherits a copy of the current context, so tenant_context set by
+        # the auth dependency still resolves per-tenant integration secrets.
+        self._owner = asyncio.create_task(
+            self._own_resources(ready), name=f"copilot-session:{self.thread_id}"
+        )
         try:
-            # Persistent MCP sessions live in self._stack for the session lifetime.
-            tools, self._mcp_client = await load_mcp_tools(self._stack)
-            checkpointer = await self._stack.enter_async_context(make_checkpointer())
+            tools, self._mcp_client, checkpointer = await ready
+            self._tools = list(tools)
             self._graph = build_graph(tools, checkpointer)
-            return self
         except BaseException:
             # Don't leak half-started MCP subprocesses if init fails partway.
-            await self._stack.aclose()
+            await self._release()
             raise
+        return self
+
+    async def _own_resources(self, ready: asyncio.Future) -> None:
+        """Hold the MCP stdio sessions and the checkpointer open in *this* task
+        until the session is closed.
+
+        Why a dedicated task rather than the caller's: the MCP stdio transport and
+        every `ClientSession` run on anyio task groups, and an anyio cancel scope
+        belongs to whichever task entered it. When that task was an SSE generator
+        task (``/chat/stream``), sse-starlette cancelling its task group at the end
+        of the response propagated cancellation into those scopes and closed the
+        stdio streams — while the CopilotSession stayed in the API's pool. The
+        next turn on the same thread_id then called into a dead transport and
+        failed with ``anyio.ClosedResourceError``, bricking the thread for good.
+        Anchoring the resources in a task nobody else cancels ties their lifetime
+        to the session, which is what the pool assumes.
+        """
+        stack = AsyncExitStack()
+        try:
+            async with stack:
+                tools, client = await load_mcp_tools(stack)
+                checkpointer = await stack.enter_async_context(make_checkpointer())
+                if ready.done():  # caller gave up while we were starting
+                    return
+                ready.set_result((tools, client, checkpointer))
+                assert self._close is not None
+                await self._close.wait()
+        except asyncio.CancelledError:
+            if not ready.done():
+                ready.cancel()
+            raise
+        except BaseException as exc:  # noqa: BLE001 — reported to the caller instead
+            if not ready.done():
+                ready.set_exception(exc)
+            else:
+                log.exception("session resources failed (thread=%s)", self.thread_id)
+
+    async def _release(self) -> None:
+        """Ask the owner task to unwind its exit stack, and wait for it."""
+        if self._close is not None:
+            self._close.set()
+        owner, self._owner = self._owner, None
+        if owner is None:
+            return
+        # asyncio.wait (not await/wait_for) so a failed or already-cancelled owner
+        # task can never leak its exception out of teardown.
+        done, _pending = await asyncio.wait({owner}, timeout=_CLOSE_TIMEOUT_S)
+        if not done:
+            log.warning("session teardown timed out (thread=%s); cancelling", self.thread_id)
+            owner.cancel()
+            await asyncio.wait({owner}, timeout=_CLOSE_TIMEOUT_S)
+        elif not owner.cancelled() and owner.exception() is not None:
+            log.warning("session teardown raised (thread=%s): %r",
+                        self.thread_id, owner.exception())
 
     async def __aexit__(self, *exc) -> None:
-        await self._stack.aclose()
+        await self._release()
 
     @property
     def _config(self) -> dict:

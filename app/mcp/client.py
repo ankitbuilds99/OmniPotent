@@ -74,6 +74,9 @@ def _server_config() -> dict:
             "env": {
                 "GITHUB_TOKEN": runtime.github_token(),
                 "GITHUB_REPO": runtime.github_repo(),
+                # The server is a subprocess and reads env, not app.config, so the
+                # HTTP_TIMEOUT_GITHUB setting only reaches it if we forward it.
+                "HTTP_TIMEOUT_GITHUB": str(s.http_timeout_github),
             },
         },
         "pagerduty": {

@@ -97,7 +97,13 @@ def make_guarded_tool_node(tools):
                 )
             else:
                 out.append(m)
-        return {"messages": out}
+        # Clear the multi-agent tool queue *here*, in the node. The routing
+        # function that used to do it (`state.pop("pending_tool_calls", None)`)
+        # cannot write graph state — LangGraph routers only choose an edge — so
+        # the queue stayed set forever and every agent node bounced straight
+        # back to `tools`, burning the recursion limit without ever reaching
+        # `report`. Nodes write state; routers read it.
+        return {"messages": out, "pending_tool_calls": None}
 
     return guarded
 
@@ -442,10 +448,12 @@ def _build_multi_agent_graph(tools, checkpointer):
             return "report"
 
     def route_after_tools_multi(state: AgentState) -> Literal["investigator", "remediation", "orchestrator"]:
-        """Route back to the appropriate agent after tools execute."""
+        """Route back to the appropriate agent after tools execute.
+
+        The queue is cleared by the tools node itself; a router cannot mutate
+        state, so doing it here was a no-op that looped the graph forever.
+        """
         agent = state.get("multi_agent_agent", "orchestrator")
-        # Clear pending tool calls
-        state.pop("pending_tool_calls", None)
 
         if agent == "investigator":
             return "investigator"
