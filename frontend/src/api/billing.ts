@@ -20,8 +20,11 @@ import type {
 } from '../types/billing';
 
 import { authHeaders } from '../lib/authToken';
+import { API_BASE } from '../lib/apiClient';
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+// Same-origin by default, matching apiClient. Defaulting to localhost:8000 sent
+// every Billing call from a production browser to the user's own machine.
+const BASE_URL = API_BASE;
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });

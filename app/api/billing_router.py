@@ -6,7 +6,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.billing import (
@@ -308,14 +308,11 @@ async def track_usage(req: TrackUsageRequest) -> dict[str, Any]:
     return await api.track_usage(org_id, req.metric_type, req.metadata)
 
 
-# Webhook endpoint
-@router.post("/webhooks/stripe")
-async def handle_stripe_webhook(request: Request) -> dict[str, Any]:
-    """Handle Stripe webhook events."""
-    api = _get_billing_api()
-    payload = await request.body()
-    signature = request.headers.get("stripe-signature", "")
-    try:
-        return await api.handle_webhook(payload, signature)
-    except BillingUnavailableError as e:
-        raise _unavailable(e) from e
+# Stripe's webhook receiver is `POST /webhooks/stripe` (app/api/main.py). There
+# was a second one here, at /billing/webhooks/stripe. It could never fire:
+# `require_auth` only exempts paths under `/webhooks/`, and Stripe sends a
+# `Stripe-Signature` header and no `Authorization` header, so every real delivery
+# was rejected with 401 before reaching the handler. A duplicate receiver that
+# looks configured but never runs is worse than none at all — plan changes would
+# silently depend on whichever URL was pasted into the Stripe dashboard — so it
+# is gone rather than moved.

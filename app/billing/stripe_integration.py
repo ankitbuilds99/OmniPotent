@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -652,32 +649,9 @@ class StripeBillingService:
         return mapping.get(stripe_status, InvoiceStatus.DRAFT)
 
 
-def verify_stripe_signature(
-    payload: bytes,
-    signature: str,
-    secret: str,
-    tolerance: int = 300,
-) -> bool:
-    """Verify Stripe webhook signature manually."""
-    if not signature:
-        return False
-
-    parts = dict(item.split("=", 1) for item in signature.split(","))
-    timestamp = parts.get("t")
-    v1_signature = parts.get("v1")
-
-    if not timestamp or not v1_signature:
-        return False
-
-    timestamp_int = int(timestamp)
-    if abs(time.time() - timestamp_int) > tolerance:
-        return False
-
-    signed_payload = f"{timestamp}.{payload.decode('utf-8')}"
-    expected_sig = hmac.new(
-        secret.encode("utf-8"),
-        signed_payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(v1_signature, expected_sig)
+# `verify_stripe_signature` used to live here, a second implementation of the
+# Stripe-Signature check with no callers: `app.billing.__init__` exports the one
+# in app/billing/webhooks.py, which is what POST /webhooks/stripe uses. This copy
+# raised ValueError instead of returning False on a header Stripe did not send
+# (`dict(item.split("=", 1) ...)` on 'garbage', `int()` on a non-numeric `t`), so
+# whichever caller found it first would have turned a forged header into a 500.
