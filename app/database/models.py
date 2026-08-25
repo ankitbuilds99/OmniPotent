@@ -351,6 +351,13 @@ class Incident(Base):
     related_alerts: Mapped[list[str]] = mapped_column(JSONB, default=list)
     impact: Mapped[str | None] = mapped_column(Text)
     customer_impact: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # The sender's own identity for the underlying alert — Alertmanager's
+    # `fingerprint`, and whatever the other receivers can offer. Alertmanager
+    # re-delivers the same firing group every `repeat_interval` (4h by default,
+    # and every 30s while a group is still resolving), so without this one alert
+    # became one incident per delivery and the resolved notification had nothing
+    # to close.
+    dedupe_key: Mapped[str | None] = mapped_column(String(256))
 
     investigation: Mapped["IncidentInvestigation | None"] = relationship(
         back_populates="incident", cascade="all, delete-orphan", uselist=False
@@ -359,6 +366,7 @@ class Incident(Base):
     __table_args__ = (
         Index("ix_incidents_org_triggered", "org_id", "triggered_at"),
         Index("ix_incidents_org_status", "org_id", "status"),
+        Index("ix_incidents_org_dedupe", "org_id", "dedupe_key"),
     )
 
 

@@ -446,8 +446,24 @@ async def lifespan(app: FastAPI):
         )
         slo_task = asyncio.create_task(poller.run())
         log.info("proactive SLO poller enabled")
+    # On-call escalation sweeper. Without it `escalate_to_next_step` has no
+    # caller at all, so every alert stops at step 0 and a policy's later levels
+    # are unreachable however long nobody acknowledges.
+    escalation_task: asyncio.Task | None = None
+    try:
+        from app.database.engine import _get_session_factory
+        from app.oncall.escalation_service import EscalationSweeper
+
+        escalation_task = asyncio.create_task(
+            EscalationSweeper(
+                _get_session_factory(),
+                interval=get_settings().copilot_escalation_sweep_interval_s,
+            ).run()
+        )
+    except Exception:
+        log.exception("escalation sweeper failed to start; alerts will not escalate past step 0")
     yield
-    for _task in (slo_task, job_task):
+    for _task in (escalation_task, slo_task, job_task):
         if _task:
             _task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

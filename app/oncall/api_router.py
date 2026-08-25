@@ -13,11 +13,11 @@ Complete REST API for enterprise on-call management:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone as dt_timezone
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.database.engine import session_dependency as get_async_session
@@ -44,6 +44,15 @@ router = APIRouter(prefix="/oncall", tags=["oncall"])
 # existed the whole time; nothing set it. `_org_uuid()` is what sets it now.
 _org_uuid = org_uuid
 _ensure_org_row = ensure_org_row
+
+
+def _as_utc(value: datetime) -> datetime:
+    """A stored timestamp as tz-aware UTC.
+
+    SQLite has no timezone type and returns these columns naive, so comparing
+    one against `datetime.now(utc)` raises rather than answering.
+    """
+    return value if value.tzinfo else value.replace(tzinfo=dt_timezone.utc)
 
 
 async def _owned_team(db: Any, team_id: UUID) -> OncallTeam:
@@ -305,6 +314,11 @@ class ShiftResponse(BaseModel):
     end_time: datetime
     shift_type: str
     status: str
+    # Why this shift is assigned to whoever holds it: "rotation" as generated,
+    # or "swap"/"override" where a human moved it. Without this a swapped shift
+    # reads as a rotation-generation bug — the assignee is not the person the
+    # rotation order says should be on.
+    source: str = "rotation"
 
     class Config:
         from_attributes = True
@@ -636,20 +650,58 @@ async def accept_swap(
     accepting_user_id: UUID,
     db=Depends(get_async_session),
 ):
-    """Accept a swap request."""
+    """Accept a swap request, and carry out the swap.
+
+    Accepting used to mutate only the swap row — no write to `OncallShift.user_id`
+    and no override created — so both engineers saw "accepted" while the
+    rotation, the current-on-call lookup and every page still went to the
+    original assignee. The swap is the point of the request; recording consent
+    to it and not performing it is the worst of the two outcomes, because both
+    parties now believe cover is arranged.
+    """
     swap = await _owned_swap(db, swap_id)
 
     if swap.status != "pending":
         raise HTTPException(status_code=400, detail=f"Swap request is already {swap.status}")
 
+    if swap.expires_at and _as_utc(swap.expires_at) < datetime.now(dt_timezone.utc):
+        swap.status = "expired"
+        await db.commit()
+        raise HTTPException(status_code=400, detail="Swap request has expired")
+
+    from_shift = await _owned_shift(db, swap.from_shift_id)
+
+    # Whoever is taking the shift: the named target if the request had one,
+    # otherwise whoever accepted an open request.
+    taker = swap.to_user_id or accepting_user_id
+
+    if swap.to_shift_id:
+        # A two-way trade: each engineer takes the other's shift.
+        to_shift = await _owned_shift(db, swap.to_shift_id)
+        from_shift.user_id, to_shift.user_id = to_shift.user_id, from_shift.user_id
+        to_shift.source = "swap"
+    else:
+        # A one-way handover of a single shift.
+        from_shift.user_id = taker
+    from_shift.source = "swap"
+
     swap.status = "accepted"
     swap.responded_by = accepting_user_id
-    swap.responded_at = datetime.utcnow()
+    swap.responded_at = datetime.now(dt_timezone.utc)
 
     await db.commit()
 
-    log.info("Swap request %s accepted by %s", swap_id, accepting_user_id)
-    return {"success": True, "status": swap.status}
+    log.info(
+        "Swap request %s accepted by %s; shift %s reassigned to %s",
+        swap_id, accepting_user_id, from_shift.id, from_shift.user_id,
+    )
+    return {
+        "success": True,
+        "status": swap.status,
+        "from_shift_id": str(from_shift.id),
+        "from_shift_user_id": str(from_shift.user_id),
+        "to_shift_id": str(swap.to_shift_id) if swap.to_shift_id else None,
+    }
 
 
 @router.post("/swaps/{swap_id}/decline")
@@ -1619,6 +1671,7 @@ async def get_schedule_ical_feed(
 @router.get("/schedules/{schedule_id}/ical-url")
 async def get_ical_subscription_url(
     schedule_id: UUID,
+    request: Request,
     user_id: UUID | None = None,
     db=Depends(get_async_session),
 ):
@@ -1627,12 +1680,16 @@ async def get_ical_subscription_url(
 
     Returns a URL that can be added to calendar applications
     for automatic syncing.
+
+    The prefix used to be the hardcoded `/api/v1/oncall`, which no route has
+    ever matched — this router is mounted at `/oncall` — so the URL handed out
+    here 404'd while the real feed sat one path away. It is now reversed from
+    the feed route itself, which cannot drift, and made absolute against the
+    request: a calendar app given a relative path has nothing to subscribe to.
     """
     schedule = await _owned_schedule(db, schedule_id)
 
-    # Build subscription URL
-    base_url = "/api/v1/oncall"  # In production, use actual base URL
-    url = f"{base_url}/schedules/{schedule_id}/ical"
+    url = str(request.url_for("get_schedule_ical_feed", schedule_id=schedule_id))
     if user_id:
         url += f"?user_id={user_id}"
 

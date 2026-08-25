@@ -137,7 +137,7 @@ async def send_slack_message(
         response = await client.post(
             "https://slack.com/api/chat.postMessage",
             headers={
-                "Authorization": f"Bearer {SlackConfig.BOT_TOKEN}",
+                "Authorization": f"Bearer {SlackConfig.bot_token()}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -161,7 +161,7 @@ async def update_slack_message(
         response = await client.post(
             "https://slack.com/api/chat.update",
             headers={
-                "Authorization": f"Bearer {SlackConfig.BOT_TOKEN}",
+                "Authorization": f"Bearer {SlackConfig.bot_token()}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -175,7 +175,7 @@ async def add_reaction(channel: str, ts: str, emoji: str) -> dict:
         response = await client.post(
             "https://slack.com/api/reactions.add",
             headers={
-                "Authorization": f"Bearer {SlackConfig.BOT_TOKEN}",
+                "Authorization": f"Bearer {SlackConfig.bot_token()}",
                 "Content-Type": "application/json",
             },
             json={
@@ -245,112 +245,24 @@ def build_investigation_blocks(query: str, status: str = "starting") -> list:
     return blocks
 
 
-def build_rca_result_blocks(
-    query: str,
-    root_cause: str,
-    confidence: int,
-    evidence: list,
-    recommendation: str,
-) -> list:
-    """Build Slack blocks for RCA results."""
-    confidence_emoji = ":large_green_circle:" if confidence >= 80 else ":large_yellow_circle:" if confidence >= 50 else ":red_circle:"
-
-    evidence_text = "\n".join([f"• {e}" for e in evidence[:5]])
-
-    return [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": ":white_check_mark: Investigation Complete",
-                "emoji": True,
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Query:* {query}",
-            }
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Root Cause:*\n{root_cause}",
-            }
-        },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Confidence:*\n{confidence_emoji} {confidence}%",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": "*Status:*\n:white_check_mark: Verified",
-                },
-            ]
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Evidence:*\n{evidence_text}",
-            }
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Recommendation:*\n{recommendation}",
-            }
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": ":thumbsup: Helpful",
-                        "emoji": True,
-                    },
-                    "action_id": "feedback_helpful",
-                    "value": "helpful",
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": ":thumbsdown: Not Helpful",
-                        "emoji": True,
-                    },
-                    "action_id": "feedback_not_helpful",
-                    "value": "not_helpful",
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": ":page_facing_up: View Full Report",
-                        "emoji": True,
-                    },
-                    "action_id": "view_full_report",
-                    "url": "https://omnipotent.example.com/investigation/123",
-                },
-            ]
-        },
-    ]
-
-
 async def run_investigation(
     query: str, channel: str, thread_ts: str, message_ts: str
 ) -> None:
-    """Run AI investigation and update Slack with results."""
+    """Run a real AI investigation and update Slack with the result.
+
+    This used to `asyncio.sleep(3)` and then post a fixed, invented root cause —
+    "Database connection pool exhaustion ... in payment-service v2.4.1" — at a
+    hardcoded 87% confidence, with four invented pieces of supporting evidence
+    and a recommendation to roll a specific service back a specific version.
+    Posted into an incident channel, next to a green check mark reading
+    "Verified", that is an instruction to take a destructive action based on
+    nothing at all. It now runs the same investigation path as every other
+    trigger, and renders the same structured report the production Slack
+    integration renders.
+    """
+    from app.integrations import slack as slack_blocks
+
+    thread_id = f"slack-{channel}-{thread_ts}"
     try:
         await update_slack_message(
             channel,
@@ -361,36 +273,44 @@ async def run_investigation(
 
         await add_reaction(channel, thread_ts, "eyes")
 
-        # Simulated investigation - in production, this would call the real RCA engine
-        import asyncio
-        await asyncio.sleep(3)
+        # Imported here, not at module scope: app.api.main includes this router,
+        # so a top-level import would be circular.
+        from app.api.main import _get_session, _running_turn
 
-        # Mock results
-        result_blocks = build_rca_result_blocks(
-            query=query,
-            root_cause="Database connection pool exhaustion due to connection leak in payment-service v2.4.1",
-            confidence=87,
-            evidence=[
-                "Error rate spiked 300% at 14:32 UTC",
-                "payment-service v2.4.1 deployed at 14:15 UTC",
-                "DB connection count at max (100/100)",
-                "Similar pattern in commit abc123 (connection leak)",
-            ],
-            recommendation="Rollback payment-service to v2.4.0. The connection leak was introduced in the refactored database client.",
-        )
+        async with _running_turn(thread_id):
+            session = await _get_session(thread_id)
+            result = await session.ask(query)
 
-        await update_slack_message(channel, message_ts, "Investigation complete", result_blocks)
+        if result.status == "awaiting_approval":
+            req = result.approval_request or {}
+            detail = "\n".join(
+                f"• `{a.get('tool')}`" + (" *(write)*" if a.get("write") else "")
+                for a in req.get("actions", [])
+            ) or req.get("message", "")
+            blocks = slack_blocks.approval_blocks(thread_id, query, detail)
+            text = "Approval needed"
+            reaction = "hourglass"
+        elif result.report:
+            blocks = slack_blocks.report_blocks(query, result.report, result.final_text)
+            text = "Investigation complete"
+            reaction = "white_check_mark"
+        else:
+            blocks = slack_blocks.result_blocks(query, result.final_text)
+            text = "Investigation complete"
+            reaction = "white_check_mark"
 
-        await add_reaction(channel, thread_ts, "white_check_mark")
+        await update_slack_message(channel, message_ts, text, blocks)
+        await add_reaction(channel, thread_ts, reaction)
 
     except Exception as e:
-        logger.error(f"Investigation failed: {e}")
+        logger.exception("Investigation failed")
         await update_slack_message(
             channel,
             message_ts,
             f"Investigation failed: {str(e)}",
             [{"type": "section", "text": {"type": "mrkdwn", "text": f":x: Error: {str(e)}"}}],
         )
+        await add_reaction(channel, thread_ts, "x")
 
 
 @router.post("/events")
@@ -524,24 +444,62 @@ async def slash_rca(request: Request, background_tasks: BackgroundTasks):
     }
 
 
+_STATUS_EMOJI = {
+    "operational": ":large_green_circle:",
+    "degraded": ":large_yellow_circle:",
+    "partial_outage": ":large_orange_circle:",
+    "major_outage": ":red_circle:",
+    "maintenance": ":wrench:",
+    "unknown": ":white_circle:",
+}
+
+
 @router.post("/commands/status")
 async def slash_status(request: Request):
-    """Handle /status slash command - current system status."""
+    """Handle /status slash command - current system status.
+
+    This used to answer from a hardcoded dict: "checkout" was permanently
+    degraded at 2.3% errors and "api" permanently healthy at 45ms, whatever was
+    actually happening. Reporting a real outage as healthy is the failure mode
+    that matters here, so it now reads the status registry and reports an empty
+    registry as empty.
+    """
     form_data = await request.form()
     service_raw = form_data.get("text", "")
     service = str(service_raw).strip() if service_raw else ""
 
-    # Mock status data
-    services = {
-        "api": {"status": "healthy", "latency": "45ms", "error_rate": "0.01%"},
-        "checkout": {"status": "degraded", "latency": "230ms", "error_rate": "2.3%"},
-        "payment": {"status": "healthy", "latency": "120ms", "error_rate": "0.05%"},
-        "database": {"status": "healthy", "latency": "12ms", "error_rate": "0%"},
-    }
+    from app.status_page.components import get_status_registry
 
-    if service and service in services:
-        s = services[service]
-        status_emoji = ":large_green_circle:" if s["status"] == "healthy" else ":large_yellow_circle:"
+    try:
+        registry = get_status_registry()
+        components = registry.list_components(showcase_only=True)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("/status lookup failed")
+        return _ephemeral(f":x: Could not read component status: {e}")
+
+    if not components:
+        return _ephemeral(
+            ":grey_question: No status components are configured, so there is "
+            "nothing to report. Register components on the status page first."
+        )
+
+    if service:
+        match = next(
+            (
+                c for c in components
+                if service.lower() in (c.name.lower(), c.component_id.lower())
+            ),
+            None,
+        )
+        if match is None:
+            known = ", ".join(sorted(c.name for c in components)[:20])
+            return _ephemeral(
+                f":grey_question: No component called *{service}*. Known: {known}"
+            )
+        emoji = _STATUS_EMOJI.get(match.status.value, ":white_circle:")
+        checked = (
+            match.last_checked.isoformat() if match.last_checked else "never checked"
+        )
         return {
             "response_type": "ephemeral",
             "blocks": [
@@ -549,14 +507,18 @@ async def slash_status(request: Request):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{service.title()} Service Status*\n{status_emoji} {s['status'].title()}\n• Latency: {s['latency']}\n• Error Rate: {s['error_rate']}",
+                        "text": (
+                            f"*{match.name}*\n{emoji} "
+                            f"{match.status.value.replace('_', ' ').title()}\n"
+                            f"• Last checked: {checked}"
+                        ),
                     }
                 }
             ]
         }
 
-    # All services overview
-    blocks = [
+    overall = registry.get_overall_status()
+    blocks: list[dict] = [
         {
             "type": "header",
             "text": {
@@ -564,38 +526,116 @@ async def slash_status(request: Request):
                 "text": ":bar_chart: System Status",
                 "emoji": True,
             }
-        }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"{_STATUS_EMOJI.get(overall.value, ':white_circle:')} "
+                    f"*Overall: {overall.value.replace('_', ' ').title()}*"
+                ),
+            }
+        },
     ]
 
-    for name, s in services.items():
-        status_emoji = ":large_green_circle:" if s["status"] == "healthy" else ":large_yellow_circle:"
+    for comp in components:
+        emoji = _STATUS_EMOJI.get(comp.status.value, ":white_circle:")
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"{status_emoji} *{name}*: {s['status'].title()} | {s['latency']} | {s['error_rate']} errors",
+                "text": (
+                    f"{emoji} *{comp.name}*: "
+                    f"{comp.status.value.replace('_', ' ').title()}"
+                ),
             }
         })
 
     return {"response_type": "ephemeral", "blocks": blocks}
 
 
+def _ephemeral(text: str) -> dict:
+    """A plain ephemeral reply. Used for every "we don't know" answer, because
+    the alternative — inventing a plausible one — is what this command used to do."""
+    return {
+        "response_type": "ephemeral",
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+    }
+
+
+async def _current_oncall(team_name: str = "") -> list[dict]:
+    """Real rosters from the on-call schedules, newest-covering shift first.
+
+    Returns one entry per team: {"team", "primary", "secondary"}, where the
+    responder values are emails (or None when the rotation has nobody on call).
+    """
+    from sqlalchemy import select
+
+    from app.database.engine import get_session
+    from app.database.orgs import org_uuid
+    from app.oncall.models import OncallTeam
+    from app.oncall.schedule_service import ScheduleService
+
+    rosters: list[dict] = []
+    async with get_session() as session:
+        query = select(OncallTeam).where(OncallTeam.org_id == org_uuid())
+        if team_name:
+            query = query.where(OncallTeam.name.ilike(team_name))
+        teams = list((await session.execute(query)).scalars().all())
+
+        service = ScheduleService(session)
+        for team in teams:
+            current = await service.get_current_oncall(team.id)
+            emails = {
+                p["user_id"]: p["user_email"]
+                for p in current.get("participants", [])
+            }
+            rosters.append({
+                "team": team.name,
+                "primary": emails.get(current.get("primary")),
+                "secondary": emails.get(current.get("secondary")),
+            })
+    return rosters
+
+
+def _responder(email: str | None) -> str:
+    return email or "_nobody on call_"
+
+
 @router.post("/commands/oncall")
 async def slash_oncall(request: Request):
-    """Handle /oncall slash command - who's on call."""
+    """Handle /oncall slash command - who's on call.
+
+    This used to answer from a hardcoded dict of invented people — "Alice Smith",
+    "Bob Jones", "Charlie Brown" — for three teams that need not exist. During an
+    incident that is worse than no answer at all: the responder pages a name that
+    was never real while the actual on-call keeps sleeping. It now reads the
+    schedules, and says so plainly when there is nothing to read.
+    """
     form_data = await request.form()
     team_raw = form_data.get("text", "")
     team = str(team_raw).strip() if team_raw else ""
 
-    # Mock on-call data
-    oncall_data = {
-        "platform": {"primary": "Alice Smith", "secondary": "Bob Jones", "escalation": "#platform-oncall"},
-        "infra": {"primary": "Charlie Brown", "secondary": "Diana Prince", "escalation": "#infra-oncall"},
-        "security": {"primary": "Eve Wilson", "secondary": "Frank Miller", "escalation": "#security-oncall"},
-    }
+    try:
+        rosters = await _current_oncall(team)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("/oncall lookup failed")
+        return _ephemeral(f":x: Could not read the on-call schedule: {e}")
 
-    if team and team in oncall_data:
-        o = oncall_data[team]
+    if not rosters:
+        if team:
+            return _ephemeral(
+                f":grey_question: No on-call team called *{team}*. "
+                "Run `/oncall` with no arguments to list the teams that exist."
+            )
+        return _ephemeral(
+            ":grey_question: No on-call teams are configured yet. "
+            "Create a team and a schedule first — there is nobody to page."
+        )
+
+    if team and len(rosters) == 1:
+        r = rosters[0]
         return {
             "response_type": "ephemeral",
             "blocks": [
@@ -603,14 +643,17 @@ async def slash_oncall(request: Request):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{team.title()} On-Call*\n:bust_in_silhouette: Primary: {o['primary']}\n:busts_in_silhouette: Secondary: {o['secondary']}\n:mega: Escalation: {o['escalation']}",
-                    }
+                        "text": (
+                            f"*{r['team']} On-Call*\n"
+                            f":bust_in_silhouette: Primary: {_responder(r['primary'])}\n"
+                            f":busts_in_silhouette: Secondary: {_responder(r['secondary'])}"
+                        ),
+                    },
                 }
-            ]
+            ],
         }
 
-    # All teams
-    blocks = [
+    blocks: list[dict] = [
         {
             "type": "header",
             "text": {
@@ -621,161 +664,401 @@ async def slash_oncall(request: Request):
         }
     ]
 
-    for name, o in oncall_data.items():
+    for r in rosters:
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*{name.title()}*: {o['primary']} (backup: {o['secondary']})",
+                "text": (
+                    f"*{r['team']}*: {_responder(r['primary'])}"
+                    f" (backup: {_responder(r['secondary'])})"
+                ),
             }
         })
 
     return {"response_type": "ephemeral", "blocks": blocks}
 
 
+_SEVERITY_ALIASES = {
+    "p1": "critical", "sev1": "critical", "critical": "critical",
+    "p2": "high", "sev2": "high", "high": "high",
+    "p3": "medium", "sev3": "medium", "medium": "medium",
+    "p4": "low", "sev4": "low", "low": "low",
+}
+
+# Highest first, so "escalate" is a step towards the front of this list.
+_SEVERITY_ORDER = ["critical", "high", "medium", "low"]
+
+
+def _short(incident_id) -> str:
+    """The first block of the incident UUID — enough to say out loud in a channel."""
+    return str(incident_id)[:8]
+
+
+async def _target_incident(args: str):
+    """The incident a subcommand applies to, plus the leftover arguments.
+
+    Slack hands us a channel, not an incident, so the id may be given as the
+    first word; without one we take the most recent incident that is not yet
+    resolved. Returning None rather than picking something is the whole point:
+    these handlers used to post ":white_check_mark: Incident Resolved" into the
+    channel with no incident behind it at all, and a channel that believes an
+    incident is closed stops working it.
+    """
+    from uuid import UUID
+
+    from app.incidents.models import IncidentStatus
+    from app.incidents.store import get_incident_store
+
+    store = get_incident_store()
+    first, _, rest = args.partition(" ")
+    if first.strip():
+        try:
+            candidate = await store.get_incident(UUID(first.strip()))
+        except (ValueError, AttributeError, TypeError):
+            candidate = None
+        if candidate is not None:
+            return candidate, rest.strip()
+
+    open_incidents = [
+        i for i in await store.list_incidents(limit=25)
+        if i.status != IncidentStatus.RESOLVED
+    ]
+    return (open_incidents[0] if open_incidents else None), args.strip()
+
+
+def _no_incident() -> dict:
+    return _ephemeral(
+        ":grey_question: There is no open incident to act on. Pass an incident "
+        "id as the first argument, or declare one with `/incident create "
+        "<title>`."
+    )
+
+
+def _incident_line(incident, headline: str, user_id: str) -> dict:
+    """One in-channel block describing what was actually recorded."""
+    return {
+        "response_type": "in_channel",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"{headline}\n\n"
+                        f"*{incident.title}* (`{_short(incident.id)}`)\n"
+                        f"• Severity: {incident.severity.value} "
+                        f"• Status: {incident.status.value}"
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"Recorded by <@{user_id}>"},
+                ],
+            },
+        ],
+    }
+
+
 @router.post("/commands/incident")
 async def slash_incident(request: Request, background_tasks: BackgroundTasks):
-    """Handle /incident slash command - create, update, resolve incidents."""
+    """Handle /incident slash command - create, update, resolve incidents.
+
+    Every subcommand here used to be a message and nothing else. `create`
+    invented an id from the clock (`INC-{timestamp % 100000}`) and stored
+    nothing, so the incident it announced could not be looked up, updated or
+    resolved by anything afterwards. `update`, `resolve`, `escalate` and
+    `severity` posted a confident line into the channel without an incident to
+    apply it to — a channel reading "Incident Resolved" while the incident is
+    open and still paging is worse than no command at all.
+
+    Each subcommand now goes through the incident store and reports what the
+    store did, including when it did nothing.
+    """
     form_data = await request.form()
     text_raw = form_data.get("text", "")
     text = str(text_raw).strip() if text_raw else ""
     user_id = str(form_data.get("user_id", ""))
-    _ = form_data.get("user_name", "")  # Available for future use
-    _ = form_data.get("channel_id", "")  # Available for future use
-    _ = form_data.get("trigger_id", "")  # Available for future use
-    _ = form_data.get("response_url", "")  # Available for future use
+    user_name = str(form_data.get("user_name", "") or user_id)
 
     parts = text.split(maxsplit=1)
     subcommand = parts[0].lower() if parts else "help"
     args = parts[1] if len(parts) > 1 else ""
 
+    from app.incidents.store import get_incident_store
+
+    store = get_incident_store()
+
     if subcommand == "create":
         if not args:
-            # Open modal for incident creation
-            return {
-                "response_type": "ephemeral",
-                "text": "Opening incident creation form...",
-            }
+            return _ephemeral(
+                "Usage: `/incident create <title>` — the title is what the "
+                "incident gets recorded under."
+            )
 
-        # Quick create with title
-        from datetime import datetime, timezone
-        incident_id = f"INC-{int(datetime.now(timezone.utc).timestamp()) % 100000}"
+        from app.incidents.models import IncidentSeverity
 
-        from app.slack_bot.messages import get_message_builder, IncidentData
-        builder = get_message_builder()
-        incident = IncidentData(
-            incident_id=incident_id,
-            title=args,
-            severity="P2",
-            status="open",
-            services=[],
-            responders=[user_id],
-            started_at=datetime.now(timezone.utc),
-        )
+        try:
+            incident = await store.create_incident(
+                title=args,
+                severity=IncidentSeverity.HIGH,
+                service="unspecified",
+                description=f"Declared from Slack by {user_name}",
+            )
+        except Exception as e:  # noqa: BLE001 — reported, not swallowed
+            logger.exception("/incident create failed")
+            return _ephemeral(f":x: Could not create the incident: {e}")
 
-        blocks = builder.incident_card(incident, show_actions=True)
-
-        return {
-            "response_type": "in_channel",
-            "blocks": blocks,
-        }
-
-    elif subcommand == "update":
         return {
             "response_type": "in_channel",
             "blocks": [
                 {
-                    "type": "section",
+                    "type": "header",
                     "text": {
-                        "type": "mrkdwn",
-                        "text": f":speech_balloon: *Status Update* from <@{user_id}>:\n\n{args}",
+                        "type": "plain_text",
+                        "text": ":rotating_light: Incident Declared",
+                        "emoji": True,
                     },
                 },
-            ],
-        }
-
-    elif subcommand == "resolve":
-        return {
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f":white_check_mark: *Incident Resolved* by <@{user_id}>\n\n{args or 'No resolution notes provided.'}",
-                    },
-                },
-            ],
-        }
-
-    elif subcommand == "escalate":
-        return {
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f":arrow_up: *Incident Escalated* by <@{user_id}>\n\n{args or 'Escalating to next tier.'}",
-                    },
-                },
-            ],
-        }
-
-    elif subcommand == "severity":
-        severity = args.upper() if args else "P2"
-        return {
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f":chart_with_upwards_trend: *Severity Updated* to {severity} by <@{user_id}>",
-                    },
-                },
-            ],
-        }
-
-    else:
-        return {
-            "response_type": "ephemeral",
-            "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
                         "text": (
-                            "*`/incident` Commands:*\n\n"
-                            "* `/incident create <title>` - Create a new incident\n"
-                            "* `/incident update <message>` - Post a status update\n"
-                            "* `/incident resolve [notes]` - Resolve the incident\n"
-                            "* `/incident escalate [reason]` - Escalate to next tier\n"
-                            "* `/incident severity <P1|P2|P3|P4>` - Change severity"
+                            f"*{incident.title}*\n"
+                            f"• ID: `{incident.id}`\n"
+                            f"• Severity: {incident.severity.value} "
+                            f"(change with `/incident severity <P1-P4>`)\n"
+                            f"• Service: {incident.service} — set it on the "
+                            f"incident page if it matters for routing"
                         ),
                     },
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"Declared by <@{user_id}>"},
+                    ],
                 },
             ],
         }
 
+    if subcommand in {"update", "resolve", "escalate", "severity", "ack", "acknowledge"}:
+        incident, rest = await _target_incident(args)
+        if incident is None:
+            return _no_incident()
+
+        try:
+            if subcommand == "update":
+                if not rest:
+                    return _ephemeral("Usage: `/incident update [id] <message>`")
+                updated = await store.add_timeline_note(
+                    incident.id, rest, user=user_name, kind="status_update"
+                )
+                return _incident_line(
+                    updated or incident,
+                    f":speech_balloon: *Status update recorded*\n\n{rest}",
+                    user_id,
+                )
+
+            if subcommand in {"ack", "acknowledge"}:
+                updated = await store.acknowledge_incident(incident.id, user_name)
+                return _incident_line(
+                    updated or incident, ":eyes: *Acknowledged*", user_id
+                )
+
+            if subcommand == "resolve":
+                updated = await store.resolve_incident(
+                    incident.id, user_name, notes=rest or None
+                )
+                headline = ":white_check_mark: *Incident Resolved*"
+                if rest:
+                    headline += f"\n\n{rest}"
+                return _incident_line(updated or incident, headline, user_id)
+
+            if subcommand == "severity":
+                wanted = _SEVERITY_ALIASES.get(rest.strip().lower())
+                if not wanted:
+                    return _ephemeral(
+                        f":grey_question: Unknown severity {rest.strip()!r}. Use "
+                        f"one of P1, P2, P3, P4 (or critical/high/medium/low)."
+                    )
+                updated = await store.update_incident(
+                    incident.id, {"severity": wanted}
+                )
+                await store.add_timeline_note(
+                    incident.id,
+                    f"Severity set to {wanted} by {user_name}",
+                    user=user_name,
+                    kind="severity_change",
+                )
+                return _incident_line(
+                    updated or incident,
+                    f":chart_with_upwards_trend: *Severity set to {wanted}*",
+                    user_id,
+                )
+
+            # escalate: one step up the severity ladder, and say so when there
+            # is no step left rather than claiming an escalation happened.
+            current = incident.severity.value
+            index = _SEVERITY_ORDER.index(current) if current in _SEVERITY_ORDER else 1
+            if index == 0:
+                await store.add_timeline_note(
+                    incident.id,
+                    f"Escalation requested by {user_name}"
+                    + (f": {rest}" if rest else ""),
+                    user=user_name,
+                    kind="escalation",
+                )
+                return _incident_line(
+                    incident,
+                    ":arrow_up: *Escalation noted* — already at the highest "
+                    "severity, so the record is unchanged.",
+                    user_id,
+                )
+            raised = _SEVERITY_ORDER[index - 1]
+            updated = await store.update_incident(incident.id, {"severity": raised})
+            await store.add_timeline_note(
+                incident.id,
+                f"Escalated to {raised} by {user_name}"
+                + (f": {rest}" if rest else ""),
+                user=user_name,
+                kind="escalation",
+            )
+            return _incident_line(
+                updated or incident,
+                f":arrow_up: *Escalated* {current} → {raised}",
+                user_id,
+            )
+        except Exception as e:  # noqa: BLE001 — reported, not swallowed
+            logger.exception("/incident %s failed", subcommand)
+            return _ephemeral(f":x: `/incident {subcommand}` failed: {e}")
+
+    return {
+        "response_type": "ephemeral",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "*`/incident` Commands:*\n\n"
+                        "* `/incident create <title>` - Declare a new incident\n"
+                        "* `/incident update [id] <message>` - Add to the timeline\n"
+                        "* `/incident ack [id]` - Acknowledge\n"
+                        "* `/incident resolve [id] [notes]` - Resolve\n"
+                        "* `/incident escalate [id] [reason]` - Raise severity one level\n"
+                        "* `/incident severity [id] <P1|P2|P3|P4>` - Set severity\n\n"
+                        "_Without an id, these apply to the most recent "
+                        "unresolved incident._"
+                    ),
+                },
+            },
+        ],
+    }
+
+
+async def _create_slack_channel(name: str, invite: str = "") -> tuple[str, str]:
+    """Create a Slack channel and return `(channel_id, error)`.
+
+    A war room whose channel does not exist is the failure this guards: the old
+    handler announced "*War Room Created*  *Channel:* #inc-...-warroom" without
+    calling Slack at all, so responders searched for a channel that was never
+    there while the incident ran.
+    """
+    token = SlackConfig.bot_token()
+    if not token:
+        return "", (
+            "SLACK_BOT_TOKEN is not configured, so the bot cannot create a "
+            "channel"
+        )
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.post(
+                "https://slack.com/api/conversations.create",
+                headers=headers,
+                json={"name": name[:80]},
+            )
+            payload = response.json()
+        except Exception as e:  # noqa: BLE001 — surfaced to the channel
+            return "", str(e)
+
+        if not payload.get("ok"):
+            return "", str(payload.get("error") or "conversations.create failed")
+
+        channel_id = str(payload.get("channel", {}).get("id", ""))
+        if channel_id and invite:
+            try:
+                await client.post(
+                    "https://slack.com/api/conversations.invite",
+                    headers=headers,
+                    json={"channel": channel_id, "users": invite},
+                )
+            except Exception:  # noqa: BLE001 — the room exists; the invite is a nicety
+                logger.warning("Could not invite %s to %s", invite, channel_id)
+        return channel_id, ""
+
 
 @router.post("/commands/warroom")
 async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
-    """Handle /warroom slash command - create and manage war rooms."""
+    """Handle /warroom slash command - create and manage war rooms.
+
+    `create` used to announce a channel it had not created, against an incident
+    id it had invented from the clock, with a "Join War Room" button wired to an
+    action id nothing handled. `list` then read the war room manager, which of
+    course had never heard of it — so the command contradicted itself one line
+    later.
+    """
     form_data = await request.form()
     text_raw = form_data.get("text", "")
     text = str(text_raw).strip() if text_raw else ""
     user_id = str(form_data.get("user_id", ""))
-    _ = form_data.get("channel_id", "")  # Available for future use
 
     parts = text.split(maxsplit=1)
     subcommand = parts[0].lower() if parts else "create"
     args = parts[1] if len(parts) > 1 else ""
 
+    from app.slack_bot.war_room import get_war_room_manager
+
+    manager = get_war_room_manager()
+
     if subcommand == "create":
-        from datetime import datetime, timezone
-        incident_id = f"INC-{int(datetime.now(timezone.utc).timestamp()) % 100000}"
-        channel_name = f"inc-{incident_id.lower()}-warroom"
+        incident, rest = await _target_incident(args)
+        if incident is None:
+            return _ephemeral(
+                ":grey_question: A war room needs an incident. Declare one with "
+                "`/incident create <title>` first, or pass an incident id."
+            )
+
+        existing = manager.get_by_incident(str(incident.id))
+        if existing is not None:
+            return _ephemeral(
+                f":information_source: <#{existing.channel_id}> is already the "
+                f"war room for `{_short(incident.id)}`."
+            )
+
+        title = rest or incident.title
+        name = manager._generate_channel_name(_short(incident.id), title)
+        channel_id, error = await _create_slack_channel(name, invite=user_id)
+        if error:
+            return _ephemeral(
+                f":x: Could not create the war room channel: {error}. No channel "
+                f"was created — the incident is still at `{_short(incident.id)}`."
+            )
+
+        war_room = await manager.create_war_room(
+            incident_id=str(incident.id),
+            org_id=str(getattr(incident, "org_id", "")) or "default",
+            title=title,
+            severity=incident.severity.value,
+            description=incident.description or "",
+            channel_id=channel_id,
+            channel_name=name,
+        )
 
         return {
             "response_type": "in_channel",
@@ -786,39 +1069,24 @@ async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
                         "type": "mrkdwn",
                         "text": (
                             f":mega: *War Room Created*\n\n"
-                            f"*Channel:* #{channel_name}\n"
-                            f"*Created by:* <@{user_id}>\n"
-                            f"*Incident:* {args or incident_id}"
+                            f"*Channel:* <#{war_room.channel_id}>\n"
+                            f"*Incident:* {incident.title} "
+                            f"(`{_short(incident.id)}`)\n"
+                            f"*Created by:* <@{user_id}>"
                         ),
                     },
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Join War Room", "emoji": True},
-                            "action_id": f"join_warroom_{incident_id}",
-                            "style": "primary",
-                        },
-                    ],
                 },
             ],
         }
 
-    elif subcommand == "list":
-        from app.slack_bot.war_room import get_war_room_manager
-        manager = get_war_room_manager()
+    if subcommand == "list":
         active_rooms = manager.get_active_war_rooms()
 
         if not active_rooms:
-            return {
-                "response_type": "ephemeral",
-                "text": "No active war rooms.",
-            }
+            return _ephemeral("No active war rooms.")
 
         rooms_text = "\n".join(
-            f"* #{wr.channel_name} - {wr.severity} {wr.title} ({wr.status.value})"
+            f"* <#{wr.channel_id}> - {wr.severity} {wr.title} ({wr.status.value})"
             for wr in active_rooms[:10]
         )
 
@@ -835,97 +1103,211 @@ async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
             ],
         }
 
-    else:
-        return {
-            "response_type": "ephemeral",
-            "text": "Usage: `/warroom create [title]` or `/warroom list`",
+    return _ephemeral("Usage: `/warroom create [incident-id] [title]` or `/warroom list`")
+
+
+async def _postmortem_for(incident) -> tuple[dict | None, str]:
+    """Generate the postmortem for `incident`, or return why it could not be.
+
+    There is no template fallback on purpose: the generator refuses without an
+    LLM rather than emitting a canned document, and a canned document presented
+    as analysis is what this command used to post.
+    """
+    from app.postmortems import (
+        PostmortemGenerationFailed,
+        PostmortemUnavailable,
+        generate_postmortem,
+    )
+
+    try:
+        return await generate_postmortem(incident), ""
+    except PostmortemUnavailable as e:
+        return None, str(e)
+    except PostmortemGenerationFailed as e:
+        return None, f"the model did not return a usable postmortem: {e}"
+    except Exception as e:  # noqa: BLE001 — reported into the channel
+        logger.exception("postmortem generation failed for %s", incident.id)
+        return None, str(e)
+
+
+async def _run_postmortem(incident, response_url: str, want_actions: bool) -> None:
+    """Generate in the background and deliver via `response_url`.
+
+    Slack kills a slash command that has not answered in three seconds, and a
+    postmortem is several model calls, so the work cannot happen inline. The old
+    handler solved that by saying "You'll be notified when ready" and doing
+    nothing at all.
+    """
+    document, error = await _postmortem_for(incident)
+    if error or document is None:
+        await _send_response(
+            response_url,
+            [{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f":x: Could not generate the postmortem for "
+                        f"`{_short(incident.id)}`: {error}"
+                    ),
+                },
+            }],
+        )
+        return
+
+    if want_actions:
+        items = document.get("action_items") or []
+        if not items:
+            body = (
+                f":page_facing_up: The postmortem for *{incident.title}* "
+                f"proposes no action items."
+            )
+        else:
+            lines = "\n".join(
+                f"{i + 1}. :white_large_square: [{item.get('priority', 'P2')}] "
+                f"{item.get('title', '')}"
+                + (f" — {item['owner']}" if item.get("owner") else "")
+                for i, item in enumerate(items)
+            )
+            body = (
+                f"*Action items from {incident.title} "
+                f"(`{_short(incident.id)}`):*\n\n{lines}"
+            )
+        await _send_response(
+            response_url,
+            [{"type": "section", "text": {"type": "mrkdwn", "text": body}}],
+        )
+        return
+
+    sections = document.get("sections") or []
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Postmortem: {incident.title}"[:150],
+                "emoji": True,
+            },
         }
+    ]
+    # Slack rejects a message with more than 50 blocks and truncates any single
+    # text field past 3000 characters, so cap both rather than post nothing.
+    for section in sections[:20]:
+        content = str(section.get("content", "")).strip()
+        if not content:
+            continue
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{section.get('title', '')}*\n{content}"[:2900],
+            },
+        })
+    blocks.append({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": f"Draft, generated from incident `{incident.id}`.",
+        }],
+    })
+    await _send_response(response_url, blocks)
 
 
 @router.post("/commands/postmortem")
-async def slash_postmortem(request: Request):
-    """Handle /postmortem slash command - generate and manage postmortems."""
+async def slash_postmortem(request: Request, background_tasks: BackgroundTasks):
+    """Handle /postmortem slash command - generate and manage postmortems.
+
+    `generate` promised "You'll be notified when ready" and started nothing.
+    `actions` was the worse one: it listed four invented action items under
+    "Action Items from Recent Incidents", one of them naming a specific service
+    to put a circuit breaker in front of. Follow-up work assigned off that list
+    would have been work on an incident that never happened.
+    """
     form_data = await request.form()
     text_raw = form_data.get("text", "")
     text = str(text_raw).strip() if text_raw else ""
-    user_id = str(form_data.get("user_id", ""))
+    response_url = str(form_data.get("response_url", ""))
 
     parts = text.split(maxsplit=1)
     subcommand = parts[0].lower() if parts else "generate"
     args = parts[1] if len(parts) > 1 else ""
 
-    if subcommand == "generate":
-        incident_id = args or "current"
-        return {
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f":page_facing_up: *Generating Postmortem* for {incident_id}...\n\n"
-                            f"Requested by <@{user_id}>"
-                        ),
-                    },
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {"type": "mrkdwn", "text": "This may take a few moments. You'll be notified when ready."},
-                    ],
-                },
-            ],
-        }
+    if subcommand in {"generate", "actions"}:
+        incident, _rest = await _target_incident(args)
+        if incident is None:
+            from app.incidents.store import get_incident_store
 
-    elif subcommand == "actions":
-        return {
-            "response_type": "ephemeral",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            "*Action Items from Recent Incidents:*\n\n"
-                            "1. :white_large_square: Add connection pool monitoring\n"
-                            "2. :white_large_square: Implement circuit breaker for payment-service\n"
-                            "3. :white_check_mark: Add pre-deploy health checks\n"
-                            "4. :white_large_square: Update runbook for DB failover"
-                        ),
-                    },
-                },
-            ],
-        }
+            recent = await get_incident_store().list_incidents(limit=1)
+            incident = recent[0] if recent else None
+        if incident is None:
+            return _ephemeral(
+                ":grey_question: There are no incidents on record, so there is "
+                "nothing to write a postmortem about."
+            )
+        if not response_url:
+            return _ephemeral(":x: Slack sent no response_url; cannot deliver the result.")
 
-    elif subcommand == "share":
-        return {
-            "response_type": "ephemeral",
-            "text": f"Sharing postmortem for {args}. Choose destination channel.",
-        }
+        background_tasks.add_task(
+            _run_postmortem, incident, response_url, subcommand == "actions"
+        )
+        what = "action items" if subcommand == "actions" else "postmortem"
+        return _ephemeral(
+            f":hourglass: Generating the {what} for *{incident.title}* "
+            f"(`{_short(incident.id)}`). This takes a few model calls; the "
+            f"result will replace this message."
+        )
 
-    else:
-        return {
-            "response_type": "ephemeral",
-            "text": "Usage: `/postmortem generate [incident_id]` | `/postmortem actions` | `/postmortem share <incident_id>`",
-        }
+    if subcommand == "share":
+        return _ephemeral(
+            "Sharing a postmortem to another channel is not wired up yet. "
+            "`/postmortem generate [incident-id]` posts the draft here, and the "
+            "full document is at `/api/incidents/<id>/postmortem`."
+        )
+
+    return _ephemeral(
+        "Usage: `/postmortem generate [incident-id]` | "
+        "`/postmortem actions [incident-id]`"
+    )
 
 
 @router.post("/commands/stakeholder")
 async def slash_stakeholder(request: Request):
-    """Handle /stakeholder slash command - post stakeholder updates."""
+    """Handle /stakeholder slash command - post stakeholder updates.
+
+    Its own usage text said it "Posts an update to stakeholder channels", and it
+    posted into whichever channel the command was typed in. The update is real
+    either way, so the fix is to name the destination truthfully and to record
+    the update on the incident timeline, which is where a stakeholder update
+    belongs when the postmortem is written.
+    """
     form_data = await request.form()
     text_raw = form_data.get("text", "")
     text = str(text_raw).strip() if text_raw else ""
     user_id = str(form_data.get("user_id", ""))
+    user_name = str(form_data.get("user_name", "") or user_id)
 
     if not text:
-        return {
-            "response_type": "ephemeral",
-            "text": "Usage: `/stakeholder <update message>` - Posts an update to stakeholder channels.",
-        }
+        return _ephemeral(
+            "Usage: `/stakeholder <update message>` — posts the update in this "
+            "channel and records it on the current incident's timeline."
+        )
 
     from datetime import datetime, timezone
+
+    incident, _rest = await _target_incident("")
+    if incident is not None:
+        from app.incidents.store import get_incident_store
+
+        try:
+            await get_incident_store().add_timeline_note(
+                incident.id, text, user=user_name, kind="stakeholder_update"
+            )
+        except Exception:  # noqa: BLE001 — the post still goes out
+            logger.exception("Could not record the stakeholder update on %s", incident.id)
+
+    context = f"Posted by <@{user_id}> at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+    if incident is not None:
+        context += f" • recorded on incident `{_short(incident.id)}`"
 
     return {
         "response_type": "in_channel",
@@ -940,22 +1322,11 @@ async def slash_stakeholder(request: Request):
             },
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": text,
-                },
+                "text": {"type": "mrkdwn", "text": text},
             },
             {
                 "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"Posted by <@{user_id}> at "
-                            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-                        ),
-                    },
-                ],
+                "elements": [{"type": "mrkdwn", "text": context}],
             },
         ],
     }

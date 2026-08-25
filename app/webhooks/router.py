@@ -64,6 +64,40 @@ def _normalize_tags(raw: Any) -> dict[str, str]:
     return tags
 
 
+def _object_body(data: Any, source: str) -> dict[str, Any]:
+    """The delivery body as an object, or a 400 naming what arrived instead.
+
+    Every receiver here starts with `data.get(...)`, which is an AttributeError
+    — a 500 — for a top-level array, string or number. The alerting platform
+    reads a 500 as "retry", so a malformed payload became a retry loop into the
+    same crash. A 400 is both accurate and terminal.
+    """
+    if isinstance(data, dict):
+        return data
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"{source} delivery body must be a JSON object, got "
+            f"{type(data).__name__}."
+        ),
+    )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    """A sub-object, treating null/absent/wrong-typed as empty.
+
+    `data.get("labels", {})` looks safe and is not: the default only applies
+    when the key is *missing*, and Alertmanager templates routinely emit
+    `"labels": null` for an alert with none.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def _sequence(value: Any) -> list[Any]:
+    """A list field, treating null/absent/wrong-typed as empty."""
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 def _basic_auth_password(header: str) -> str:
     """The password out of an `Authorization: Basic` header, or ""."""
     try:
@@ -257,16 +291,18 @@ def _pagerduty_triggered(payload: dict) -> list[dict[str, Any]]:
                 }
             )
         return triggered
-    for msg in payload.get("messages") or []:  # v2 / legacy
+    for msg in _sequence(payload.get("messages")):  # v2 / legacy
+        if not isinstance(msg, dict):
+            continue
         if not str(msg.get("event", "")).startswith("incident.trigger"):
             continue
-        data = msg.get("incident") or {}
+        data = _mapping(msg.get("incident"))
         triggered.append(
             {
                 "id": data.get("id", "unknown"),
                 "title": data.get("title") or data.get("summary") or "PagerDuty Alert",
                 "description": data.get("description"),
-                "service": (data.get("service") or {}).get("name") or "unknown",
+                "service": _mapping(data.get("service")).get("name") or "unknown",
                 "urgency": data.get("urgency", "low"),
             }
         )
@@ -309,7 +345,7 @@ async def pagerduty_webhook(
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
-        data = json.loads(body)
+        data = _object_body(json.loads(body), "PagerDuty")
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
@@ -345,41 +381,94 @@ async def alertmanager_webhook(
     background_tasks: BackgroundTasks,
     x_webhook_secret: str | None = Header(None),
 ) -> WebhookResponse:
-    """Receive Prometheus Alertmanager webhook events."""
+    """Receive Prometheus Alertmanager webhook events.
+
+    Alertmanager is a *state* feed, not an event feed: it re-sends every firing
+    group on `repeat_interval` (4h in the stock config) and sends a matching
+    `status: "resolved"` delivery when the alert clears. The receiver treated
+    each delivery as new and dropped everything that was not firing, so one
+    flapping alert produced an incident every four hours and none of them ever
+    closed. `fingerprint` — which Alertmanager computes from the label set and
+    which was read nowhere in this file — is what ties the deliveries together.
+    """
     _verify_shared_secret(request, x_webhook_secret, "Alertmanager")
     try:
-        data = await request.json()
+        data = _object_body(await request.json(), "Alertmanager")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    alerts = data.get("alerts", [])
-    created_incidents = []
+    created_incidents: list[str] = []
+    deduped = 0
+    resolved = 0
 
     severity_map = {
         "critical": IncidentSeverity.CRITICAL,
         "warning": IncidentSeverity.HIGH,
         "info": IncidentSeverity.LOW,
     }
+    store = get_incident_store()
 
-    for alert in alerts:
-        if alert.get("status") != "firing":
+    for alert in _sequence(data.get("alerts")):
+        if not isinstance(alert, dict):
             continue
 
-        labels = alert.get("labels", {})
-        annotations = alert.get("annotations", {})
+        labels = _mapping(alert.get("labels"))
+        annotations = _mapping(alert.get("annotations"))
+        alertname = str(labels.get("alertname") or "Prometheus Alert")
+        # Alertmanager always sends `fingerprint`; older versions and
+        # hand-rolled senders may not, so fall back to the label set, which is
+        # what the fingerprint is derived from anyway.
+        fingerprint = str(alert.get("fingerprint") or "").strip()
+        if not fingerprint and labels:
+            fingerprint = json.dumps(labels, sort_keys=True)
+        dedupe_key = f"alertmanager:{fingerprint}" if fingerprint else ""
+
+        if str(alert.get("status") or "").lower() == "resolved":
+            existing = (
+                await store.find_open_by_dedupe_key(dedupe_key) if dedupe_key else None
+            )
+            if existing is not None:
+                await store.resolve_incident(
+                    existing.id,
+                    "alertmanager",
+                    notes=f"{alertname} stopped firing in Alertmanager",
+                )
+                resolved += 1
+                log.info("Resolved incident %s from Alertmanager", existing.id)
+            continue
+
+        if str(alert.get("status") or "").lower() != "firing":
+            continue
+
+        if dedupe_key:
+            existing = await store.find_open_by_dedupe_key(dedupe_key)
+            if existing is not None:
+                # A re-delivery of an alert we are already working. Record that
+                # it is still firing and move on — a second incident for the
+                # same alert splits the response across two records.
+                await store.add_timeline_note(
+                    existing.id,
+                    f"{alertname} still firing (Alertmanager re-delivery)",
+                    user="alertmanager",
+                    kind="alert_repeat",
+                )
+                deduped += 1
+                continue
 
         severity = severity_map.get(
-            labels.get("severity", "warning"),
+            str(labels.get("severity") or "warning").lower(),
             IncidentSeverity.MEDIUM,
         )
 
-        store = get_incident_store()
         incident = await store.create_incident(
-            title=labels.get("alertname", "Prometheus Alert"),
+            title=alertname,
             description=annotations.get("description") or annotations.get("summary"),
             severity=severity,
-            service=labels.get("service", labels.get("job", "unknown")),
-            tags=["alertmanager", labels.get("alertname", "unknown")],
+            service=str(labels.get("service") or labels.get("job") or "unknown"),
+            tags=["alertmanager", alertname],
+            dedupe_key=dedupe_key or None,
         )
         created_incidents.append(str(incident.id))
 
@@ -387,10 +476,15 @@ async def alertmanager_webhook(
 
         log.info("Created incident from Alertmanager: %s", incident.id)
 
+    parts = [f"Processed {len(created_incidents)} alerts"]
+    if deduped:
+        parts.append(f"{deduped} already open")
+    if resolved:
+        parts.append(f"{resolved} resolved")
     return WebhookResponse(
         status="ok",
         incident_id=created_incidents[0] if created_incidents else None,
-        message=f"Processed {len(created_incidents)} alerts",
+        message=", ".join(parts),
     )
 
 
@@ -403,7 +497,9 @@ async def datadog_webhook(
     """Receive Datadog webhook events."""
     _verify_shared_secret(request, x_webhook_secret, "Datadog")
     try:
-        data = await request.json()
+        data = _object_body(await request.json(), "Datadog")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
@@ -455,7 +551,9 @@ async def grafana_webhook(
     """Receive Grafana alerting webhook events."""
     _verify_shared_secret(request, x_webhook_secret, "Grafana")
     try:
-        data = await request.json()
+        data = _object_body(await request.json(), "Grafana")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
@@ -509,11 +607,15 @@ async def generic_webhook(
     _verify_shared_secret(request, x_webhook_secret, "generic webhook")
 
     try:
-        data = await request.json()
+        data = _object_body(await request.json(), "Generic webhook")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    title = data.get("title") or data.get("name") or data.get("alert", "Alert")
+    # `or` rather than a `.get` default at each step: a present-but-null field is
+    # the common shape out of a templating layer, and a default never applies to it.
+    title = data.get("title") or data.get("name") or data.get("alert") or "Alert"
     description = data.get("description") or data.get("message") or data.get("body")
     service = data.get("service") or data.get("source") or "unknown"
 
@@ -530,10 +632,10 @@ async def generic_webhook(
     }
     severity = severity_map.get(severity_str, IncidentSeverity.MEDIUM)
 
-    raw_tags = data.get("tags") or []
+    raw_tags = data.get("tags")
     if isinstance(raw_tags, str):
         raw_tags = [raw_tags]
-    tags = [str(t) for t in raw_tags] if isinstance(raw_tags, (list, tuple)) else []
+    tags = [str(t) for t in _sequence(raw_tags)]
     tags.append("generic-webhook")
 
     store = get_incident_store()

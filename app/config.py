@@ -365,6 +365,12 @@ class Settings(BaseSettings):
     # before it will re-open an investigation for a still-burning service.
     copilot_slo_poll_interval_s: int = 300
     copilot_slo_cooldown_s: int = 3600
+    # How often the on-call sweeper looks for alerts whose next escalation step
+    # has come due. This is the resolution of every `delay_minutes` in every
+    # escalation policy, so it wants to be well under the shortest delay a team
+    # would configure. Not a feature flag: an on-call system that does not
+    # escalate is not on-call, so there is no "off".
+    copilot_escalation_sweep_interval_s: int = 30
     # Parallel multi-hypothesis probe: when the RCA has 2+ competing hypotheses,
     # score each concurrently against the observed evidence and re-rank them, so a
     # weakly-supported top hypothesis can't win by ordering alone. true (default).

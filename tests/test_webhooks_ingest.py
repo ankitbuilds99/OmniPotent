@@ -732,3 +732,257 @@ def test_an_unauthenticated_deployment_leaves_the_receivers_open(client):
     response = c.post("/api/webhooks/alertmanager", json=ALERTMANAGER_FIRING)
 
     assert response.status_code == 200, response.text
+
+
+# -----------------------------------------------------------------------------
+# Alertmanager is a state feed, not an event feed
+# -----------------------------------------------------------------------------
+
+
+def _am(status: str, *, fingerprint: str = "fp-1", alertname: str = "HighErrorRate") -> dict:
+    return {
+        "alerts": [
+            {
+                "status": status,
+                "fingerprint": fingerprint,
+                "labels": {"alertname": alertname, "severity": "critical", "service": "api"},
+                "annotations": {"description": "5xx rate above 10%"},
+            }
+        ]
+    }
+
+
+def _incidents(client) -> list[dict]:
+    listing = client.get("/api/incidents")
+    assert listing.status_code == 200, listing.text
+    return listing.json()
+
+
+def test_a_repeated_firing_delivery_does_not_open_a_second_incident(client):
+    """Alertmanager re-sends every firing group on `repeat_interval` — 4h in the
+    stock config. Each re-delivery used to open a fresh incident, so one alert
+    that stayed on over a weekend produced a dozen of them."""
+    c, _ = client
+    first = c.post("/api/webhooks/alertmanager", json=_am("firing"))
+    second = c.post("/api/webhooks/alertmanager", json=_am("firing"))
+
+    assert first.status_code == 200 and second.status_code == 200, second.text
+    assert len(_incidents(c)) == 1
+    assert second.json()["incident_id"] is None
+    assert "already open" in second.json()["message"]
+
+
+def test_a_re_delivery_is_recorded_on_the_incident_it_matched(client):
+    """Deduping must not mean discarding: "still firing" is information the
+    responder needs, and it is the difference between a quiet alert and one
+    nobody has fixed."""
+    c, _ = client
+    created = c.post("/api/webhooks/alertmanager", json=_am("firing")).json()["incident_id"]
+    c.post("/api/webhooks/alertmanager", json=_am("firing"))
+
+    timeline = _incident(c, created)["incident"]["timeline"]
+
+    assert any(entry.get("type") == "alert_repeat" for entry in timeline), timeline
+    assert any("still firing" in entry.get("message", "") for entry in timeline), timeline
+
+
+def test_a_resolved_delivery_closes_the_incident_it_opened(client):
+    """The matching `status: "resolved"` delivery was dropped on the floor, so
+    an incident opened from an alert could only ever be closed by hand."""
+    c, _ = client
+    created = c.post("/api/webhooks/alertmanager", json=_am("firing")).json()["incident_id"]
+
+    resolved = c.post("/api/webhooks/alertmanager", json=_am("resolved"))
+
+    assert resolved.status_code == 200, resolved.text
+    assert "1 resolved" in resolved.json()["message"]
+    assert _incident(c, created)["incident"]["status"] == IncidentStatus.RESOLVED.value
+
+
+def test_an_alert_that_fires_again_after_resolving_is_a_new_incident(client):
+    """Not a reopening. Reopening would rewrite the first incident's duration
+    and splice a week of silence into its postmortem timeline."""
+    c, _ = client
+    first = c.post("/api/webhooks/alertmanager", json=_am("firing")).json()["incident_id"]
+    c.post("/api/webhooks/alertmanager", json=_am("resolved"))
+    second = c.post("/api/webhooks/alertmanager", json=_am("firing")).json()["incident_id"]
+
+    assert second and second != first
+    assert len(_incidents(c)) == 2
+
+
+def test_two_different_alerts_are_not_deduped_into_one(client):
+    """The fingerprint is the alert's identity. Deduping on anything coarser —
+    the alert name, the service — merges unrelated outages."""
+    c, _ = client
+    c.post("/api/webhooks/alertmanager", json=_am("firing", fingerprint="fp-a", alertname="A"))
+    c.post("/api/webhooks/alertmanager", json=_am("firing", fingerprint="fp-b", alertname="B"))
+
+    assert len(_incidents(c)) == 2
+
+
+def test_a_delivery_with_no_fingerprint_still_dedupes_on_its_labels(client):
+    """Older Alertmanager versions and hand-rolled senders omit `fingerprint`;
+    the label set is what the fingerprint is derived from anyway."""
+    c, _ = client
+    payload = {"alerts": [{"status": "firing", "labels": {"alertname": "X", "service": "api"}}]}
+    c.post("/api/webhooks/alertmanager", json=payload)
+    c.post("/api/webhooks/alertmanager", json=payload)
+
+    assert len(_incidents(c)) == 1
+
+
+def test_a_resolved_delivery_for_an_unknown_alert_is_harmless(client):
+    """Alertmanager sends resolutions for alerts that fired before this service
+    existed, or before the dedupe key column did."""
+    c, _ = client
+    response = c.post("/api/webhooks/alertmanager", json=_am("resolved", fingerprint="never-seen"))
+
+    assert response.status_code == 200, response.text
+    assert _incidents(c) == []
+
+
+# -----------------------------------------------------------------------------
+# Malformed deliveries are a 400, not a 500
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [
+    "/api/webhooks/alertmanager",
+    "/api/webhooks/datadog",
+    "/api/webhooks/grafana",
+    "/api/webhooks/generic",
+])
+def test_a_top_level_array_is_refused_not_crashed(client, path):
+    """Every receiver opens with `data.get(...)`, which is an AttributeError —
+    a 500 — for anything that is not an object. The sender reads a 500 as
+    "retry", so one malformed template became a retry loop into the same crash.
+    A 400 is both accurate and terminal."""
+    c, _ = client
+    response = c.post(path, json=[{"title": "not an object"}])
+
+    assert response.status_code == 400, f"{path}: {response.status_code}"
+    assert "object" in response.json()["detail"].lower()
+
+
+@pytest.mark.parametrize("path", [
+    "/api/webhooks/alertmanager",
+    "/api/webhooks/datadog",
+    "/api/webhooks/grafana",
+    "/api/webhooks/generic",
+])
+def test_a_bare_json_scalar_is_refused_not_crashed(client, path):
+    c, _ = client
+    assert c.post(path, json="just a string").status_code == 400
+    assert c.post(path, json=7).status_code == 400
+
+
+@pytest.mark.parametrize("path", [
+    "/api/webhooks/alertmanager",
+    "/api/webhooks/datadog",
+    "/api/webhooks/grafana",
+    "/api/webhooks/generic",
+])
+def test_a_body_that_is_not_json_at_all_is_refused_not_crashed(client, path):
+    c, _ = client
+    response = c.post(path, content=b"<html>gateway error</html>",
+                      headers={"Content-Type": "application/json"})
+
+    assert response.status_code == 400, f"{path}: {response.status_code}"
+
+
+def test_alertmanager_null_alerts_is_not_a_crash(client):
+    """`"alerts": null` is what a template renders for a group that emptied out
+    between the decision to notify and the render. `.get("alerts", [])` does not
+    help — the default only applies when the key is missing."""
+    c, _ = client
+    response = c.post("/api/webhooks/alertmanager", json={"alerts": None})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["incident_id"] is None
+
+
+def test_alertmanager_null_labels_and_annotations_are_not_a_crash(client):
+    """An alert with no labels renders as `null`, not `{}`."""
+    c, _ = client
+    response = c.post("/api/webhooks/alertmanager", json={
+        "alerts": [{"status": "firing", "labels": None, "annotations": None}]
+    })
+
+    assert response.status_code == 200, response.text
+    assert _incident(c, response.json()["incident_id"])["incident"]["title"] == "Prometheus Alert"
+
+
+def test_alertmanager_non_object_entries_in_alerts_are_skipped(client):
+    c, _ = client
+    response = c.post("/api/webhooks/alertmanager", json={
+        "alerts": ["oops", None, {"status": "firing", "labels": {"alertname": "real"}}]
+    })
+
+    assert response.status_code == 200, response.text
+    assert len(_incidents(c)) == 1
+
+
+def test_generic_null_fields_fall_through_to_the_next_candidate(client):
+    """A templating layer emits `"title": null` for an unset variable far more
+    often than it omits the key, and a `.get` default never applies to null."""
+    c, _ = client
+    response = c.post("/api/webhooks/generic", json={
+        "title": None, "name": None, "alert": "disk pressure",
+        "service": None, "tags": None, "severity": None,
+    })
+
+    assert response.status_code == 200, response.text
+    detail = _incident(c, response.json()["incident_id"])["incident"]
+    assert detail["title"] == "disk pressure"
+    assert detail["service"] == "unknown"
+
+
+def test_generic_scalar_tags_do_not_crash(client):
+    """`tags` arrives as a bare string from half the senders that set it."""
+    c, _ = client
+    response = c.post("/api/webhooks/generic", json={"title": "t", "tags": "prod"})
+
+    assert response.status_code == 200, response.text
+    assert "prod" in _incident(c, response.json()["incident_id"])["incident"]["tags"]
+
+
+def test_datadog_and_grafana_null_tags_do_not_crash(client):
+    c, _ = client
+    datadog = c.post("/api/webhooks/datadog", json={
+        "alert_type": "error", "title": "dd", "tags": None,
+    })
+    grafana = c.post("/api/webhooks/grafana", json={
+        "state": "alerting", "title": "gf", "tags": None,
+    })
+
+    assert datadog.status_code == 200, datadog.text
+    assert grafana.status_code == 200, grafana.text
+
+
+def test_pagerduty_signed_non_object_body_is_refused_not_crashed(client):
+    """The signature check passes — the body is genuinely from PagerDuty — and
+    the parse is what breaks. A 500 here is a retry loop from a signed sender."""
+    c, _ = client
+    body = json.dumps(["not", "an", "object"]).encode()
+
+    response = c.post("/api/webhooks/pagerduty", content=body,
+                      headers={"X-PagerDuty-Signature": _pd_sig(body),
+                               "Content-Type": "application/json"})
+
+    assert response.status_code == 400, response.text
+
+
+def test_pagerduty_legacy_messages_with_junk_entries_are_skipped(client):
+    c, _ = client
+    body = json.dumps({"messages": ["oops", None, {
+        "event": "incident.trigger",
+        "incident": {"id": "PX", "title": "real one", "service": None},
+    }]}).encode()
+
+    response = c.post("/api/webhooks/pagerduty", content=body,
+                      headers={"X-PagerDuty-Signature": _pd_sig(body),
+                               "Content-Type": "application/json"})
+
+    assert response.status_code == 200, response.text
+    assert _incident(c, response.json()["incident_id"])["incident"]["service"] == "unknown"

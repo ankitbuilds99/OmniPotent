@@ -105,6 +105,11 @@ class Incident(BaseModel):
     related_alerts: list[UUID] = []
     impact: str | None = None
     customer_impact: bool = False
+    # The alerting platform's own id for the underlying alert, when it has one
+    # (Alertmanager's `fingerprint`). Used to recognise a re-delivery of an alert
+    # we already have an incident for, and to close that incident when the same
+    # alert resolves.
+    dedupe_key: str | None = None
 
 
 class CreateIncidentRequest(BaseModel):

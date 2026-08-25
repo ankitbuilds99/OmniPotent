@@ -101,6 +101,7 @@ def _to_incident(row: Any) -> Incident:
         related_alerts=[UUID(a) for a in (row.related_alerts or [])],
         impact=row.impact,
         customer_impact=row.customer_impact,
+        dedupe_key=row.dedupe_key,
     )
 
 
@@ -180,6 +181,7 @@ class IncidentStore:
         tags: list[str] | None = None,
         impact: str | None = None,
         customer_impact: bool = False,
+        dedupe_key: str | None = None,
     ) -> Incident:
         from app.database.engine import get_session
         from app.database.models import Incident as IncidentRow
@@ -188,6 +190,7 @@ class IncidentStore:
             org = await ensure_org_row(session)
             row = IncidentRow(
                 org_id=org,
+                dedupe_key=dedupe_key,
                 title=title,
                 description=description,
                 severity=severity.value,
@@ -247,6 +250,66 @@ class IncidentStore:
             if "description" in updates:
                 row.description = updates["description"]
 
+            await session.commit()
+            return _to_incident(row)
+
+    async def find_open_by_dedupe_key(self, dedupe_key: str) -> Incident | None:
+        """The unresolved incident already tracking this alert, if there is one.
+
+        Scoped to unresolved on purpose: an alert that fires, resolves, and
+        fires again a week later is a new incident, not a reopening of the old
+        one — reopening would silently rewrite the first incident's duration and
+        its postmortem's timeline.
+        """
+        from app.database.engine import get_session
+        from app.database.models import Incident as IncidentRow
+
+        key = (dedupe_key or "").strip()
+        if not key:
+            return None
+
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(IncidentRow)
+                    .options(selectinload(IncidentRow.investigation))
+                    .where(
+                        IncidentRow.org_id == org_uuid(),
+                        IncidentRow.dedupe_key == key,
+                        IncidentRow.status != IncidentStatus.RESOLVED.value,
+                    )
+                    .order_by(IncidentRow.triggered_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return _to_incident(row) if row else None
+
+    async def add_timeline_note(
+        self, incident_id: UUID, message: str, user: str | None = None, kind: str = "note"
+    ) -> Incident | None:
+        """Record a free-text update against the incident.
+
+        The status updates responders type during an incident are most of what a
+        postmortem timeline is made of, and there was no way to get one onto the
+        record: `/incident update` posted the text into the channel and dropped
+        it. Scrollback is not a timeline — it is unsearchable, unexportable, and
+        gone when the war room is archived.
+        """
+        from app.database.engine import get_session
+
+        text = message.strip()
+        if not text:
+            return await self.get_incident(incident_id)
+
+        async with get_session() as session:
+            row = await self._fetch(session, incident_id)
+            if not row:
+                return None
+
+            _append_timeline(
+                row,
+                TimelineEntry(timestamp=_now(), type=kind, message=text, user=user),
+            )
             await session.commit()
             return _to_incident(row)
 

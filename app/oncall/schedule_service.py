@@ -37,6 +37,51 @@ from app.oncall.models import (
 log = logging.getLogger("omnipotent.oncall.schedule_service")
 
 
+def _aware(value: datetime | None) -> datetime:
+    """A timestamp read back from the database, as tz-aware UTC.
+
+    Postgres round-trips `DateTime(timezone=True)` with its offset intact;
+    SQLite has no timezone type and hands back a naive datetime for the same
+    column. Any code that compares a stored boundary against a computed one has
+    to normalise first or it raises "can't compare offset-naive and
+    offset-aware datetimes" on whichever backend it was not developed against.
+    """
+    if value is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _rotation_period(rotation_type: str, length_days: int) -> timedelta:
+    """How long one turn of the rotation lasts, in days."""
+    return {
+        "daily": timedelta(days=1),
+        "weekly": timedelta(days=7),
+        "biweekly": timedelta(days=14),
+    }.get(rotation_type, timedelta(days=max(1, length_days)))
+
+
+def _handoff(day: date, hour: int, minute: int, tz: Any) -> datetime:
+    """The wall-clock handoff on `day`, as a real instant in `tz`.
+
+    Shift boundaries have to be computed this way at *both* ends. The previous
+    code localized the start and then did `shift_start + timedelta(days=7)` for
+    the end: pytz freezes the UTC offset at localize time, so that addition
+    keeps the pre-transition offset while the next shift's start is localized
+    fresh at the post-transition one. Across the November fall-back the shift
+    ended at 09:00-04:00 and the next began at 09:00-05:00, leaving an hour with
+    nobody paged; in March the sign flips and two engineers are both primary for
+    an hour. Deriving the end from the next rotation *date* makes end[n] and
+    start[n+1] the same expression, so they agree by construction.
+
+    `normalize()` handles the other trap: a handoff time can be one that does
+    not exist — 02:30 on a spring-forward Sunday — and pytz otherwise returns a
+    datetime for an instant that never occurred. Normalizing maps it to the
+    first real moment at or after it.
+    """
+    naive = datetime.combine(day, time(hour, minute))
+    return tz.normalize(tz.localize(naive, is_dst=False))
+
+
 class ScheduleService:
     """Manages on-call schedules, rotations, and shift generation."""
 
@@ -199,19 +244,16 @@ class ScheduleService:
             tz,
         )
 
-        while current_date <= end_date:
-            shift_start = tz.localize(
-                datetime.combine(rotation_start, time(handoff_hour, handoff_minute))
-            )
+        period = _rotation_period(rotation_type, length_days)
 
-            if rotation_type == "daily":
-                shift_end = shift_start + timedelta(days=1)
-            elif rotation_type == "weekly":
-                shift_end = shift_start + timedelta(days=7)
-            elif rotation_type == "biweekly":
-                shift_end = shift_start + timedelta(days=14)
-            else:
-                shift_end = shift_start + timedelta(days=length_days)
+        while current_date <= end_date:
+            next_rotation_start = rotation_start + period
+
+            # The end of a shift is the wall-clock handoff on the *next*
+            # rotation day, computed the same way that day's shift start will
+            # be. Anything else drifts at a DST transition — see _handoff().
+            shift_start = _handoff(rotation_start, handoff_hour, handoff_minute, tz)
+            shift_end = _handoff(next_rotation_start, handoff_hour, handoff_minute, tz)
 
             current_participant = participants[participant_index % participant_count]
             assigned_user_id = current_participant.user_id
@@ -240,15 +282,7 @@ class ScheduleService:
 
             participant_index += 1
 
-            if rotation_type == "daily":
-                rotation_start += timedelta(days=1)
-            elif rotation_type == "weekly":
-                rotation_start += timedelta(days=7)
-            elif rotation_type == "biweekly":
-                rotation_start += timedelta(days=14)
-            else:
-                rotation_start += timedelta(days=length_days)
-
+            rotation_start = next_rotation_start
             current_date = rotation_start
 
         await self.db.commit()
@@ -593,11 +627,16 @@ class ScheduleService:
         )
         overrides = list(override_result.scalars().all())
 
+        # _aware(): SQLite hands these columns back tz-naive while the window
+        # below is built tz-aware, and the very first comparison then raises
+        # TypeError — which is what made this endpoint a 500 on every call.
         coverage_periods: list[tuple[datetime, datetime]] = []
         for shift in shifts:
-            coverage_periods.append((shift.start_time, shift.end_time))
+            coverage_periods.append((_aware(shift.start_time), _aware(shift.end_time)))
         for override in overrides:
-            coverage_periods.append((override.start_time, override.end_time))
+            coverage_periods.append(
+                (_aware(override.start_time), _aware(override.end_time))
+            )
 
         coverage_periods.sort(key=lambda x: x[0])
 
@@ -608,27 +647,35 @@ class ScheduleService:
             else:
                 merged.append((start, end))
 
+        window_start = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+        window_end = datetime.combine(
+            end_date + timedelta(days=1), time.min, tzinfo=timezone.utc
+        )
+
+        def _gap(gap_start: datetime, gap_end: datetime) -> dict[str, Any]:
+            return {
+                "gap_start": gap_start,
+                "gap_end": gap_end,
+                "gap_hours": round((gap_end - gap_start).total_seconds() / 3600, 2),
+            }
+
+        # No shifts at all means the whole window is uncovered. The old code
+        # only emitted a trailing gap `if merged`, so a 24x7 schedule that had
+        # never had shifts generated reported perfect coverage — the one case
+        # where the answer matters most.
+        if not merged:
+            return [_gap(window_start, window_end)] if window_end > window_start else []
+
         gaps: list[dict[str, Any]] = []
-        expected_start = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+        expected_start = window_start
 
         for coverage_start, coverage_end in merged:
             if coverage_start > expected_start:
-                gap_hours = (coverage_start - expected_start).total_seconds() / 3600
-                gaps.append({
-                    "gap_start": expected_start,
-                    "gap_end": coverage_start,
-                    "gap_hours": round(gap_hours, 2),
-                })
-            expected_start = coverage_end
+                gaps.append(_gap(expected_start, min(coverage_start, window_end)))
+            expected_start = max(expected_start, coverage_end)
 
-        expected_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
-        if merged and merged[-1][1] < expected_end:
-            gap_hours = (expected_end - merged[-1][1]).total_seconds() / 3600
-            gaps.append({
-                "gap_start": merged[-1][1],
-                "gap_end": expected_end,
-                "gap_hours": round(gap_hours, 2),
-            })
+        if expected_start < window_end:
+            gaps.append(_gap(expected_start, window_end))
 
         return gaps
 
