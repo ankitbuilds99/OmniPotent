@@ -24,6 +24,7 @@ from app.database.models import Base
 # autogenerate only sees what has been imported. Without this the 17 oncall_*
 # tables were absent from every generated revision — and would have been
 # dropped by one, since autogenerate reads absence as "delete this table".
+import app.database.team_models  # noqa: E402,F401
 import app.oncall.models  # noqa: E402,F401
 import app.model_router.models  # noqa: E402,F401
 import app.notifications.models  # noqa: E402,F401

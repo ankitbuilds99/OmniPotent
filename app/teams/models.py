@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+def _now() -> datetime:
+    """UTC, timezone-aware.
+
+    These were `datetime.utcnow()`, which returns a *naive* datetime. Once teams
+    are stored in a `DateTime(timezone=True)` column the values read back are
+    aware, and comparing an aware `expires_at` against a naive "now" raises
+    TypeError rather than expiring the invitation. (`utcnow` is also deprecated
+    from 3.12.)
+    """
+    return datetime.now(timezone.utc)
 
 
 class TeamRole(str, Enum):
@@ -32,8 +44,8 @@ class Team(BaseModel):
     name: str
     slug: str
     owner_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -44,7 +56,7 @@ class TeamMember(BaseModel):
     user_id: str
     email: str
     role: TeamRole = TeamRole.MEMBER
-    joined_at: datetime = Field(default_factory=datetime.utcnow)
+    joined_at: datetime = Field(default_factory=_now)
     last_active: datetime | None = None
 
 
@@ -56,9 +68,9 @@ class TeamInvitation(BaseModel):
     role: TeamRole = TeamRole.MEMBER
     invited_by: str
     status: InvitationStatus = InvitationStatus.PENDING
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_now)
     expires_at: datetime = Field(
-        default_factory=lambda: datetime.utcnow() + timedelta(days=7)
+        default_factory=lambda: _now() + timedelta(days=7)
     )
     accepted_at: datetime | None = None
 

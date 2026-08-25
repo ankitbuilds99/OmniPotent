@@ -55,6 +55,9 @@ CORE_TABLES = {
     "status_incident_updates",
     "status_maintenances",
     "status_subscribers",
+    "teams",
+    "team_members",
+    "team_invitations",
 }
 ONCALL_TABLES = {
     "oncall_alerts",

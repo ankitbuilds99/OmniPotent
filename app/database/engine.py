@@ -185,6 +185,7 @@ async def init_db() -> None:
     # Importing the model modules is what registers their tables on the shared
     # metadata; create_all only creates what has been imported.
     from app.database.models import Base
+    import app.database.team_models  # noqa: F401
     import app.oncall.models  # noqa: F401
     import app.model_router.models  # noqa: F401
     import app.notifications.models  # noqa: F401
