@@ -13,13 +13,13 @@ import type { StreamEvent } from "../types";
 
 import { wsProtocols } from "../lib/authToken";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+import { wsUrl as apiWsUrl } from "../lib/apiClient";
 
-// Convert HTTP URL to WebSocket URL
+// Convert the shared API base to a WebSocket origin. This used to default to
+// "http://localhost:8000", so a production browser opened its socket against the
+// user's own machine; apiClient's wsUrl() falls back to the page origin instead.
 function getWsUrl(): string {
-  const url = new URL(BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString().replace(/\/$/, "");
+  return apiWsUrl("");
 }
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";

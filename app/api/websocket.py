@@ -59,6 +59,44 @@ def parse_message(raw: str) -> WsMessage | None:
         return None
 
 
+# The subprotocol the browser client offers on every connection
+# (frontend/src/lib/authToken.ts::wsProtocols).
+WS_SUBPROTOCOL = "copilot-v1"
+
+
+def negotiate_subprotocol(websocket: WebSocket) -> str | None:
+    """Pick the subprotocol to echo back in the handshake response.
+
+    RFC 6455 requires the server to answer a non-empty Sec-WebSocket-Protocol
+    offer with exactly one of the offered values. Browsers enforce this: Chrome
+    fails the connection with "Sent non-empty 'Sec-WebSocket-Protocol' header
+    but no response was received" when the server accepts without one. The SPA
+    always offers ["copilot-v1"] (plus "auth-<token>" when signed in), so
+    accepting with no subprotocol made every real WebSocket chat unusable even
+    though Starlette's TestClient — which does not enforce negotiation — was
+    happy.
+
+    The `auth-<token>` entry is a credential and is never echoed back; it would
+    then appear in response headers and proxy logs.
+    """
+    offered = [
+        p.strip()
+        for p in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if p.strip()
+    ]
+    if not offered:
+        return None
+    if WS_SUBPROTOCOL in offered:
+        return WS_SUBPROTOCOL
+    for proto in offered:
+        if not proto.startswith("auth-"):
+            return proto
+    # Only a credential was offered: there is nothing safe to echo, so the
+    # client will (correctly) fail the handshake.
+    log.warning("WebSocket client offered no usable subprotocol; handshake will fail")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Connection Manager
 # --------------------------------------------------------------------------- #
@@ -102,8 +140,12 @@ class ConnectionManager:
     async def connect(
         self, websocket: WebSocket, thread_id: str, session_id: str = ""
     ) -> ClientConnection:
-        """Accept a new WebSocket connection."""
-        await websocket.accept()
+        """Accept a new WebSocket connection.
+
+        The accept must answer the client's Sec-WebSocket-Protocol offer (see
+        `negotiate_subprotocol`), or every browser client fails the handshake.
+        """
+        await websocket.accept(subprotocol=negotiate_subprotocol(websocket))
         conn = ClientConnection(
             websocket=websocket,
             thread_id=thread_id,
