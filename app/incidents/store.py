@@ -22,18 +22,20 @@ from sqlalchemy.orm import selectinload
 
 from app.database.orgs import ensure_org_row, org_uuid
 from app.incidents.models import (
-    AgentFinding,
     AgentState,
-    AgentStatus,
     Incident,
     IncidentSeverity,
     IncidentStatus,
     Investigation,
     SafetyGate,
+    SafetyGateStatus,
     TimelineEntry,
 )
 
-AGENT_TYPES = ["knowledge", "reasoning", "action", "learning", "collaboration", "ambient"]
+# The confidence an investigation must reach before its recommendation is
+# considered strong enough to act on unattended. Recorded as a real, measured
+# safety gate when a run finishes.
+CONFIDENCE_THRESHOLD = 0.8
 
 
 def _now() -> datetime:
@@ -118,14 +120,20 @@ class IncidentStore:
     Stateless: every method opens its own session and filters on `org_uuid()`.
     """
 
-    async def _fetch(self, session: Any, incident_id: UUID) -> Any:
+    async def _fetch(self, session: Any, incident_id: UUID, org: UUID | None = None) -> Any:
+        """The incident row, scoped to `org` (default: the request's org).
+
+        The explicit `org` is for the background investigation path: that code
+        runs after the response, where the request-scoped tenant contextvar is
+        no longer guaranteed, so the caller passes the org it captured.
+        """
         from app.database.models import Incident as IncidentRow
 
         return (
             await session.execute(
                 select(IncidentRow)
                 .options(selectinload(IncidentRow.investigation))
-                .where(IncidentRow.id == incident_id, IncidentRow.org_id == org_uuid())
+                .where(IncidentRow.id == incident_id, IncidentRow.org_id == (org or org_uuid()))
             )
         ).scalar_one_or_none()
 
@@ -285,12 +293,14 @@ class IncidentStore:
             await session.commit()
             return _to_incident(row)
 
-    async def start_investigation(self, incident_id: UUID) -> Investigation | None:
+    async def start_investigation(
+        self, incident_id: UUID, org: UUID | None = None
+    ) -> Investigation | None:
         from app.database.engine import get_session
         from app.database.models import IncidentInvestigation
 
         async with get_session() as session:
-            row = await self._fetch(session, incident_id)
+            row = await self._fetch(session, incident_id, org)
             if not row:
                 return None
             if row.investigation:
@@ -303,15 +313,14 @@ class IncidentStore:
                 org_id=row.org_id,
                 incident_id=row.id,
                 started_at=_now(),
-                agents={
-                    agent: _dump(AgentState(agent_type=agent, status=AgentStatus.IDLE))
-                    for agent in AGENT_TYPES
-                },
-                safety_gates=[
-                    _dump(SafetyGate(gate_type="confidence", threshold=0.8)),
-                    _dump(SafetyGate(gate_type="policy")),
-                    _dump(SafetyGate(gate_type="sandbox")),
-                ],
+                # No agents and no gates until something real reports in. This
+                # used to be written with six `AgentState`s parked at `idle` and
+                # three `pending` safety gates, and nothing in the codebase ever
+                # moved any of them: the six "agents" did not exist, and the
+                # gates were never evaluated. The row now starts empty and is
+                # filled by `record_investigation_result()` from the agent run.
+                agents={},
+                safety_gates=[],
                 recommended_actions=[],
             )
             session.add(investigation)
@@ -320,7 +329,109 @@ class IncidentStore:
                 TimelineEntry(
                     timestamp=_now(),
                     type="investigation_started",
-                    message="6-agent parallel investigation initiated",
+                    message="Investigation queued — the agent run reports back here",
+                ),
+            )
+            await session.commit()
+            await session.refresh(investigation)
+            return _to_investigation(investigation)
+
+    async def record_investigation_result(
+        self,
+        incident_id: UUID,
+        *,
+        root_cause: str | None,
+        recommended_actions: list[str],
+        confidence: float,
+        org: UUID | None = None,
+    ) -> Investigation | None:
+        """Close an investigation out with what the agent run actually produced.
+
+        Nothing used to finish an investigation: `start_investigation()` wrote a
+        row and the row stayed exactly as written — `completed_at` null,
+        `root_cause` null, `overall_confidence` 0.0 — no matter how the run
+        ended, because no code path ever wrote a result back. The webhook
+        investigation path calls this when the run completes.
+        """
+        from app.database.engine import get_session
+
+        async with get_session() as session:
+            row = await self._fetch(session, incident_id, org)
+            if not row or not row.investigation:
+                return None
+
+            investigation = row.investigation
+            investigation.completed_at = _now()
+            investigation.root_cause = root_cause
+            investigation.recommended_actions = list(recommended_actions)
+            investigation.overall_confidence = confidence
+            # The one gate this codebase actually evaluates. The row used to be
+            # created with three `pending` gates — confidence, policy, sandbox —
+            # that nothing ever checked; the other two are gone rather than
+            # displayed forever as "pending". This one is measured: the run's own
+            # confidence against the threshold the UI draws.
+            investigation.safety_gates = [
+                _dump(
+                    SafetyGate(
+                        gate_type="confidence",
+                        status=(
+                            SafetyGateStatus.PASSED
+                            if confidence >= CONFIDENCE_THRESHOLD
+                            else SafetyGateStatus.FAILED
+                        ),
+                        threshold=CONFIDENCE_THRESHOLD,
+                        current_value=confidence,
+                        message=(
+                            f"Investigation confidence {confidence:.0%} "
+                            f"vs {CONFIDENCE_THRESHOLD:.0%} required for autonomous action"
+                        ),
+                        checked_at=_now(),
+                    )
+                )
+            ]
+
+            _append_timeline(
+                row,
+                TimelineEntry(
+                    timestamp=_now(),
+                    type="investigation_completed",
+                    message=(
+                        f"Investigation complete — root cause: {root_cause}"
+                        if root_cause
+                        else "Investigation complete — no root cause identified"
+                    )[:1000],
+                ),
+            )
+            if root_cause and row.status == IncidentStatus.TRIGGERED.value:
+                row.status = IncidentStatus.IDENTIFIED.value
+
+            await session.commit()
+            await session.refresh(investigation)
+            return _to_investigation(investigation)
+
+    async def record_investigation_failure(
+        self, incident_id: UUID, error: str, *, org: UUID | None = None
+    ) -> Investigation | None:
+        """Mark an investigation as finished without a verdict.
+
+        A run that dies — bad API key, provider outage, a paused approval nobody
+        answers — otherwise leaves a row that reads as still running forever.
+        """
+        from app.database.engine import get_session
+
+        async with get_session() as session:
+            row = await self._fetch(session, incident_id, org)
+            if not row or not row.investigation:
+                return None
+
+            investigation = row.investigation
+            investigation.completed_at = _now()
+            _append_timeline(
+                row,
+                TimelineEntry(
+                    timestamp=_now(),
+                    type="investigation_failed",
+                    message=f"Investigation did not complete: {error}"[:1000],
                 ),
             )
             await session.commit()
@@ -341,63 +452,6 @@ class IncidentStore:
                 )
             ).scalar_one_or_none()
             return _to_investigation(row) if row else None
-
-    async def update_agent_status(
-        self,
-        investigation_id: UUID,
-        agent_type: str,
-        status: AgentStatus,
-        progress: int | None = None,
-        current_action: str | None = None,
-        finding: AgentFinding | None = None,
-    ) -> Investigation | None:
-        from app.database.engine import get_session
-        from app.database.models import IncidentInvestigation
-
-        async with get_session() as session:
-            row = (
-                await session.execute(
-                    select(IncidentInvestigation).where(
-                        IncidentInvestigation.id == investigation_id,
-                        IncidentInvestigation.org_id == org_uuid(),
-                    )
-                )
-            ).scalar_one_or_none()
-            if not row or agent_type not in (row.agents or {}):
-                return None
-
-            agents = {
-                name: AgentState.model_validate(state)
-                for name, state in row.agents.items()
-            }
-            agent = agents[agent_type]
-            agent.status = status
-
-            if progress is not None:
-                agent.progress = progress
-            if current_action is not None:
-                agent.current_action = current_action
-            if finding:
-                agent.findings.append(finding)
-
-            if status == AgentStatus.RUNNING and not agent.started_at:
-                agent.started_at = _now()
-            if status == AgentStatus.COMPLETE:
-                agent.completed_at = _now()
-                agent.progress = 100
-
-            confidences = [
-                f.confidence
-                for a in agents.values()
-                if a.status == AgentStatus.COMPLETE
-                for f in a.findings
-            ]
-            if confidences:
-                row.overall_confidence = sum(confidences) / len(confidences)
-
-            row.agents = {name: _dump(state) for name, state in agents.items()}
-            await session.commit()
-            return _to_investigation(row)
 
 
 _STORE = IncidentStore()

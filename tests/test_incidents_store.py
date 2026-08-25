@@ -16,7 +16,7 @@ import pytest
 import app.config as cfg
 from app import tenant_context
 from app.database import engine as db_engine
-from app.incidents.models import AgentStatus, IncidentSeverity, IncidentStatus
+from app.incidents.models import IncidentSeverity, IncidentStatus, SafetyGateStatus
 from app.incidents.store import IncidentStore, get_incident_store
 
 
@@ -146,31 +146,83 @@ def test_update_records_a_status_change(db):
     assert [e.type for e in updated.timeline] == ["triggered", "status_change"]
 
 
-def test_investigation_is_persisted_and_agent_updates_stick(db):
+def test_investigation_is_persisted_and_the_result_sticks(db):
+    """An investigation starts empty and is filled by the run that finishes it.
+
+    This used to assert six `AgentState`s — knowledge, reasoning, action,
+    learning, collaboration, ambient — seeded at `idle` by `start_investigation`
+    and moved by `update_agent_status`. Nothing in `app/` ever called that
+    method; the six agents were written once, displayed, and never touched
+    again, so the test was the only thing that made them look alive. Both are
+    gone. What replaced them is the path the webhook actually drives:
+    `start_investigation` parks a row, and `record_investigation_result` writes
+    back what the agent run produced.
+    """
     created = _declare("acme", "checkout down")
 
     started = _as("acme", lambda: get_incident_store().start_investigation(created.id))
     assert started is not None
-    assert set(started.agents) == {
-        "knowledge", "reasoning", "action", "learning", "collaboration", "ambient"
-    }
+    # Nothing is claimed until the run reports in.
+    assert started.agents == {}
+    assert started.completed_at is None
+    assert started.root_cause is None
 
-    from app.incidents.models import AgentFinding
-
-    finding = AgentFinding(agent_type="knowledge", finding="pool exhausted", confidence=0.9)
-    updated = _as(
+    finished = _as(
         "acme",
-        lambda: get_incident_store().update_agent_status(
-            started.id, "knowledge", AgentStatus.COMPLETE, finding=finding
+        lambda: get_incident_store().record_investigation_result(
+            created.id,
+            root_cause="connection pool exhausted",
+            recommended_actions=["raise pool size to 40"],
+            confidence=0.9,
         ),
     )
-    assert updated.agents["knowledge"].progress == 100
-    assert updated.overall_confidence == pytest.approx(0.9)
+    assert finished.root_cause == "connection pool exhausted"
+    assert finished.overall_confidence == pytest.approx(0.9)
+    assert finished.completed_at is not None
+
+    # The confidence gate is measured, not parked at "pending".
+    gate = next(g for g in finished.safety_gates if g.gate_type == "confidence")
+    assert gate.status == SafetyGateStatus.PASSED
+    assert gate.current_value == pytest.approx(0.9)
 
     # And it is on the incident, from a fresh store.
     reloaded = _as("acme", lambda: IncidentStore().get_incident(created.id))
     assert reloaded.investigation is not None
-    assert reloaded.investigation.agents["knowledge"].findings[0].finding == "pool exhausted"
+    assert reloaded.investigation.root_cause == "connection pool exhausted"
+    assert reloaded.investigation.recommended_actions == ["raise pool size to 40"]
+    # A root cause moves the incident off "triggered".
+    assert reloaded.status == IncidentStatus.IDENTIFIED
+
+
+def test_a_low_confidence_run_fails_the_gate(db):
+    """The gate has to be able to say no, or it is decoration again."""
+    created = _declare("acme", "checkout down")
+    _as("acme", lambda: get_incident_store().start_investigation(created.id))
+
+    finished = _as(
+        "acme",
+        lambda: get_incident_store().record_investigation_result(
+            created.id, root_cause=None, recommended_actions=[], confidence=0.2
+        ),
+    )
+    gate = next(g for g in finished.safety_gates if g.gate_type == "confidence")
+    assert gate.status == SafetyGateStatus.FAILED
+    # No root cause means the incident stays where it was.
+    reloaded = _as("acme", lambda: IncidentStore().get_incident(created.id))
+    assert reloaded.status == IncidentStatus.TRIGGERED
+
+
+def test_a_failed_run_is_not_left_looking_like_it_is_still_going(db):
+    created = _declare("acme", "checkout down")
+    _as("acme", lambda: get_incident_store().start_investigation(created.id))
+
+    failed = _as(
+        "acme",
+        lambda: get_incident_store().record_investigation_failure(created.id, "no API key"),
+    )
+    assert failed.completed_at is not None
+    reloaded = _as("acme", lambda: IncidentStore().get_incident(created.id))
+    assert any(e.type == "investigation_failed" for e in reloaded.timeline)
 
 
 def test_repeated_investigate_returns_the_running_one(db):
@@ -192,12 +244,24 @@ def test_investigation_is_not_readable_by_another_tenant(db):
     assert (
         _as(
             "umbrella",
-            lambda: get_incident_store().update_agent_status(
-                started.id, "knowledge", AgentStatus.COMPLETE
+            lambda: get_incident_store().record_investigation_result(
+                created.id, root_cause="mine now", recommended_actions=[], confidence=1.0
             ),
         )
         is None
     )
+    assert (
+        _as(
+            "umbrella",
+            lambda: get_incident_store().record_investigation_failure(created.id, "sabotage"),
+        )
+        is None
+    )
+
+    # Neither write landed.
+    mine = _as("acme", lambda: IncidentStore().get_investigation(started.id))
+    assert mine.root_cause is None
+    assert mine.completed_at is None
 
 
 def test_timestamps_come_back_as_utc_aware(db):
