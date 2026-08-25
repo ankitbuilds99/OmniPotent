@@ -7,6 +7,9 @@ call the product actually makes was billed at exactly $0.00.
 
 from __future__ import annotations
 
+import pytest
+
+from app import llm
 from app.model_router.complexity_analyzer import ComplexityAnalyzer, ComplexityLevel
 from app.model_router.cost_optimizer import CostOptimizer, ModelCost
 
@@ -66,6 +69,48 @@ class TestSeverityRouting:
 
 
 class TestPricing:
+    def test_every_model_the_llm_factory_can_pick_has_its_own_price(self):
+        """The table is only useful if it covers what `app/llm.py` resolves to.
+
+        COPILOT_MODEL / COPILOT_FAST_MODEL default to "", so `_DEFAULTS` is what
+        real traffic runs on — and none of those ids were priced. Each one fell
+        through to the most-expensive-known fallback, which billed the cheap
+        fast model (plan/reflect/report/verify) at ~15x its real rate. This is
+        the drift guard: adding a provider default without a price fails here.
+        """
+        optimizer = CostOptimizer()
+
+        for provider, models in llm._DEFAULTS.items():
+            for which, model_id in models.items():
+                assert optimizer.get_model_cost(model_id) is not None, (
+                    f"{provider}/{which} = {model_id} has no price"
+                )
+
+    def test_the_fast_model_is_cheaper_than_the_main_one(self):
+        """A fallback price makes every unpriced model cost the same, which is
+        how 'fast' ended up billing more than Opus. Ordering must be real."""
+        optimizer = CostOptimizer()
+
+        for provider, models in llm._DEFAULTS.items():
+            main = optimizer.get_model_cost(models["main"])
+            fast = optimizer.get_model_cost(models["fast"])
+            assert main is not None and fast is not None, provider
+            if models["main"] == models["fast"]:
+                continue  # deepseek uses one model for both
+            assert fast.avg_cost_per_1k < main.avg_cost_per_1k, provider
+
+    def test_the_default_anthropic_models_are_priced_at_their_list_rate(self):
+        """100k in / 20k out, the shape of one investigation turn."""
+        optimizer = CostOptimizer()
+
+        opus = optimizer.estimate_cost("claude-opus-4-8", 100_000, 20_000)
+        haiku = optimizer.estimate_cost("claude-haiku-4-5", 100_000, 20_000)
+
+        # $5/$25 per MTok and $1/$5 per MTok respectively — not $3.00 apiece,
+        # which is what the Opus-3 fallback rate charged for both.
+        assert opus.estimated_cost == pytest.approx(1.0)
+        assert haiku.estimated_cost == pytest.approx(0.2)
+
     def test_the_models_the_product_actually_calls_have_a_price(self):
         """The table shipped with only `-latest` aliases.
 

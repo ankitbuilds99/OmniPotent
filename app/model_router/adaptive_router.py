@@ -40,6 +40,23 @@ class ModelTier(str, Enum):
     PREMIUM = "premium"      # Best quality, highest latency/cost
 
 
+# Tiers from weakest to strongest. ModelTier is a str Enum, so comparing two
+# tiers directly compares their *names* alphabetically ("quality" > "premium",
+# "balanced" < "fast"), which silently inverted the SLA quality floor. Every
+# ordering question about tiers goes through TIER_ORDER / tier_rank.
+TIER_ORDER: list["ModelTier"] = [
+    ModelTier.FAST,
+    ModelTier.BALANCED,
+    ModelTier.QUALITY,
+    ModelTier.PREMIUM,
+]
+
+
+def tier_rank(tier: "ModelTier") -> int:
+    """Position of `tier` in the weakest-to-strongest order."""
+    return TIER_ORDER.index(tier)
+
+
 class CustomerTier(str, Enum):
     """Customer subscription tiers."""
     FREE = "free"
@@ -209,8 +226,10 @@ class AdaptiveModelRouter:
             complexity.level, ModelTier.BALANCED
         )
 
-        # Step 3: Adjust for SLA requirements
-        if sla.min_quality.value > target_tier.value:
+        # Step 3: Adjust for SLA requirements — min_quality is a floor, so it may
+        # only ever raise the tier chosen from complexity, never lower it.
+        floor_applied = tier_rank(sla.min_quality) > tier_rank(target_tier)
+        if floor_applied:
             target_tier = sla.min_quality
 
         # Step 4: Filter by customer tier
@@ -219,11 +238,9 @@ class AdaptiveModelRouter:
         )
 
         # Cap at highest allowed tier
-        tier_order = [ModelTier.FAST, ModelTier.BALANCED, ModelTier.QUALITY, ModelTier.PREMIUM]
-        highest_allowed_idx = max(tier_order.index(t) for t in allowed_tiers)
-        target_idx = tier_order.index(target_tier)
-        if target_idx > highest_allowed_idx:
-            target_tier = tier_order[highest_allowed_idx]
+        highest_allowed_idx = max(tier_rank(t) for t in allowed_tiers)
+        if tier_rank(target_tier) > highest_allowed_idx:
+            target_tier = TIER_ORDER[highest_allowed_idx]
 
         # Step 5: Find candidate models
         candidates = self._get_candidate_models(
@@ -269,6 +286,8 @@ class AdaptiveModelRouter:
             "complexity_score": complexity.overall_score,
             "latency_requirement": sla.max_latency_ms,
             "candidates_considered": len(candidates),
+            "min_quality": sla.min_quality.value,
+            "min_quality_floor_applied": floor_applied,
         }
 
         # Get fallback models
@@ -280,6 +299,7 @@ class AdaptiveModelRouter:
             complexity=complexity,
             customer_tier=customer_tier,
             sla=sla,
+            floor_applied=floor_applied,
         )
 
         # Record routing decision
@@ -313,8 +333,7 @@ class AdaptiveModelRouter:
         """Get candidate models matching requirements."""
         candidates = []
 
-        tier_order = [ModelTier.FAST, ModelTier.BALANCED, ModelTier.QUALITY, ModelTier.PREMIUM]
-        target_idx = tier_order.index(target_tier)
+        target_idx = tier_rank(target_tier)
 
         for model_id, config in self.MODEL_CONFIGS.items():
             # Check availability
@@ -322,7 +341,7 @@ class AdaptiveModelRouter:
                 continue
 
             # Check tier (allow target or higher quality)
-            model_tier_idx = tier_order.index(config["tier"])
+            model_tier_idx = tier_rank(config["tier"])
             if model_tier_idx < target_idx:
                 continue
 
@@ -402,6 +421,7 @@ class AdaptiveModelRouter:
         complexity: ComplexityScore,
         customer_tier: CustomerTier,
         sla: SLARequirements,
+        floor_applied: bool = False,
     ) -> str:
         """Build human-readable routing reason."""
         config = self.MODEL_CONFIGS[model]
@@ -418,6 +438,11 @@ class AdaptiveModelRouter:
             parts.append("Simple query optimized for speed")
         else:
             parts.append("Trivial query using fastest model")
+
+        # Quality floor: say so, otherwise the reason claims "fastest model"
+        # while the SLA has just forced a more expensive one.
+        if floor_applied:
+            parts.append(f"raised to the {sla.min_quality.value} tier by the min_quality SLA")
 
         # Customer tier constraint
         if customer_tier == CustomerTier.FREE:

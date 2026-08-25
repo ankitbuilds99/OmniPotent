@@ -50,6 +50,44 @@ class CostEstimate:
         }
 
 
+def evaluate_budget(
+    *,
+    daily_spent: float,
+    monthly_spent: float,
+    daily_limit: float | None,
+    monthly_limit: float | None,
+    additional_cost: float = 0.0,
+) -> dict[str, Any]:
+    """Would `additional_cost` more dollars fit under the caps that are set?
+
+    Pure arithmetic, no storage: the same decision has to be made against the
+    in-process history (`CostOptimizer.check_budget`) and against the persisted
+    ledger (`app.model_router.usage_store.check_budget`), and two copies of a
+    money rule is one copy too many.
+
+    A limit of None is "no cap", which reports a null remaining rather than a
+    made-up one. A cap of 0 is a real cap: `if limit` would have read it as
+    unset and let the spend through.
+    """
+    daily_remaining = None if daily_limit is None else daily_limit - daily_spent
+    monthly_remaining = None if monthly_limit is None else monthly_limit - monthly_spent
+
+    reasons: list[str] = []
+    if daily_remaining is not None and daily_remaining < additional_cost:
+        reasons.append(f"Daily budget exceeded (${daily_remaining:.4f} remaining)")
+    if monthly_remaining is not None and monthly_remaining < additional_cost:
+        reasons.append(f"Monthly budget exceeded (${monthly_remaining:.4f} remaining)")
+
+    return {
+        "can_proceed": not reasons,
+        "reasons": reasons,
+        "daily_spent": daily_spent,
+        "daily_remaining": daily_remaining,
+        "monthly_spent": monthly_spent,
+        "monthly_remaining": monthly_remaining,
+    }
+
+
 @dataclass
 class UsageRecord:
     """Record of model usage."""
@@ -152,6 +190,53 @@ class CostOptimizer:
             input_cost_per_1k=0.00025,
             output_cost_per_1k=0.00125,
             cached_input_cost_per_1k=0.00003,
+        ),
+        # --- the ids `app.llm._DEFAULTS` actually resolves to ----------------
+        # COPILOT_MODEL/COPILOT_FAST_MODEL default to "", so *these* are what
+        # every real request runs on. None of them were in the table, so all
+        # of them fell through to `_cost_for`'s most-expensive-known fallback:
+        # the cheap fast model (plan/reflect/report/verify) was billed at the
+        # Opus-3 rate, ~15x its real price. Prices are per 1k tokens, from each
+        # provider's published list price.
+        "claude-opus-4-8": ModelCost(          # $5 / $25 per MTok
+            model_id="claude-opus-4-8",
+            input_cost_per_1k=0.005,
+            output_cost_per_1k=0.025,
+            cached_input_cost_per_1k=0.0005,   # cache read = 0.1x input
+        ),
+        "claude-haiku-4-5": ModelCost(         # $1 / $5 per MTok
+            model_id="claude-haiku-4-5",
+            input_cost_per_1k=0.001,
+            output_cost_per_1k=0.005,
+            cached_input_cost_per_1k=0.0001,
+        ),
+        "gemini-1.5-pro": ModelCost(           # $1.25 / $5 per MTok
+            model_id="gemini-1.5-pro",
+            input_cost_per_1k=0.00125,
+            output_cost_per_1k=0.005,
+            cached_input_cost_per_1k=0.0003125,
+        ),
+        "gemini-1.5-flash": ModelCost(         # $0.075 / $0.30 per MTok
+            model_id="gemini-1.5-flash",
+            input_cost_per_1k=0.000075,
+            output_cost_per_1k=0.0003,
+            cached_input_cost_per_1k=0.00001875,
+        ),
+        "llama-3.3-70b-versatile": ModelCost(  # Groq: $0.59 / $0.79 per MTok
+            model_id="llama-3.3-70b-versatile",
+            input_cost_per_1k=0.00059,
+            output_cost_per_1k=0.00079,
+        ),
+        "llama-3.1-8b-instant": ModelCost(     # Groq: $0.05 / $0.08 per MTok
+            model_id="llama-3.1-8b-instant",
+            input_cost_per_1k=0.00005,
+            output_cost_per_1k=0.00008,
+        ),
+        "deepseek-chat": ModelCost(            # $0.27 / $1.10 per MTok
+            model_id="deepseek-chat",
+            input_cost_per_1k=0.00027,
+            output_cost_per_1k=0.0011,
+            cached_input_cost_per_1k=0.00007,
         ),
     }
 
@@ -265,6 +350,19 @@ class CostOptimizer:
             with_batching=with_batching,
         )
 
+    def price(self, model_id: str, input_tokens: int, output_tokens: int) -> float:
+        """What a call that has already happened cost, in dollars.
+
+        Public because the ledger writers (`usage_ledger`, the API's
+        record-usage endpoint) need the price without also filing the call in
+        this object's in-process history.
+        """
+        cost_info = self._cost_for(model_id)
+        return (
+            (input_tokens / 1000) * cost_info.input_cost_per_1k
+            + (output_tokens / 1000) * cost_info.output_cost_per_1k
+        )
+
     def record_usage(
         self,
         model_id: str,
@@ -274,11 +372,7 @@ class CostOptimizer:
         request_type: str = "inference",
     ) -> UsageRecord:
         """Record model usage."""
-        cost_info = self._cost_for(model_id)
-        cost = (
-            (input_tokens / 1000) * cost_info.input_cost_per_1k
-            + (output_tokens / 1000) * cost_info.output_cost_per_1k
-        )
+        cost = self.price(model_id, input_tokens, output_tokens)
 
         record = UsageRecord(
             model_id=model_id,
@@ -331,24 +425,15 @@ class CostOptimizer:
         daily = self.get_daily_usage(customer_id)
         monthly = self.get_monthly_usage(customer_id)
 
-        daily_remaining = None
-        monthly_remaining = None
-        can_proceed = True
-        reasons: list[str] = []
-
-        # Check daily limit
-        if self.budget_limit_daily:
-            daily_remaining = self.budget_limit_daily - daily["total_cost"]
-            if daily_remaining < additional_cost:
-                can_proceed = False
-                reasons.append(f"Daily budget exceeded (${daily_remaining:.4f} remaining)")
-
-        # Check monthly limit
-        if self.budget_limit_monthly:
-            monthly_remaining = self.budget_limit_monthly - monthly["total_cost"]
-            if monthly_remaining < additional_cost:
-                can_proceed = False
-                reasons.append(f"Monthly budget exceeded (${monthly_remaining:.4f} remaining)")
+        verdict = evaluate_budget(
+            daily_spent=daily["total_cost"],
+            monthly_spent=monthly["total_cost"],
+            daily_limit=self.budget_limit_daily,
+            monthly_limit=self.budget_limit_monthly,
+            additional_cost=additional_cost,
+        )
+        can_proceed = verdict["can_proceed"]
+        reasons = list(verdict["reasons"])
 
         # Check customer-specific budget
         if customer_id and customer_id in self._customer_budgets:
@@ -362,12 +447,9 @@ class CostOptimizer:
             customer_remaining = None
 
         return {
+            **verdict,
             "can_proceed": can_proceed,
             "reasons": reasons,
-            "daily_spent": daily["total_cost"],
-            "daily_remaining": daily_remaining,
-            "monthly_spent": monthly["total_cost"],
-            "monthly_remaining": monthly_remaining,
             "customer_remaining": customer_remaining,
         }
 
