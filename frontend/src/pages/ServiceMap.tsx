@@ -1,5 +1,19 @@
 /**
- * Service Map - Live dependency graph visualization with real metrics from Prometheus
+ * Service Map — the dependency graph the backend actually knows about, plus the
+ * per-service metrics a configured Prometheus actually reported.
+ *
+ * This page used to ask for `GET /api/kubernetes/services` (a route that has
+ * never existed — it 404s), query Prometheus straight from the browser at
+ * localhost:9090 (unreachable, and CORS-blocked, from any real deployment), and
+ * then, when both failed, *invent* the map: an error rate accumulated from
+ * incident severities, a hardcoded requests_per_sec/latency of 0, a star
+ * topology from whichever node was named "gateway", and an edge from every
+ * service to every database.
+ *
+ * Now: nodes and edges come from `GET /api/knowledge-graph/topology`, metrics
+ * come from `GET /api/knowledge-graph/service-metrics` (which proxies the
+ * operator-configured Prometheus server-side and 503s by name when there isn't
+ * one), and anything we have no reading for renders as "—" rather than 0.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -15,30 +29,38 @@ import {
   Cloud,
   Zap,
   Loader2,
+  AlertTriangle,
   RefreshCw
 } from "lucide-react";
 
 import { apiFetch } from "../lib/apiClient";
 
+type NodeStatus = "healthy" | "degraded" | "unhealthy" | "unknown";
+
+/** A metric we have no reading for is `null`, never 0 — 0 claims "measured, and
+ *  it was zero", which is what made the old fallback map look like a healthy
+ *  fleet serving no traffic. */
+interface ServiceMetrics {
+  requests_per_sec: number | null;
+  error_rate: number | null;
+  latency_p99: number | null;
+}
+
 interface ServiceNode {
   id: string;
   name: string;
   type: "service" | "database" | "cache" | "queue" | "external";
-  status: "healthy" | "degraded" | "unhealthy";
-  metrics: {
-    requests_per_sec: number;
-    error_rate: number;
-    latency_p99: number;
-  };
+  status: NodeStatus;
+  metrics: ServiceMetrics;
   x: number;
   y: number;
 }
 
+/** An edge is a recorded DEPENDS_ON/CALLS relationship. It carries no traffic
+ *  numbers because the graph does not record per-edge traffic. */
 interface ServiceEdge {
   from: string;
   to: string;
-  requests_per_sec: number;
-  error_rate: number;
 }
 
 interface ServiceMapData {
@@ -46,9 +68,26 @@ interface ServiceMapData {
   edges: ServiceEdge[];
 }
 
-interface PrometheusResult {
-  metric: Record<string, string>;
-  value: [number, string];
+interface TopologyNode {
+  id?: string;
+  name?: string;
+  health_status?: string;
+}
+
+interface TopologyResponse {
+  nodes?: TopologyNode[];
+  edges?: { source?: string; target?: string }[];
+}
+
+interface MetricsResponse {
+  source?: string;
+  url?: string;
+  services?: Record<string, Partial<Record<keyof ServiceMetrics, number>>>;
+}
+
+/** "—" for anything we did not measure. */
+function fmt(value: number | null, digits: number, suffix = ""): string {
+  return value === null ? "—" : `${value.toFixed(digits)}${suffix}`;
 }
 
 function getNodeIcon(type: ServiceNode["type"]) {
@@ -61,6 +100,109 @@ function getNodeIcon(type: ServiceNode["type"]) {
   }
 }
 
+const STATUS_COLORS: Record<NodeStatus, string> = {
+  healthy: "var(--ok)",
+  degraded: "#eab308",
+  unhealthy: "var(--bad)",
+  unknown: "var(--text-2)",
+};
+
+function classifyType(serviceName: string): ServiceNode["type"] {
+  const n = serviceName.toLowerCase();
+  if (n.includes("db") || n.includes("postgres") || n.includes("mysql") || n.includes("mongo")) {
+    return "database";
+  }
+  if (n.includes("redis") || n.includes("cache") || n.includes("memcached")) return "cache";
+  if (n.includes("queue") || n.includes("rabbit") || n.includes("kafka") || n.includes("sqs")) {
+    return "queue";
+  }
+  if (n.includes("external") || n.includes("stripe") || n.includes("aws") || n.includes("s3")) {
+    return "external";
+  }
+  return "service";
+}
+
+/** Health from measurements when we have them, otherwise whatever the graph
+ *  recorded, otherwise "unknown". Never inferred from incident counts. */
+export function classifyStatus(metrics: ServiceMetrics, recorded: string | undefined): NodeStatus {
+  const { error_rate, latency_p99 } = metrics;
+  if (error_rate !== null || latency_p99 !== null) {
+    if ((error_rate ?? 0) > 5 || (latency_p99 ?? 0) > 2000) return "unhealthy";
+    if ((error_rate ?? 0) > 1 || (latency_p99 ?? 0) > 500) return "degraded";
+    return "healthy";
+  }
+  const status = (recorded || "").toLowerCase();
+  if (status === "healthy" || status === "degraded" || status === "unhealthy") return status;
+  return "unknown";
+}
+
+const ROW_HEIGHT = 150;
+const COL_WIDTH = 220;
+const PER_ROW = 5;
+
+/**
+ * Deterministic layered layout driven by the real edges: services nothing
+ * depends on sit at the top, their dependencies below them, and so on. The old
+ * code indexed into a fixed 8-position literal with `idx % positions.length`,
+ * so a 9th service was drawn exactly on top of the 1st.
+ */
+export function layout(
+  ids: string[],
+  edges: ServiceEdge[],
+): Map<string, { x: number; y: number }> {
+  const known = new Set(ids);
+  const outgoing = new Map<string, string[]>();
+  const indegree = new Map<string, number>(ids.map(id => [id, 0]));
+  for (const edge of edges) {
+    if (!known.has(edge.from) || !known.has(edge.to)) continue;
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+  }
+
+  const depth = new Map<string, number>();
+  const roots = ids.filter(id => (indegree.get(id) ?? 0) === 0);
+  let frontier = roots.length > 0 ? roots : ids.slice(0, 1);
+  let level = 0;
+  while (frontier.length > 0 && level <= ids.length) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      if (depth.has(id)) continue;
+      depth.set(id, level);
+      for (const target of outgoing.get(id) ?? []) {
+        if (!depth.has(target)) next.push(target);
+      }
+    }
+    frontier = next;
+    level += 1;
+  }
+  // Anything inside a cycle the BFS never entered gets its own bottom row.
+  const orphanLevel = level;
+  for (const id of ids) if (!depth.has(id)) depth.set(id, orphanLevel);
+
+  const byLevel = new Map<number, string[]>();
+  for (const id of ids) {
+    const d = depth.get(id) ?? 0;
+    byLevel.set(d, [...(byLevel.get(d) ?? []), id]);
+  }
+
+  const positions = new Map<string, { x: number; y: number }>();
+  let rowCursor = 0;
+  for (const d of [...byLevel.keys()].sort((a, b) => a - b)) {
+    const members = byLevel.get(d) ?? [];
+    members.forEach((id, i) => {
+      const col = i % PER_ROW;
+      const row = Math.floor(i / PER_ROW);
+      const wide = Math.min(members.length - row * PER_ROW, PER_ROW);
+      positions.set(id, {
+        x: 480 - ((wide - 1) * COL_WIDTH) / 2 + col * COL_WIDTH,
+        y: 110 + (rowCursor + row) * ROW_HEIGHT,
+      });
+    });
+    rowCursor += Math.ceil(members.length / PER_ROW);
+  }
+  return positions;
+}
+
 function ServiceNodeCard({
   node,
   selected,
@@ -70,12 +212,7 @@ function ServiceNodeCard({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const statusColors = {
-    healthy: { border: "var(--ok)", bg: "rgba(45, 212, 167, 0.1)" },
-    degraded: { border: "#eab308", bg: "rgba(234, 179, 8, 0.1)" },
-    unhealthy: { border: "var(--bad)", bg: "rgba(255, 107, 107, 0.1)" },
-  };
-  const colors = statusColors[node.status];
+  const border = STATUS_COLORS[node.status];
   const Icon = getNodeIcon(node.type);
 
   return (
@@ -95,12 +232,12 @@ function ServiceNodeCard({
         className="rounded-lg p-3 shadow-lg"
         style={{
           backgroundColor: "var(--surface)",
-          border: `2px solid ${colors.border}`,
-          boxShadow: selected ? `0 0 20px ${colors.border}40` : undefined,
+          border: `2px solid ${border}`,
+          boxShadow: selected ? `0 0 20px ${border}40` : undefined,
         }}
       >
         <div className="flex items-center gap-2 mb-2">
-          <Icon size={16} style={{ color: colors.border }} />
+          <Icon size={16} style={{ color: border }} />
           <span className="font-medium text-sm whitespace-nowrap" style={{ color: "var(--text)" }}>
             {node.name}
           </span>
@@ -109,25 +246,25 @@ function ServiceNodeCard({
           <div className="text-center">
             <div style={{ color: "var(--text-2)" }}>RPS</div>
             <div className="font-mono" style={{ color: "var(--text)" }}>
-              {node.metrics.requests_per_sec.toFixed(1)}
+              {fmt(node.metrics.requests_per_sec, 1)}
             </div>
           </div>
           <div className="text-center">
             <div style={{ color: "var(--text-2)" }}>Err%</div>
             <div
               className="font-mono"
-              style={{ color: node.metrics.error_rate > 1 ? "var(--bad)" : "var(--text)" }}
+              style={{ color: (node.metrics.error_rate ?? 0) > 1 ? "var(--bad)" : "var(--text)" }}
             >
-              {node.metrics.error_rate.toFixed(2)}
+              {fmt(node.metrics.error_rate, 2)}
             </div>
           </div>
           <div className="text-center">
             <div style={{ color: "var(--text-2)" }}>P99</div>
             <div
               className="font-mono"
-              style={{ color: node.metrics.latency_p99 > 500 ? "var(--bad)" : "var(--text)" }}
+              style={{ color: (node.metrics.latency_p99 ?? 0) > 500 ? "var(--bad)" : "var(--text)" }}
             >
-              {node.metrics.latency_p99.toFixed(0)}ms
+              {fmt(node.metrics.latency_p99, 0, "ms")}
             </div>
           </div>
         </div>
@@ -139,21 +276,21 @@ function ServiceNodeCard({
 function ServiceDetailPanel({
   node,
   edges,
+  metricsNote,
   onClose,
 }: {
   node: ServiceNode;
   edges: ServiceEdge[];
+  metricsNote: string | null;
   onClose: () => void;
 }) {
   const inbound = edges.filter(e => e.to === node.id);
   const outbound = edges.filter(e => e.from === node.id);
   const Icon = getNodeIcon(node.type);
-
-  const statusColors = {
-    healthy: "var(--ok)",
-    degraded: "#eab308",
-    unhealthy: "var(--bad)",
-  };
+  const hasMetrics =
+    node.metrics.requests_per_sec !== null ||
+    node.metrics.error_rate !== null ||
+    node.metrics.latency_p99 !== null;
 
   return (
     <motion.div
@@ -175,19 +312,20 @@ function ServiceDetailPanel({
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Icon size={20} style={{ color: statusColors[node.status] }} />
+            <Icon size={20} style={{ color: STATUS_COLORS[node.status] }} />
             <h3 className="font-semibold" style={{ color: "var(--text)" }}>{node.name}</h3>
           </div>
-          <button onClick={onClose} style={{ color: "var(--text-2)" }}>
+          <button onClick={onClose} aria-label="Close details" style={{ color: "var(--text-2)" }}>
             <X size={20} />
           </button>
         </div>
         <div className="mt-2">
           <span
             className="px-2 py-0.5 text-xs font-medium rounded-full"
+            data-testid="service-status"
             style={{
-              backgroundColor: `${statusColors[node.status]}20`,
-              color: statusColors[node.status],
+              backgroundColor: `${STATUS_COLORS[node.status]}20`,
+              color: STATUS_COLORS[node.status],
             }}
           >
             {node.status}
@@ -196,107 +334,81 @@ function ServiceDetailPanel({
       </div>
 
       <div className="p-4 space-y-6">
-        {/* Metrics */}
         <div>
           <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-2)" }}>
             Current Metrics
           </h4>
+          {!hasMetrics && (
+            <p className="text-xs mb-3" style={{ color: "var(--text-2)" }}>
+              {metricsNote ?? "Prometheus reported no series for this service."}
+            </p>
+          )}
           <div className="space-y-3">
             <div className="flex justify-between items-center" style={{ color: "var(--text)" }}>
               <span>Requests/sec</span>
-              <span className="font-mono">{node.metrics.requests_per_sec.toFixed(2)}</span>
+              <span className="font-mono">{fmt(node.metrics.requests_per_sec, 2)}</span>
             </div>
             <div className="flex justify-between items-center">
               <span style={{ color: "var(--text)" }}>Error Rate</span>
               <span
                 className="font-mono"
-                style={{ color: node.metrics.error_rate > 1 ? "var(--bad)" : "var(--text)" }}
+                style={{ color: (node.metrics.error_rate ?? 0) > 1 ? "var(--bad)" : "var(--text)" }}
               >
-                {node.metrics.error_rate.toFixed(2)}%
+                {fmt(node.metrics.error_rate, 2, "%")}
               </span>
             </div>
             <div className="flex justify-between items-center">
               <span style={{ color: "var(--text)" }}>Latency P99</span>
               <span
                 className="font-mono"
-                style={{ color: node.metrics.latency_p99 > 500 ? "var(--bad)" : "var(--text)" }}
+                style={{ color: (node.metrics.latency_p99 ?? 0) > 500 ? "var(--bad)" : "var(--text)" }}
               >
-                {node.metrics.latency_p99.toFixed(0)}ms
+                {fmt(node.metrics.latency_p99, 0, "ms")}
               </span>
             </div>
           </div>
         </div>
 
-        {/* Inbound */}
-        {inbound.length > 0 && (
-          <div>
-            <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-2)" }}>
-              Inbound ({inbound.length})
-            </h4>
-            <div className="space-y-2">
-              {inbound.map((edge, i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between text-sm p-2 rounded"
-                  style={{ backgroundColor: "var(--bg)" }}
-                >
-                  <span style={{ color: "var(--text)" }}>from {edge.from}</span>
-                  <span className="font-mono text-xs" style={{ color: "var(--text-2)" }}>
-                    {edge.requests_per_sec.toFixed(1)} rps
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Outbound */}
-        {outbound.length > 0 && (
-          <div>
-            <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-2)" }}>
-              Outbound ({outbound.length})
-            </h4>
-            <div className="space-y-2">
-              {outbound.map((edge, i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between text-sm p-2 rounded"
-                  style={{ backgroundColor: "var(--bg)" }}
-                >
-                  <span style={{ color: "var(--text)" }}>to {edge.to}</span>
-                  <span className="font-mono text-xs" style={{ color: "var(--text-2)" }}>
-                    {edge.requests_per_sec.toFixed(1)} rps
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Actions */}
         <div>
           <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-2)" }}>
-            Quick Actions
+            Depended on by ({inbound.length})
           </h4>
-          <div className="space-y-2">
-            {["View Traces", "View Metrics", "View Logs"].map((action) => (
-              <button
-                key={action}
-                className="w-full px-3 py-2 text-left text-sm rounded transition-colors"
-                style={{ border: "1px solid var(--border)", color: "var(--text)" }}
-              >
-                {action}
-              </button>
-            ))}
-            {node.status !== "healthy" && (
-              <button
-                className="w-full px-3 py-2 text-left text-sm rounded font-medium"
-                style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
-              >
-                Investigate with AI
-              </button>
-            )}
-          </div>
+          {inbound.length === 0 ? (
+            <p className="text-xs" style={{ color: "var(--text-2)" }}>No recorded dependents.</p>
+          ) : (
+            <div className="space-y-2">
+              {inbound.map((edge) => (
+                <div
+                  key={`in-${edge.from}`}
+                  className="text-sm p-2 rounded"
+                  style={{ backgroundColor: "var(--bg)", color: "var(--text)" }}
+                >
+                  {edge.from}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-2)" }}>
+            Depends on ({outbound.length})
+          </h4>
+          {outbound.length === 0 ? (
+            <p className="text-xs" style={{ color: "var(--text-2)" }}>No recorded dependencies.</p>
+          ) : (
+            <div className="space-y-2">
+              {outbound.map((edge) => (
+                <div
+                  key={`out-${edge.to}`}
+                  className="text-sm p-2 rounded"
+                  style={{ backgroundColor: "var(--bg)", color: "var(--text)" }}
+                >
+                  {edge.to}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </motion.div>
@@ -323,35 +435,27 @@ function ConnectionLines({
         <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
           <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280" />
         </marker>
-        <marker id="arrowhead-error" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-          <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444" />
-        </marker>
         <marker id="arrowhead-selected" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
           <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6" />
         </marker>
       </defs>
-      {edges.map((edge, i) => {
+      {edges.map((edge) => {
         const from = getNodePos(edge.from);
         const to = getNodePos(edge.to);
         const isSelected = selectedNode === edge.from || selectedNode === edge.to;
-        const isError = edge.error_rate > 1;
-
-        const color = isSelected ? "var(--accent)" : isError ? "var(--bad)" : "#6b7280";
-        const marker = isSelected ? "url(#arrowhead-selected)" : isError ? "url(#arrowhead-error)" : "url(#arrowhead)";
-        const strokeWidth = isSelected ? 2.5 : isError ? 2 : 1.5;
         const opacity = selectedNode && !isSelected ? 0.2 : 1;
 
         return (
           <line
-            key={i}
+            key={`${edge.from}->${edge.to}`}
+            data-testid="dependency-edge"
             x1={from.x}
             y1={from.y}
             x2={to.x}
             y2={to.y}
-            stroke={color}
-            strokeWidth={strokeWidth}
-            strokeDasharray={isError ? "5,5" : undefined}
-            markerEnd={marker}
+            stroke={isSelected ? "var(--accent)" : "#6b7280"}
+            strokeWidth={isSelected ? 2.5 : 1.5}
+            markerEnd={isSelected ? "url(#arrowhead-selected)" : "url(#arrowhead)"}
             style={{ opacity, transition: "opacity 0.2s" }}
           />
         );
@@ -369,30 +473,35 @@ function LoadingState() {
   );
 }
 
-function EmptyState() {
+function EmptyState({ error }: { error: string | null }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full">
-      <Server className="w-12 h-12" style={{ color: "var(--text-2)" }} />
-      <p className="mt-4 text-lg font-medium" style={{ color: "var(--text)" }}>No Services</p>
-      <p className="text-sm" style={{ color: "var(--text-2)" }}>
-        Connect Prometheus or Kubernetes to see live service metrics
+    <div className="flex flex-col items-center justify-center h-full px-8 text-center">
+      {error ? (
+        <AlertTriangle className="w-12 h-12" style={{ color: "var(--bad)" }} />
+      ) : (
+        <Server className="w-12 h-12" style={{ color: "var(--text-2)" }} />
+      )}
+      <p className="mt-4 text-lg font-medium" style={{ color: "var(--text)" }}>
+        {error ? "Could not load the service map" : "No services in the knowledge graph"}
+      </p>
+      <p className="text-sm max-w-lg" style={{ color: "var(--text-2)" }}>
+        {error ??
+          "Register services with POST /api/knowledge-graph/services, or turn on graph sync, and their recorded dependencies will be drawn here."}
       </p>
     </div>
   );
 }
 
-async function queryPrometheus(query: string): Promise<PrometheusResult[]> {
-  const prometheusUrl = import.meta.env.VITE_PROMETHEUS_URL || "http://localhost:9090";
+/** Read an error body without assuming it is JSON — a 502 from a proxy is HTML. */
+async function errorDetail(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
   try {
-    const response = await fetch(
-      `${prometheusUrl}/api/v1/query?query=${encodeURIComponent(query)}`
-    );
-    if (!response.ok) return [];
-    const data = await response.json();
-    return data.status === "success" ? data.data.result : [];
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (typeof parsed?.detail === "string") return parsed.detail;
   } catch {
-    return [];
+    /* not JSON */
   }
+  return text.slice(0, 300) || `${res.status} ${res.statusText}`;
 }
 
 export function ServiceMap({ onBack }: { onBack: () => void }) {
@@ -400,211 +509,76 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [loading, setLoading] = useState(true);
-  const [dataSource, setDataSource] = useState<"prometheus" | "kubernetes" | "fallback">("fallback");
+  const [topologyError, setTopologyError] = useState<string | null>(null);
+  const [metricsNote, setMetricsNote] = useState<string | null>(null);
 
   const fetchServiceMap = useCallback(async () => {
+    // Metrics are best-effort: a map with no numbers is still a real map, so a
+    // 503 from an unconfigured Prometheus must not blank the topology — it just
+    // means every reading stays null and we say why.
+    let measured: Record<string, Partial<ServiceMetrics>> = {};
+    let note: string | null = null;
     try {
-      const serviceMetrics = new Map<string, {
-        requests_per_sec: number;
-        error_rate: number;
-        latency_p99: number;
-        type: ServiceNode["type"];
-      }>();
-
-      // Try to fetch from Prometheus first
-      const [rpsResults, errorResults, latencyResults] = await Promise.all([
-        queryPrometheus('sum(rate(http_requests_total[5m])) by (service)'),
-        queryPrometheus('sum(rate(http_requests_total{status=~"5.."}[5m])) by (service) / sum(rate(http_requests_total[5m])) by (service) * 100'),
-        queryPrometheus('histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service)) * 1000'),
-      ]);
-
-      // Process Prometheus results
-      rpsResults.forEach((result: PrometheusResult) => {
-        const service = result.metric.service || result.metric.job || "unknown";
-        if (!serviceMetrics.has(service)) {
-          serviceMetrics.set(service, {
-            requests_per_sec: 0,
-            error_rate: 0,
-            latency_p99: 0,
-            type: "service",
-          });
-        }
-        serviceMetrics.get(service)!.requests_per_sec = parseFloat(result.value[1]) || 0;
-      });
-
-      errorResults.forEach((result: PrometheusResult) => {
-        const service = result.metric.service || result.metric.job || "unknown";
-        if (serviceMetrics.has(service)) {
-          serviceMetrics.get(service)!.error_rate = parseFloat(result.value[1]) || 0;
-        }
-      });
-
-      latencyResults.forEach((result: PrometheusResult) => {
-        const service = result.metric.service || result.metric.job || "unknown";
-        if (serviceMetrics.has(service)) {
-          serviceMetrics.get(service)!.latency_p99 = parseFloat(result.value[1]) || 0;
-        }
-      });
-
-      // If Prometheus returned data, use it
-      if (serviceMetrics.size > 0) {
-        setDataSource("prometheus");
+      const res = await apiFetch("/api/knowledge-graph/service-metrics");
+      if (res.ok) {
+        const body = (await res.json()) as MetricsResponse;
+        measured = body.services ?? {};
+        note =
+          Object.keys(measured).length === 0
+            ? `${body.url ?? "Prometheus"} returned no series for these queries.`
+            : null;
       } else {
-        // Try Kubernetes API
-        try {
-          const k8sRes = await apiFetch(`/api/kubernetes/services`);
-          if (k8sRes.ok) {
-            const services = await k8sRes.json();
-            services.forEach((svc: { name: string; namespace: string; type: string }) => {
-              serviceMetrics.set(svc.name, {
-                requests_per_sec: 0,
-                error_rate: 0,
-                latency_p99: 0,
-                type: svc.type === "database" ? "database" : "service",
-              });
-            });
-            setDataSource("kubernetes");
-          }
-        } catch {
-          // Kubernetes not available
-        }
+        note = await errorDetail(res);
       }
+    } catch (err) {
+      note = `could not reach the metrics endpoint: ${(err as Error).message}`;
+    }
 
-      // If still no data, try to get from incidents/alerts
-      if (serviceMetrics.size === 0) {
-        setDataSource("fallback");
-
-        const incidentsRes = await apiFetch(`/api/incidents`);
-        const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
-
-        const alertsRes = await apiFetch(`/oncall/alerts?limit=50`);
-        const alerts = alertsRes.ok ? await alertsRes.json() : [];
-
-        incidents.forEach((inc: Record<string, unknown>) => {
-          const service = (inc.service as string) || "api-gateway";
-          if (!serviceMetrics.has(service)) {
-            serviceMetrics.set(service, {
-              requests_per_sec: 0,
-              error_rate: 0,
-              latency_p99: 0,
-              type: "service",
-            });
-          }
-          // Increment error rate based on incident severity
-          const severity = (inc.severity as string) || "medium";
-          const errorIncrement = severity === "critical" ? 5 : severity === "high" ? 2 : 0.5;
-          serviceMetrics.get(service)!.error_rate += errorIncrement;
-        });
-
-        alerts.forEach((alert: Record<string, unknown>) => {
-          const service = (alert.source as string) || "unknown-service";
-          if (!serviceMetrics.has(service)) {
-            serviceMetrics.set(service, {
-              requests_per_sec: 0,
-              error_rate: 0,
-              latency_p99: 0,
-              type: "service",
-            });
-          }
-          serviceMetrics.get(service)!.error_rate += 0.5;
-        });
+    try {
+      const res = await apiFetch("/api/knowledge-graph/topology");
+      if (!res.ok) {
+        setMetricsNote(note);
+        setTopologyError(await errorDetail(res));
+        setMapData({ nodes: [], edges: [] });
+        return;
       }
+      const body = (await res.json()) as TopologyResponse;
+      const raw = (body.nodes ?? []).filter(
+        (n): n is TopologyNode & { id: string } => typeof n.id === "string" && n.id.length > 0,
+      );
+      const ids = raw.map(n => n.id);
+      const known = new Set(ids);
+      const edges: ServiceEdge[] = (body.edges ?? [])
+        .filter(e => typeof e.source === "string" && typeof e.target === "string")
+        .map(e => ({ from: e.source as string, to: e.target as string }))
+        .filter(e => known.has(e.from) && known.has(e.to));
 
-      // Generate nodes with proper layout
-      const nodes: ServiceNode[] = [];
-      const edges: ServiceEdge[] = [];
-
-      const positions = [
-        { x: 400, y: 100 },
-        { x: 200, y: 220 },
-        { x: 600, y: 220 },
-        { x: 120, y: 360 },
-        { x: 400, y: 360 },
-        { x: 680, y: 360 },
-        { x: 200, y: 480 },
-        { x: 600, y: 480 },
-      ];
-
-      let idx = 0;
-      serviceMetrics.forEach((data, serviceName) => {
-        const pos = positions[idx % positions.length];
-
-        // Determine node type from name
-        let type: ServiceNode["type"] = data.type;
-        if (serviceName.includes("db") || serviceName.includes("postgres") || serviceName.includes("mysql") || serviceName.includes("mongo")) {
-          type = "database";
-        } else if (serviceName.includes("redis") || serviceName.includes("cache") || serviceName.includes("memcached")) {
-          type = "cache";
-        } else if (serviceName.includes("queue") || serviceName.includes("rabbit") || serviceName.includes("kafka") || serviceName.includes("sqs")) {
-          type = "queue";
-        } else if (serviceName.includes("external") || serviceName.includes("stripe") || serviceName.includes("aws") || serviceName.includes("s3")) {
-          type = "external";
-        }
-
-        // Determine health status
-        let status: ServiceNode["status"] = "healthy";
-        if (data.error_rate > 5 || data.latency_p99 > 2000) {
-          status = "unhealthy";
-        } else if (data.error_rate > 1 || data.latency_p99 > 500) {
-          status = "degraded";
-        }
-
-        nodes.push({
-          id: serviceName,
-          name: serviceName,
-          type,
-          status,
-          metrics: {
-            requests_per_sec: data.requests_per_sec,
-            error_rate: data.error_rate,
-            latency_p99: data.latency_p99,
-          },
+      const positions = layout(ids, edges);
+      const nodes: ServiceNode[] = raw.map(n => {
+        const m = measured[n.id] ?? measured[n.name ?? ""] ?? {};
+        const metrics: ServiceMetrics = {
+          requests_per_sec: m.requests_per_sec ?? null,
+          error_rate: m.error_rate ?? null,
+          latency_p99: m.latency_p99 ?? null,
+        };
+        const pos = positions.get(n.id) ?? { x: 480, y: 110 };
+        return {
+          id: n.id,
+          name: n.name || n.id,
+          type: classifyType(n.name || n.id),
+          status: classifyStatus(metrics, n.health_status),
+          metrics,
           x: pos.x,
           y: pos.y,
-        });
-        idx++;
+        };
       });
 
-      // Generate edges based on service relationships
-      if (nodes.length > 1) {
-        // Find gateway/ingress service
-        const gateway = nodes.find(n =>
-          n.name.includes("gateway") ||
-          n.name.includes("ingress") ||
-          n.name.includes("frontend")
-        ) || nodes[0];
-
-        // Connect gateway to other services
-        nodes.forEach((node) => {
-          if (node.id !== gateway.id && node.type === "service") {
-            edges.push({
-              from: gateway.id,
-              to: node.id,
-              requests_per_sec: node.metrics.requests_per_sec * 0.8,
-              error_rate: node.metrics.error_rate,
-            });
-          }
-        });
-
-        // Connect services to databases/caches
-        const dbNodes = nodes.filter(n => n.type === "database" || n.type === "cache");
-        const serviceNodes = nodes.filter(n => n.type === "service" && n.id !== gateway.id);
-
-        serviceNodes.forEach((svc) => {
-          dbNodes.forEach((db) => {
-            edges.push({
-              from: svc.id,
-              to: db.id,
-              requests_per_sec: svc.metrics.requests_per_sec * 0.5,
-              error_rate: db.metrics.error_rate,
-            });
-          });
-        });
-      }
-
+      setTopologyError(null);
+      setMetricsNote(note);
       setMapData({ nodes, edges });
-    } catch (error) {
-      console.error("Failed to fetch service map:", error);
+    } catch (err) {
+      setTopologyError(`Could not load the topology: ${(err as Error).message}`);
+      setMapData({ nodes: [], edges: [] });
     } finally {
       setLoading(false);
     }
@@ -635,10 +609,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
             Service Map
           </h1>
           <span className="text-sm" style={{ color: "var(--text-2)" }}>
-            Live dependency graph
-            {dataSource === "prometheus" && " (Prometheus)"}
-            {dataSource === "kubernetes" && " (Kubernetes)"}
-            {dataSource === "fallback" && " (Incidents)"}
+            {mapData.nodes.length} services · {mapData.edges.length} recorded dependencies
           </span>
         </div>
         <div className="nav__right">
@@ -647,6 +618,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
             className="p-2 rounded-lg mr-2"
             style={{ border: "1px solid var(--border)" }}
             title="Refresh"
+            aria-label="Refresh"
           >
             <RefreshCw size={16} />
           </button>
@@ -654,6 +626,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
             <button
               onClick={() => setZoom(z => Math.max(0.5, z - 0.1))}
               className="p-2 rounded transition-colors"
+              aria-label="Zoom out"
               style={{ color: "var(--text-2)" }}
             >
               <ZoomOut size={18} />
@@ -664,6 +637,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
             <button
               onClick={() => setZoom(z => Math.min(2, z + 0.1))}
               className="p-2 rounded transition-colors"
+              aria-label="Zoom in"
               style={{ color: "var(--text-2)" }}
             >
               <ZoomIn size={18} />
@@ -671,27 +645,36 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
           </div>
           <div className="h-6 w-px" style={{ backgroundColor: "var(--border)" }} />
           <div className="flex items-center gap-4 text-sm">
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-full" style={{ backgroundColor: "var(--ok)" }} />
-              <span style={{ color: "var(--text-2)" }}>Healthy</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-full" style={{ backgroundColor: "#eab308" }} />
-              <span style={{ color: "var(--text-2)" }}>Degraded</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-full" style={{ backgroundColor: "var(--bad)" }} />
-              <span style={{ color: "var(--text-2)" }}>Unhealthy</span>
-            </div>
+            {(["healthy", "degraded", "unhealthy", "unknown"] as NodeStatus[]).map(s => (
+              <div key={s} className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-full" style={{ backgroundColor: STATUS_COLORS[s] }} />
+                <span style={{ color: "var(--text-2)", textTransform: "capitalize" }}>{s}</span>
+              </div>
+            ))}
           </div>
         </div>
       </header>
+
+      {metricsNote && !loading && (
+        <div
+          className="px-4 py-2 text-sm flex items-center gap-2 flex-shrink-0"
+          role="status"
+          style={{
+            backgroundColor: "var(--surface)",
+            borderBottom: "1px solid var(--border)",
+            color: "var(--text-2)",
+          }}
+        >
+          <AlertTriangle size={14} style={{ color: "#eab308" }} />
+          <span>Live metrics unavailable — {metricsNote}</span>
+        </div>
+      )}
 
       <div className="flex-1 relative overflow-hidden">
         {loading ? (
           <LoadingState />
         ) : mapData.nodes.length === 0 ? (
-          <EmptyState />
+          <EmptyState error={topologyError} />
         ) : (
           <div
             className="absolute inset-0"
@@ -727,6 +710,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
           <ServiceDetailPanel
             node={selectedNodeData}
             edges={mapData.edges}
+            metricsNote={metricsNote}
             onClose={() => setSelectedNode(null)}
           />
         )}
