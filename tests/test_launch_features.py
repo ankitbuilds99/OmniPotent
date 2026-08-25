@@ -1,5 +1,29 @@
 """Tests for launch-critical features."""
 
+import asyncio
+
+import pytest
+
+
+@pytest.fixture
+def oauth_db(tmp_path, monkeypatch):
+    """A throwaway database for the OAuth tests that persist account links."""
+    from app.config import get_settings
+    from app.database import engine as db_engine
+
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/auth.db")
+    get_settings.cache_clear()
+    db_engine._engine = None
+    db_engine._session_factory = None
+
+    asyncio.run(db_engine.init_db())
+    yield
+
+    asyncio.run(db_engine.close_db())
+    get_settings.cache_clear()
+    db_engine._engine = None
+    db_engine._session_factory = None
+
 
 class TestOAuthModule:
     """Tests for OAuth2 authentication."""
@@ -11,7 +35,7 @@ class TestOAuthModule:
         providers = get_available_providers()
         assert isinstance(providers, list)
 
-    def test_session_token_creation_and_verification(self, monkeypatch):
+    def test_session_token_creation_and_verification(self, monkeypatch, oauth_db):
         """Test JWT session token creation and verification."""
         from app.auth.oauth import create_session_token, verify_session_token
         from app.config import get_settings
@@ -31,7 +55,7 @@ class TestOAuthModule:
         assert token
         assert isinstance(token, str)
 
-        payload = verify_session_token(token)
+        payload = asyncio.run(verify_session_token(token))
         assert payload is not None
         assert payload["sub"] == "user_123"
         assert payload["org_id"] == "org_456"
@@ -51,7 +75,7 @@ class TestOAuthModule:
         verified_again = verify_oauth_state(state)
         assert verified_again is None
 
-    def test_account_linking(self):
+    def test_account_linking(self, oauth_db):
         """Test OAuth account linking."""
         from app.auth.oauth import (
             OAuthUser,
@@ -67,15 +91,15 @@ class TestOAuthModule:
             name="Test Developer",
         )
 
-        account = link_oauth_account("user_test_123", user)
+        account = asyncio.run(link_oauth_account("user_test_123", user))
         assert account.user_id == "user_test_123"
         assert account.provider == "github"
 
-        found = find_account_by_provider("github", "12345")
+        found = asyncio.run(find_account_by_provider("github", "12345"))
         assert found is not None
         assert found.email == "dev@example.com"
 
-        accounts = get_user_accounts("user_test_123")
+        accounts = asyncio.run(get_user_accounts("user_test_123"))
         assert len(accounts) >= 1
 
 

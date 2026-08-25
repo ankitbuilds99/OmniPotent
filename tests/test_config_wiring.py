@@ -48,6 +48,12 @@ def _fields_reachable_via_accessors(app_blob: str) -> set[str]:
 
     e.g. nothing says `settings.cors_origins`, but `settings.allowed_origins` is
     used by the CORS middleware and reads `self.cors_origins`.
+
+    Transitively: an accessor may read another accessor rather than a field
+    (`oauth_allowlist_configured` reads `self.oauth_allowed_emails`, which is the
+    property that parses `copilot_oauth_allowed_emails`). Stopping at one hop
+    reported the underlying field as dead even though the chain that reads it
+    starts from a real call site in app/.
     """
     tree = ast.parse(CONFIG_PY.read_text())
     settings_cls = next(
@@ -56,16 +62,30 @@ def _fields_reachable_via_accessors(app_blob: str) -> set[str]:
         if isinstance(node, ast.ClassDef) and node.name == "Settings"
     )
 
+    accessors = {
+        member.name: {
+            node.attr
+            for node in ast.walk(member)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        }
+        for member in settings_cls.body
+        if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+    # Seed with the accessors app/ actually calls, then follow self-references
+    # until nothing new appears.
     reachable: set[str] = set()
-    for member in settings_cls.body:
-        if not isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        if member.name not in app_blob:
-            continue  # the accessor itself has no caller
-        for node in ast.walk(member):
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                if node.value.id == "self":
-                    reachable.add(node.attr)
+    pending = [name for name in accessors if name in app_blob]
+    while pending:
+        current = pending.pop()
+        for attr in accessors[current]:
+            if attr in reachable:
+                continue
+            reachable.add(attr)
+            if attr in accessors:
+                pending.append(attr)
     return reachable
 
 

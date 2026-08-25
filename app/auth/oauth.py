@@ -106,20 +106,43 @@ def get_available_providers() -> list[str]:
     return list(OAUTH_CONFIGS.keys())
 
 
-_OAUTH_STATES: dict[str, tuple[str, datetime]] = {}
+# state -> (provider, issued_at, link_user_id). `link_user_id` is set when the
+# flow was started by POST /auth/{provider}/link rather than by a login: it is
+# the id of the already-authenticated user the new provider should attach to.
+# Carrying it here rather than in the callback URL matters — the callback URL is
+# attacker-suppliable, the state is not.
+_OAUTH_STATES: dict[str, tuple[str, datetime, str]] = {}
+
+STATE_TTL = timedelta(minutes=15)
 
 
-def generate_oauth_state(provider: str) -> str:
+def generate_oauth_state(provider: str, link_user_id: str = "") -> str:
     """Generate a secure state parameter for CSRF protection."""
     state = secrets.token_urlsafe(32)
-    _OAUTH_STATES[state] = (provider, datetime.now(timezone.utc))
+    _OAUTH_STATES[state] = (provider, datetime.now(timezone.utc), link_user_id)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
-    expired = [k for k, (_, ts) in _OAUTH_STATES.items() if ts < cutoff]
+    cutoff = datetime.now(timezone.utc) - STATE_TTL
+    expired = [k for k, (_, ts, _u) in _OAUTH_STATES.items() if ts < cutoff]
     for k in expired:
         del _OAUTH_STATES[k]
 
     return state
+
+
+def peek_oauth_link_user(state: str) -> str:
+    """The user id an account-link flow was started by, without consuming the state.
+
+    Non-destructive on purpose: the callback still calls `verify_oauth_state` to
+    check and consume the state, and that has to stay the one place a state is
+    spent. Returns "" for a login flow, an unknown state or an expired one.
+    """
+    entry = _OAUTH_STATES.get(state)
+    if not entry:
+        return ""
+    _provider, ts, link_user_id = entry
+    if datetime.now(timezone.utc) - ts > STATE_TTL:
+        return ""
+    return link_user_id
 
 
 def verify_oauth_state(state: str) -> str | None:
@@ -127,20 +150,22 @@ def verify_oauth_state(state: str) -> str | None:
     if state not in _OAUTH_STATES:
         return None
 
-    provider, ts = _OAUTH_STATES.pop(state)
-    if datetime.now(timezone.utc) - ts > timedelta(minutes=15):
+    provider, ts, _link_user_id = _OAUTH_STATES.pop(state)
+    if datetime.now(timezone.utc) - ts > STATE_TTL:
         return None
 
     return provider
 
 
-def get_authorization_url(provider: str, redirect_uri: str) -> str | None:
+def get_authorization_url(
+    provider: str, redirect_uri: str, link_user_id: str = ""
+) -> str | None:
     """Get OAuth authorization URL for a provider."""
     config = get_oauth_config(provider)
     if not config:
         return None
 
-    state = generate_oauth_state(provider)
+    state = generate_oauth_state(provider, link_user_id=link_user_id)
 
     params = {
         "client_id": config.client_id,
@@ -284,7 +309,14 @@ def create_session_token(
     role: str = "viewer",
     expires_hours: int = 24,
 ) -> str:
-    """Create a JWT session token."""
+    """Create a JWT session token.
+
+    The `jti` is what makes logout mean something: `revoke_session` writes it to
+    the `revoked_sessions` table and `verify_session_token` refuses any token
+    carrying a revoked one. Without it a token could only be withdrawn by
+    rotating COPILOT_SECRET_KEY, which would also invalidate every tenant's
+    encrypted integration secrets.
+    """
     secret = _session_signing_key()
 
     now = datetime.now(timezone.utc)
@@ -295,14 +327,19 @@ def create_session_token(
         "role": role,
         "iat": now,
         "exp": now + timedelta(hours=expires_hours),
+        "jti": secrets.token_urlsafe(16),
         "type": "session",
     }
 
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def verify_session_token(token: str) -> dict[str, Any] | None:
-    """Verify and decode a session token."""
+def decode_session_token(token: str) -> dict[str, Any] | None:
+    """Signature/expiry/type check only — no revocation lookup.
+
+    Callers that gate access want `verify_session_token`; this exists for the
+    paths that only need the claims of a token they have already accepted.
+    """
     try:
         secret = _session_signing_key()
     except RuntimeError:
@@ -322,6 +359,93 @@ def verify_session_token(token: str) -> dict[str, Any] | None:
         return None
 
 
+async def verify_session_token(token: str) -> dict[str, Any] | None:
+    """Verify a session token: signature, expiry, type, and not revoked.
+
+    Async because the revocation list is a table rather than process memory —
+    logout on one pod has to be visible to every other pod, and to the next
+    process after a restart.
+    """
+    payload = decode_session_token(token)
+    if payload is None:
+        return None
+    jti = payload.get("jti")
+    if jti and await is_session_revoked(str(jti)):
+        log.debug("Session token %s was revoked", jti)
+        return None
+    return payload
+
+
+async def is_session_revoked(jti: str) -> bool:
+    """Whether this token id has been logged out.
+
+    Fails *open* when the database is unreachable: the alternative is that a
+    database blip logs every signed-in user out of an incident-response tool
+    mid-incident. The token is still signature- and expiry-checked.
+    """
+    from sqlalchemy import select
+
+    try:
+        from app.database.auth_models import RevokedSessionDB
+        from app.database.engine import get_session
+
+        async with get_session() as session:
+            found = await session.scalar(
+                select(RevokedSessionDB.jti).where(RevokedSessionDB.jti == jti)
+            )
+        return found is not None
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        log.warning("Revocation check unavailable (%s); accepting on signature alone", exc)
+        return False
+
+
+async def revoke_session(token: str) -> bool:
+    """Record this token's `jti` as revoked. Returns True if anything was revoked.
+
+    Also sweeps rows whose token would have expired anyway, so the table tracks
+    live sessions rather than growing without bound.
+    """
+    from sqlalchemy import delete
+
+    payload = decode_session_token(token)
+    if not payload:
+        return False
+    jti = payload.get("jti")
+    if not jti:
+        # Tokens minted before `jti` existed cannot be revoked individually.
+        return False
+
+    exp = payload.get("exp")
+    expires_at = (
+        datetime.fromtimestamp(float(exp), tz=timezone.utc)
+        if exp
+        else datetime.now(timezone.utc) + timedelta(hours=24)
+    )
+
+    try:
+        from app.database.auth_models import RevokedSessionDB
+        from app.database.engine import get_session
+
+        async with get_session() as session:
+            await session.merge(
+                RevokedSessionDB(
+                    jti=str(jti),
+                    user_id=str(payload.get("sub") or ""),
+                    expires_at=expires_at,
+                )
+            )
+            await session.execute(
+                delete(RevokedSessionDB).where(
+                    RevokedSessionDB.expires_at < datetime.now(timezone.utc)
+                )
+            )
+            await session.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("Could not record session revocation: %s", exc)
+        return False
+
+
 @dataclass
 class OAuthAccount:
     """Linked OAuth account."""
@@ -337,54 +461,135 @@ class OAuthAccount:
     last_login: datetime
 
 
-_OAUTH_ACCOUNTS: dict[str, OAuthAccount] = {}
-_USER_ACCOUNTS: dict[str, list[str]] = {}
+def _to_account(row: Any) -> OAuthAccount:
+    """Read a row back as the dataclass the endpoints work in.
 
+    `created_at`/`last_login` are re-attached to UTC: SQLite, the default
+    database, has no timezone type, so a `DateTime(timezone=True)` column round
+    trips naive and `.isoformat()` would claim a local time it never stored.
+    """
 
-def link_oauth_account(
-    user_id: str,
-    oauth_user: OAuthUser,
-) -> OAuthAccount:
-    """Link an OAuth account to a user."""
-    account_id = f"{oauth_user.provider}:{oauth_user.provider_id}"
+    def _utc(value: datetime | None) -> datetime:
+        value = value or datetime.now(timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
-    account = OAuthAccount(
-        id=account_id,
-        user_id=user_id,
-        provider=oauth_user.provider,
-        provider_id=oauth_user.provider_id,
-        email=oauth_user.email,
-        name=oauth_user.name,
-        avatar_url=oauth_user.avatar_url,
-        created_at=datetime.now(timezone.utc),
-        last_login=datetime.now(timezone.utc),
+    return OAuthAccount(
+        id=f"{row.provider}:{row.provider_id}",
+        user_id=row.user_id,
+        provider=row.provider,
+        provider_id=row.provider_id,
+        email=row.email,
+        name=row.name,
+        avatar_url=row.avatar_url,
+        created_at=_utc(row.created_at),
+        last_login=_utc(row.last_login),
     )
 
-    _OAUTH_ACCOUNTS[account_id] = account
 
-    if user_id not in _USER_ACCOUNTS:
-        _USER_ACCOUNTS[user_id] = []
-    if account_id not in _USER_ACCOUNTS[user_id]:
-        _USER_ACCOUNTS[user_id].append(account_id)
+async def link_oauth_account(user_id: str, oauth_user: OAuthUser) -> OAuthAccount:
+    """Link an OAuth account to a user, or refresh the existing link."""
+    from sqlalchemy import select
 
-    return account
+    from app.database.auth_models import OAuthAccountDB
+    from app.database.engine import get_session
+
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        row = await session.scalar(
+            select(OAuthAccountDB).where(
+                OAuthAccountDB.provider == oauth_user.provider,
+                OAuthAccountDB.provider_id == str(oauth_user.provider_id),
+            )
+        )
+        if row is None:
+            row = OAuthAccountDB(
+                provider=oauth_user.provider,
+                provider_id=str(oauth_user.provider_id),
+                user_id=user_id,
+                email=(oauth_user.email or "").strip().lower(),
+                name=oauth_user.name or "",
+                avatar_url=oauth_user.avatar_url,
+                created_at=now,
+                last_login=now,
+            )
+            session.add(row)
+        else:
+            # An existing provider identity keeps the local user it was first
+            # bound to. Re-pointing it at whoever is logging in now would let a
+            # second login silently take over another user's account.
+            row.email = (oauth_user.email or "").strip().lower()
+            row.name = oauth_user.name or ""
+            row.avatar_url = oauth_user.avatar_url
+            row.last_login = now
+        await session.commit()
+        return _to_account(row)
 
 
-def find_account_by_provider(provider: str, provider_id: str) -> OAuthAccount | None:
+async def find_account_by_provider(provider: str, provider_id: str) -> OAuthAccount | None:
     """Find an OAuth account by provider and provider ID."""
-    account_id = f"{provider}:{provider_id}"
-    return _OAUTH_ACCOUNTS.get(account_id)
+    from sqlalchemy import select
+
+    from app.database.auth_models import OAuthAccountDB
+    from app.database.engine import get_session
+
+    async with get_session() as session:
+        row = await session.scalar(
+            select(OAuthAccountDB).where(
+                OAuthAccountDB.provider == provider,
+                OAuthAccountDB.provider_id == str(provider_id),
+            )
+        )
+        return _to_account(row) if row else None
 
 
-def find_account_by_email(email: str) -> OAuthAccount | None:
-    """Find an OAuth account by email."""
-    for account in _OAUTH_ACCOUNTS.values():
-        if account.email.lower() == email.lower():
-            return account
-    return None
+async def find_account_by_email(email: str) -> OAuthAccount | None:
+    """Find an OAuth account by email (case-insensitive)."""
+    from sqlalchemy import select
+
+    from app.database.auth_models import OAuthAccountDB
+    from app.database.engine import get_session
+
+    async with get_session() as session:
+        row = await session.scalar(
+            select(OAuthAccountDB)
+            .where(OAuthAccountDB.email == (email or "").strip().lower())
+            .order_by(OAuthAccountDB.created_at)
+        )
+        return _to_account(row) if row else None
 
 
-def get_user_accounts(user_id: str) -> list[OAuthAccount]:
+async def get_user_accounts(user_id: str) -> list[OAuthAccount]:
     """Get all OAuth accounts linked to a user."""
-    account_ids = _USER_ACCOUNTS.get(user_id, [])
-    return [_OAUTH_ACCOUNTS[aid] for aid in account_ids if aid in _OAUTH_ACCOUNTS]
+    from sqlalchemy import select
+
+    from app.database.auth_models import OAuthAccountDB
+    from app.database.engine import get_session
+
+    async with get_session() as session:
+        rows = (
+            await session.scalars(
+                select(OAuthAccountDB)
+                .where(OAuthAccountDB.user_id == user_id)
+                .order_by(OAuthAccountDB.created_at)
+            )
+        ).all()
+        return [_to_account(r) for r in rows]
+
+
+async def touch_account_login(provider: str, provider_id: str) -> None:
+    """Stamp `last_login` on an existing link."""
+    from sqlalchemy import update
+
+    from app.database.auth_models import OAuthAccountDB
+    from app.database.engine import get_session
+
+    async with get_session() as session:
+        await session.execute(
+            update(OAuthAccountDB)
+            .where(
+                OAuthAccountDB.provider == provider,
+                OAuthAccountDB.provider_id == str(provider_id),
+            )
+            .values(last_login=datetime.now(timezone.utc))
+        )
+        await session.commit()

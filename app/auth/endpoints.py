@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -25,6 +24,8 @@ from app.auth.oauth import (
     get_authorization_url,
     exchange_code_for_token,
     get_user_info,
+    peek_oauth_link_user,
+    revoke_session,
     verify_oauth_state,
     create_session_token,
     verify_session_token,
@@ -32,6 +33,7 @@ from app.auth.oauth import (
     find_account_by_provider,
     find_account_by_email,
     get_user_accounts,
+    touch_account_login,
 )
 from app.config import get_settings
 
@@ -40,12 +42,30 @@ log = logging.getLogger("omnipotent.auth.endpoints")
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-def _validate_redirect_uri(redirect_uri: str) -> str:
+def _own_origin(request: Request | None) -> str:
+    """The origin this request arrived on, e.g. "https://copilot.example.com"."""
+    if request is None:
+        return ""
+    parsed = urlsplit(str(request.base_url))
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _validate_redirect_uri(redirect_uri: str, request: Request | None = None) -> str:
     """Reject redirect targets that are not an allowed origin.
 
     The callback appends the session token to this URI, so an unvalidated value
     hands a valid session to any attacker-controlled domain. Relative paths are
     allowed; absolute URLs must match a configured origin exactly.
+
+    The app's own origin counts as allowed. `allowed_origins` is derived from
+    CORS_ORIGINS/FRONTEND_URL, which default to localhost:3000 and which neither
+    render.yaml nor the k8s manifests set — and the shipped Dockerfile builds the
+    SPA with VITE_API_URL="" and serves it from the API image, so the browser
+    origin *is* the API origin. Without this case every same-origin deployment
+    answered "Sign in with GitHub" with 400 "redirect_uri is not an allowed
+    origin"; only a separate Vite dev server on :5173 ever worked.
     """
     if not redirect_uri:
         return ""
@@ -63,6 +83,9 @@ def _validate_redirect_uri(redirect_uri: str) -> str:
 
     origin = f"{parsed.scheme}://{parsed.netloc}"
     allowed = {o.rstrip("/") for o in get_settings().allowed_origins}
+    own = _own_origin(request)
+    if own:
+        allowed.add(own.rstrip("/"))
     if origin not in allowed:
         log.warning("Rejected redirect_uri to non-allowed origin: %s", origin)
         raise HTTPException(400, "redirect_uri is not an allowed origin")
@@ -151,7 +174,7 @@ async def oauth_login(
     if provider not in available:
         raise HTTPException(400, f"Provider '{provider}' is not configured")
 
-    redirect_uri = _validate_redirect_uri(redirect_uri)
+    redirect_uri = _validate_redirect_uri(redirect_uri, request)
 
     base_url = str(request.base_url).rstrip("/")
     callback_url = f"{base_url}/auth/{provider}/callback"
@@ -187,7 +210,7 @@ async def oauth_callback(
     and exchanges it for an access token. On success, creates a session
     and redirects to the app.
     """
-    redirect_uri = _validate_redirect_uri(redirect_uri)
+    redirect_uri = _validate_redirect_uri(redirect_uri, request)
 
     if error:
         log.warning("OAuth error from %s: %s", provider, error)
@@ -197,6 +220,13 @@ async def oauth_callback(
 
     if not code:
         raise HTTPException(400, "Missing authorization code")
+
+    # Read the link intent before the state is consumed. It lives in the state
+    # rather than in the callback URL because the callback URL comes back from
+    # the browser: `?link=true` on it (the previous design) is attacker-settable
+    # and, being merely inert, meant "Link another provider" quietly created a
+    # second unrelated account and swapped the session over to it.
+    link_user_id = peek_oauth_link_user(state)
 
     verified_provider = verify_oauth_state(state)
     if not verified_provider:
@@ -222,18 +252,29 @@ async def oauth_callback(
     if not oauth_user:
         raise HTTPException(500, "Failed to get user info")
 
-    existing = find_account_by_provider(provider, oauth_user.provider_id)
-    if existing:
-        user_id = existing.user_id
-        existing.last_login = datetime.now(timezone.utc)
+    if link_user_id:
+        # Attaching a second provider to an account that is already signed in:
+        # the local user is the one that started the flow, never a new one.
+        existing = await find_account_by_provider(provider, oauth_user.provider_id)
+        if existing and existing.user_id != link_user_id:
+            raise HTTPException(
+                409, "That account is already linked to a different user."
+            )
+        user_id = link_user_id
+        await link_oauth_account(user_id, oauth_user)
     else:
-        email_account = find_account_by_email(oauth_user.email)
-        if email_account:
-            user_id = email_account.user_id
+        existing = await find_account_by_provider(provider, oauth_user.provider_id)
+        if existing:
+            user_id = existing.user_id
+            await touch_account_login(provider, oauth_user.provider_id)
         else:
-            user_id = f"user_{secrets.token_hex(8)}"
+            email_account = await find_account_by_email(oauth_user.email)
+            if email_account:
+                user_id = email_account.user_id
+            else:
+                user_id = f"user_{secrets.token_hex(8)}"
 
-        link_oauth_account(user_id, oauth_user)
+            await link_oauth_account(user_id, oauth_user)
 
     org_id, role = await _get_or_create_org_for_user(user_id, oauth_user.email)
 
@@ -266,17 +307,55 @@ async def oauth_callback(
     return response
 
 
-async def _get_or_create_org_for_user(user_id: str, email: str) -> tuple[str, str]:
-    """Resolve the (org_id, role) this login should act as.
+_NOT_PROVISIONED = (
+    "This account is not provisioned for this deployment. "
+    "Ask an administrator to add it."
+)
 
-    In multi-tenant mode the org must be a *real* row in the tenant store: that
-    membership is what `app.tenancy.auth.resolve_session` looks the user up by,
-    so a synthesised id would mint a session token that every API route rejects.
-    An existing member keeps their stored role (an invited viewer must not be
-    promoted to owner by logging in); a brand-new user gets their own org.
+
+def _refuse_unprovisioned(email: str, reason: str) -> None:
+    log.warning("Refused OAuth login for %s: %s", email, reason)
+    raise HTTPException(403, _NOT_PROVISIONED)
+
+
+async def _get_or_create_org_for_user(user_id: str, email: str) -> tuple[str, str]:
+    """Resolve the (org_id, role) this login should act as, or refuse the login.
+
+    Completing OAuth proves the person controls an account *at GitHub or Google*.
+    It says nothing about whether they should have access here, so this is the
+    point where that is decided:
+
+    * Single-tenant. There is no membership table to consult and `require_auth`
+      accepts the resulting token on its signature alone, so an unrestricted
+      login is a full bypass of COPILOT_API_TOKEN — any GitHub account on the
+      internet would read /audit and spend the operator's LLM budget. A login is
+      allowed only when it matches COPILOT_OAUTH_ALLOWED_EMAILS/_DOMAINS, or
+      when there is no API token to bypass in the first place (the local-dev
+      default, where every route is already open).
+    * Multi-tenant. An existing member keeps their stored role — an invited
+      viewer must not be promoted to owner by logging in. Provisioning a *new*
+      org is self-serve signup by another name, so it honours the same
+      COPILOT_SIGNUP_ENABLED switch that POST /signup does, and the allowlist
+      overrides it in both directions.
     """
-    domain = email.split("@")[1] if "@" in email else "personal"
-    if not get_settings().copilot_multi_tenant:
+    s = get_settings()
+    # Lowercased: providers do not normalise the domain, and `Alice@ACME.com`
+    # deriving `org_ACME_com` while `alice@acme.com` derives `org_acme_com` puts
+    # the same person in two different orgs depending on how they typed it.
+    domain = email.lower().split("@")[1] if "@" in email else "personal"
+    allowlisted = s.oauth_allowlist_configured and s.oauth_email_allowed(email)
+
+    if not s.copilot_multi_tenant:
+        if s.oauth_allowlist_configured:
+            if not allowlisted:
+                _refuse_unprovisioned(email, "not on the OAuth allowlist")
+        elif s.copilot_api_token.strip():
+            _refuse_unprovisioned(
+                email,
+                "single-tenant deployment has COPILOT_API_TOKEN set but no OAuth "
+                "allowlist; set COPILOT_OAUTH_ALLOWED_EMAILS or "
+                "COPILOT_OAUTH_ALLOWED_DOMAINS to say who may sign in",
+            )
         # Single-tenant: there is no org table to join, and the token is accepted
         # on its signature alone. The id is informational only.
         return f"org_{domain.replace('.', '_')}", "owner"
@@ -287,19 +366,32 @@ async def _get_or_create_org_for_user(user_id: str, email: str) -> tuple[str, st
     membership = await store.get_membership_by_email(email)
     if membership:
         return membership
+
+    if s.oauth_allowlist_configured:
+        if not allowlisted:
+            _refuse_unprovisioned(email, "not on the OAuth allowlist")
+    elif not s.copilot_signup_enabled:
+        _refuse_unprovisioned(email, "self-serve signup is disabled")
+
     org = await store.create_org(name=domain, owner_email=email)
     log.info("Provisioned org %s for first login of %s", org.id, email)
     return org.id, "owner"
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, str]:
+async def logout(request: Request, response: Response) -> dict[str, str]:
     """End the current session.
 
-    Clears the session cookie and invalidates the token.
+    Clears the session cookie *and* revokes the token. Deleting the cookie alone
+    left the JWT valid for its full 24 hours — a token that had already been
+    copied out of the browser (or out of a URL fragment in a log) could not be
+    withdrawn at all short of rotating COPILOT_SECRET_KEY, which is also the
+    secrets-vault KEK.
     """
+    token = _extract_token(request)
+    revoked = await revoke_session(token) if token else False
     response.delete_cookie("session")
-    return {"status": "logged_out"}
+    return {"status": "logged_out", "revoked": "true" if revoked else "false"}
 
 
 @router.get("/me", response_model=UserInfo)
@@ -312,12 +404,12 @@ async def get_current_user(request: Request) -> UserInfo:
     if not token:
         raise HTTPException(401, "Not authenticated")
 
-    payload = verify_session_token(token)
+    payload = await verify_session_token(token)
     if not payload:
         raise HTTPException(401, "Invalid or expired token")
 
     user_id = payload["sub"]
-    accounts = get_user_accounts(user_id)
+    accounts = await get_user_accounts(user_id)
 
     return UserInfo(
         id=user_id,
@@ -337,11 +429,11 @@ async def list_linked_accounts(request: Request) -> list[dict[str, Any]]:
     if not token:
         raise HTTPException(401, "Not authenticated")
 
-    payload = verify_session_token(token)
+    payload = await verify_session_token(token)
     if not payload:
         raise HTTPException(401, "Invalid or expired token")
 
-    accounts = get_user_accounts(payload["sub"])
+    accounts = await get_user_accounts(payload["sub"])
     return [
         {
             "provider": a.provider,
@@ -368,7 +460,7 @@ async def link_provider(
     if not token:
         raise HTTPException(401, "Not authenticated")
 
-    payload = verify_session_token(token)
+    payload = await verify_session_token(token)
     if not payload:
         raise HTTPException(401, "Invalid or expired token")
 
@@ -377,9 +469,14 @@ async def link_provider(
         raise HTTPException(400, f"Provider '{provider}' is not configured")
 
     base_url = str(request.base_url).rstrip("/")
-    callback_url = f"{base_url}/auth/{provider}/callback?link=true"
+    callback_url = f"{base_url}/auth/{provider}/callback"
 
-    auth_url = get_authorization_url(provider, callback_url)
+    # The link intent travels in the signed/served-side state, not on the
+    # callback URL: the browser hands the callback URL back to us, so a marker
+    # there proves nothing about who started the flow.
+    auth_url = get_authorization_url(
+        provider, callback_url, link_user_id=str(payload["sub"])
+    )
     if not auth_url:
         raise HTTPException(500, "Failed to generate authorization URL")
 

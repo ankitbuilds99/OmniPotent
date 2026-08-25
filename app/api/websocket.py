@@ -174,8 +174,16 @@ class ConnectionManager:
         log.info("WebSocket disconnected: thread=%s", conn.thread_id)
 
     async def send(self, conn: ClientConnection, message: dict) -> bool:
-        """Send a message to a specific connection. Returns False if send failed."""
+        """Send a message to a specific connection. Returns False if send failed.
+
+        A failed send on a session-bearing connection is queued for resumption.
+        Nothing used to fill that buffer, so `get_pending` always returned []:
+        the client reconnected with `?session_id=` exactly as
+        frontend/src/hooks/useWebSocket.ts intends, and every event emitted while
+        it was away — the whole investigation, in a long one — was gone.
+        """
         if conn.closed:
+            await self._queue_missed(conn, message)
             return False
         try:
             if conn.websocket.client_state == WebSocketState.CONNECTED:
@@ -183,17 +191,33 @@ class ConnectionManager:
                 return True
         except Exception:
             log.debug("Failed to send to WebSocket", exc_info=True)
+        await self._queue_missed(conn, message)
         return False
 
+    async def _queue_missed(self, conn: ClientConnection, message: dict) -> None:
+        """Buffer a message the client did not receive, if it can resume."""
+        if conn.session_id:
+            await self.queue_for_session(conn.session_id, message)
+
     async def broadcast(self, thread_id: str, message: dict) -> int:
-        """Broadcast a message to all connections on a thread. Returns send count."""
+        """Broadcast a message to all connections on a thread. Returns send count.
+
+        When nobody is connected the message is still buffered for every session
+        known to belong to this thread — the common case is a client that dropped
+        mid-investigation, where "no connections" is precisely when resumption
+        has to work.
+        """
         sent = 0
         async with self._lock:
             conns = self._connections.get(thread_id)
-            if not conns:
-                return 0
-            # Copy to avoid mutation during iteration
-            active = list(conns.values())
+            active = list(conns.values()) if conns else []
+            orphaned = (
+                [sid for sid, tid in self._session_threads.items() if tid == thread_id]
+                if not active
+                else []
+            )
+        for session_id in orphaned:
+            await self.queue_for_session(session_id, message)
         for conn in active:
             if await self.send(conn, message):
                 sent += 1
@@ -205,13 +229,23 @@ class ConnectionManager:
             messages = self._sessions.pop(session_id, [])
             return messages
 
+    # Buffers are only useful until the client gives up reconnecting, and this is
+    # now written to on every failed send, so both dimensions are bounded: at
+    # most _MAX_QUEUED_MESSAGES per session and _MAX_BUFFERED_SESSIONS sessions.
+    _MAX_QUEUED_MESSAGES = 100
+    _MAX_BUFFERED_SESSIONS = 500
+
     async def queue_for_session(self, session_id: str, message: dict) -> None:
         """Queue a message for a disconnected session."""
         async with self._lock:
             if session_id not in self._sessions:
+                if len(self._sessions) >= self._MAX_BUFFERED_SESSIONS:
+                    # Drop the oldest abandoned session rather than the live one.
+                    oldest = next(iter(self._sessions))
+                    del self._sessions[oldest]
+                    self._session_threads.pop(oldest, None)
                 self._sessions[session_id] = []
-            # Bound the queue to prevent memory bloat from abandoned sessions
-            if len(self._sessions[session_id]) < 100:
+            if len(self._sessions[session_id]) < self._MAX_QUEUED_MESSAGES:
                 self._sessions[session_id].append(message)
 
     def connection_count(self, thread_id: str | None = None) -> int:

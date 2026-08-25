@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 import json
 import logging
 from typing import Any
@@ -59,6 +62,70 @@ def _normalize_tags(raw: Any) -> dict[str, str]:
         key, sep, value = item.partition(":")
         tags[key.strip()] = value.strip() if sep else ""
     return tags
+
+
+def _basic_auth_password(header: str) -> str:
+    """The password out of an `Authorization: Basic` header, or ""."""
+    try:
+        decoded = base64.b64decode(header.split(" ", 1)[1].strip(), validate=True).decode()
+    except (IndexError, binascii.Error, UnicodeDecodeError):
+        return ""
+    return decoded.partition(":")[2]
+
+
+def _verify_shared_secret(request: Request, x_webhook_secret: str | None, source: str) -> None:
+    """Authenticate a receiver that has no provider signature of its own.
+
+    Alertmanager, Datadog and Grafana do not sign their deliveries — there is no
+    HMAC to check, so the only credential available is a shared secret the sender
+    is configured to present. Until now these three had no check at all; they were
+    reachable only because `require_auth` demanded the app bearer token in front of
+    them, and that same gate is what made every real alert delivery 401 (the bypass
+    listed `/webhooks/` while the router is mounted at `/api/webhooks/`). Opening
+    the prefix without this would have turned a "no alert ever arrives" bug into an
+    unauthenticated incident-creation endpoint, so the credential check moves here
+    rather than disappearing.
+
+    Accepted, in the order a sender is likely to manage:
+      - `X-Webhook-Secret: <secret>`   (Datadog custom headers, curl)
+      - `Authorization: Bearer <secret>`  (Grafana contact points, Alertmanager
+        `http_config.authorization`)
+      - `Authorization: Basic <base64 user:secret>`  (Alertmanager `basic_auth`,
+        the only option in older Grafana notifiers — the username is ignored)
+
+    Either COPILOT_WEBHOOK_SECRET or COPILOT_API_TOKEN satisfies it, so a
+    deployment that already hands its token to a sender does not need a second
+    one. When neither is configured the deployment has no authentication at all
+    (the local-dev default, where `require_auth` is likewise a no-op) and the
+    receiver stays open — this gate follows the app's auth posture, it does not
+    invent a stricter one.
+    """
+    settings = get_settings()
+    expected = [s for s in (settings.copilot_webhook_secret, settings.copilot_api_token) if s]
+    if not expected:
+        return
+
+    auth = request.headers.get("authorization", "")
+    scheme, _, credential = auth.partition(" ")
+    presented = [x_webhook_secret or ""]
+    if scheme.lower() == "bearer":
+        presented.append(credential.strip())
+    elif scheme.lower() == "basic":
+        presented.append(_basic_auth_password(auth))
+
+    for candidate in presented:
+        if candidate and any(hmac.compare_digest(candidate, e) for e in expected):
+            return
+
+    log.warning("Rejected unauthenticated %s webhook delivery", source)
+    raise HTTPException(
+        status_code=401,
+        detail=(
+            f"Unauthenticated {source} delivery. Configure the sender to send the "
+            "shared secret as X-Webhook-Secret, Authorization: Bearer, or basic-auth "
+            "password (COPILOT_WEBHOOK_SECRET, or the app's COPILOT_API_TOKEN)."
+        ),
+    )
 
 
 def _schedule_investigation(background_tasks: BackgroundTasks, incident: Incident) -> None:
@@ -276,8 +343,10 @@ async def pagerduty_webhook(
 async def alertmanager_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
+    x_webhook_secret: str | None = Header(None),
 ) -> WebhookResponse:
     """Receive Prometheus Alertmanager webhook events."""
+    _verify_shared_secret(request, x_webhook_secret, "Alertmanager")
     try:
         data = await request.json()
     except Exception:
@@ -329,8 +398,10 @@ async def alertmanager_webhook(
 async def datadog_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
+    x_webhook_secret: str | None = Header(None),
 ) -> WebhookResponse:
     """Receive Datadog webhook events."""
+    _verify_shared_secret(request, x_webhook_secret, "Datadog")
     try:
         data = await request.json()
     except Exception:
@@ -379,8 +450,10 @@ async def datadog_webhook(
 async def grafana_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
+    x_webhook_secret: str | None = Header(None),
 ) -> WebhookResponse:
     """Receive Grafana alerting webhook events."""
+    _verify_shared_secret(request, x_webhook_secret, "Grafana")
     try:
         data = await request.json()
     except Exception:
@@ -433,11 +506,7 @@ async def generic_webhook(
     x_webhook_secret: str | None = Header(None),
 ) -> WebhookResponse:
     """Generic webhook receiver for custom integrations."""
-    settings = get_settings()
-
-    if settings.copilot_webhook_secret:
-        if x_webhook_secret != settings.copilot_webhook_secret:
-            raise HTTPException(status_code=401, detail="Invalid secret")
+    _verify_shared_secret(request, x_webhook_secret, "generic webhook")
 
     try:
         data = await request.json()

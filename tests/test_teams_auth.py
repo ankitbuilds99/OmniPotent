@@ -149,12 +149,14 @@ def test_wrong_shared_token_is_rejected_by_the_router_itself(monkeypatch):
     monkeypatch.delenv("COPILOT_MULTI_TENANT", raising=False)
     monkeypatch.setenv("COPILOT_API_TOKEN", TOKEN)
     _reset()
+    # async since it may have to check the session-revocation table before
+    # accepting an OAuth session token.
     with pytest.raises(HTTPException) as excinfo:
-        teams_router._get_user_from_header("Bearer not-the-token")
+        asyncio.run(teams_router._get_user_from_header("Bearer not-the-token"))
     assert excinfo.value.status_code == 401
     with pytest.raises(HTTPException):
-        teams_router._get_user_from_header(None)
-    assert teams_router._get_user_from_header(f"Bearer {TOKEN}")["id"]
+        asyncio.run(teams_router._get_user_from_header(None))
+    assert asyncio.run(teams_router._get_user_from_header(f"Bearer {TOKEN}"))["id"]
     _reset()
 
 

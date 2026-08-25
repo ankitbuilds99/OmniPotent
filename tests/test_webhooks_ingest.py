@@ -23,6 +23,7 @@ what an unsigned one does, and whether anything is actually queued.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -615,3 +616,119 @@ def test_gitlab_pipeline_success_investigates_nothing(client):
     assert response.status_code == 200
     assert "auto_triage" not in response.json()
     assert queued == []
+
+
+# -----------------------------------------------------------------------------
+# Reachability and authentication of the alert receivers
+# -----------------------------------------------------------------------------
+
+
+ALERTMANAGER_FIRING = {
+    "alerts": [
+        {
+            "status": "firing",
+            "labels": {"alertname": "HighErrorRate", "severity": "critical", "service": "api"},
+            "annotations": {"description": "5xx rate above 10%"},
+        }
+    ]
+}
+
+
+def test_alert_webhooks_are_reachable_when_the_app_requires_a_token(client):
+    """An alert delivery must not be rejected before it reaches its own check.
+
+    `require_auth` skipped `/webhooks/`, but `app/webhooks/router.py` is included
+    with `prefix="/api"` on top of its own `/webhooks` prefix — it lives at
+    `/api/webhooks/*`. So on every deployment that set COPILOT_API_TOKEN (i.e.
+    every production one) Alertmanager, Grafana and Datadog got a 401, no alert
+    ever became an incident, and the product's whole ingestion path was dead.
+    """
+    c, monkeypatch = client
+    monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+    monkeypatch.setenv("COPILOT_WEBHOOK_SECRET", "hook-secret")
+    cfg.get_settings.cache_clear()
+
+    response = c.post(
+        "/api/webhooks/alertmanager",
+        json=ALERTMANAGER_FIRING,
+        headers={"X-Webhook-Secret": "hook-secret"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["incident_id"]
+
+
+def test_unsigned_receivers_reject_an_unauthenticated_delivery(client):
+    """Opening the path prefix must not open the endpoint.
+
+    Alertmanager, Datadog and Grafana do not sign their payloads, so once
+    `require_auth` stops gating them the shared secret is the only credential
+    left. Without this, anyone on the internet could fabricate incidents — and
+    each one spends the operator's LLM budget on an auto-investigation.
+    """
+    c, monkeypatch = client
+    monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+    monkeypatch.setenv("COPILOT_WEBHOOK_SECRET", "hook-secret")
+    cfg.get_settings.cache_clear()
+
+    for path, payload in (
+        ("/api/webhooks/alertmanager", ALERTMANAGER_FIRING),
+        ("/api/webhooks/datadog", {"alert_type": "error", "title": "spoofed"}),
+        ("/api/webhooks/grafana", {"state": "alerting", "title": "spoofed"}),
+        ("/api/webhooks/generic", {"title": "spoofed"}),
+    ):
+        assert c.post(path, json=payload).status_code == 401, path
+        assert c.post(
+            path, json=payload, headers={"X-Webhook-Secret": "wrong"}
+        ).status_code == 401, path
+
+
+def test_a_sender_may_present_the_secret_as_bearer_or_basic_auth(client):
+    """Alertmanager offers `authorization` and `basic_auth`, not a custom header."""
+    c, monkeypatch = client
+    monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+    monkeypatch.setenv("COPILOT_WEBHOOK_SECRET", "hook-secret")
+    cfg.get_settings.cache_clear()
+
+    bearer = c.post(
+        "/api/webhooks/grafana",
+        json={"state": "alerting", "title": "bearer alert"},
+        headers={"Authorization": "Bearer hook-secret"},
+    )
+    assert bearer.status_code == 200, bearer.text
+
+    basic = base64.b64encode(b"alertmanager:hook-secret").decode()
+    basic_response = c.post(
+        "/api/webhooks/alertmanager",
+        json=ALERTMANAGER_FIRING,
+        headers={"Authorization": f"Basic {basic}"},
+    )
+    assert basic_response.status_code == 200, basic_response.text
+
+
+def test_the_app_token_also_satisfies_the_receivers(client):
+    """A deployment that already handed a sender its API token needs no second secret."""
+    c, monkeypatch = client
+    monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+    monkeypatch.setenv("COPILOT_WEBHOOK_SECRET", "")
+    cfg.get_settings.cache_clear()
+
+    response = c.post(
+        "/api/webhooks/datadog",
+        json={"alert_type": "error", "title": "Datadog Alert", "alert_id": 7},
+        headers={"Authorization": "Bearer prod-token"},
+    )
+
+    assert response.status_code == 200, response.text
+
+
+def test_an_unauthenticated_deployment_leaves_the_receivers_open(client):
+    """No token and no secret is the local-dev default, where nothing is gated."""
+    c, monkeypatch = client
+    monkeypatch.setenv("COPILOT_API_TOKEN", "")
+    monkeypatch.setenv("COPILOT_WEBHOOK_SECRET", "")
+    cfg.get_settings.cache_clear()
+
+    response = c.post("/api/webhooks/alertmanager", json=ALERTMANAGER_FIRING)
+
+    assert response.status_code == 200, response.text

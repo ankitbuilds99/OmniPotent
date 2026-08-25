@@ -58,6 +58,8 @@ CORE_TABLES = {
     "teams",
     "team_members",
     "team_invitations",
+    "oauth_accounts",
+    "revoked_sessions",
 }
 ONCALL_TABLES = {
     "oncall_alerts",

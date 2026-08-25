@@ -20,6 +20,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.config import get_settings
+from app.database import engine as db_engine
 from app.auth.endpoints import (
     AuthProviderInfo,
     LoginResponse,
@@ -32,15 +33,15 @@ from app.auth.endpoints import (
 from app.auth.oauth import (
     OAuthAccount,
     OAuthUser,
-    _OAUTH_ACCOUNTS,
     _OAUTH_STATES,
-    _USER_ACCOUNTS,
     create_session_token,
+    decode_session_token,
     find_account_by_email,
     find_account_by_provider,
     generate_oauth_state,
     get_user_accounts,
     link_oauth_account,
+    revoke_session,
     verify_session_token,
 )
 
@@ -60,9 +61,38 @@ def _auth_settings(monkeypatch):
     """
     monkeypatch.setenv("COPILOT_SECRET_KEY", TEST_SIGNING_KEY)
     monkeypatch.setenv("CORS_ORIGINS", TEST_ALLOWED_ORIGIN)
+    # A login is an authorization decision now, and these three inputs are what
+    # it reads. Pin them so the module's outcome does not depend on whatever the
+    # developer happens to have exported.
+    monkeypatch.setenv("COPILOT_API_TOKEN", "")
+    monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_EMAILS", "")
+    monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_DOMAINS", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def oauth_db(tmp_path, monkeypatch):
+    """A throwaway database for the tests that touch `oauth_accounts`.
+
+    Provider links and session revocations are rows now, not module dicts, so
+    these tests need somewhere to put them. A per-test SQLite file also restores
+    what `_clear_oauth_state()` used to give this module: isolation between
+    tests, since the rows no longer vanish when the dict is cleared.
+    """
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/auth.db")
+    get_settings.cache_clear()
+    db_engine._engine = None
+    db_engine._session_factory = None
+
+    asyncio.run(db_engine.init_db())
+    yield
+
+    asyncio.run(db_engine.close_db())
+    get_settings.cache_clear()
+    db_engine._engine = None
+    db_engine._session_factory = None
 
 
 def _run(coro):
@@ -71,10 +101,8 @@ def _run(coro):
 
 
 def _clear_oauth_state():
-    """Clear OAuth state between tests."""
+    """Clear pending OAuth states between tests."""
     _OAUTH_STATES.clear()
-    _OAUTH_ACCOUNTS.clear()
-    _USER_ACCOUNTS.clear()
 
 
 # -----------------------------------------------------------------------------
@@ -273,6 +301,95 @@ class TestGetOrCreateOrgForUser:
             get_settings.cache_clear()
 
 
+class TestOAuthLoginIsAnAuthorizationDecision:
+    """Completing OAuth must not be enough, on its own, to get in.
+
+    Signing in with Google proves the person controls a Google account. It says
+    nothing about whether they should have access to *this* deployment. A
+    single-tenant install trusts the session token on its signature alone, so
+    without this gate any GitHub or Google account on the internet could finish
+    the OAuth dance and receive an owner session — a complete bypass of
+    COPILOT_API_TOKEN, with read access to /audit and a spend of the operator's
+    LLM budget.
+    """
+
+    def test_a_stranger_is_refused_when_the_deployment_has_a_token(self, monkeypatch):
+        monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_EMAILS", "")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_DOMAINS", "")
+        get_settings.cache_clear()
+
+        with pytest.raises(HTTPException) as exc:
+            _run(_get_or_create_org_for_user("user_x", "stranger@gmail.com"))
+
+        assert exc.value.status_code == 403
+        # The refusal must not confirm whether the account exists.
+        assert "not provisioned" in exc.value.detail
+
+    def test_an_open_deployment_still_lets_anyone_in(self, monkeypatch):
+        """No API token means no gate to bypass — the local-dev default."""
+        monkeypatch.setenv("COPILOT_API_TOKEN", "")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_EMAILS", "")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_DOMAINS", "")
+        get_settings.cache_clear()
+
+        org_id, role = _run(_get_or_create_org_for_user("user_x", "anyone@gmail.com"))
+
+        assert (org_id, role) == ("org_gmail_com", "owner")
+
+    def test_allowlisted_domain_gets_in(self, monkeypatch):
+        monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_DOMAINS", "acme.com")
+        get_settings.cache_clear()
+
+        org_id, role = _run(_get_or_create_org_for_user("user_x", "Alice@ACME.com"))
+
+        assert (org_id, role) == ("org_acme_com", "owner")
+
+    def test_an_off_allowlist_address_is_refused(self, monkeypatch):
+        monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_DOMAINS", "acme.com")
+        get_settings.cache_clear()
+
+        with pytest.raises(HTTPException) as exc:
+            _run(_get_or_create_org_for_user("user_x", "alice@acme.com.evil.test"))
+
+        assert exc.value.status_code == 403
+
+    def test_allowlisted_individual_address_gets_in(self, monkeypatch):
+        monkeypatch.setenv("COPILOT_API_TOKEN", "prod-token")
+        monkeypatch.setenv("COPILOT_OAUTH_ALLOWED_EMAILS", "boss@acme.com, ops@acme.com")
+        get_settings.cache_clear()
+
+        assert _run(_get_or_create_org_for_user("u", "ops@acme.com"))[1] == "owner"
+        with pytest.raises(HTTPException):
+            _run(_get_or_create_org_for_user("u", "intern@acme.com"))
+
+    def test_multi_tenant_signup_switch_is_honoured(self, tmp_path, monkeypatch):
+        """OAuth self-provisioning is signup; COPILOT_SIGNUP_ENABLED=false meant it.
+
+        `POST /signup` refused, and then the same person clicked "Sign in with
+        Google" and got an owner session in a brand new org.
+        """
+        from app.tenancy import auth as tenant_auth
+
+        monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
+        monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
+        monkeypatch.setenv("COPILOT_SIGNUP_ENABLED", "false")
+        get_settings.cache_clear()
+        tenant_auth.reset_store_cache()
+        try:
+            _run(tenant_auth.get_store().setup())
+
+            with pytest.raises(HTTPException) as exc:
+                _run(_get_or_create_org_for_user("user_x", "walkin@gmail.com"))
+
+            assert exc.value.status_code == 403
+        finally:
+            tenant_auth.reset_store_cache()
+            get_settings.cache_clear()
+
+
 class TestExtractToken:
     """Tests for _extract_token helper."""
 
@@ -351,9 +468,29 @@ class TestOAuthStateFunctions:
         """generate_oauth_state stores provider with state."""
         state = generate_oauth_state("github")
 
-        provider, timestamp = _OAUTH_STATES[state]
+        provider, timestamp, link_user_id = _OAUTH_STATES[state]
         assert provider == "github"
         assert isinstance(timestamp, datetime)
+        # Empty unless the state was minted by "link another provider".
+        assert link_user_id == ""
+
+    def test_generate_oauth_state_carries_link_intent(self):
+        """A link flow's target user rides on the state, not on the callback URL.
+
+        `/auth/{provider}/link` used to append `?link=true` to the redirect_uri it
+        sent the provider, and the callback then had no idea *whose* account was
+        being linked — it created a brand new user and swapped the caller's
+        session onto it. The user id travels with the state now, where the caller
+        cannot forge it.
+        """
+        state = generate_oauth_state("github", link_user_id="user_42")
+
+        from app.auth.oauth import peek_oauth_link_user, verify_oauth_state
+
+        assert peek_oauth_link_user(state) == "user_42"
+        # peek does not consume: the callback reads the intent, then verifies.
+        assert verify_oauth_state(state) == "github"
+        assert peek_oauth_link_user(state) == ""
 
     def test_verify_oauth_state_valid(self):
         """verify_oauth_state returns provider for valid state."""
@@ -380,8 +517,12 @@ class TestOAuthStateFunctions:
 
         state = generate_oauth_state("google")
         # Manually expire the state
-        provider, _ = _OAUTH_STATES[state]
-        _OAUTH_STATES[state] = (provider, datetime.now(timezone.utc) - timedelta(minutes=20))
+        provider, _, link_user_id = _OAUTH_STATES[state]
+        _OAUTH_STATES[state] = (
+            provider,
+            datetime.now(timezone.utc) - timedelta(minutes=20),
+            link_user_id,
+        )
 
         result = verify_oauth_state(state)
 
@@ -406,8 +547,8 @@ class TestSessionTokenFunctions:
         # JWT has 3 parts separated by dots
         assert token.count(".") == 2
 
-    def test_verify_session_token_valid(self):
-        """verify_session_token decodes valid token."""
+    def test_decode_session_token_valid(self):
+        """decode_session_token decodes valid token."""
         token = create_session_token(
             user_id="user_123",
             org_id="org_abc",
@@ -415,7 +556,7 @@ class TestSessionTokenFunctions:
             role="viewer",
         )
 
-        payload = verify_session_token(token)
+        payload = decode_session_token(token)
 
         assert payload is not None
         assert payload["sub"] == "user_123"
@@ -424,8 +565,22 @@ class TestSessionTokenFunctions:
         assert payload["role"] == "viewer"
         assert payload["type"] == "session"
 
-    def test_verify_session_token_expired(self):
-        """verify_session_token returns None for expired token."""
+    def test_create_session_token_mints_a_unique_jti(self):
+        """Every session carries an id, which is what logout can revoke.
+
+        Without one there is nothing to record: `POST /auth/logout` cleared the
+        cookie and the 24h JWT it had issued stayed valid for anyone holding a
+        copy.
+        """
+        first = decode_session_token(create_session_token("u", "o", "e@x.test"))
+        second = decode_session_token(create_session_token("u", "o", "e@x.test"))
+
+        assert first is not None and second is not None
+        assert first["jti"] and second["jti"]
+        assert first["jti"] != second["jti"]
+
+    def test_decode_session_token_expired(self):
+        """decode_session_token returns None for expired token."""
         # Create token that's already expired
         token = create_session_token(
             user_id="user_123",
@@ -434,18 +589,18 @@ class TestSessionTokenFunctions:
             expires_hours=-1,  # Expired an hour ago
         )
 
-        payload = verify_session_token(token)
+        payload = decode_session_token(token)
 
         assert payload is None
 
-    def test_verify_session_token_invalid(self):
-        """verify_session_token returns None for invalid token."""
-        payload = verify_session_token("invalid.token.here")
+    def test_decode_session_token_invalid(self):
+        """decode_session_token returns None for invalid token."""
+        payload = decode_session_token("invalid.token.here")
 
         assert payload is None
 
-    def test_verify_session_token_wrong_type(self):
-        """verify_session_token returns None for non-session token type."""
+    def test_decode_session_token_wrong_type(self):
+        """decode_session_token returns None for non-session token type."""
         import jwt
         from app.config import get_settings
 
@@ -458,19 +613,50 @@ class TestSessionTokenFunctions:
             algorithm="HS256",
         )
 
-        payload = verify_session_token(token)
+        payload = decode_session_token(token)
 
         assert payload is None
+
+
+class TestSessionRevocation:
+    """Logging out has to actually invalidate the session it issued."""
+
+    def test_verify_accepts_a_live_session(self, oauth_db):
+        token = create_session_token("user_live", "org_abc", "live@example.com")
+
+        payload = _run(verify_session_token(token))
+
+        assert payload is not None
+        assert payload["sub"] == "user_live"
+
+    def test_revoked_token_stops_verifying(self, oauth_db):
+        token = create_session_token("user_out", "org_abc", "out@example.com")
+        assert _run(verify_session_token(token)) is not None
+
+        assert _run(revoke_session(token)) is True
+
+        assert _run(verify_session_token(token)) is None
+        # The signature is still valid — it is the revocation record that
+        # rejects it, so a stolen copy of the cookie is dead too.
+        assert decode_session_token(token) is not None
+
+    def test_revoking_one_session_leaves_the_others_alone(self, oauth_db):
+        laptop = create_session_token("user_two", "org_abc", "two@example.com")
+        phone = create_session_token("user_two", "org_abc", "two@example.com")
+
+        _run(revoke_session(laptop))
+
+        assert _run(verify_session_token(laptop)) is None
+        assert _run(verify_session_token(phone)) is not None
+
+    def test_revoking_a_junk_token_is_a_no_op(self, oauth_db):
+        assert _run(revoke_session("not.a.token")) is False
 
 
 class TestOAuthAccountFunctions:
     """Tests for OAuth account management functions."""
 
-    def setup_method(self):
-        """Clear state before each test."""
-        _clear_oauth_state()
-
-    def test_link_oauth_account_creates_account(self):
+    def test_link_oauth_account_creates_account(self, oauth_db):
         """link_oauth_account creates and stores an account."""
         oauth_user = OAuthUser(
             provider="google",
@@ -480,7 +666,7 @@ class TestOAuthAccountFunctions:
             avatar_url="https://example.com/alice.png",
         )
 
-        account = link_oauth_account("user_alice", oauth_user)
+        account = _run(link_oauth_account("user_alice", oauth_user))
 
         assert account.user_id == "user_alice"
         assert account.provider == "google"
@@ -488,8 +674,13 @@ class TestOAuthAccountFunctions:
         assert account.email == "alice@example.com"
         assert account.name == "Alice Smith"
 
-    def test_link_oauth_account_adds_to_user_accounts(self):
-        """link_oauth_account associates account with user."""
+    def test_link_oauth_account_survives_a_restart(self, oauth_db):
+        """The link is a row, so a fresh engine still finds it.
+
+        `_OAUTH_ACCOUNTS` was a module dict: every provider link was lost on
+        restart, `/auth/me` reported `providers: []` for someone who had just
+        signed in, and their next login minted a different local user id.
+        """
         oauth_user = OAuthUser(
             provider="github",
             provider_id="github_67890",
@@ -497,12 +688,34 @@ class TestOAuthAccountFunctions:
             name="Bob Jones",
         )
 
-        link_oauth_account("user_bob", oauth_user)
+        _run(link_oauth_account("user_bob", oauth_user))
 
-        assert "user_bob" in _USER_ACCOUNTS
-        assert "github:github_67890" in _USER_ACCOUNTS["user_bob"]
+        # Drop the engine the way a process restart would.
+        _run(db_engine.close_db())
 
-    def test_find_account_by_provider_found(self):
+        accounts = _run(get_user_accounts("user_bob"))
+        assert [(a.provider, a.provider_id) for a in accounts] == [("github", "github_67890")]
+
+    def test_relinking_keeps_the_original_local_user(self, oauth_db):
+        """A provider identity stays bound to the user it first created.
+
+        Re-pointing it would be an account takeover: anyone who can present the
+        same provider id could attach it to a local user of their choosing.
+        """
+        oauth_user = OAuthUser(
+            provider="google",
+            provider_id="g_stable",
+            email="stable@example.com",
+            name="Stable",
+        )
+        _run(link_oauth_account("user_first", oauth_user))
+
+        again = _run(link_oauth_account("user_second", oauth_user))
+
+        assert again.user_id == "user_first"
+        assert _run(get_user_accounts("user_second")) == []
+
+    def test_find_account_by_provider_found(self, oauth_db):
         """find_account_by_provider returns matching account."""
         oauth_user = OAuthUser(
             provider="google",
@@ -510,20 +723,20 @@ class TestOAuthAccountFunctions:
             email="test@example.com",
             name="Test User",
         )
-        link_oauth_account("user_test", oauth_user)
+        _run(link_oauth_account("user_test", oauth_user))
 
-        account = find_account_by_provider("google", "google_111")
+        account = _run(find_account_by_provider("google", "google_111"))
 
         assert account is not None
         assert account.email == "test@example.com"
 
-    def test_find_account_by_provider_not_found(self):
+    def test_find_account_by_provider_not_found(self, oauth_db):
         """find_account_by_provider returns None for non-existent account."""
-        account = find_account_by_provider("google", "nonexistent")
+        account = _run(find_account_by_provider("google", "nonexistent"))
 
         assert account is None
 
-    def test_find_account_by_email_found(self):
+    def test_find_account_by_email_found(self, oauth_db):
         """find_account_by_email returns matching account."""
         oauth_user = OAuthUser(
             provider="github",
@@ -531,14 +744,14 @@ class TestOAuthAccountFunctions:
             email="unique@example.com",
             name="Unique User",
         )
-        link_oauth_account("user_unique", oauth_user)
+        _run(link_oauth_account("user_unique", oauth_user))
 
-        account = find_account_by_email("unique@example.com")
+        account = _run(find_account_by_email("unique@example.com"))
 
         assert account is not None
         assert account.provider == "github"
 
-    def test_find_account_by_email_case_insensitive(self):
+    def test_find_account_by_email_case_insensitive(self, oauth_db):
         """find_account_by_email is case-insensitive."""
         oauth_user = OAuthUser(
             provider="google",
@@ -546,19 +759,19 @@ class TestOAuthAccountFunctions:
             email="CaSeSeNsItIvE@Example.COM",
             name="Case Test",
         )
-        link_oauth_account("user_case", oauth_user)
+        _run(link_oauth_account("user_case", oauth_user))
 
-        account = find_account_by_email("casesensitive@example.com")
+        account = _run(find_account_by_email("casesensitive@example.com"))
 
         assert account is not None
 
-    def test_find_account_by_email_not_found(self):
+    def test_find_account_by_email_not_found(self, oauth_db):
         """find_account_by_email returns None for non-existent email."""
-        account = find_account_by_email("notfound@example.com")
+        account = _run(find_account_by_email("notfound@example.com"))
 
         assert account is None
 
-    def test_get_user_accounts_returns_all(self):
+    def test_get_user_accounts_returns_all(self, oauth_db):
         """get_user_accounts returns all linked accounts for user."""
         oauth_google = OAuthUser(
             provider="google",
@@ -572,19 +785,19 @@ class TestOAuthAccountFunctions:
             email="multi@example.com",
             name="Multi User",
         )
-        link_oauth_account("user_multi", oauth_google)
-        link_oauth_account("user_multi", oauth_github)
+        _run(link_oauth_account("user_multi", oauth_google))
+        _run(link_oauth_account("user_multi", oauth_github))
 
-        accounts = get_user_accounts("user_multi")
+        accounts = _run(get_user_accounts("user_multi"))
 
         assert len(accounts) == 2
         providers = [a.provider for a in accounts]
         assert "google" in providers
         assert "github" in providers
 
-    def test_get_user_accounts_empty(self):
+    def test_get_user_accounts_empty(self, oauth_db):
         """get_user_accounts returns empty list for unknown user."""
-        accounts = get_user_accounts("nonexistent_user")
+        accounts = _run(get_user_accounts("nonexistent_user"))
 
         assert accounts == []
 
@@ -714,6 +927,68 @@ class TestOAuthLoginEndpoint:
 
                 with pytest.raises(HTTPException) as exc_info:
                     await oauth_login("google", mock_request, redirect_uri="https://evil.example/steal")
+
+                assert exc_info.value.status_code == 400
+
+        _run(scenario())
+
+    def test_oauth_login_accepts_its_own_origin(self):
+        """The app's own URL is an allowed redirect target without extra config.
+
+        The allowlist was built from CORS_ORIGINS alone, and a single-origin
+        deployment — the shipped layout, where the SPA is served by this very
+        app — has no cross-origin entry to list. So the frontend's own
+        `redirect_uri=https://app.example.com/dashboard` was rejected 400 and
+        login was impossible until someone thought to add the app's own URL to a
+        *cross*-origin setting.
+        """
+        from app.auth.endpoints import oauth_login
+
+        async def scenario():
+            mock_request = MagicMock()
+            mock_request.base_url = "https://app.example.com/"
+            mock_request.headers = {}
+
+            with patch("app.auth.endpoints.get_available_providers") as mock_providers, \
+                 patch("app.auth.endpoints.get_authorization_url") as mock_auth_url:
+                mock_providers.return_value = ["google"]
+                mock_auth_url.return_value = "https://accounts.google.com/o/oauth2"
+
+                result = await oauth_login(
+                    "google", mock_request, redirect_uri="https://app.example.com/dashboard"
+                )
+
+                assert result.status_code == 302
+
+        _run(scenario())
+
+    def test_a_forged_forwarded_host_cannot_name_its_own_origin(self):
+        """"Own origin" is what the server was reached on, not what the caller claims.
+
+        Reading X-Forwarded-Host here would undo the allowlist entirely: anyone
+        could send `X-Forwarded-Host: evil.test` alongside
+        `redirect_uri=https://evil.test/steal` and have their own domain declared
+        allowed, which is exactly the handoff the validation exists to stop.
+        Behind a real proxy the origin arrives via `base_url` (uvicorn
+        --proxy-headers) or is configured as FRONTEND_URL/CORS_ORIGINS.
+        """
+        from app.auth.endpoints import oauth_login
+
+        async def scenario():
+            mock_request = MagicMock()
+            mock_request.base_url = "https://app.example.com/"
+            mock_request.headers = {
+                "x-forwarded-host": "evil.test",
+                "x-forwarded-proto": "https",
+            }
+
+            with patch("app.auth.endpoints.get_available_providers") as mock_providers:
+                mock_providers.return_value = ["google"]
+
+                with pytest.raises(HTTPException) as exc_info:
+                    await oauth_login(
+                        "google", mock_request, redirect_uri="https://evil.test/steal"
+                    )
 
                 assert exc_info.value.status_code == 400
 
@@ -1053,12 +1328,14 @@ class TestOAuthCallbackEndpoint:
                  patch("app.auth.endpoints.exchange_code_for_token") as mock_exchange, \
                  patch("app.auth.endpoints.get_user_info") as mock_userinfo, \
                  patch("app.auth.endpoints.find_account_by_provider") as mock_find_provider, \
+                 patch("app.auth.endpoints.touch_account_login") as mock_touch, \
                  patch("app.auth.endpoints.create_session_token") as mock_create_token, \
                  patch("app.auth.endpoints.get_settings") as mock_settings:
                 mock_verify.return_value = "google"
                 mock_exchange.return_value = {"access_token": "token_xyz"}
                 mock_userinfo.return_value = oauth_user
                 mock_find_provider.return_value = existing_account
+                mock_touch.return_value = None
                 mock_create_token.return_value = "session_token_abc"
                 mock_settings.return_value.is_production = False
 
@@ -1086,11 +1363,38 @@ class TestLogoutEndpoint:
 
         async def scenario():
             mock_response = MagicMock()
+            mock_request = MagicMock()
+            mock_request.cookies = {}
+            mock_request.headers = {}
 
-            result = await logout(mock_response)
+            result = await logout(mock_request, mock_response)
 
             mock_response.delete_cookie.assert_called_once_with("session")
-            assert result == {"status": "logged_out"}
+            assert result == {"status": "logged_out", "revoked": "false"}
+
+        _run(scenario())
+
+    def test_logout_revokes_the_session_it_ends(self, oauth_db):
+        """The token stops working, not just the cookie.
+
+        Deleting the cookie alone left the JWT valid for its full 24 hours: a
+        copy taken from the browser, or out of a logged URL fragment, could not
+        be withdrawn short of rotating COPILOT_SECRET_KEY — which is also the
+        secrets-vault KEK, so rotating it is not a logout, it is an outage.
+        """
+        from app.auth.endpoints import logout
+
+        async def scenario():
+            token = create_session_token("user_bye", "org_abc", "bye@example.com")
+            mock_response = MagicMock()
+            mock_request = MagicMock()
+            mock_request.cookies = {"session": token}
+            mock_request.headers = {}
+
+            result = await logout(mock_request, mock_response)
+
+            assert result == {"status": "logged_out", "revoked": "true"}
+            assert await verify_session_token(token) is None
 
         _run(scenario())
 
@@ -1370,10 +1674,11 @@ class TestSecurityValidations:
         state = generate_oauth_state("google")
 
         # Manually expire the state
-        provider, _ = _OAUTH_STATES[state]
+        provider, _, link_user_id = _OAUTH_STATES[state]
         _OAUTH_STATES[state] = (
             provider,
-            datetime.now(timezone.utc) - timedelta(minutes=20)
+            datetime.now(timezone.utc) - timedelta(minutes=20),
+            link_user_id,
         )
 
         result = verify_oauth_state(state)
@@ -1388,7 +1693,7 @@ class TestSecurityValidations:
             expires_hours=-1,  # Already expired
         )
 
-        payload = verify_session_token(token)
+        payload = decode_session_token(token)
         assert payload is None
 
     def test_session_token_type_validation(self):
@@ -1409,7 +1714,7 @@ class TestSecurityValidations:
             algorithm="HS256",
         )
 
-        payload = verify_session_token(wrong_type_token)
+        payload = decode_session_token(wrong_type_token)
         assert payload is None
 
     def test_cookie_httponly_setting(self):

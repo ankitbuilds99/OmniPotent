@@ -253,6 +253,14 @@ class Settings(BaseSettings):
     # provisions the free plan (upgrades go through billing). Disable in locked-down
     # deployments to require admin-side provisioning (CLI / /admin).
     copilot_signup_enabled: bool = True
+    # Who may complete OAuth/SSO login. OAuth authenticates against the *provider*,
+    # not against this deployment: with GitHub login switched on and no allowlist,
+    # every GitHub account on the internet can finish the flow and be issued a
+    # session token. Comma-separated addresses and/or domains ("acme.com" matches
+    # anyone @acme.com). Empty means no allowlist — see app/auth/endpoints.py
+    # `_authorize_oauth_login` for what that permits in each mode.
+    copilot_oauth_allowed_emails: str = ""
+    copilot_oauth_allowed_domains: str = ""
     # SCIM 2.0 provisioning (enterprise SSO): a bearer token the IdP presents to the
     # /scim/v2/Users endpoints, scoped to one org. Empty = SCIM disabled (403).
     # Authentication itself is OIDC/JWT via supabase_jwks_url (app/tenancy/supabase_auth.py).
@@ -542,6 +550,41 @@ class Settings(BaseSettings):
         base = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
         extra = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
         return base + extra
+
+    @property
+    def oauth_allowed_emails(self) -> set[str]:
+        """Explicit addresses permitted to log in through OAuth (lowercased)."""
+        return {
+            e.strip().lower()
+            for e in self.copilot_oauth_allowed_emails.split(",")
+            if e.strip()
+        }
+
+    @property
+    def oauth_allowed_domains(self) -> set[str]:
+        """Email domains permitted to log in through OAuth (lowercased, no '@')."""
+        return {
+            d.strip().lower().lstrip("@")
+            for d in self.copilot_oauth_allowed_domains.split(",")
+            if d.strip()
+        }
+
+    @property
+    def oauth_allowlist_configured(self) -> bool:
+        return bool(self.oauth_allowed_emails or self.oauth_allowed_domains)
+
+    def oauth_email_allowed(self, email: str) -> bool:
+        """Whether this address matches the configured allowlist.
+
+        Meaningless unless `oauth_allowlist_configured` — an empty allowlist
+        matches nothing, and callers must decide what "unconfigured" means for
+        their deployment mode rather than reading it as "deny everyone".
+        """
+        addr = (email or "").strip().lower()
+        if not addr:
+            return False
+        domain = addr.split("@")[-1] if "@" in addr else ""
+        return addr in self.oauth_allowed_emails or domain in self.oauth_allowed_domains
 
     @property
     def sync_allowed_hosts(self) -> set[str]:

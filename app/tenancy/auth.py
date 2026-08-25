@@ -113,7 +113,7 @@ async def resolve_session(token: str) -> tuple[TenantConfig, str] | None:
     """
     from app.auth.oauth import verify_session_token
 
-    claims = verify_session_token(token)
+    claims = await verify_session_token(token)
     if not claims:
         return None
     email = (claims.get("email") or "").strip().lower()

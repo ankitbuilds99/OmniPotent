@@ -489,9 +489,24 @@ async def require_auth(conn: HTTPConnection) -> None:
     # Auth routes need to be open for OAuth login/callback flows.
     if any(conn.url.path.startswith(p) for p in _AUTH_PATH_PREFIXES):
         return
-    # Webhooks authenticate via their own provider signatures (HMAC), not the
-    # shared bearer token — PagerDuty/Slack don't send it.
-    if conn.url.path.startswith("/webhooks/"):
+    # Webhooks authenticate per-route, not with the shared bearer token, because
+    # the sending platform cannot be told to present it in the form this gate
+    # wants: PagerDuty/GitHub/GitLab sign the body (verified in the handler,
+    # fail-closed), and the receivers that have no signature at all —
+    # Alertmanager, Datadog, Grafana, /generic — go through
+    # `app.webhooks.router._verify_shared_secret`, which accepts the shared
+    # secret as X-Webhook-Secret, bearer or basic-auth password. Skipping here
+    # moves the credential check, it does not remove it.
+    #
+    # Both prefixes, because there are two mounts: `POST /webhooks/stripe` is
+    # declared on the app directly, while app/webhooks/router.py (Alertmanager,
+    # Grafana, Datadog, PagerDuty, the generic receiver) carries its own
+    # `/webhooks` prefix and is included with `prefix="/api"` — so it really
+    # lives at /api/webhooks/*. Only the first prefix was listed, so on any
+    # deployment with COPILOT_API_TOKEN set every alert delivery was rejected
+    # 401 before reaching its signature check, and no alert ever became an
+    # incident.
+    if conn.url.path.startswith(("/webhooks/", "/api/webhooks/")):
         return
     # The Slack bot router is mounted at /api/slack and is the same case: Slack
     # signs every request with X-Slack-Signature and never sends an Authorization
@@ -558,7 +573,7 @@ async def require_auth(conn: HTTPConnection) -> None:
     if token.count(".") == 2:
         from app.auth.oauth import verify_session_token
 
-        if verify_session_token(token) is not None:
+        if await verify_session_token(token) is not None:
             return
     raise _reject(conn, "Missing or invalid API token.")
 
@@ -2969,16 +2984,30 @@ async def admin_set_plan(req: SetPlanRequest, org_id: str = "") -> dict:
 # but still IP rate-limited. Always provisions the FREE plan; upgrades go through
 # billing/admin so signup can't self-assign a paid tier.
 # --------------------------------------------------------------------------- #
-def _scim_guard(request: Request) -> str:
+async def _scim_guard(request: Request) -> str:
     """Authenticate a SCIM request via COPILOT_SCIM_TOKEN and return the target org.
-    Raises 403 when SCIM is unconfigured, 401 on a bad token."""
+    Raises 403 when SCIM is unconfigured, 401 on a bad token, 503 when
+    COPILOT_SCIM_ORG names an org that does not exist.
+
+    That last check is the point of this being async. The guard only tested that
+    the setting was non-empty, so a typo'd org id made every provisioning call
+    return 201 to the IdP while writing a membership row pointing at nothing —
+    and `resolve_session`/`resolve_jwt` return None when the org lookup misses,
+    so each "successfully provisioned" user got 401 on every route. Failing here
+    puts the error in front of the administrator who can fix it."""
     s = get_settings()
     if not (s.copilot_scim_token and s.copilot_scim_org):
         raise HTTPException(403, "SCIM provisioning is not configured.")
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    if token != s.copilot_scim_token:
+    if not hmac.compare_digest(token, s.copilot_scim_token):
         raise HTTPException(401, "Invalid SCIM token.")
+    if await tenant_auth.get_store().get_org(s.copilot_scim_org) is None:
+        raise HTTPException(
+            503,
+            f"COPILOT_SCIM_ORG '{s.copilot_scim_org}' is not a provisioned "
+            "organization; users cannot be added to it.",
+        )
     return s.copilot_scim_org
 
 
@@ -3005,7 +3034,7 @@ async def scim_create_user(request: Request) -> dict:
         dict: SCIM user resource.
     """
     from app.tenancy import scim
-    org_id = _scim_guard(request)
+    org_id = await _scim_guard(request)
     payload = scim.parse_scim_user(await request.json())
     if not payload["email"]:
         raise HTTPException(400, "SCIM user requires userName (email).")
@@ -3043,7 +3072,7 @@ async def scim_deprovision_user(email: str, request: Request) -> dict:
         dict: Deprovisioning confirmation.
     """
     from app.tenancy import scim
-    org_id = _scim_guard(request)
+    org_id = await _scim_guard(request)
     # DELETE always deprovisions; PATCH deprovisions when it sets active=false.
     if request.method == "PATCH":
         body = await request.json()

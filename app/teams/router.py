@@ -65,7 +65,7 @@ def _principal_for_opaque_token(token: str) -> dict[str, Any] | None:
     return None
 
 
-def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
+async def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
     """Resolve the caller's identity from the Authorization header.
 
     The signature is verified. A previous version base64-decoded the JWT payload
@@ -83,7 +83,7 @@ def _get_user_from_header(authorization: str | None) -> dict[str, Any]:
         # token our own OAuth callback mints (HS256 over COPILOT_SECRET_KEY). Only
         # the first was accepted, so a user who signed in with GitHub/Google got
         # "Invalid or expired token" on every team route. Both are signature-checked.
-        claims = verify_jwt(token) or verify_session_token(token)
+        claims = verify_jwt(token) or await verify_session_token(token)
         if claims is None:
             raise HTTPException(
                 status_code=401,
@@ -152,7 +152,7 @@ async def create_team(
     authorization: str | None = Header(None),
 ) -> TeamResponse:
     """Create a new team."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     try:
@@ -181,7 +181,7 @@ async def list_teams(
     authorization: str | None = Header(None),
 ) -> list[TeamResponse]:
     """List all teams the user belongs to."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     teams = await store.get_user_teams(user["id"])
@@ -205,7 +205,7 @@ async def get_team(
     authorization: str | None = Header(None),
 ) -> TeamResponse:
     """Get team details."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     team = await store.get_team(team_id)
@@ -234,7 +234,7 @@ async def update_team(
     authorization: str | None = Header(None),
 ) -> TeamResponse:
     """Update team settings. Requires admin or owner role."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
@@ -267,7 +267,7 @@ async def delete_team(
     authorization: str | None = Header(None),
 ) -> dict[str, str]:
     """Delete a team. Only owner can delete."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     await _check_team_permission(team_id, user["id"], [TeamRole.OWNER])
@@ -285,7 +285,7 @@ async def list_members(
     authorization: str | None = Header(None),
 ) -> list[TeamMemberResponse]:
     """List all team members."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     # Any member can view the member list
@@ -315,7 +315,7 @@ async def update_member_role(
     authorization: str | None = Header(None),
 ) -> TeamMemberResponse:
     """Update a member's role. Requires admin or owner."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
@@ -349,7 +349,7 @@ async def remove_member(
     authorization: str | None = Header(None),
 ) -> dict[str, str]:
     """Remove a member from team. Admins+ can remove, users can leave."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     # Users can remove themselves (leave)
@@ -371,7 +371,7 @@ async def list_invitations(
     authorization: str | None = Header(None),
 ) -> list[InvitationResponse]:
     """List pending invitations. Requires admin or owner."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
@@ -397,7 +397,7 @@ async def invite_member(
     authorization: str | None = Header(None),
 ) -> InvitationResponse:
     """Invite a new member. Requires admin or owner."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
@@ -442,7 +442,7 @@ async def cancel_invitation(
     authorization: str | None = Header(None),
 ) -> dict[str, str]:
     """Cancel a pending invitation. Requires admin or owner."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     await _check_team_permission(team_id, user["id"], [TeamRole.OWNER, TeamRole.ADMIN])
@@ -466,7 +466,7 @@ async def accept_invitation(
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
     """Accept an invitation to join a team."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     # The invitation id is not a bearer credential: it is returned to the inviter
@@ -516,7 +516,7 @@ async def get_my_invitations(
     authorization: str | None = Header(None),
 ) -> list[dict[str, Any]]:
     """Get all pending invitations for the current user."""
-    user = _get_user_from_header(authorization)
+    user = await _get_user_from_header(authorization)
     store = get_team_store()
 
     invitations = await store.get_user_pending_invitations(user["email"])
