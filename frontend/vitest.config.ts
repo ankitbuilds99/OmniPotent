@@ -38,11 +38,16 @@ export default defineConfig({
       // Set just under what the suite measures today, so the step passes and
       // a genuine failure fails the build. Raise these as tests get written;
       // the numbers are meant to be embarrassing enough to prompt that.
+      //
+      // Ratcheted once already: 0.9/10/40/0.9 -> here, after page-level tests
+      // for OnCall, Postmortem, RunbookBuilder, ServiceMap, Team,
+      // IntegrationMarketplace, OnboardingWizard and the api client took line
+      // coverage from 0.99% to 20.8%.
       thresholds: {
-        lines: 0.9,
-        functions: 10,
-        branches: 40,
-        statements: 0.9,
+        lines: 20,
+        functions: 38,
+        branches: 72,
+        statements: 20,
       },
     },
   },
