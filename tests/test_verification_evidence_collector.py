@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import threading
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -125,12 +130,23 @@ class TestEvidenceCollector:
         await collector.close()
 
     @pytest.mark.asyncio
-    async def test_get_http_client_with_github_token(self):
-        """Should include auth header with GitHub token."""
+    async def test_github_token_is_not_a_default_header_on_the_shared_client(self):
+        """The GitHub token must be attached per-request, to GitHub only.
+
+        The one httpx client is also used for Prometheus, Loki and
+        Elasticsearch. A default Authorization header would have leaked the
+        GitHub token to every one of those hosts.
+        """
         collector = EvidenceCollector(github_token="ghp_test123")
         client = await collector._get_http_client()
-        assert "Authorization" in client.headers
+        assert "Authorization" not in client.headers
+        assert collector._github_headers()["Authorization"] == "token ghp_test123"
         await collector.close()
+
+    @pytest.mark.asyncio
+    async def test_github_headers_omit_authorization_without_a_token(self):
+        collector = EvidenceCollector()
+        assert "Authorization" not in collector._github_headers()
 
     @pytest.mark.asyncio
     async def test_close(self):
@@ -401,6 +417,13 @@ class TestEvidenceCollector:
         assert evidence == []
 
     @pytest.mark.asyncio
+    async def test_collect_git_evidence_without_a_repo(self):
+        """A token with no repo has nothing to read commits from."""
+        collector = EvidenceCollector(github_token="ghp_token")
+        evidence = await collector._collect_git_evidence("Test", "svc", 60)
+        assert evidence == []
+
+    @pytest.mark.asyncio
     async def test_collect_graph_evidence_no_graph(self):
         """Should return empty without knowledge graph."""
         collector = EvidenceCollector()
@@ -600,3 +623,166 @@ class TestEvidenceCollectorIntegration:
         for ev in evidence:
             if ev.resource_type == "Deployment":
                 assert ev.confidence >= 0.9
+
+
+class _GitHubHandler(BaseHTTPRequestHandler):
+    """A real HTTP server that answers GitHub's list-commits endpoint."""
+
+    commits: list[dict] = []
+    requests: list[tuple[str, dict]] = []
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        parsed = urlparse(self.path)
+        type(self).requests.append((parsed.path, dict(self.headers)))
+
+        if not parsed.path.endswith("/commits"):
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        payload = json.dumps(type(self).commits).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args) -> None:  # noqa: A003 - silence test noise
+        return
+
+
+@pytest.fixture
+def github_api():
+    """A GitHub-shaped HTTP API on localhost. Returns its base URL."""
+    _GitHubHandler.commits = []
+    _GitHubHandler.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _GitHubHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _commit(sha: str, message: str, author: str = "Ada") -> dict:
+    return {
+        "sha": sha,
+        "commit": {
+            "message": message,
+            "author": {"name": author, "date": "2026-01-01T00:00:00Z"},
+        },
+    }
+
+
+class TestGitEvidence:
+    """`_collect_git_evidence` used to be `if not token: return []` followed
+    immediately by `return []` — the GIT source could never produce anything."""
+
+    @pytest.mark.asyncio
+    async def test_commits_touching_the_service_become_evidence(self, github_api):
+        _GitHubHandler.commits = [
+            _commit("aaa111", "checkout: raise pool size\n\ndetails"),
+            _commit("bbb222", "docs: unrelated tweak"),
+        ]
+        collector = EvidenceCollector(
+            github_token="ghp_token",
+            github_repo="acme/platform",
+            github_api_url=github_api,
+        )
+
+        evidence = await collector._collect_git_evidence("Latency is up", "checkout", 60)
+        await collector.close()
+
+        assert len(evidence) == 1
+        ev = evidence[0]
+        assert ev.source == EvidenceSource.GIT
+        assert ev.commit_sha == "aaa111"
+        assert ev.author == "Ada"
+        assert ev.confidence == 0.8
+        assert ev.data["matched_service"] is True
+        assert ev.data["count"] == 1
+        assert ev.data["commits"][0]["message"] == "checkout: raise pool size"
+        # The token went to GitHub, and only in this request.
+        path, headers = _GitHubHandler.requests[0]
+        assert path == "/repos/acme/platform/commits"
+        assert headers["Authorization"] == "token ghp_token"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_commits_are_weaker_evidence(self, github_api):
+        _GitHubHandler.commits = [_commit("ccc333", "docs: unrelated tweak")]
+        collector = EvidenceCollector(
+            github_token="ghp_token",
+            github_repo="acme/platform",
+            github_api_url=github_api,
+        )
+
+        evidence = await collector._collect_git_evidence("Latency is up", "checkout", 60)
+        await collector.close()
+
+        assert len(evidence) == 1
+        assert evidence[0].confidence == 0.4
+        assert evidence[0].data["matched_service"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_commits_in_the_window_is_no_evidence(self, github_api):
+        _GitHubHandler.commits = []
+        collector = EvidenceCollector(
+            github_token="ghp_token",
+            github_repo="acme/platform",
+            github_api_url=github_api,
+        )
+
+        evidence = await collector._collect_git_evidence("Latency is up", "checkout", 60)
+        await collector.close()
+
+        assert evidence == []
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_github_is_not_an_exception(self):
+        collector = EvidenceCollector(
+            github_token="ghp_token",
+            github_repo="acme/platform",
+            github_api_url="http://127.0.0.1:1",
+        )
+
+        evidence = await collector._collect_git_evidence("Latency is up", "checkout", 60)
+        await collector.close()
+
+        assert evidence == []
+
+
+class TestConfiguredSources:
+    """What the deployment can actually reach — the basis for the 503."""
+
+    def test_nothing_configured_means_no_sources(self):
+        assert EvidenceCollector().configured_sources() == []
+
+    def test_each_backend_enables_its_own_source(self):
+        assert EvidenceCollector(prometheus_url="http://p").configured_sources() == [
+            EvidenceSource.METRICS
+        ]
+        assert EvidenceCollector(loki_url="http://l").configured_sources() == [
+            EvidenceSource.LOGS
+        ]
+        assert EvidenceCollector(elasticsearch_url="http://e").configured_sources() == [
+            EvidenceSource.LOGS
+        ]
+        assert EvidenceCollector(k8s_client=object()).configured_sources() == [
+            EvidenceSource.KUBERNETES
+        ]
+
+    def test_github_needs_both_a_token_and_a_repo(self):
+        assert EvidenceCollector(github_token="ghp").configured_sources() == []
+        assert EvidenceCollector(github_repo="a/b").configured_sources() == []
+        assert EvidenceCollector(
+            github_token="ghp", github_repo="a/b"
+        ).configured_sources() == [EvidenceSource.GIT]
+
+    def test_missing_config_names_the_settings_an_operator_must_set(self):
+        missing = EvidenceCollector.missing_source_config()
+        assert "PROMETHEUS_URL" in missing
+        assert "LOKI_URL or ELASTICSEARCH_URL" in missing
+        assert "GITHUB_TOKEN + GITHUB_REPO" in missing

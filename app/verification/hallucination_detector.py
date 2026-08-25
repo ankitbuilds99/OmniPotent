@@ -97,6 +97,14 @@ class HallucinationDetector:
         cited_values: dict[str, Any],
     ) -> HallucinationResult:
         """Check if claimed facts are grounded in evidence."""
+        # "Nothing to check against" is not "contradicted". With an empty
+        # evidence list every number in the claim looks unsupported, which used
+        # to make the API report true statements as fabricated_fact whenever no
+        # evidence backend was reachable. Absence of evidence is reported by the
+        # caller as INSUFFICIENT_DATA instead.
+        if not evidence:
+            return HallucinationResult(detected=False)
+
         numeric_claims = self._extract_numeric_claims(claim_text)
 
         for value, unit, context in numeric_claims:
@@ -143,6 +151,10 @@ class HallucinationDetector:
         evidence: list[Evidence],
     ) -> HallucinationResult:
         """Check if source citations are accurate."""
+        # No evidence at all means the citation could not be checked either way.
+        if not evidence:
+            return HallucinationResult(detected=False)
+
         for source in cited_sources:
             source_found = any(
                 source.lower() in ev.source.value.lower()
@@ -167,6 +179,11 @@ class HallucinationDetector:
         evidence: list[Evidence],
     ) -> HallucinationResult:
         """Check if temporal claims are accurate."""
+        # Same rule as the other evidence-comparing checks: with nothing
+        # collected we cannot say a timing is wrong.
+        if not evidence:
+            return HallucinationResult(detected=False)
+
         time_refs = self._extract_time_references(claim_text)
 
         for time_ref, event_desc in time_refs:

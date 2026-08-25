@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -24,6 +25,7 @@ from app.verification.confidence_calibrator import (
 from app.verification.consistency_checker import (
     ActionSafetyCheck,
     DataConsistencyChecker,
+    PostActionValidation,
 )
 from app.verification.evidence_collector import Evidence, EvidenceCollector, EvidenceSource
 from app.verification.hallucination_detector import (
@@ -69,12 +71,31 @@ class Claim:
         }
 
 
+class NoEvidenceSourcesConfigured(RuntimeError):
+    """Raised when no evidence backend is reachable, so nothing can be verified.
+
+    Callers (the HTTP layer) turn this into a 503 naming the missing settings.
+    Producing a verdict here would be a statement about the deployment's
+    configuration dressed up as a statement about the claim.
+    """
+
+    def __init__(self, missing: dict[str, str]):
+        self.missing = missing
+        super().__init__(
+            "No evidence source is configured, so this claim cannot be verified. "
+            "Set at least one of: " + ", ".join(sorted(missing))
+        )
+
+
 @dataclass
 class VerificationResult:
     """Result of verifying a claim."""
     claim_id: str
     status: VerificationStatus
     confidence: float
+
+    claim_type: str = "general"
+    verified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     supporting_evidence: list[Evidence] = field(default_factory=list)
     contradicting_evidence: list[Evidence] = field(default_factory=list)
@@ -95,8 +116,14 @@ class VerificationResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "claim_id": self.claim_id,
+            "claim_type": self.claim_type,
             "status": self.status.value,
             "confidence": self.confidence,
+            "verified_at": self.verified_at.isoformat(),
+            "evidence_sources_used": sorted(
+                {e.source.value for e in self.supporting_evidence}
+                | {e.source.value for e in self.contradicting_evidence}
+            ),
             "supporting_evidence_count": len(self.supporting_evidence),
             "contradicting_evidence_count": len(self.contradicting_evidence),
             "hallucination_detected": self.hallucination_detected,
@@ -132,8 +159,29 @@ class VerificationAgent:
         self.calibration = confidence_calibrator or ConfidenceCalibrator()
         self.consistency = consistency_checker or DataConsistencyChecker()
 
-        self._verification_cache: dict[str, VerificationResult] = {}
+        # Keyed by claim id alone. It used to be keyed by f"{id}:{text[:50]}"
+        # while record_verification_outcome() looked up the bare id, so no
+        # outcome was ever recorded and the calibration endpoint had nothing to
+        # report while still answering "recorded" to every caller.
+        self._verification_cache: OrderedDict[str, VerificationResult] = OrderedDict()
         self._cache_ttl_seconds = 300
+        # Results are retained past the TTL (which only governs re-use of a
+        # verdict) so a human can report the real outcome later; bounded so a
+        # long-lived process cannot grow without limit.
+        self._max_cached_results = 1000
+
+        # Pre-action checks, so POST /actions/{id}/validate has the expected
+        # post-state to compare the cluster against.
+        self._action_checks: OrderedDict[str, ActionSafetyCheck] = OrderedDict()
+        self._max_action_checks = 500
+
+    def evidence_sources_available(self) -> list[EvidenceSource]:
+        """Evidence backends this agent can actually reach."""
+        return self.evidence.configured_sources()
+
+    def _require_evidence_sources(self) -> None:
+        if not self.evidence_sources_available():
+            raise NoEvidenceSourcesConfigured(self.evidence.missing_source_config())
 
     async def verify_claim(
         self,
@@ -153,11 +201,13 @@ class VerificationAgent:
         """
         start_time = datetime.now(timezone.utc)
 
-        cache_key = f"{claim.id}:{claim.text[:50]}"
-        if use_cache and cache_key in self._verification_cache:
-            cached = self._verification_cache[cache_key]
-            log.debug("Returning cached verification for %s", claim.id)
-            return cached
+        cached = self._verification_cache.get(claim.id)
+        if use_cache and cached is not None:
+            age = (start_time - cached.verified_at).total_seconds()
+            if age <= self._cache_ttl_seconds:
+                log.debug("Returning cached verification for %s", claim.id)
+                self._verification_cache.move_to_end(claim.id)
+                return cached
 
         evidence = await self.evidence.collect_evidence(
             claim_text=claim.text,
@@ -204,6 +254,7 @@ class VerificationAgent:
 
         result = VerificationResult(
             claim_id=claim.id,
+            claim_type=claim.claim_type,
             status=status,
             confidence=confidence,
             supporting_evidence=supporting,
@@ -219,7 +270,10 @@ class VerificationAgent:
             verification_time_ms=verification_time_ms,
         )
 
-        self._verification_cache[cache_key] = result
+        self._verification_cache[claim.id] = result
+        self._verification_cache.move_to_end(claim.id)
+        while len(self._verification_cache) > self._max_cached_results:
+            self._verification_cache.popitem(last=False)
 
         return result
 
@@ -239,7 +293,20 @@ class VerificationAgent:
         Returns:
             ActionSafetyCheck with safety assessment
         """
-        return await self.consistency.pre_action_check(action_type, target, params)
+        check = await self.consistency.pre_action_check(action_type, target, params)
+        self._remember_action_check(check)
+        return check
+
+    def _remember_action_check(self, check: ActionSafetyCheck) -> None:
+        """Retain a pre-action check so its result can later be validated."""
+        self._action_checks[check.action_id] = check
+        self._action_checks.move_to_end(check.action_id)
+        while len(self._action_checks) > self._max_action_checks:
+            self._action_checks.popitem(last=False)
+
+    def get_action_check(self, action_id: str) -> ActionSafetyCheck | None:
+        """The pre-action check with this id, or None if it is not known."""
+        return self._action_checks.get(action_id)
 
     async def validate_action_result(
         self,
@@ -256,6 +323,24 @@ class VerificationAgent:
             True if action succeeded as expected
         """
         return await self.consistency.post_action_validate(check, timeout_seconds)
+
+    async def validate_action_by_id(
+        self,
+        action_id: str,
+        timeout_seconds: int = 60,
+    ) -> PostActionValidation:
+        """Validate a previously checked action by its id.
+
+        Raises:
+            KeyError: if no pre-action check with that id is known.
+        """
+        check = self.get_action_check(action_id)
+        if check is None:
+            raise KeyError(action_id)
+
+        return await self.consistency.post_action_validate_detailed(
+            check, timeout_seconds
+        )
 
     async def verify_multiple_claims(
         self,
@@ -413,7 +498,7 @@ class VerificationAgent:
         self,
         claim_id: str,
         was_correct: bool,
-    ) -> None:
+    ) -> bool:
         """Record the actual outcome of a verified claim.
 
         Used to improve calibration over time.
@@ -421,26 +506,45 @@ class VerificationAgent:
         Args:
             claim_id: The claim that was verified
             was_correct: Whether the claim turned out to be correct
+
+        Returns:
+            True if the claim was known and the outcome was recorded. False
+            means nothing was recorded - the caller must not report success.
         """
         cached = self._verification_cache.get(claim_id)
-        if cached:
-            await self.calibration.record_outcome(
-                claim_type="general",
-                stated_confidence=cached.confidence,
-                was_correct=was_correct,
+        if cached is None:
+            log.info(
+                "No verification on record for claim %s; outcome not recorded", claim_id
             )
+            return False
+
+        await self.calibration.record_outcome(
+            claim_type=cached.claim_type,
+            stated_confidence=cached.confidence,
+            was_correct=was_correct,
+        )
+        return True
 
     def get_calibration_stats(self) -> dict[str, Any]:
         """Get calibration statistics."""
+        recorded = self.calibration.total_predictions()
         return {
+            "recorded_outcomes": recorded,
+            # Brier/ECE over zero samples are undefined, not zero. The
+            # reliability diagram reports accuracy=None for empty bins for the
+            # same reason: an empty bin used to report the bin midpoint, which
+            # drew a flawless 45-degree calibration curve over no data at all.
             "brier_score": self.calibration.calculate_brier_score(),
             "ece": self.calibration.calculate_ece(),
             "reliability_diagram": self.calibration.get_reliability_diagram_data(),
+            "persistent": self.calibration.is_persistent,
+            "storage": self.calibration.storage_description,
         }
 
     def clear_cache(self) -> None:
         """Clear the verification cache."""
         self._verification_cache.clear()
+        self._action_checks.clear()
 
 
 def create_verification_agent(
@@ -452,6 +556,7 @@ def create_verification_agent(
     knowledge_graph: Any = None,
     redis_client: Any = None,
     llm_client: Any = None,
+    github_repo: str | None = None,
 ) -> VerificationAgent:
     """Create a fully configured verification agent.
 
@@ -467,6 +572,7 @@ def create_verification_agent(
         knowledge_graph: Knowledge graph instance
         redis_client: Redis client for caching/calibration
         llm_client: LLM client for hallucination detection
+        github_repo: "owner/repo" to read commit history from
 
     Returns:
         Configured VerificationAgent
@@ -477,6 +583,7 @@ def create_verification_agent(
         elasticsearch_url=elasticsearch_url,
         k8s_client=k8s_client,
         github_token=github_token,
+        github_repo=github_repo,
         knowledge_graph=knowledge_graph,
     )
 
