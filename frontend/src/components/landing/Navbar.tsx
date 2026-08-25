@@ -56,7 +56,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
       >
         <div className="flex items-center justify-between px-6 py-4">
           {/* Logo */}
-          <a href="/" className="flex items-center gap-2 group">
+          <a href="/" className="flex items-center gap-2 group" data-testid="nav-brand">
             <motion.div
               className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center"
               whileHover={{ rotate: 180, scale: 1.1 }}
@@ -170,6 +170,10 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
               onClick={onLaunch}
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.98 }}
+              // "Launch Console" is not a unique accessible name on this page
+              // (the mobile menu, the hero and AIChat all offer the same CTA),
+              // so the E2E suite addresses this one by test id.
+              data-testid="nav-launch-console"
             >
               Launch Console
               <ArrowRight className="w-4 h-4" />

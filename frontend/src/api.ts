@@ -3,8 +3,13 @@
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 
 import { authHeaders } from "./lib/authToken";
+import { API_BASE, wsUrl } from "./lib/apiClient";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+// One shared base with apiClient. It used to default to "http://localhost:8000",
+// which points a production browser at the user's own machine whenever
+// VITE_API_URL is unset — the setup both the Vite dev proxy and the
+// single-origin production deploy assume. "" means same-origin.
+const BASE_URL = API_BASE;
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -232,11 +237,11 @@ export async function health(): Promise<boolean> {
 // WebSocket support
 // --------------------------------------------------------------------------- //
 
-/** Get the WebSocket base URL (converts http(s) to ws(s)). */
+/** Get the WebSocket base URL (converts http(s) to ws(s)).
+ *  Delegates to apiClient so the same-origin case (BASE_URL === "") works —
+ *  `new URL("")` throws, which is what this used to do on every real deploy. */
 export function getWebSocketUrl(): string {
-  const url = new URL(BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString().replace(/\/$/, "");
+  return wsUrl("");
 }
 
 /** Get the auth token for WebSocket connections. */
