@@ -18,7 +18,14 @@ import {
   ArrowLeft
 } from 'lucide-react'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+import { API_BASE } from '../lib/apiClient'
+
+// The base this page documents and links to. apiClient's API_BASE is "" when
+// VITE_API_URL is unset (same-origin); resolve that to the page's own origin so
+// the copyable curl examples are real URLs instead of pointing at the reader's
+// own localhost:8000, which was the old default.
+const API_BASE_URL =
+  API_BASE || (typeof window !== 'undefined' ? window.location.origin : '')
 
 interface EndpointGroup {
   name: string
