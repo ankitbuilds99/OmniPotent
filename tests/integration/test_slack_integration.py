@@ -2,35 +2,79 @@
 
 from __future__ import annotations
 
+import json
+from urllib.parse import urlencode
+
 import pytest
 from httpx import AsyncClient
+
+from tests.integration.conftest import slack_headers
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
 class TestSlackWebhooks:
-    """Test Slack webhook endpoints."""
+    """The Slack routes, at the paths the router is actually mounted on.
 
-    async def test_slack_events_url_verification(self, client: AsyncClient):
-        """Slack URL verification challenge should work."""
+    These used to post to `/slack/events`, `/slack/commands` and
+    `/slack/interactions`. The router is mounted at `/api/slack` and has no
+    generic `commands` route, so all three 405'd against the SPA catch-all —
+    and the assertions allowed 404, so two of them would have passed against
+    nothing at all. Nobody noticed because CI never ran this directory.
+
+    They also sent no signature. Every route here carries a router-wide
+    `enforce_slack_signature` dependency that fails closed, so an unsigned
+    request is rejected by design; the tests sign like Slack does, and one
+    asserts that skipping the signature is refused.
+    """
+
+    async def test_unsigned_request_is_refused(self, client: AsyncClient, slack_secret: str):
+        """The signature gate is load-bearing: no signature, no handler."""
         response = await client.post(
-            "/slack/events",
-            json={
+            "/api/slack/events",
+            json={"type": "url_verification", "challenge": "c"},
+        )
+        assert response.status_code == 401
+
+    async def test_slack_is_unreachable_when_no_secret_is_configured(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An unset secret must not degrade to "accept everything"."""
+        import app.config as cfg
+
+        monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
+        cfg.get_settings.cache_clear()
+        try:
+            response = await client.post(
+                "/api/slack/events",
+                json={"type": "url_verification", "challenge": "c"},
+            )
+            assert response.status_code == 503
+        finally:
+            cfg.get_settings.cache_clear()
+
+    async def test_slack_events_url_verification(self, client: AsyncClient, slack_secret: str):
+        """Slack URL verification challenge should be echoed back."""
+        body = json.dumps(
+            {
                 "type": "url_verification",
                 "token": "test_token",
                 "challenge": "test_challenge_string",
-            },
-        )
-        # Should return the challenge
-        if response.status_code == 200:
-            data = response.json()
-            assert data.get("challenge") == "test_challenge_string"
+            }
+        ).encode()
 
-    async def test_slack_events_message(self, client: AsyncClient):
-        """Slack message events should be accepted."""
         response = await client.post(
-            "/slack/events",
-            json={
+            "/api/slack/events",
+            content=body,
+            headers={"Content-Type": "application/json", **slack_headers(body)},
+        )
+        assert response.status_code == 200
+        assert response.json().get("challenge") == "test_challenge_string"
+
+    async def test_slack_events_message(self, client: AsyncClient, slack_secret: str):
+        """Slack message events should be accepted."""
+        body = json.dumps(
+            {
                 "type": "event_callback",
                 "event": {
                     "type": "message",
@@ -41,29 +85,41 @@ class TestSlackWebhooks:
                 },
                 "team_id": "T12345",
                 "event_id": "Ev12345",
-            },
-        )
-        assert response.status_code in [200, 404]
+            }
+        ).encode()
 
-    async def test_slack_commands(self, client: AsyncClient):
-        """Slack slash commands should be processed."""
         response = await client.post(
-            "/slack/commands",
-            data={
+            "/api/slack/events",
+            content=body,
+            headers={"Content-Type": "application/json", **slack_headers(body)},
+        )
+        assert response.status_code == 200
+
+    async def test_slack_commands(self, client: AsyncClient, slack_secret: str):
+        """Slash commands are mounted per command, not on one generic route."""
+        body = urlencode(
+            {
                 "command": "/copilot",
                 "text": "help",
                 "user_id": "U12345",
                 "channel_id": "C12345",
                 "response_url": "https://hooks.slack.com/commands/test",
                 "trigger_id": "12345.67890",
+            }
+        ).encode()
+
+        response = await client.post(
+            "/api/slack/commands/help",
+            content=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                **slack_headers(body),
             },
         )
-        assert response.status_code in [200, 404]
+        assert response.status_code == 200
 
-    async def test_slack_interactions(self, client: AsyncClient):
+    async def test_slack_interactions(self, client: AsyncClient, slack_secret: str):
         """Slack interactive components should be handled."""
-        import json
-
         payload = json.dumps({
             "type": "block_actions",
             "user": {"id": "U12345", "name": "testuser"},
@@ -78,12 +134,17 @@ class TestSlackWebhooks:
             "response_url": "https://hooks.slack.com/actions/test",
             "trigger_id": "12345.67890",
         })
+        body = urlencode({"payload": payload}).encode()
 
         response = await client.post(
-            "/slack/interactions",
-            data={"payload": payload},
+            "/api/slack/interactivity",
+            content=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                **slack_headers(body),
+            },
         )
-        assert response.status_code in [200, 404]
+        assert response.status_code == 200
 
 
 class TestSlackClient:

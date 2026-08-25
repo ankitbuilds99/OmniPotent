@@ -156,6 +156,7 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 markers = [
     "contract: marks tests as contract tests (may require external services)",
+    "integration: needs a real Postgres and Redis (COPILOT_DATABASE_URL + REDIS_URL); skipped otherwise",
 ]
 
 [tool.coverage.run]
