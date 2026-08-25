@@ -2,7 +2,7 @@
  * On-Call Management Page - Real API integration
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
   ChevronLeft,
@@ -27,22 +27,57 @@ interface OnCallUser {
   slack_id?: string;
 }
 
+type ShiftRole = "primary" | "secondary" | "shadow" | "escalation";
+
 interface OnCallShift {
   id: string;
   user: OnCallUser;
-  role: "primary" | "secondary" | "escalation";
+  role: ShiftRole;
   start_time: string;
   end_time: string;
   status: "active" | "upcoming" | "completed";
 }
 
 interface OnCallSchedule {
+  /** Real schedule UUID, or "" when the team has no schedule yet. It used to
+   *  fall back to the literal "default", which every override POST rejected
+   *  with 422 "Input should be a valid UUID". */
   id: string;
   name: string;
   timezone: string;
   rotation_type: "weekly" | "daily" | "custom";
   current_shifts: OnCallShift[];
   participants: OnCallUser[];
+}
+
+/** The on-call schema has no display-name column anywhere: `oncall_*.user_id`
+ *  FKs to `members`, which holds an email. The email local part is therefore
+ *  the only real name available — this used to render "On-Call User" and
+ *  "Team Member" for every human on the page. */
+function toUser(userId: string, email?: string | null): OnCallUser {
+  const mail = email ?? "";
+  return {
+    id: userId,
+    name: mail ? mail.split("@")[0] : `user ${userId.slice(0, 8)}`,
+    email: mail,
+  };
+}
+
+async function errorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") return body.detail;
+    if (typeof body?.message === "string") return body.message;
+  } catch {
+    /* not JSON */
+  }
+  return `${fallback} (HTTP ${res.status})`;
+}
+
+function toIsoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
 }
 
 interface EscalationStep {
@@ -82,9 +117,10 @@ function RoleBadge({ role }: { role: OnCallShift["role"] }) {
   const colors: Record<string, { bg: string; text: string }> = {
     primary: { bg: "rgba(45, 212, 167, 0.2)", text: "var(--ok)" },
     secondary: { bg: "rgba(100, 145, 255, 0.2)", text: "var(--accent)" },
+    shadow: { bg: "rgba(148, 163, 184, 0.2)", text: "var(--text-2)" },
     escalation: { bg: "rgba(139, 92, 246, 0.2)", text: "#8b5cf6" },
   };
-  const c = colors[role];
+  const c = colors[role] ?? colors.primary;
   return (
     <span
       className="px-2 py-0.5 text-xs font-medium rounded-full"
@@ -209,17 +245,84 @@ function CurrentOnCall({ schedule }: { schedule: OnCallSchedule }) {
   );
 }
 
+interface RawShift {
+  id?: string;
+  user_id?: string;
+  start_time?: string;
+  end_time?: string;
+  shift_type?: string;
+  status?: string;
+}
+
 function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const today = new Date();
-  const startOfWeek = new Date(today);
-  startOfWeek.setDate(today.getDate() - today.getDay());
 
-  const weekDays = Array.from({ length: 7 }, (_, i) => {
-    const date = new Date(startOfWeek);
-    date.setDate(startOfWeek.getDate() + i);
-    return date;
-  });
+  const weekDays = useMemo(() => {
+    const now = new Date();
+    const startOfWeek = new Date(now);
+    startOfWeek.setHours(0, 0, 0, 0);
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    return Array.from({ length: 7 }, (_, i) => {
+      const date = new Date(startOfWeek);
+      date.setDate(startOfWeek.getDate() + i);
+      return date;
+    });
+  }, []);
+
+  // This grid used to assign `participants[i % participants.length]` to each
+  // weekday — an invented rotation that matched nothing in the database. These
+  // are the real shift rows for the displayed week.
+  const [weekShifts, setWeekShifts] = useState<RawShift[] | null>(null);
+  const [shiftsError, setShiftsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!schedule.id) {
+      setWeekShifts([]);
+      return;
+    }
+    let cancelled = false;
+    const from = toIsoDate(weekDays[0]);
+    const to = toIsoDate(weekDays[6]);
+    (async () => {
+      try {
+        const res = await apiFetch(
+          `/oncall/schedules/${schedule.id}/shifts?start_date=${from}&end_date=${to}`
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          setShiftsError(await errorDetail(res, "Could not load this week's shifts."));
+          setWeekShifts([]);
+          return;
+        }
+        setShiftsError(null);
+        setWeekShifts(await res.json());
+      } catch (err) {
+        if (!cancelled) {
+          setShiftsError((err as Error).message);
+          setWeekShifts([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [schedule.id, weekDays]);
+
+  const userById = new Map(schedule.participants.map((p) => [p.id, p]));
+  const shiftOn = (day: Date): OnCallUser | null => {
+    const dayStart = new Date(day);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayStart.getDate() + 1);
+    const hit = (weekShifts ?? []).find((s) => {
+      if (!s.start_time || !s.end_time) return false;
+      if (s.shift_type && s.shift_type !== "primary") return false;
+      return new Date(s.start_time) < dayEnd && new Date(s.end_time) > dayStart;
+    });
+    if (!hit?.user_id) return null;
+    return userById.get(String(hit.user_id)) ?? toUser(String(hit.user_id));
+  };
 
   return (
     <div
@@ -250,11 +353,7 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
         ))}
         {weekDays.map((date, i) => {
           const isToday = date.toDateString() === today.toDateString();
-          const onCallUser = schedule.participants[i % Math.max(1, schedule.participants.length)] || {
-            id: "unknown",
-            name: "Unassigned",
-            email: "",
-          };
+          const onCallUser = shiftOn(date);
 
           return (
             <div
@@ -271,13 +370,30 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
               >
                 {date.getDate()}
               </div>
-              <div className="mt-1 flex justify-center">
-                <UserAvatar user={onCallUser} size="sm" />
+              <div className="mt-1 flex justify-center" title={onCallUser?.email || undefined}>
+                {onCallUser ? (
+                  <UserAvatar user={onCallUser} size="sm" />
+                ) : (
+                  <span className="text-xs" style={{ color: "var(--text-2)" }}>
+                    —
+                  </span>
+                )}
               </div>
             </div>
           );
         })}
       </div>
+
+      {shiftsError && (
+        <p role="alert" className="mt-4 text-sm" style={{ color: "var(--err, #f87171)" }}>
+          {shiftsError}
+        </p>
+      )}
+      {!shiftsError && weekShifts !== null && weekShifts.length === 0 && (
+        <p className="mt-4 text-sm" style={{ color: "var(--text-2)" }}>
+          No shifts generated for this week.
+        </p>
+      )}
     </div>
   );
 }
@@ -574,53 +690,68 @@ export function OnCall({ onBack }: { onBack: () => void }) {
   const [showOverrideModal, setShowOverrideModal] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
       // Fetch teams
       const teamsRes = await apiFetch(`/oncall/teams`);
-      const teams = teamsRes.ok ? await teamsRes.json() : [];
+      if (!teamsRes.ok) {
+        setLoadError(await errorDetail(teamsRes, "Could not load on-call teams."));
+        setSchedule(null);
+        setEscalationPolicy(null);
+        setUsers([]);
+        return;
+      }
+      const teams = await teamsRes.json();
 
-      if (teams.length > 0) {
+      if (Array.isArray(teams) && teams.length > 0) {
         const teamId = teams[0].id;
 
         // Fetch current on-call for team
         const oncallRes = await apiFetch(`/oncall/teams/${teamId}/current-oncall`);
-        const currentOncall = oncallRes.ok ? await oncallRes.json() : null;
+        if (!oncallRes.ok) {
+          setLoadError(await errorDetail(oncallRes, "Could not load the current on-call."));
+          setSchedule(null);
+          return;
+        }
+        const currentOncall = await oncallRes.json();
+        setLoadError(null);
 
         // Fetch escalation policies
         const policiesRes = await apiFetch(`/oncall/teams/${teamId}/escalation-policies`);
         const policies = policiesRes.ok ? await policiesRes.json() : [];
 
-        // Transform current on-call data into schedule format
+        const participants: OnCallUser[] = (currentOncall.participants ?? []).map(
+          (p: Record<string, unknown>) => toUser(String(p.user_id), p.user_email as string | null)
+        );
+
+        // `team_schedules` lists every active schedule, including ones nobody
+        // is currently on call for; `schedules` only covers the latter. The
+        // page needs a real UUID here or the Override modal cannot POST.
+        const primarySchedule = (currentOncall.team_schedules ?? [])[0];
+        const rotation = String(primarySchedule?.rotation_type ?? "weekly");
+
         const scheduleData: OnCallSchedule = {
-          id: currentOncall?.schedule_id || "default",
-          name: teams[0].name || "On-Call Schedule",
-          timezone: teams[0].timezone || "UTC",
-          rotation_type: "weekly",
-          current_shifts: currentOncall?.shifts?.map((s: Record<string, unknown>) => ({
-            id: s.id || `shift-${s.user_id || 'unknown'}`,
-            user: {
-              id: s.user_id,
-              name: s.user_name || "On-Call User",
-              email: s.user_email || "",
-              phone: s.user_phone,
-              slack_id: s.slack_id,
-            },
-            role: s.role || "primary",
-            start_time: s.start_time,
-            end_time: s.end_time,
+          id: primarySchedule?.id ? String(primarySchedule.id) : "",
+          name: primarySchedule?.name || teams[0].name || "On-Call Schedule",
+          timezone: primarySchedule?.timezone || teams[0].timezone || "UTC",
+          rotation_type:
+            rotation === "daily" ? "daily" : rotation === "weekly" ? "weekly" : "custom",
+          current_shifts: (currentOncall.shifts ?? []).map((s: Record<string, unknown>) => ({
+            id: String(s.id ?? `${s.schedule_id}-${s.user_id}`),
+            user: toUser(String(s.user_id ?? ""), s.user_email as string | null),
+            role: (s.role as ShiftRole) || "primary",
+            start_time: String(s.start_time ?? ""),
+            end_time: String(s.end_time ?? ""),
             status: "active" as const,
-          })) || [],
-          participants: currentOncall?.participants?.map((p: Record<string, unknown>) => ({
-            id: p.user_id,
-            name: p.user_name || "Team Member",
-            email: p.user_email || "",
-          })) || [],
+          })),
+          participants,
         };
 
         setSchedule(scheduleData);
-        setUsers(scheduleData.participants);
+        setUsers(participants);
 
         // Set escalation policy
         if (policies.length > 0) {
@@ -639,15 +770,18 @@ export function OnCall({ onBack }: { onBack: () => void }) {
               })) || [],
             });
           }
+        } else {
+          setEscalationPolicy(null);
         }
       } else {
         // No teams - show empty state
+        setLoadError(null);
         setSchedule(null);
         setEscalationPolicy(null);
         setUsers([]);
       }
     } catch (error) {
-      console.error("Failed to fetch on-call data:", error);
+      setLoadError(`Could not reach the on-call API: ${(error as Error).message}`);
     } finally {
       setLoading(false);
     }
@@ -661,9 +795,19 @@ export function OnCall({ onBack }: { onBack: () => void }) {
 
   const handleCreateOverride = async (userId: string, start: string, end: string) => {
     if (!schedule) return;
+    setActionError(null);
+    // Without a real schedule this used to post the literal "default" and the
+    // API answered 422 "Input should be a valid UUID" — silently, in a catch
+    // that only reached console.error.
+    if (!schedule.id) {
+      setActionError(
+        "This team has no schedule yet, so there is nothing to override. Create a schedule first."
+      );
+      return;
+    }
 
     try {
-      await apiFetch(`/oncall/overrides`, {
+      const res = await apiFetch(`/oncall/overrides`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -673,14 +817,19 @@ export function OnCall({ onBack }: { onBack: () => void }) {
           end_time: new Date(end).toISOString(),
         }),
       });
+      if (!res.ok) {
+        setActionError(await errorDetail(res, "Could not create the override."));
+        return;
+      }
       setShowOverrideModal(false);
       fetchData();
     } catch (error) {
-      console.error("Failed to create override:", error);
+      setActionError(`Could not create the override: ${(error as Error).message}`);
     }
   };
 
   const handleCreateSchedule = async (name: string, timezone: string) => {
+    setActionError(null);
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       const res = await apiFetch(`/oncall/teams`, {
@@ -693,15 +842,31 @@ export function OnCall({ onBack }: { onBack: () => void }) {
           timezone,
         }),
       });
-      if (res.ok) {
-        setShowCreateModal(false);
-        fetchData();
-      } else {
-        const error = await res.json();
-        console.error("Failed to create team:", error);
+      if (!res.ok) {
+        setActionError(await errorDetail(res, "Could not create the team."));
+        return;
       }
+      const team = await res.json();
+      // A team on its own has no rotation; without a schedule the page can
+      // neither show a roster nor accept an override.
+      const schedRes = await apiFetch(`/oncall/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          team_id: team.id,
+          name: `${name} primary`,
+          timezone,
+          rotation_type: "weekly",
+          layer: 1,
+        }),
+      });
+      if (!schedRes.ok) {
+        setActionError(await errorDetail(schedRes, "Team created, but its schedule was not."));
+      }
+      setShowCreateModal(false);
+      fetchData();
     } catch (error) {
-      console.error("Failed to create team:", error);
+      setActionError(`Could not create the team: ${(error as Error).message}`);
     }
   };
 
@@ -734,7 +899,10 @@ export function OnCall({ onBack }: { onBack: () => void }) {
             onClick={() => setShowOverrideModal(true)}
             className="px-4 py-2 rounded-lg font-medium"
             style={{ border: "1px solid var(--border)", color: "var(--text)" }}
-            disabled={!schedule}
+            disabled={!schedule?.id}
+            title={
+              schedule?.id ? undefined : "Create a schedule before overriding it"
+            }
           >
             Create Override
           </button>
@@ -750,6 +918,19 @@ export function OnCall({ onBack }: { onBack: () => void }) {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6">
+        {(loadError || actionError) && (
+          <div
+            role="alert"
+            className="mb-6 rounded-xl p-4 text-sm"
+            style={{
+              backgroundColor: "rgba(248, 113, 113, 0.1)",
+              border: "1px solid rgba(248, 113, 113, 0.4)",
+              color: "var(--text)",
+            }}
+          >
+            {loadError ?? actionError}
+          </div>
+        )}
         {loading ? (
           <LoadingState />
         ) : !schedule ? (

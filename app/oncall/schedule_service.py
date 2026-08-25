@@ -355,6 +355,41 @@ class ScheduleService:
     # CURRENT ON-CALL
     # =========================================================================
 
+    async def _member_emails(self, user_ids: set[UUID]) -> dict[UUID, str]:
+        """Map member ids to their email. `oncall_*.user_id` FKs to `members.id`,
+        which is the only place a responder has a human-readable identity."""
+        if not user_ids:
+            return {}
+        from app.database.models import Member
+
+        rows = await self.db.execute(select(Member.id, Member.email).where(Member.id.in_(user_ids)))
+        return {row[0]: row[1] for row in rows.all()}
+
+    async def get_team_participants(self, team_id: UUID) -> list[dict[str, Any]]:
+        """The team roster, with each member's real email from `members`."""
+        from app.oncall.models import OncallTeamMember
+
+        rows = await self.db.execute(
+            select(OncallTeamMember)
+            .where(
+                OncallTeamMember.team_id == team_id,
+                OncallTeamMember.is_active.is_(True),
+            )
+            .order_by(OncallTeamMember.joined_at)
+        )
+        members = list(rows.scalars().all())
+        emails = await self._member_emails({m.user_id for m in members})
+        return [
+            {
+                "user_id": m.user_id,
+                "user_email": emails.get(m.user_id),
+                "role": m.role,
+                "timezone": m.timezone,
+                "skills": m.skills,
+            }
+            for m in members
+        ]
+
     async def get_current_oncall(
         self,
         team_id: UUID,
@@ -362,7 +397,12 @@ class ScheduleService:
     ) -> dict[str, Any]:
         """
         Get the current on-call user(s) for a team.
-        Returns primary, secondary, and any shadows.
+
+        Returns primary, secondary, and any shadows, plus the `shifts` rows they
+        come from and the team `participants`. The shift/participant detail used
+        to be missing entirely, so the UI's roster and responder list — which
+        read exactly those two keys — were permanently empty and the schedule id
+        it needs for an override was never sent.
         """
         if at_time is None:
             at_time = datetime.now(timezone.utc)
@@ -374,19 +414,90 @@ class ScheduleService:
             "secondary": None,
             "shadows": [],
             "schedules": [],
+            "shifts": [],
+            "participants": await self.get_team_participants(team_id),
+            # Every active schedule, including ones nobody is currently on call
+            # for. `schedules` only lists covered ones, so a team whose shifts
+            # haven't been generated yet exposed no schedule id at all and the
+            # UI had nothing to attach an override to.
+            "team_schedules": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "layer": s.layer,
+                    "timezone": s.timezone,
+                    "rotation_type": (s.rotation_config or {}).get("type"),
+                }
+                for s in schedules
+            ],
         }
+        emails = {
+            p["user_id"]: p["user_email"]
+            for p in result["participants"]
+            if p["user_email"] is not None
+        }
+
+        def _shift_entry(
+            schedule: OncallSchedule,
+            *,
+            row_id: UUID,
+            user_id: UUID,
+            role: str,
+            start: datetime,
+            end: datetime,
+            source: str,
+            status: str,
+        ) -> dict[str, Any]:
+            return {
+                "id": row_id,
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "layer": schedule.layer,
+                "user_id": user_id,
+                "user_email": emails.get(user_id),
+                "role": role,
+                "start_time": start,
+                "end_time": end,
+                "source": source,
+                "status": status,
+            }
 
         for schedule in schedules:
             override = await self._get_active_override(schedule.id, at_time)
+            role = "primary" if schedule.layer == 1 else "secondary"
 
             if override:
                 oncall_user_id = override.override_user_id
                 source = "override"
+                result["shifts"].append(
+                    _shift_entry(
+                        schedule,
+                        row_id=override.id,
+                        user_id=oncall_user_id,
+                        role=role,
+                        start=override.start_time,
+                        end=override.end_time,
+                        source="override",
+                        status="active",
+                    )
+                )
             else:
                 shift = await self._get_current_shift(schedule.id, at_time, "primary")
                 if shift:
                     oncall_user_id = shift.user_id
                     source = "shift"
+                    result["shifts"].append(
+                        _shift_entry(
+                            schedule,
+                            row_id=shift.id,
+                            user_id=oncall_user_id,
+                            role=role,
+                            start=shift.start_time,
+                            end=shift.end_time,
+                            source="shift",
+                            status="active",
+                        )
+                    )
                 else:
                     continue
 
@@ -395,6 +506,7 @@ class ScheduleService:
                 "schedule_name": schedule.name,
                 "layer": schedule.layer,
                 "user_id": oncall_user_id,
+                "user_email": emails.get(oncall_user_id),
                 "source": source,
             }
 
@@ -408,6 +520,18 @@ class ScheduleService:
             shadow_shift = await self._get_current_shift(schedule.id, at_time, "shadow")
             if shadow_shift:
                 result["shadows"].append(shadow_shift.user_id)
+                result["shifts"].append(
+                    _shift_entry(
+                        schedule,
+                        row_id=shadow_shift.id,
+                        user_id=shadow_shift.user_id,
+                        role="shadow",
+                        start=shadow_shift.start_time,
+                        end=shadow_shift.end_time,
+                        source="shift",
+                        status="active",
+                    )
+                )
 
         return result
 
