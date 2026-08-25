@@ -9,6 +9,7 @@ Adding a new capability = adding one entry here. No agent code changes.
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import AsyncExitStack
 
@@ -19,6 +20,10 @@ from langchain_mcp_adapters.tools import load_mcp_tools as _load_session_tools
 from app import policy, runtime, tenant_context
 from app.config import get_settings
 
+log = logging.getLogger("omnipotent.mcp")
+
+# Built-in servers. Marketplace-installed agents are appended at call time by
+# _server_config(); iterate the config, not this tuple.
 _SERVERS = (
     "datadog", "repo", "github", "pagerduty", "kubernetes", "sentry", "memory",
     "traces", "deploys", "argocd", "terraform", "docker", "cicd", "security",
@@ -43,10 +48,13 @@ def _server_config() -> dict:
     current Python interpreter and forward the relevant paths via env so the
     servers read the same data the app is configured with. Integration secrets
     come from the resolved tenant when multi-tenant, else from .env.
+
+    Enabled marketplace agents are merged in on top, so installing one adds its
+    tools and disabling one removes them. Built-ins win on a name collision.
     """
     py = sys.executable
     s = get_settings()
-    return {
+    builtin: dict = {
         "datadog": {
             "command": py,
             "args": ["-m", "app.mcp.servers.datadog.server"],
@@ -232,6 +240,18 @@ def _server_config() -> dict:
         },
     }
 
+    # Imported lazily: reading install state costs a file read, and this module
+    # is imported by tooling that never launches a server.
+    from app.marketplace.manager import installed_server_configs
+
+    try:
+        installed = installed_server_configs(py)
+    except Exception as exc:  # a broken install file must not take the agent down
+        log.warning("Could not load marketplace agents: %s", exc)
+        installed = {}
+
+    return {**installed, **builtin}
+
 
 # Tool names that mutate external state and require human approval. The action
 # policy engine (app/policy.py) is the single source of truth; this alias keeps
@@ -250,7 +270,8 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
     handshake per call that dominated latency in a multi-tool investigation.
     """
     settings = get_settings()
-    client = MultiServerMCPClient(_server_config())
+    config = _server_config()
+    client = MultiServerMCPClient(config)
     tools: list[BaseTool] = []
 
     # Groq free tier has severe limitations:
@@ -262,11 +283,16 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
         # No tools for Groq - avoids hallucination and rate limits
         return [], client
 
-    for name in _SERVERS:
+    # Iterate the config, not _SERVERS: marketplace-installed agents live only in
+    # the config, and a name in _SERVERS with no config entry raised KeyError into
+    # the swallow below — silently dropping the server.
+    for name in config:
         try:
             session = await stack.enter_async_context(client.session(name))
             tools.extend(await _load_session_tools(session))
-        except Exception:
-            pass  # Server not configured or failed to start
+        except Exception as exc:
+            # Not fatal — an unconfigured integration is a normal state — but it
+            # is the answer to "why are this agent's tools missing?", so say so.
+            log.debug("MCP server %r did not start: %s", name, exc)
 
     return tools, client

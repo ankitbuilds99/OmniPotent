@@ -26,6 +26,7 @@ from app.database.models import Base
 # dropped by one, since autogenerate reads absence as "delete this table".
 import app.database.auth_models  # noqa: E402,F401
 import app.database.team_models  # noqa: E402,F401
+import app.database.growth_models  # noqa: E402,F401
 import app.oncall.models  # noqa: E402,F401
 import app.model_router.models  # noqa: E402,F401
 import app.notifications.models  # noqa: E402,F401

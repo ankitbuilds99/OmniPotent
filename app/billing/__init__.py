@@ -82,8 +82,10 @@ from app.billing.db_store import (
 
 from app.billing.api import (
     BillingAPI,
+    BillingUnavailableError,
     PlanResponse,
     SubscriptionResponse,
+    UnknownMetricError,
     UsageResponse,
 )
 
@@ -96,6 +98,7 @@ from app.billing.subscriptions import (
 
 from app.billing.webhooks import (
     plan_from_stripe_event,
+    UnknownPlan,
     sync_usage_to_stripe,
     get_client,
     StripeClient as LegacyStripeClient,
@@ -147,8 +150,10 @@ __all__ = [
     "FakeStripeClient",
     # API
     "BillingAPI",
+    "BillingUnavailableError",
     "PlanResponse",
     "SubscriptionResponse",
+    "UnknownMetricError",
     "UsageResponse",
     # Legacy (from subscriptions.py)
     "Plan",
@@ -157,6 +162,7 @@ __all__ = [
     "SubscriptionManager",
     # Legacy (from webhooks.py)
     "plan_from_stripe_event",
+    "UnknownPlan",
     "sync_usage_to_stripe",
     "get_client",
     "LegacyStripeClient",

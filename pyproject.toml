@@ -66,6 +66,10 @@ supabase = [
     "sqlalchemy[asyncio]>=2.0.0",            # Async SQLAlchemy ORM
 ]
 secrets = ["cryptography>=50.0"]                     # per-tenant secret vault
+# Self-serve payments. The SDK is imported lazily (app/billing/stripe_client.py):
+# without it, and without STRIPE_API_KEY, every /billing/* write reports 503
+# rather than pretending the payment happened.
+billing = ["stripe>=11.0"]
 apm = ["ddtrace>=4.0"]                               # Datadog APM (DD_TRACE_ENABLED=true)
 # Database migrations
 migrations = [

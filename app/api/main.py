@@ -248,7 +248,28 @@ _AUTH_PATH_PREFIXES = ("/auth/",)
 # Back-office paths authenticated by COPILOT_OPERATOR_TOKEN rather than a tenant API
 # key. These skip tenant-key resolution in require_auth; each route still carries
 # _operator_guard, which fails closed when the token is unset or wrong.
-_OPERATOR_PATHS = frozenset({"/admin/plan"})
+#
+# The CRM and the waitlist roll-up are here because they are the deployment's own
+# conversion tracking — every customer's contact details, health score and MRR,
+# and every lead's email. They were behind `require_auth`, which on a
+# multi-tenant deployment means any tenant API key: the cheapest self-serve
+# signup could read the whole customer list and the whole waitlist.
+_OPERATOR_PATHS = frozenset(
+    {
+        "/admin/plan",
+        "/waitlist/stats",
+        "/customers",
+        "/customers/stats",
+        "/customers/dashboard",
+        "/customers/trials/active",
+        "/customers/usage",
+        "/customers/convert",
+    }
+)
+# Anonymous-reachable paths. Deliberately NOT in _OPEN_PATHS: those bypass the
+# limits middleware too, and an unauthenticated POST with no rate limit is a
+# spam endpoint. These skip only the credential check.
+_PUBLIC_PATHS = frozenset({"/signup", "/waitlist", "/waitlist/position"})
 
 # --- In-memory per-IP fixed-window rate limiter (single-instance only) ---
 # {ip: (window_start_epoch, count)}. Good enough for one process; a multi-instance
@@ -526,10 +547,12 @@ async def require_auth(conn: HTTPConnection) -> None:
     # resolution below; the route's own dependency still fails closed.
     if conn.url.path in _OPERATOR_PATHS:
         return
-    # Self-serve signup is how a new tenant GETS its first credential, so it can't
-    # require one. It stays out of _OPEN_PATHS so the IP rate-limiter still applies
-    # (abuse guard); the handler itself enforces multi-tenant + the enabled flag.
-    if conn.url.path == "/signup":
+    # Self-serve signup is how a new tenant GETS its first credential, and joining
+    # a waitlist is something a visitor does before they have an account at all,
+    # so neither can require one. They stay out of _OPEN_PATHS so the IP
+    # rate-limiter still applies (abuse guard); /signup's handler additionally
+    # enforces multi-tenant + the enabled flag.
+    if conn.url.path in _PUBLIC_PATHS:
         return
 
     s = get_settings()
@@ -633,6 +656,10 @@ async def _meter_and_spend(tokens: int, idem: str = "") -> None:
     fleet-wide spend counter."""
     await metering.record_investigation(tokens, idem=idem)
     await _record_spend(tokens)
+    # ...and to the billing meter the Billing page reads, which otherwise has no
+    # writer at all outside the hand-callable POST /billing/track.
+    from app.api.billing_router import record_ai_investigation
+    await record_ai_investigation(tokens, idem)
     # The graph's nodes price every LLM call and park it on a queue (they run in
     # worker threads and cannot await a write). This is where a turn's dollar
     # cost reaches `llm_usage_records`; without it /usage and /stats report on
@@ -3511,11 +3538,20 @@ async def stripe_webhook(request: Request) -> dict:
         event = _json.loads(raw)
     except ValueError:
         raise HTTPException(400, "Malformed Stripe event.") from None
-    mapping = billing.plan_from_stripe_event(event)
+    try:
+        mapping = billing.plan_from_stripe_event(event)
+    except billing.UnknownPlan as exc:
+        # 400, not 200-ignored: Stripe surfaces the failure in its dashboard and
+        # retries, which is the only way anyone finds out that a price was
+        # created with metadata the product does not recognise.
+        raise HTTPException(400, f"Unknown plan in subscription metadata: {exc.plan!r}") from None
     if mapping is None:
         return {"status": "ignored", "type": event.get("type")}
     org_id, plan = mapping
-    await tenant_auth.get_store().set_plan(org_id, plan)
+    if not await tenant_auth.get_store().set_plan(org_id, plan):
+        # Report the failure so Stripe retries rather than recording a change
+        # that never landed on any row.
+        raise HTTPException(404, f"No such organization: {org_id}")
     audit.record("billing.plan_changed", org_id=org_id, plan=plan, via="stripe")
     return {"status": "applied", "org_id": org_id, "plan": plan}
 
@@ -3901,7 +3937,9 @@ class WaitlistSignupRequest(BaseModel):
     tags=["Waitlist"],
     summary="Join the waitlist",
     description="Sign up for early access to OmniPotent. "
-    "Returns your position and referral code.",
+    "Returns your position and referral code. Open to anonymous visitors — a "
+    "waitlist that demanded an API key could only be joined by people who "
+    "already had an account — but per-IP rate limited like any other POST.",
     responses={
         200: {
             "description": "Signup successful",
@@ -3939,7 +3977,7 @@ async def waitlist_signup(req: WaitlistSignupRequest, request: Request):
     if request.client:
         client_ip = request.client.host
 
-    entry, message = add_to_waitlist(
+    entry, message = await add_to_waitlist(
         email=req.email,
         source=source,
         company=req.company,
@@ -3983,7 +4021,7 @@ async def waitlist_position(email: str):
     from app.waitlist import WaitlistManager
 
     manager = WaitlistManager()
-    result = manager.get_position(email)
+    result = await manager.get_position(email)
 
     if not result.get("found"):
         raise HTTPException(404, "Email not found in waitlist")
@@ -3994,19 +4032,27 @@ async def waitlist_position(email: str):
 @app.get(
     "/waitlist/stats",
     tags=["Waitlist"],
-    summary="Get waitlist statistics",
-    description="Get aggregated waitlist statistics (admin only).",
-    dependencies=[Depends(require_auth)],
+    summary="Get waitlist statistics (operator only)",
+    description="Aggregated waitlist statistics. This is a back-office endpoint: it "
+    "requires COPILOT_OPERATOR_TOKEN, not a tenant API key. It was behind "
+    "`require_auth`, which on a multi-tenant deployment means any tenant key — so "
+    "every customer could read the deployment's lead funnel.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def waitlist_stats():
     """Get waitlist statistics."""
     from app.waitlist import get_waitlist_stats
 
-    return get_waitlist_stats()
+    return await get_waitlist_stats()
 
 
 # --------------------------------------------------------------------------- #
 # Customer & Trial Management — track conversions and engagement
+#
+# Operator-only, every one of them. This is the deployment's own CRM: contact
+# details, health scores and MRR for its customers. It sat behind `require_auth`,
+# which on a multi-tenant deployment is satisfied by any tenant API key, so the
+# cheapest self-serve signup could list every other customer and their revenue.
 # --------------------------------------------------------------------------- #
 class CustomerCreateRequest(BaseModel):
     """Customer creation request."""
@@ -4024,9 +4070,10 @@ class CustomerCreateRequest(BaseModel):
 @app.post(
     "/customers",
     tags=["Customers"],
-    summary="Create a customer",
-    description="Create a new customer and optionally start a trial.",
-    dependencies=[Depends(require_auth)],
+    summary="Create a customer (operator only)",
+    description="Create a new customer and optionally start a trial. Requires "
+    "COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
     responses={
         200: {
             "description": "Customer created",
@@ -4047,7 +4094,7 @@ async def create_customer_endpoint(req: CustomerCreateRequest):
     from app.customers import CustomerManager
 
     manager = CustomerManager()
-    result = manager.create(
+    result = await manager.create(
         email=req.email,
         company=req.company,
         name=req.name,
@@ -4074,44 +4121,46 @@ async def create_customer_endpoint(req: CustomerCreateRequest):
 @app.get(
     "/customers/stats",
     tags=["Customers"],
-    summary="Get customer statistics",
-    description="Get customer and trial statistics for the dashboard.",
-    dependencies=[Depends(require_auth)],
+    summary="Get customer statistics (operator only)",
+    description="Get customer and trial statistics for the dashboard. Requires "
+    "COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def customer_stats():
     """Get customer statistics."""
     from app.customers import get_customer_stats
 
-    return get_customer_stats()
+    return await get_customer_stats()
 
 
 @app.get(
     "/customers/dashboard",
     tags=["Customers"],
-    summary="Get customer dashboard",
-    description="Get full customer dashboard including stats, trials, and recent customers.",
-    dependencies=[Depends(require_auth)],
+    summary="Get customer dashboard (operator only)",
+    description="Get full customer dashboard including stats, trials, and recent "
+    "customers. Requires COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def customer_dashboard():
     """Get customer dashboard data."""
     from app.customers import CustomerManager
 
     manager = CustomerManager()
-    return manager.get_dashboard()
+    return await manager.get_dashboard()
 
 
 @app.get(
     "/customers/trials/active",
     tags=["Customers"],
-    summary="Get active trials",
-    description="Get list of all active trials.",
-    dependencies=[Depends(require_auth)],
+    summary="Get active trials (operator only)",
+    description="Get list of all active trials. Requires COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def active_trials():
     """Get active trials."""
     from app.customers import get_active_trials
 
-    trials = get_active_trials()
+    trials = await get_active_trials()
     return {
         "count": len(trials),
         "trials": [t.to_dict() for t in trials],
@@ -4130,15 +4179,16 @@ class RecordUsageRequest(BaseModel):
 @app.post(
     "/customers/usage",
     tags=["Customers"],
-    summary="Record customer usage",
-    description="Record a usage event for a customer (investigation, etc).",
-    dependencies=[Depends(require_auth)],
+    summary="Record customer usage (operator only)",
+    description="Record a usage event for a customer (investigation, etc). Requires "
+    "COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def record_customer_usage(req: RecordUsageRequest):
     """Record customer usage."""
     from app.customers import record_usage
 
-    success = record_usage(
+    success = await record_usage(
         customer_id=req.customer_id,
         event_type=req.event_type,
         investigation_id=req.investigation_id,
@@ -4155,35 +4205,44 @@ async def record_customer_usage(req: RecordUsageRequest):
 class ConvertTrialRequest(BaseModel):
     """Trial conversion request."""
     customer_id: str
-    tier: str = "starter"
-    mrr_cents: int = 0
+    tier: str = "team"
+    annual: bool = False
     stripe_customer_id: str = ""
+    # Only read for the Enterprise tier, which is quoted per contract and so has
+    # no catalog price to derive MRR from. Every other tier ignores it: this
+    # field used to be `mrr_cents`, applied to every tier, which made this
+    # endpoint an API for writing an arbitrary number into the revenue total.
+    contracted_mrr_cents: int | None = None
 
 
 @app.post(
     "/customers/convert",
     tags=["Customers"],
-    summary="Convert trial to paid",
-    description="Convert a trial customer to a paid subscription.",
-    dependencies=[Depends(require_auth)],
+    summary="Convert trial to paid (operator only)",
+    description="Convert a trial customer to a paid subscription. The recorded MRR "
+    "comes from the pricing catalog entry for `tier`, not from the request body; "
+    "`contracted_mrr_cents` is read only for `enterprise`, which has no list price. "
+    "Requires COPILOT_OPERATOR_TOKEN. 400 for a tier the catalog does not sell.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def convert_trial_endpoint(req: ConvertTrialRequest):
     """Convert a trial to paid subscription."""
     from app.customers import convert_trial, CustomerTier
 
-    tier_map = {
-        "free": CustomerTier.FREE,
-        "starter": CustomerTier.STARTER,
-        "pro": CustomerTier.PRO,
-        "enterprise": CustomerTier.ENTERPRISE,
-    }
-    tier = tier_map.get(req.tier.lower(), CustomerTier.STARTER)
+    try:
+        tier = CustomerTier(req.tier.strip().lower())
+    except ValueError:
+        # Silently coercing an unknown tier to Starter is how a Growth
+        # conversion could be recorded as a free plan.
+        valid = ", ".join(t.value for t in CustomerTier)
+        raise HTTPException(400, f"Unknown tier {req.tier!r}; expected one of {valid}.") from None
 
-    success, message = convert_trial(
+    success, message = await convert_trial(
         customer_id=req.customer_id,
         tier=tier,
-        mrr_cents=req.mrr_cents,
+        annual=req.annual,
         stripe_customer_id=req.stripe_customer_id,
+        contracted_mrr_cents=req.contracted_mrr_cents,
     )
 
     if not success:
@@ -4193,7 +4252,7 @@ async def convert_trial_endpoint(req: ConvertTrialRequest):
         "customer.converted",
         customer_id=req.customer_id,
         tier=tier.value,
-        mrr_cents=req.mrr_cents,
+        annual=req.annual,
     )
 
     return {"success": True, "message": message}

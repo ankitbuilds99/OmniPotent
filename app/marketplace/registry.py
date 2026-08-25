@@ -1,21 +1,47 @@
-"""Agent registry — catalog of available marketplace agents.
+"""Agent registry — catalog of marketplace agents.
 
-The registry maintains a list of community-contributed agents that can be
-installed into OmniPotent. Each agent entry includes metadata, version
-information, and installation requirements.
+The registry is the catalog half of the marketplace: what exists, what it does,
+what it needs. Installing is the manager's job.
+
+`module` is the load-bearing field. It names the importable MCP server module
+that provides the agent's tools, and an entry is only *installable* when that
+module actually resolves in this deployment — see `AgentEntry.is_available()`.
+Without it there is nothing for the manager to launch and nothing for the agent
+to call, so the catalog reports `available: false` and `install` refuses rather
+than recording a row and calling it a success.
+
+The built-in catalogue below is exactly that case: these are integrations we
+publish metadata for but do not ship an implementation of, so every one of them
+is browsable and none of them is installable. Adding
+`app/mcp/servers/prometheus/server.py` and setting `module` on the entry is all
+it takes to make one real.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass, field
-from pathlib import Path
 
-REGISTRY_PATH = Path(__file__).parent / "agents.json"
+
+def module_resolves(module: str) -> bool:
+    """True when `module` is importable here — without importing it.
+
+    `find_spec` walks the import machinery, so this covers agents shipped in the
+    image, installed into site-packages, or anywhere else on sys.path.
+    """
+    if not module:
+        return False
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        # A parent package that itself fails to import raises rather than
+        # returning None. Either way the agent cannot be launched.
+        return False
 
 
 @dataclass
 class AgentEntry:
-    """An agent available in the marketplace."""
+    """An agent listed in the marketplace."""
 
     id: str
     name: str
@@ -31,6 +57,13 @@ class AgentEntry:
     verified: bool = False
     dependencies: list[str] = field(default_factory=list)
     env_vars: list[str] = field(default_factory=list)
+    # Importable MCP server module providing this agent's tools. Empty means the
+    # listing is metadata only and the agent cannot be installed.
+    module: str = ""
+
+    def is_available(self) -> bool:
+        """Whether this agent can actually be installed and run here."""
+        return module_resolves(self.module)
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentEntry":
@@ -49,6 +82,7 @@ class AgentEntry:
             verified=data.get("verified", False),
             dependencies=data.get("dependencies", []),
             env_vars=data.get("env_vars", []),
+            module=data.get("module", ""),
         )
 
     def to_dict(self) -> dict:
@@ -67,9 +101,16 @@ class AgentEntry:
             "verified": self.verified,
             "dependencies": self.dependencies,
             "env_vars": self.env_vars,
+            "module": self.module,
+            # Callers list before they install; without this the only way to find
+            # out an agent is unavailable was to try installing it.
+            "available": self.is_available(),
         }
 
 
+# None of these carry a `module`, because this repo ships no implementation for
+# any of them. They are a published roadmap, not an installable set; the manager
+# says so instead of pretending the install worked.
 BUILTIN_AGENTS: list[dict] = [
     {
         "id": "prometheus-metrics",
@@ -213,8 +254,13 @@ class Registry:
         category: str | None = None,
         verified_only: bool = False,
         search: str | None = None,
+        available_only: bool = False,
     ) -> list[AgentEntry]:
-        """List available agents with optional filtering."""
+        """List catalogued agents with optional filtering.
+
+        `verified_only` is a claim about the publisher; `available_only` is a
+        fact about this deployment — only the latter tells you what will install.
+        """
         agents = list(self._agents.values())
 
         if category:
@@ -222,6 +268,9 @@ class Registry:
 
         if verified_only:
             agents = [a for a in agents if a.verified]
+
+        if available_only:
+            agents = [a for a in agents if a.is_available()]
 
         if search:
             search_lower = search.lower()
@@ -237,6 +286,10 @@ class Registry:
     def get_agent(self, agent_id: str) -> AgentEntry | None:
         """Get a specific agent by ID."""
         return self._agents.get(agent_id)
+
+    def register(self, entry: AgentEntry) -> None:
+        """Add or replace a catalogue entry."""
+        self._agents[entry.id] = entry
 
     def list_categories(self) -> list[dict]:
         """List all agent categories with counts."""
@@ -259,3 +312,9 @@ def get_registry() -> Registry:
     if _registry is None:
         _registry = Registry()
     return _registry
+
+
+def reset_registry() -> None:
+    """Drop the singleton so the next call rebuilds it (tests)."""
+    global _registry
+    _registry = None

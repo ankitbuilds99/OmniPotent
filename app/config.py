@@ -236,6 +236,12 @@ class Settings(BaseSettings):
     # Stripe webhook signing secret — verifies inbound subscription events at
     # /webhooks/stripe (event → store.set_plan). Empty = the endpoint rejects (fails closed).
     stripe_webhook_secret: str = ""
+    # Stripe Price IDs for the self-serve checkout, as
+    # "team:monthly=price_123,team:annual=price_456,growth:monthly=price_789".
+    # Prices are created inside a Stripe account, so they cannot ship in the plan
+    # catalog (every PricingPlan.stripe_*_price_id is ""); without this mapping
+    # POST /billing/checkout has no price to sell and fails.
+    stripe_price_ids: str = ""
     # Supabase Auth SSO (optional). When SUPABASE_JWKS_URL is set, a Supabase-issued
     # JWT (Bearer) authenticates to the multi-tenant API, mapped to the user's org/
     # role membership. Verification uses only the PUBLIC JWKS — no Supabase secret.
@@ -426,6 +432,13 @@ class Settings(BaseSettings):
     copilot_neo4j_password: str = ""
     copilot_neo4j_database: str = "neo4j"
 
+    # --- Agent marketplace ---
+    # Where installed marketplace agents are recorded. Empty = data/marketplace-installed.json
+    # under the project root. This deliberately does NOT live in app/marketplace/:
+    # that directory is part of the image, so every install was erased by the next
+    # deploy, and a read-only rootfs made the write fail outright.
+    copilot_marketplace_state_path: str = ""
+
     # --- Database (production persistence) ---
     # Database URL: postgresql://user:pass@host:5432/db or sqlite:///path.db
     # Empty = SQLite at data/copilot.db (dev default).
@@ -552,6 +565,21 @@ class Settings(BaseSettings):
         return base + extra
 
     @property
+    def stripe_prices(self) -> dict[str, str]:
+        """`{"<plan>:<cycle>": "price_…"}` parsed from STRIPE_PRICE_IDS.
+
+        Malformed entries are dropped rather than raising: a typo in one price
+        should leave the other plans sellable, and the caller already reports
+        "no price configured for <plan> <cycle>" for whatever is missing.
+        """
+        prices: dict[str, str] = {}
+        for item in self.stripe_price_ids.split(","):
+            key, sep, value = item.partition("=")
+            if sep and key.strip() and value.strip():
+                prices[key.strip().lower()] = value.strip()
+        return prices
+
+    @property
     def oauth_allowed_emails(self) -> set[str]:
         """Explicit addresses permitted to log in through OAuth (lowercased)."""
         return {
@@ -602,6 +630,13 @@ class Settings(BaseSettings):
     @property
     def logs_path(self) -> Path:
         return (ROOT / self.logs_data_path).resolve()
+
+    @property
+    def marketplace_state_path(self) -> Path:
+        raw = self.copilot_marketplace_state_path.strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+        return ROOT / "data" / "marketplace-installed.json"
 
     @property
     def sources_root(self) -> Path:

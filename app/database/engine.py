@@ -187,6 +187,7 @@ async def init_db() -> None:
     from app.database.models import Base
     import app.database.auth_models  # noqa: F401
     import app.database.team_models  # noqa: F401
+    import app.database.growth_models  # noqa: F401
     import app.oncall.models  # noqa: F401
     import app.model_router.models  # noqa: F401
     import app.notifications.models  # noqa: F401

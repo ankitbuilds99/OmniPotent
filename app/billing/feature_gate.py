@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import wraps
 from typing import Any, Callable, Protocol
 from uuid import UUID
 
@@ -19,6 +18,7 @@ from app.billing.models import (
 from app.billing.plans import (
     PlanManager,
     FEATURE_TO_MIN_TIER,
+    catalog_plan_for,
 )
 
 log = logging.getLogger("omnipotent.billing.feature_gate")
@@ -68,16 +68,44 @@ class FeatureGateService:
         self._plan_manager = PlanManager()
         self._cache: dict[str, Any] = {}
 
+    def _plan_from_tenant_context(self, org_id: UUID) -> PricingPlan | None:
+        """The catalog entry for the plan this org is actually being metered on.
+
+        There are two records of what an org pays for. `billing_subscriptions` is
+        written only by the Stripe service; the tenancy store's `orgs.plan` is
+        what `/webhooks/stripe` sets and what every quota check reads. When only
+        the second exists — which is every deployment that upgrades customers by
+        webhook rather than through the checkout flow — falling straight through
+        to the community plan told a paying customer they were on Starter with
+        25 investigations while the meter allowed them the 1000 they had bought.
+
+        Read from the request's tenant context rather than by lookup: the
+        billing store is keyed by an org UUID derived one-way from the tenant's
+        string id (`org_uuid_for`), so there is no route back. The org guard
+        below is what keeps this from reporting one tenant's plan for another.
+        """
+        from app.database.orgs import org_uuid_for
+        from app.tenant_context import get_tenant
+
+        cfg = get_tenant()
+        if cfg is None or org_uuid_for(cfg.org_id) != org_id:
+            return None
+        return catalog_plan_for(cfg.plan)
+
     async def get_organization_plan(self, org_id: UUID) -> PricingPlan | None:
         """Get the active plan for an organization."""
         subscription = await self._store.get_subscription(org_id)
 
         if not subscription or not subscription.is_active:
-            return self._plan_manager.get_community_plan()
+            return self._plan_from_tenant_context(org_id) or (
+                self._plan_manager.get_community_plan()
+            )
 
         plan = await self._store.get_plan(subscription.plan_id)
         if not plan:
-            return self._plan_manager.get_community_plan()
+            return self._plan_from_tenant_context(org_id) or (
+                self._plan_manager.get_community_plan()
+            )
 
         return plan
 
@@ -308,73 +336,95 @@ class FeatureGateService:
         return result
 
 
-def require_feature(feature_key: str) -> Callable:
-    """Decorator to require a feature for an endpoint."""
+def _gate_service() -> FeatureGateService:
+    """A gate over the same billing store the /billing/* routes read."""
+    from app.api.billing_router import _get_store
 
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            db = kwargs.get("db")
-            org = kwargs.get("current_org")
-
-            if not db or not org:
-                raise PermissionError("Missing dependencies")
-
-            gate = FeatureGateService(db)
-            result = await gate.can_access_feature(org.org_id, feature_key)
-
-            if not result.allowed:
-                raise PermissionError(
-                    f"Feature not available: {result.reason}",
-                    {
-                        "error": "feature_not_available",
-                        "message": result.reason,
-                        "feature": feature_key,
-                        "required_plan": result.required_plan,
-                        "upgrade_url": result.upgrade_url,
-                    },
-                )
-
-            return await func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
+    return FeatureGateService(_get_store())
 
 
-def check_usage_limit(metric_type: MetricType, increment: int = 1) -> Callable:
-    """Decorator to check usage limits."""
+def _enforced() -> bool:
+    """Whether plan gating applies to this deployment.
 
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            db = kwargs.get("db")
-            org = kwargs.get("current_org")
+    No-op in single-tenant mode, mirroring `require_perm` in app/api/main.py: a
+    self-hosted or offline install has no subscription to check, and gating it
+    would lock the operator out of their own deployment.
+    """
+    from app.config import get_settings
 
-            if not db or not org:
-                raise PermissionError("Missing dependencies")
+    return get_settings().copilot_multi_tenant
 
-            gate = FeatureGateService(db)
-            result = await gate.check_usage_limit(org.org_id, metric_type, increment)
 
-            if not result.within_limit:
-                raise PermissionError(
-                    f"Usage limit exceeded: {result.reason}",
-                    {
-                        "error": "usage_limit_exceeded",
-                        "message": result.reason,
-                        "metric": metric_type.value,
-                        "current_usage": result.current_usage,
-                        "limit": result.limit,
-                        "upgrade_url": "/settings/billing/upgrade",
-                    },
-                )
+def require_feature(feature_key: str) -> Callable[[], Any]:
+    """FastAPI dependency: 402 unless the caller's plan includes `feature_key`.
 
-            return await func(*args, **kwargs)
+    This was a bare decorator that read `db` and `current_org` out of the
+    endpoint's kwargs. No route in this app has either — tenancy arrives through
+    the request-scoped `TenantConfig`, not as parameters — so wrapping any real
+    endpoint with it would have raised `PermissionError("Missing dependencies")`
+    on every request, which FastAPI reports as a 500. It had no call sites, so
+    the paywall the pricing page advertises was never enforced anywhere.
 
-        return wrapper
+    Use as `dependencies=[Depends(require_feature("ai_postmortem"))]`. 402
+    Payment Required (not 403) so the frontend can tell "your plan does not
+    include this" apart from "your role may not do this".
+    """
 
-    return decorator
+    async def _check() -> None:
+        if not _enforced():
+            return
+        from app.api.billing_router import _current_org_id
+
+        org_id = _current_org_id()
+        result = await _gate_service().can_access_feature(org_id, feature_key)
+        if result.allowed:
+            return
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "feature_not_available",
+                "message": result.reason,
+                "feature": feature_key,
+                "required_plan": result.required_plan,
+                "upgrade_url": result.upgrade_url,
+            },
+        )
+
+    return _check
+
+
+def check_usage_limit(metric_type: MetricType, increment: int = 1) -> Callable[[], Any]:
+    """FastAPI dependency: 402 once the plan's monthly allowance for `metric_type`
+    is spent. Same history and same single-tenant no-op as `require_feature`."""
+
+    async def _check() -> None:
+        if not _enforced():
+            return
+        from app.api.billing_router import _current_org_id
+
+        org_id = _current_org_id()
+        result = await _gate_service().check_usage_limit(
+            org_id, metric_type, increment
+        )
+        if result.within_limit:
+            return
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "usage_limit_exceeded",
+                "message": result.reason,
+                "metric": metric_type.value,
+                "current_usage": result.current_usage,
+                "limit": result.limit,
+                "upgrade_url": "/settings/billing/upgrade",
+            },
+        )
+
+    return _check
 
 
 class FeatureGate:

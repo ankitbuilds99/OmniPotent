@@ -27,6 +27,30 @@ class BillingUnavailableError(RuntimeError):
     """
 
 
+class UnknownMetricError(ValueError):
+    """Raised for a metric name that is not a `MetricType`.
+
+    `MetricType(metric_type)` was constructed straight from a query parameter, so
+    `?metric=ai_investigations` (plural — the name the response body itself uses)
+    raised ValueError out of the handler and the client got a 500 "An unexpected
+    error occurred", which reads as an outage rather than as a typo.
+    """
+
+    def __init__(self, metric_type: str):
+        self.metric_type = metric_type
+        self.valid = [m.value for m in MetricType]
+        super().__init__(
+            f"unknown metric {metric_type!r}; expected one of {', '.join(self.valid)}"
+        )
+
+
+def _parse_metric(metric_type: str) -> MetricType:
+    try:
+        return MetricType(metric_type)
+    except ValueError:
+        raise UnknownMetricError(metric_type) from None
+
+
 @dataclass
 class PlanResponse:
     """Plan information for API response."""
@@ -291,9 +315,18 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe customer portal session."""
         if not self._stripe:
-            # Demo mode: redirect to return URL or billing page
-            log.info("Stripe not configured - using demo portal")
-            return {"portal_url": return_url or "/?portal=demo"}
+            # Fail closed, like create_checkout above. The "demo portal" returned
+            # the caller's own URL, and the frontend does
+            # `window.location.href = result.portal_url` — so all four buttons
+            # wired to it ("Billing Portal", "Manage via Stripe", "View all in
+            # Stripe", "Add new card") reloaded the page the user was already on.
+            # No error, no message: the customer clicks, nothing happens, and
+            # there is no way to tell it apart from a slow page.
+            log.error("Refusing portal session: Stripe is not configured")
+            raise BillingUnavailableError(
+                "The billing portal is not available: billing is not configured "
+                "on this deployment."
+            )
 
         result = await self._stripe.create_portal_session(org_id, return_url)
         return {"portal_url": result.portal_url}
@@ -421,7 +454,7 @@ class BillingAPI:
         increment: int = 1,
     ) -> dict[str, Any]:
         """Check if within usage limits."""
-        mt = MetricType(metric_type)
+        mt = _parse_metric(metric_type)
         result = await self._feature_gate.check_usage_limit(org_id, mt, increment)
 
         return {
@@ -474,7 +507,7 @@ class BillingAPI:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Track a usage event."""
-        mt = MetricType(metric_type)
+        mt = _parse_metric(metric_type)
 
         if mt == MetricType.AI_INVESTIGATION:
             await self._usage_tracker.track_ai_investigation(

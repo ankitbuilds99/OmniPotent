@@ -2,6 +2,23 @@
 
 Tracks the full customer journey from trial to paid conversion,
 with usage metering and engagement analytics.
+
+Three things were wrong with the version this replaces, and all three were
+reachable from the API:
+
+* It was four module-level dicts. Every customer, trial and metered usage event
+  was lost on restart, on deploy, and between worker processes — while the
+  endpoints kept returning 200.
+* Those dicts were global, so on a multi-tenant deployment every tenant's
+  `GET /customers/dashboard` returned every other tenant's customers, contacts,
+  health scores and MRR. Rows carry `org_id` now and every statement filters on
+  it; the routes are additionally operator-only, since this is the deployment's
+  own back-office rather than a per-tenant feature.
+* `convert_trial` wrote whatever `mrr_cents` the request body carried straight
+  into the revenue total, so `POST /customers/convert` was an API for inventing
+  MRR. The amount now comes from the pricing catalog for the plan being
+  converted to; only Enterprise, which has no list price, takes a contracted
+  figure from the caller.
 """
 
 from __future__ import annotations
@@ -12,16 +29,30 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
+from uuid import UUID
+
+from sqlalchemy import delete, func, select, update
+
+from app.database.orgs import ensure_org_row, org_uuid
 
 log = logging.getLogger("omnipotent.customers")
 
 
 class CustomerTier(str, Enum):
-    """Customer pricing tier."""
+    """Customer pricing tier.
 
-    FREE = "free"
+    These are the names in `app.billing.plans.PRICING_PLANS`, deliberately: the
+    tier is what conversion reads a price off, so a tier the catalog does not
+    know is a tier with no defensible MRR. The previous set — free / starter /
+    pro / enterprise — matched no catalog entry, which is how "pro" could be
+    converted at any MRR the caller felt like sending.
+    """
+
     STARTER = "starter"
-    PRO = "pro"
+    TEAM = "team"
+    GROWTH = "growth"
+    BUSINESS = "business"
+    SCALE = "scale"
     ENTERPRISE = "enterprise"
 
 
@@ -122,7 +153,7 @@ class Customer:
     company: str
     created_at: datetime
     status: CustomerStatus = CustomerStatus.TRIAL
-    tier: CustomerTier = CustomerTier.FREE
+    tier: CustomerTier = CustomerTier.STARTER
 
     name: str = ""
     role: str = ""
@@ -190,10 +221,8 @@ class Customer:
         return f"{masked}@{domain}"
 
 
-_customer_store: dict[str, Customer] = {}
-_email_index: dict[str, str] = {}
-_trial_store: dict[str, Trial] = {}
-_usage_store: dict[str, list[UsageRecord]] = {}
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _generate_id(prefix: str) -> str:
@@ -201,7 +230,88 @@ def _generate_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(8)}"
 
 
-def create_customer(
+def _utc(value: datetime | None) -> Any:
+    """Read a timestamp back as UTC-aware.
+
+    SQLite, the default database, has no timezone type, so a
+    `DateTime(timezone=True)` column round trips naive. Everything written here
+    is UTC; without this, `Trial.is_active` compares naive against aware and
+    raises TypeError.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
+def _enum(cls: Any, value: str, fallback: Any) -> Any:
+    """Read a stored enum value back, tolerating one written by an older build."""
+    try:
+        return cls(value)
+    except ValueError:
+        return fallback
+
+
+def _to_customer(row: Any) -> Customer:
+    return Customer(
+        id=row.id,
+        email=row.email,
+        company=row.company,
+        created_at=_utc(row.created_at),
+        status=_enum(CustomerStatus, row.status, CustomerStatus.TRIAL),
+        tier=_enum(CustomerTier, row.tier, CustomerTier.STARTER),
+        name=row.name,
+        role=row.role,
+        team_size=row.team_size,
+        industry=row.industry,
+        use_case=row.use_case,
+        mrr_cents=row.mrr_cents,
+        lifetime_value_cents=row.lifetime_value_cents,
+        total_investigations=row.total_investigations,
+        total_tokens_used=row.total_tokens_used,
+        last_active_at=_utc(row.last_active_at),
+        trial_id=row.trial_id,
+        stripe_customer_id=row.stripe_customer_id,
+        onboarding_completed=row.onboarding_completed,
+        onboarding_step=row.onboarding_step,
+        health_score=row.health_score,
+        nps_score=row.nps_score,
+        feedback=row.feedback,
+        tags=list(row.tags or []),
+        metadata=dict(row.meta or {}),
+    )
+
+
+def _to_trial(row: Any) -> Trial:
+    return Trial(
+        id=row.id,
+        customer_id=row.customer_id,
+        started_at=_utc(row.started_at),
+        expires_at=_utc(row.expires_at),
+        status=_enum(TrialStatus, row.status, TrialStatus.ACTIVE),
+        investigations_allowed=row.investigations_allowed,
+        investigations_used=row.investigations_used,
+        tokens_allowed=row.tokens_allowed,
+        tokens_used=row.tokens_used,
+        converted_at=_utc(row.converted_at),
+        cancelled_at=_utc(row.cancelled_at),
+        cancel_reason=row.cancel_reason,
+    )
+
+
+async def _customer_row(session: Any, org: UUID, customer_id: str = "", email: str = "") -> Any:
+    from app.database.growth_models import CustomerDB
+
+    stmt = select(CustomerDB).where(CustomerDB.org_id == org)
+    if customer_id:
+        stmt = stmt.where(CustomerDB.id == customer_id)
+    elif email:
+        stmt = stmt.where(CustomerDB.email == email.strip().lower())
+    else:
+        return None
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def create_customer(
     email: str,
     company: str,
     name: str = "",
@@ -216,48 +326,45 @@ def create_customer(
     Returns:
         Tuple of (customer, message).
     """
+    from app.database.engine import get_session
+    from app.database.growth_models import CustomerDB
+
     email = email.strip().lower()
 
     if not email or "@" not in email:
         return None, "Valid email required"
 
-    if email in _email_index:
-        existing_id = _email_index[email]
-        existing = _customer_store.get(existing_id)
-        if existing:
-            return existing, "Customer already exists"
+    async with get_session() as session:
+        org = await ensure_org_row(session)
 
-    customer = Customer(
-        id=_generate_id("cust"),
-        email=email,
-        company=company,
-        name=name,
-        role=role,
-        team_size=team_size,
-        industry=industry,
-        use_case=use_case,
-        created_at=datetime.now(timezone.utc),
-    )
+        existing = await _customer_row(session, org, email=email)
+        if existing is not None:
+            return _to_customer(existing), "Customer already exists"
 
-    if source:
-        customer.tags.append(f"source:{source}")
+        row = CustomerDB(
+            id=_generate_id("cust"),
+            org_id=org,
+            email=email,
+            company=company,
+            name=name,
+            role=role,
+            team_size=team_size,
+            industry=industry,
+            use_case=use_case,
+            status=CustomerStatus.TRIAL.value,
+            tier=CustomerTier.STARTER.value,
+            health_score=50.0,
+            tags=[f"source:{source}"] if source else [],
+            meta={},
+        )
+        session.add(row)
+        await session.commit()
 
-    customer.health_score = 50.0
-
-    _customer_store[customer.id] = customer
-    _email_index[email] = customer.id
-    _usage_store[customer.id] = []
-
-    log.info(
-        "Customer created: company=%s tier=%s",
-        company,
-        customer.tier.value,
-    )
-
-    return customer, "Customer created successfully"
+        log.info("Customer created: company=%s tier=%s", company, row.tier)
+        return _to_customer(row), "Customer created successfully"
 
 
-def create_trial(
+async def create_trial(
     customer_id: str,
     duration_days: int = 14,
     investigations_allowed: int = 10,
@@ -268,59 +375,66 @@ def create_trial(
     Returns:
         Tuple of (trial, message).
     """
-    customer = _customer_store.get(customer_id)
-    if not customer:
-        return None, "Customer not found"
+    from app.database.engine import get_session
+    from app.database.growth_models import TrialDB
 
-    if customer.trial_id:
-        existing_trial = _trial_store.get(customer.trial_id)
-        if existing_trial and existing_trial.is_active:
-            return existing_trial, "Trial already active"
+    async with get_session() as session:
+        org = org_uuid()
+        customer = await _customer_row(session, org, customer_id=customer_id)
+        if customer is None:
+            return None, "Customer not found"
 
-    now = datetime.now(timezone.utc)
+        if customer.trial_id:
+            existing = (
+                await session.execute(select(TrialDB).where(TrialDB.id == customer.trial_id))
+            ).scalar_one_or_none()
+            if existing is not None and _to_trial(existing).is_active:
+                return _to_trial(existing), "Trial already active"
 
-    trial = Trial(
-        id=_generate_id("trial"),
-        customer_id=customer_id,
-        started_at=now,
-        expires_at=now + timedelta(days=duration_days),
-        investigations_allowed=investigations_allowed,
-        tokens_allowed=tokens_allowed,
-    )
+        now = _now()
+        trial = TrialDB(
+            id=_generate_id("trial"),
+            org_id=org,
+            customer_id=customer_id,
+            status=TrialStatus.ACTIVE.value,
+            started_at=now,
+            expires_at=now + timedelta(days=duration_days),
+            investigations_allowed=investigations_allowed,
+            tokens_allowed=tokens_allowed,
+        )
+        session.add(trial)
+        customer.trial_id = trial.id
+        customer.status = CustomerStatus.TRIAL.value
+        await session.commit()
 
-    _trial_store[trial.id] = trial
-    customer.trial_id = trial.id
-    customer.status = CustomerStatus.TRIAL
-
-    log.info(
-        "Trial created: customer=%s duration=%d days",
-        customer.company,
-        duration_days,
-    )
-
-    return trial, "Trial started successfully"
-
-
-def get_customer(customer_id: str = "", email: str = "") -> Customer | None:
-    """Get customer by ID or email."""
-    if customer_id:
-        return _customer_store.get(customer_id)
-
-    if email:
-        email = email.strip().lower()
-        cust_id = _email_index.get(email)
-        if cust_id:
-            return _customer_store.get(cust_id)
-
-    return None
+        log.info("Trial created: customer=%s duration=%d days", customer.company, duration_days)
+        return _to_trial(trial), "Trial started successfully"
 
 
-def get_trial(trial_id: str) -> Trial | None:
-    """Get trial by ID."""
-    return _trial_store.get(trial_id)
+async def get_customer(customer_id: str = "", email: str = "") -> Customer | None:
+    """Get customer by ID or email, within the calling org."""
+    from app.database.engine import get_session
+
+    async with get_session() as session:
+        row = await _customer_row(session, org_uuid(), customer_id=customer_id, email=email)
+        return _to_customer(row) if row else None
 
 
-def record_usage(
+async def get_trial(trial_id: str) -> Trial | None:
+    """Get trial by ID, within the calling org."""
+    from app.database.engine import get_session
+    from app.database.growth_models import TrialDB
+
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(TrialDB).where(TrialDB.id == trial_id, TrialDB.org_id == org_uuid())
+            )
+        ).scalar_one_or_none()
+        return _to_trial(row) if row else None
+
+
+async def record_usage(
     customer_id: str,
     event_type: str,
     investigation_id: str = "",
@@ -329,52 +443,63 @@ def record_usage(
     **metadata: Any,
 ) -> bool:
     """Record customer usage event."""
-    customer = _customer_store.get(customer_id)
-    if not customer:
-        return False
+    from app.database.engine import get_session
+    from app.database.growth_models import CustomerUsageRecordDB, TrialDB
 
-    record = UsageRecord(
-        timestamp=datetime.now(timezone.utc),
-        event_type=event_type,
-        investigation_id=investigation_id,
-        tokens_used=tokens_used,
-        duration_seconds=duration_seconds,
-        metadata=metadata,
-    )
+    async with get_session() as session:
+        org = org_uuid()
+        customer = await _customer_row(session, org, customer_id=customer_id)
+        if customer is None:
+            return False
 
-    if customer_id not in _usage_store:
-        _usage_store[customer_id] = []
-    _usage_store[customer_id].append(record)
+        recorded_at = _now()
+        session.add(
+            CustomerUsageRecordDB(
+                org_id=org,
+                customer_id=customer_id,
+                event_type=event_type,
+                investigation_id=investigation_id,
+                tokens_used=tokens_used,
+                duration_seconds=duration_seconds,
+                meta=dict(metadata),
+                recorded_at=recorded_at,
+            )
+        )
 
-    customer.last_active_at = record.timestamp
+        customer.last_active_at = recorded_at
+        if event_type == "investigation":
+            customer.total_investigations += 1
+        if tokens_used > 0:
+            customer.total_tokens_used += tokens_used
 
-    if event_type == "investigation":
-        customer.total_investigations += 1
+        if customer.trial_id:
+            trial = (
+                await session.execute(select(TrialDB).where(TrialDB.id == customer.trial_id))
+            ).scalar_one_or_none()
+            if trial is not None and _to_trial(trial).is_active:
+                if event_type == "investigation":
+                    trial.investigations_used += 1
+                trial.tokens_used += tokens_used
 
-    if tokens_used > 0:
-        customer.total_tokens_used += tokens_used
-
-    if customer.trial_id:
-        trial = _trial_store.get(customer.trial_id)
-        if trial and trial.is_active:
-            if event_type == "investigation":
-                trial.investigations_used += 1
-            trial.tokens_used += tokens_used
-
-    _update_health_score(customer)
-
-    return True
+        customer.health_score = _health_score(customer)
+        await session.commit()
+        return True
 
 
-def _update_health_score(customer: Customer) -> None:
-    """Update customer health score based on engagement."""
+def _health_score(customer: Any) -> float:
+    """Engagement score for a customer row, 0-100.
+
+    Takes the row (or anything with the same attributes) and returns the score
+    rather than mutating in place, so the caller decides when it is written.
+    """
     score = 50.0
 
     if customer.total_investigations > 0:
         score += min(20, customer.total_investigations * 2)
 
-    if customer.last_active_at:
-        days_inactive = (datetime.now(timezone.utc) - customer.last_active_at).days
+    last_active = _utc(customer.last_active_at)
+    if last_active:
+        days_inactive = (_now() - last_active).days
         if days_inactive == 0:
             score += 15
         elif days_inactive <= 3:
@@ -387,7 +512,7 @@ def _update_health_score(customer: Customer) -> None:
     if customer.onboarding_completed:
         score += 10
 
-    if customer.is_paying:
+    if customer.mrr_cents > 0:
         score += 15
 
     if customer.nps_score is not None:
@@ -398,105 +523,213 @@ def _update_health_score(customer: Customer) -> None:
         elif customer.nps_score <= 6:
             score -= 10
 
-    customer.health_score = max(0, min(100, score))
+    return max(0.0, min(100.0, score))
 
 
-def convert_trial(
+def listed_mrr_cents(tier: CustomerTier, annual: bool = False) -> int | None:
+    """The catalog's monthly price for a tier, or None when it has no list price.
+
+    Enterprise is quoted per contract and Starter is free, so both return None
+    and the caller has to decide what that means rather than being handed a
+    number the price list does not support.
+    """
+    from app.billing.plans import PRICING_PLANS
+
+    plan = PRICING_PLANS.get(tier.value)
+    if plan is None:
+        return None
+    cents = plan.annual_price_cents // 12 if annual else plan.monthly_price_cents
+    return cents or None
+
+
+async def convert_trial(
     customer_id: str,
-    tier: CustomerTier = CustomerTier.STARTER,
-    mrr_cents: int = 0,
+    tier: CustomerTier = CustomerTier.TEAM,
+    annual: bool = False,
     stripe_customer_id: str = "",
+    contracted_mrr_cents: int | None = None,
 ) -> tuple[bool, str]:
-    """Convert a trial customer to paid."""
-    customer = _customer_store.get(customer_id)
-    if not customer:
-        return False, "Customer not found"
+    """Convert a trial customer to paid.
 
-    if customer.trial_id:
-        trial = _trial_store.get(customer.trial_id)
-        if trial:
-            trial.status = TrialStatus.CONVERTED
-            trial.converted_at = datetime.now(timezone.utc)
+    The MRR written here is the catalog price for `tier`, not a number from the
+    request body: the previous version stored whatever `mrr_cents` the caller
+    sent, so `POST /customers/convert` could set the dashboard's revenue total
+    to anything. `contracted_mrr_cents` is accepted only for Enterprise, which
+    is quoted per deal and therefore has no list price to read.
+    """
+    from app.database.engine import get_session
+    from app.database.growth_models import TrialDB
 
-    customer.status = CustomerStatus.ACTIVE
-    customer.tier = tier
-    customer.mrr_cents = mrr_cents
-    customer.stripe_customer_id = stripe_customer_id
-    customer.tags.append("converted")
-    customer.tags.append(f"tier:{tier.value}")
+    listed = listed_mrr_cents(tier, annual)
+    if listed is None:
+        if tier is not CustomerTier.ENTERPRISE:
+            return False, f"The {tier.value} plan has no recurring price to convert to."
+        if contracted_mrr_cents is None or contracted_mrr_cents < 0:
+            return (
+                False,
+                "Enterprise is quoted per contract: pass contracted_mrr_cents.",
+            )
+        mrr_cents = contracted_mrr_cents
+    else:
+        mrr_cents = listed
 
-    log.info(
-        "Trial converted: customer=%s tier=%s mrr=$%.2f",
-        customer.company,
-        tier.value,
-        mrr_cents / 100,
-    )
+    async with get_session() as session:
+        org = org_uuid()
+        customer = await _customer_row(session, org, customer_id=customer_id)
+        if customer is None:
+            return False, "Customer not found"
 
-    return True, "Trial converted successfully"
+        if customer.trial_id:
+            trial = (
+                await session.execute(select(TrialDB).where(TrialDB.id == customer.trial_id))
+            ).scalar_one_or_none()
+            if trial is not None:
+                trial.status = TrialStatus.CONVERTED.value
+                trial.converted_at = _now()
+
+        customer.status = CustomerStatus.ACTIVE.value
+        customer.tier = tier.value
+        customer.mrr_cents = mrr_cents
+        customer.stripe_customer_id = stripe_customer_id
+        customer.tags = [*(customer.tags or []), "converted", f"tier:{tier.value}"]
+        customer.health_score = _health_score(customer)
+        await session.commit()
+
+        log.info(
+            "Trial converted: customer=%s tier=%s mrr=$%.2f",
+            customer.company,
+            tier.value,
+            mrr_cents / 100,
+        )
+        return True, "Trial converted successfully"
 
 
-def get_active_trials() -> list[Trial]:
-    """Get all active trials."""
-    now = datetime.now(timezone.utc)
-    active = []
+async def get_active_trials() -> list[Trial]:
+    """Get all active trials for the calling org, expiring any that are due.
 
-    for trial in _trial_store.values():
-        if trial.status == TrialStatus.ACTIVE:
-            if now >= trial.expires_at:
-                trial.status = TrialStatus.EXPIRED
-            else:
-                active.append(trial)
+    Expiry used to happen as a side effect of somebody calling this function, so
+    a trial nobody listed stayed `active` forever. It is a single UPDATE now,
+    which also means the status in the table is right for anyone reading it
+    directly.
+    """
+    from app.database.engine import get_session
+    from app.database.growth_models import TrialDB
 
-    return sorted(active, key=lambda t: t.expires_at)
+    org = org_uuid()
+    async with get_session() as session:
+        await session.execute(
+            update(TrialDB)
+            .where(
+                TrialDB.org_id == org,
+                TrialDB.status == TrialStatus.ACTIVE.value,
+                TrialDB.expires_at <= _now(),
+            )
+            .values(status=TrialStatus.EXPIRED.value)
+        )
+        await session.commit()
+
+        rows = (
+            await session.execute(
+                select(TrialDB)
+                .where(TrialDB.org_id == org, TrialDB.status == TrialStatus.ACTIVE.value)
+                .order_by(TrialDB.expires_at)
+            )
+        ).scalars().all()
+        return [_to_trial(r) for r in rows]
 
 
-def get_customer_stats() -> dict[str, Any]:
-    """Get customer statistics for dashboard."""
-    customers = list(_customer_store.values())
-    trials = list(_trial_store.values())
+async def get_customer_stats() -> dict[str, Any]:
+    """Get customer statistics for dashboard, scoped to the calling org."""
+    from app.database.engine import get_session
+    from app.database.growth_models import CustomerDB, TrialDB
 
-    if not customers:
-        return {
-            "total_customers": 0,
-            "total_trials": 0,
-            "active_trials": 0,
-            "paying_customers": 0,
-            "mrr_usd": 0.0,
-            "conversion_rate": 0.0,
-            "avg_health_score": 0.0,
+    org = org_uuid()
+    active_trials = await get_active_trials()
+
+    async with get_session() as session:
+        totals = (
+            await session.execute(
+                select(
+                    func.count(CustomerDB.id),
+                    func.coalesce(func.sum(CustomerDB.mrr_cents), 0),
+                    func.coalesce(func.avg(CustomerDB.health_score), 0.0),
+                    func.coalesce(func.sum(CustomerDB.total_investigations), 0),
+                ).where(CustomerDB.org_id == org)
+            )
+        ).one()
+        total_customers, total_mrr, avg_health, total_investigations = totals
+
+        if not total_customers:
+            return {
+                "total_customers": 0,
+                "total_trials": 0,
+                "active_trials": 0,
+                "paying_customers": 0,
+                "mrr_usd": 0.0,
+                "conversion_rate": 0.0,
+                "avg_health_score": 0.0,
+            }
+
+        paying = (
+            await session.execute(
+                select(func.count(CustomerDB.id)).where(
+                    CustomerDB.org_id == org, CustomerDB.mrr_cents > 0
+                )
+            )
+        ).scalar() or 0
+
+        by_status = {
+            status: count
+            for status, count in (
+                await session.execute(
+                    select(CustomerDB.status, func.count(CustomerDB.id))
+                    .where(CustomerDB.org_id == org)
+                    .group_by(CustomerDB.status)
+                )
+            ).all()
+        }
+        by_tier = {
+            tier: count
+            for tier, count in (
+                await session.execute(
+                    select(CustomerDB.tier, func.count(CustomerDB.id))
+                    .where(CustomerDB.org_id == org)
+                    .group_by(CustomerDB.tier)
+                )
+            ).all()
         }
 
-    paying = [c for c in customers if c.is_paying]
-    active_trials = get_active_trials()
-    converted_trials = [t for t in trials if t.status == TrialStatus.CONVERTED]
-
-    total_mrr = sum(c.mrr_cents for c in paying)
-
-    by_status: dict[str, int] = {}
-    by_tier: dict[str, int] = {}
-
-    for c in customers:
-        by_status[c.status.value] = by_status.get(c.status.value, 0) + 1
-        by_tier[c.tier.value] = by_tier.get(c.tier.value, 0) + 1
+        total_trials = (
+            await session.execute(
+                select(func.count(TrialDB.id)).where(TrialDB.org_id == org)
+            )
+        ).scalar() or 0
+        converted_trials = (
+            await session.execute(
+                select(func.count(TrialDB.id)).where(
+                    TrialDB.org_id == org, TrialDB.status == TrialStatus.CONVERTED.value
+                )
+            )
+        ).scalar() or 0
 
     return {
-        "total_customers": len(customers),
-        "total_trials": len(trials),
+        "total_customers": total_customers,
+        "total_trials": total_trials,
         "active_trials": len(active_trials),
-        "paying_customers": len(paying),
+        "paying_customers": paying,
         "mrr_usd": total_mrr / 100,
-        "conversion_rate": len(converted_trials) / len(trials) if trials else 0.0,
-        "avg_health_score": sum(c.health_score for c in customers) / len(customers),
+        "conversion_rate": converted_trials / total_trials if total_trials else 0.0,
+        "avg_health_score": float(avg_health),
         "by_status": by_status,
         "by_tier": by_tier,
-        "total_investigations": sum(c.total_investigations for c in customers),
+        "total_investigations": total_investigations,
     }
 
 
 class CustomerManager:
     """High-level customer management for API integration."""
 
-    def create(
+    async def create(
         self,
         email: str,
         company: str,
@@ -505,46 +738,57 @@ class CustomerManager:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Create customer and optionally start trial."""
-        customer, msg = create_customer(email, company, **kwargs)
+        customer, msg = await create_customer(email, company, **kwargs)
 
         if not customer:
             return {"success": False, "error": msg}
 
-        result = {
+        result: dict[str, Any] = {
             "success": True,
             "message": msg,
             "customer": customer.to_dict(),
         }
 
         if start_trial:
-            trial, trial_msg = create_trial(customer.id, duration_days=trial_days)
+            trial, trial_msg = await create_trial(customer.id, duration_days=trial_days)
             if trial:
                 result["trial"] = trial.to_dict()
                 result["message"] = f"{msg}. {trial_msg}"
 
         return result
 
-    def get_dashboard(self) -> dict[str, Any]:
+    async def get_dashboard(self) -> dict[str, Any]:
         """Get customer dashboard data."""
-        stats = get_customer_stats()
+        from app.database.engine import get_session
+        from app.database.growth_models import CustomerDB
+
+        stats = await get_customer_stats()
+        trials = await get_active_trials()
+
+        async with get_session() as session:
+            recent = (
+                await session.execute(
+                    select(CustomerDB)
+                    .where(CustomerDB.org_id == org_uuid())
+                    .order_by(CustomerDB.created_at.desc())
+                    .limit(10)
+                )
+            ).scalars().all()
 
         return {
             "stats": stats,
-            "active_trials": [t.to_dict() for t in get_active_trials()[:10]],
-            "recent_customers": [
-                c.to_dict()
-                for c in sorted(
-                    _customer_store.values(),
-                    key=lambda x: x.created_at,
-                    reverse=True,
-                )[:10]
-            ],
+            "active_trials": [t.to_dict() for t in trials[:10]],
+            "recent_customers": [_to_customer(c).to_dict() for c in recent],
         }
 
 
-def clear_customers() -> None:
+async def clear_customers() -> None:
     """Clear all customer data (for testing)."""
-    _customer_store.clear()
-    _email_index.clear()
-    _trial_store.clear()
-    _usage_store.clear()
+    from app.database.engine import get_session
+    from app.database.growth_models import CustomerDB, CustomerUsageRecordDB, TrialDB
+
+    async with get_session() as session:
+        await session.execute(delete(CustomerUsageRecordDB))
+        await session.execute(delete(TrialDB))
+        await session.execute(delete(CustomerDB))
+        await session.commit()

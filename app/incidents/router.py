@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.billing.feature_gate import require_feature
 from app.incidents.models import (
     Incident,
     IncidentSeverity,
@@ -302,8 +303,13 @@ class PostmortemRequest(BaseModel):
         "action items are written by the configured LLM from exactly those facts. "
         "Pass `sections` to regenerate a subset. 503 when no LLM key is configured "
         "— there is no template fallback, because a canned paragraph presented as "
-        "analysis is worse than no paragraph."
+        "analysis is worse than no paragraph. 402 when the org's plan does not "
+        "include AI postmortems (multi-tenant deployments only)."
     ),
+    # `ai_postmortem` is Team-and-up in FEATURE_TO_MIN_TIER and the pricing page
+    # sells it that way; until this dependency existed nothing on the server
+    # enforced any of it. No-op in single-tenant mode.
+    dependencies=[Depends(require_feature("ai_postmortem"))],
 )
 async def create_postmortem(incident_id: UUID, request: PostmortemRequest | None = None) -> dict:
     store = get_incident_store()

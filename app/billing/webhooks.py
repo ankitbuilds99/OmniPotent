@@ -10,11 +10,11 @@ import hmac
 import logging
 from typing import Any, Protocol
 
+from app.billing.plans import quota_plan_for
 from app.config import get_settings
+from app.tenancy.models import PLAN_QUOTAS
 
 log = logging.getLogger("omnipotent.billing.webhooks")
-
-_PLANS = {"free", "team", "enterprise", "starter_monthly", "starter_yearly", "pro_monthly"}
 
 
 class StripeClient(Protocol):
@@ -110,8 +110,36 @@ def verify_stripe_signature(
     return hmac.compare_digest(expected, v1)
 
 
+class UnknownPlan(ValueError):
+    """A subscription event named a plan this deployment does not sell.
+
+    Distinct from "not a subscription event": the caller must reject the
+    delivery so Stripe retries and the mismatch is visible, rather than treating
+    it as nothing to do. Silently ignoring it left the customer on whatever they
+    had before, with Stripe believing the change was accepted.
+    """
+
+    def __init__(self, plan: str):
+        self.plan = plan
+        super().__init__(f"unknown plan in Stripe metadata: {plan!r}")
+
+
 def plan_from_stripe_event(event: dict) -> tuple[str, str] | None:
-    """Map a Stripe subscription event to (org_id, plan)."""
+    """Map a Stripe subscription event to (org_id, enforced plan).
+
+    The returned plan is an `app.tenancy.models.PLAN_QUOTAS` value, because that
+    is what `set_plan` stores and what the quota check reads. Stripe metadata
+    carries a *catalog* tier name ("growth"), so it is translated here rather
+    than at each call site.
+
+    Returns None when the event is not a subscription change at all, and raises
+    `UnknownPlan` when it is one but names a plan that does not exist. Those two
+    used to be the same answer, which is how `plan: "pro_monthly"` — a value in
+    the old hardcoded allowlist that no part of the product sells — could be
+    accepted here and then normalised to `free` on the way into the database:
+    the webhook replied `{"status": "applied", "plan": "pro_monthly"}` while the
+    customer was downgraded.
+    """
     etype = event.get("type", "")
     obj = (event.get("data") or {}).get("object") or {}
     meta = obj.get("metadata") or {}
@@ -121,6 +149,13 @@ def plan_from_stripe_event(event: dict) -> tuple[str, str] | None:
     if etype == "customer.subscription.deleted":
         return org_id, "free"
     if etype in ("customer.subscription.created", "customer.subscription.updated"):
-        plan = (meta.get("plan") or "").strip().lower()
-        return (org_id, plan) if plan in _PLANS else None
+        raw = (meta.get("plan") or "").strip().lower()
+        # "free" is not a catalog tier — it is what a cancellation resolves to —
+        # but Stripe metadata may name it directly, so accept it.
+        if raw in PLAN_QUOTAS:
+            return org_id, raw
+        plan = quota_plan_for(raw)
+        if plan is None:
+            raise UnknownPlan(raw)
+        return org_id, plan
     return None

@@ -5,6 +5,10 @@ Provides:
 - Trial management
 - Usage metering
 - Conversion funnel analytics
+
+Every function here is a coroutine and every row is scoped to the calling org:
+this is the `customers` / `trials` / `customer_usage_records` tables, not the
+module dicts it used to be.
 """
 
 from app.customers.manager import (
@@ -14,11 +18,13 @@ from app.customers.manager import (
     CustomerStatus,
     Trial,
     TrialStatus,
+    clear_customers,
     create_customer,
     create_trial,
     get_customer,
     get_trial,
     get_customer_stats,
+    listed_mrr_cents,
     record_usage,
     convert_trial,
     get_active_trials,
@@ -31,11 +37,13 @@ __all__ = [
     "CustomerStatus",
     "Trial",
     "TrialStatus",
+    "clear_customers",
     "create_customer",
     "create_trial",
     "get_customer",
     "get_trial",
     "get_customer_stats",
+    "listed_mrr_cents",
     "record_usage",
     "convert_trial",
     "get_active_trials",

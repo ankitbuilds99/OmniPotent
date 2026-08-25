@@ -58,6 +58,14 @@ _POLICY: dict[str, tuple[Decision, Risk, str]] = {
     # terraform (infrastructure-as-code management)
     "trigger_plan": ("approve", "medium", "Queues a Terraform plan on a workspace"),
     "trigger_apply": ("approve", "high", "Applies a Terraform run (changes live infrastructure)"),
+    # marketplace — these mutate the deployment itself, not a monitored system.
+    # An install changes which MCP subprocesses launch and which tools every
+    # future investigation sees, so it is not a read no matter how it reads.
+    "install_agent": ("approve", "medium", "Installs a marketplace agent: launches a new MCP server subprocess and adds its tools to every future investigation"),
+    "uninstall_agent": ("approve", "medium", "Removes an installed agent and the tools other runs may depend on"),
+    "configure_agent": ("approve", "medium", "Rewrites an installed agent's runtime configuration, including the endpoints and credentials its subprocess receives"),
+    "enable_agent": ("notify", "low", "Re-enables an installed agent's tools (reversible)"),
+    "disable_agent": ("notify", "low", "Stops loading an installed agent's tools (reversible)"),
 }
 
 
@@ -134,6 +142,17 @@ def describe_action(tool_name: str, args: dict | None = None) -> str:
         return f"Trigger Terraform plan{spec} on workspace {_g('workspace')}"
     if tool_name == "trigger_apply":
         return f"Apply Terraform run {_g('run_id')}"
+    # marketplace
+    if tool_name == "install_agent":
+        return f"Install marketplace agent {_g('agent_id')} into this deployment"
+    if tool_name == "uninstall_agent":
+        return f"Uninstall marketplace agent {_g('agent_id')}"
+    if tool_name == "configure_agent":
+        return f"Reconfigure marketplace agent {_g('agent_id')}"
+    if tool_name == "enable_agent":
+        return f"Enable marketplace agent {_g('agent_id')}"
+    if tool_name == "disable_agent":
+        return f"Disable marketplace agent {_g('agent_id')}"
     return tool_name
 
 

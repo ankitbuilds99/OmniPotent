@@ -37,6 +37,11 @@ from app.database import engine as db_engine
 CONFIGURED_AWAY = {
     "/billing/subscription/cancel",
     "/billing/subscription/reactivate",
+    # The portal used to answer 200 with `portal_url` set to the caller's own
+    # return URL, and the frontend assigns that to window.location — so every
+    # button wired to it silently reloaded the current page. Refusing by name is
+    # the fix, not a regression.
+    "/billing/portal",
     # /billing/webhooks/stripe is deliberately absent: it was a duplicate Stripe
     # receiver behind require_auth, which Stripe could never reach. The live one
     # is POST /webhooks/stripe (tests/test_stripe_webhook_route.py).

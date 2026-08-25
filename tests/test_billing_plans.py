@@ -5,10 +5,13 @@ from uuid import uuid4
 from app.billing.models import PlanTier, PricingPlan
 from app.billing.plans import (
     PlanManager, PRICING_PLANS, PLAN_TIER_HIERARCHY, FEATURE_TO_MIN_TIER,
-    FEATURE_DISPLAY_NAMES, _create_starter_features, _create_team_features,
+    FEATURE_DISPLAY_NAMES, CATALOG_TO_QUOTA_PLAN, QUOTA_PLAN_TO_CATALOG,
+    catalog_plan_for, quota_plan_for,
+    _create_starter_features, _create_team_features,
     _create_growth_features, _create_business_features, _create_scale_features,
     _create_enterprise_features,
 )
+from app.tenancy.models import PLAN_QUOTAS
 
 class TestPlanFeatureCreation:
     def test_starter_features_has_basic_features(self):
@@ -153,3 +156,55 @@ class TestPlanManagerWithCustomPlans:
         manager = PlanManager(plans={"custom": custom_plan})
         with pytest.raises(ValueError, match="Starter plan not found"):
             manager.get_community_plan()
+
+
+class TestPlanVocabularies:
+    """The catalog sells six tiers; the quota layer enforces three.
+
+    Nothing reconciled them, so a paid tier the enforcement layer had never heard
+    of was normalised to `free` on its way into `orgs.plan` — a downgrade applied
+    on the strength of a successful payment.
+    """
+
+    def test_every_catalog_tier_maps_to_a_plan_that_is_enforced(self):
+        assert set(CATALOG_TO_QUOTA_PLAN) == set(PRICING_PLANS)
+        assert set(CATALOG_TO_QUOTA_PLAN.values()) <= set(PLAN_QUOTAS)
+
+    def test_every_enforced_plan_has_a_tier_to_display(self):
+        assert set(QUOTA_PLAN_TO_CATALOG) == set(PLAN_QUOTAS)
+        assert set(QUOTA_PLAN_TO_CATALOG.values()) <= set(PRICING_PLANS)
+
+    @pytest.mark.parametrize(
+        "tier,expected",
+        [("starter", "free"), ("team", "team"), ("growth", "team"),
+         ("business", "team"), ("scale", "enterprise"), ("enterprise", "enterprise")],
+    )
+    def test_quota_plan_for_known_tiers(self, tier, expected):
+        assert quota_plan_for(tier) == expected
+
+    @pytest.mark.parametrize("tier", ["  Growth ", "TEAM"])
+    def test_quota_plan_for_is_forgiving_about_case_and_space(self, tier):
+        assert quota_plan_for(tier) in PLAN_QUOTAS
+
+    @pytest.mark.parametrize("tier", ["pro_monthly", "platinum", "", "  ", None])
+    def test_an_unknown_tier_returns_none_rather_than_defaulting(self, tier):
+        """None is the signal to reject. Defaulting is what caused the downgrade."""
+        assert quota_plan_for(tier) is None
+
+    def test_a_paid_tier_never_resolves_to_the_free_plan(self):
+        for name, plan in PRICING_PLANS.items():
+            if plan.monthly_price_cents > 0:
+                assert quota_plan_for(name) != "free", f"{name} is priced but maps to free"
+
+    @pytest.mark.parametrize("plan,expected", [("free", "starter"), ("team", "team"),
+                                               ("enterprise", "enterprise")])
+    def test_catalog_plan_for_names_the_tier_the_customer_actually_has(self, plan, expected):
+        assert catalog_plan_for(plan).name == expected
+
+    def test_catalog_plan_for_falls_back_to_starter_for_junk(self):
+        """Display-side, so a bad value shows the least generous tier, never the most."""
+        assert catalog_plan_for("nonsense").name == "starter"
+
+    def test_the_round_trip_is_stable_for_representative_tiers(self):
+        for quota_plan, tier in QUOTA_PLAN_TO_CATALOG.items():
+            assert quota_plan_for(tier) == quota_plan

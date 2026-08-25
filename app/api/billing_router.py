@@ -14,7 +14,9 @@ from app.billing import (
     DatabaseBillingStore,
     StripeBillingService,
 )
-from app.billing.api import BillingUnavailableError
+from app.billing.api import BillingUnavailableError, UnknownMetricError
+from app.billing.models import MetricType
+from app.billing.stripe_client import make_stripe_client
 from app.config import get_settings
 from app.database.orgs import org_uuid
 
@@ -26,6 +28,23 @@ router = APIRouter(prefix="/billing", tags=["Billing"])
 def _unavailable(exc: BillingUnavailableError) -> HTTPException:
     """Map an unconfigured-billing failure to 503 (never a silent success)."""
     return HTTPException(status_code=503, detail=str(exc))
+
+
+def _bad_metric(exc: UnknownMetricError) -> HTTPException:
+    """Map an unrecognised metric name to 400 — the caller's typo, not an outage."""
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+def _bad_request(exc: ValueError) -> HTTPException:
+    """Map a rejected billing operation to 400 with the reason.
+
+    The Stripe service raises ValueError for everything it cannot do — unknown
+    plan, no price configured for the requested cycle, no Stripe customer yet —
+    and none of it was caught, so the client saw a bare 500 "An unexpected error
+    occurred" and had no way to tell a typo from an outage.
+    """
+    return HTTPException(status_code=400, detail=str(exc))
+
 
 # Billing service singletons (initialized lazily). The store holds no state of
 # its own — every row it reads and writes is in the `billing_*` tables — so one
@@ -43,20 +62,25 @@ def _get_store() -> DatabaseBillingStore:
 
 
 def _get_stripe_service() -> StripeBillingService | None:
+    """The live Stripe service, or None when billing is not configured.
+
+    This used to pass the `stripe` module itself as the client. The module has no
+    `create_customer` / `create_checkout_session` / `construct_webhook_event`, so
+    a deployment with the SDK installed got an AttributeError — a 500 — on the
+    first checkout. `StripeSDKClient` is the adapter that actually implements the
+    protocol the service calls.
+    """
     global _STRIPE_SERVICE
     s = get_settings()
     if _STRIPE_SERVICE is None and s.stripe_api_key:
-        try:
-            import stripe
-            stripe.api_key = s.stripe_api_key
+        client = make_stripe_client(s.stripe_api_key)
+        if client is not None:
             _STRIPE_SERVICE = StripeBillingService(
                 store=_get_store(),
-                stripe_client=stripe,
+                stripe_client=client,
                 webhook_secret=s.stripe_webhook_secret or "",
                 frontend_url=s.frontend_url or "http://localhost:3000",
             )
-        except Exception as e:
-            log.warning("Failed to initialize Stripe: %s", e)
     return _STRIPE_SERVICE
 
 
@@ -80,6 +104,32 @@ def _current_org_id() -> UUID:
     incidents and runbooks beside them.
     """
     return org_uuid()
+
+
+async def record_ai_investigation(tokens: int = 0, idem: str = "") -> None:
+    """Mirror a completed investigation into the billing meter.
+
+    The Billing page reads `billing_usage_records` / `billing_usage_summaries`,
+    and until this existed the only writer was the hand-callable POST
+    /billing/track — which no part of the product or the frontend ever called.
+    So every counter and every bar on the Usage tab read zero forever, while the
+    enforced meter at GET /usage counted the same investigations correctly.
+
+    Best-effort by design: accounting must not fail a request that already
+    succeeded. The caller is the completion hook, which is equally forgiving of
+    its other meters.
+    """
+    meta: dict[str, Any] = {"source": "investigation"}
+    if tokens:
+        meta["tokens"] = tokens
+    if idem:
+        meta["idempotency_key"] = idem
+    try:
+        await _get_billing_api().track_usage(
+            _current_org_id(), MetricType.AI_INVESTIGATION.value, meta
+        )
+    except Exception:  # noqa: BLE001 — billing accounting must never break a request
+        log.warning("billing usage record failed", exc_info=True)
 
 
 # Request/Response models
@@ -145,6 +195,8 @@ async def change_subscription(req: ChangePlanRequest) -> dict[str, Any]:
         return await api.change_plan(org_id, req.plan_name, req.billing_cycle)
     except BillingUnavailableError as e:
         raise _unavailable(e) from e
+    except ValueError as e:
+        raise _bad_request(e) from e
 
 
 @router.post("/subscription/cancel")
@@ -156,6 +208,8 @@ async def cancel_subscription(req: CancelRequest) -> dict[str, Any]:
         return await api.cancel_subscription(org_id, req.reason, req.immediate, req.feedback)
     except BillingUnavailableError as e:
         raise _unavailable(e) from e
+    except ValueError as e:
+        raise _bad_request(e) from e
 
 
 @router.post("/subscription/reactivate")
@@ -167,6 +221,8 @@ async def reactivate_subscription() -> dict[str, Any]:
         return await api.reactivate_subscription(org_id)
     except BillingUnavailableError as e:
         raise _unavailable(e) from e
+    except ValueError as e:
+        raise _bad_request(e) from e
 
 
 @router.get("/subscription/proration")
@@ -223,7 +279,10 @@ async def check_usage_limit(metric: str, increment: int = 1) -> dict[str, Any]:
     """Check if within usage limits."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.check_usage_limit(org_id, metric, increment)
+    try:
+        return await api.check_usage_limit(org_id, metric, increment)
+    except UnknownMetricError as e:
+        raise _bad_metric(e) from e
 
 
 # Checkout and portal endpoints
@@ -243,6 +302,8 @@ async def create_checkout(req: CheckoutRequest) -> dict[str, Any]:
         )
     except BillingUnavailableError as e:
         raise _unavailable(e) from e
+    except ValueError as e:
+        raise _bad_request(e) from e
 
 
 @router.post("/portal")
@@ -254,6 +315,8 @@ async def create_portal(req: PortalRequest) -> dict[str, Any]:
         return await api.create_portal(org_id, req.return_url)
     except BillingUnavailableError as e:
         raise _unavailable(e) from e
+    except ValueError as e:
+        raise _bad_request(e) from e
 
 
 # Invoice and payment method endpoints
@@ -305,7 +368,10 @@ async def track_usage(req: TrackUsageRequest) -> dict[str, Any]:
     """Track a usage event."""
     api = _get_billing_api()
     org_id = _current_org_id()
-    return await api.track_usage(org_id, req.metric_type, req.metadata)
+    try:
+        return await api.track_usage(org_id, req.metric_type, req.metadata)
+    except UnknownMetricError as e:
+        raise _bad_metric(e) from e
 
 
 # Stripe's webhook receiver is `POST /webhooks/stripe` (app/api/main.py). There

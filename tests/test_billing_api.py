@@ -393,10 +393,15 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_create_portal_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """create_portal should return demo portal when Stripe not configured."""
-        result = await api_no_stripe.create_portal(org_id)
+        """create_portal must fail loudly when Stripe is not configured.
 
-        assert "portal_url" in result
+        It used to return `{"portal_url": <the caller's own return_url>}`, so
+        every "Billing Portal" / "View all in Stripe" / "Add new card" button
+        navigated the browser to the page it was already on: no error, no
+        message, nothing happens, and no way to tell it from a slow page.
+        """
+        with pytest.raises(BillingUnavailableError):
+            await api_no_stripe.create_portal(org_id)
 
     # Change plan tests
 

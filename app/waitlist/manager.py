@@ -2,6 +2,17 @@
 
 Tracks signups, manages tiers, and provides analytics for
 understanding conversion funnel and user acquisition.
+
+This was three module-level dicts — `_waitlist_store`, `_email_index` and a
+`_position_counter` integer. Everything a visitor was told when they signed up
+(their position, their referral code) was true only until the process recycled,
+and a second uvicorn worker answered from a second, empty waitlist: two people
+could be handed position #1, and one of them would find themselves off the list
+entirely after the next deploy. It is the `waitlist_entries` table now, and
+`position` is allocated under a unique constraint so a concurrent signup cannot
+duplicate one.
+
+The list is global, not per-org: someone joining a waitlist has no account yet.
 """
 
 from __future__ import annotations
@@ -16,6 +27,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger("omnipotent.waitlist")
 
@@ -107,9 +121,10 @@ class WaitlistEntry:
         return f"{masked_local}@{domain}"
 
 
-_waitlist_store: dict[str, WaitlistEntry] = {}
-_email_index: dict[str, str] = {}
-_position_counter: int = 0
+# How many times to re-pick a position when a concurrent signup takes the one we
+# were about to claim. Each retry re-reads MAX(position), so this only has to
+# outlast a burst, not a sustained race.
+_POSITION_ATTEMPTS = 5
 
 
 def _generate_id() -> str:
@@ -134,7 +149,76 @@ def _hash_ip(ip: str) -> str:
     return hashlib.sha256(ip.encode()).hexdigest()[:16]
 
 
-def add_to_waitlist(
+def _utc(value: datetime | None) -> Any:
+    """Read a timestamp back as UTC-aware.
+
+    SQLite has no timezone type, so a `DateTime(timezone=True)` column round
+    trips to a naive datetime; everything written here is UTC. Without this the
+    "signups today" comparison in `get_waitlist_stats` raises TypeError on the
+    default database.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
+def _enum(cls: Any, value: str, fallback: Any) -> Any:
+    """Read a stored enum value back, tolerating one written by an older build."""
+    try:
+        return cls(value)
+    except ValueError:
+        return fallback
+
+
+def _to_entry(row: Any) -> WaitlistEntry:
+    return WaitlistEntry(
+        id=row.id,
+        email=row.email,
+        created_at=_utc(row.created_at),
+        tier=_enum(WaitlistTier, row.tier, WaitlistTier.STANDARD),
+        source=_enum(SignupSource, row.source, SignupSource.OTHER),
+        company=row.company,
+        role=row.role,
+        team_size=row.team_size,
+        use_case=row.use_case,
+        referral_code=row.referral_code,
+        referred_by=row.referred_by,
+        referral_count=row.referral_count,
+        position=row.position,
+        invited_at=_utc(row.invited_at),
+        converted_at=_utc(row.converted_at),
+        utm_source=row.utm_source,
+        utm_medium=row.utm_medium,
+        utm_campaign=row.utm_campaign,
+        ip_hash=row.ip_hash,
+        user_agent=row.user_agent,
+        notes=row.notes,
+        tags=list(row.tags or []),
+    )
+
+
+async def _row_for_email(session: Any, email: str) -> Any:
+    from app.database.growth_models import WaitlistEntryDB
+
+    return (
+        await session.execute(
+            select(WaitlistEntryDB).where(WaitlistEntryDB.email == email)
+        )
+    ).scalar_one_or_none()
+
+
+async def _credit_referrer(session: Any, referred_by: str) -> None:
+    """Give the referrer their +1, and the tier bump it may have earned."""
+    referrer = await _row_for_email(session, referred_by.strip().lower())
+    if referrer is None:
+        return
+    referrer.referral_count += 1
+    if referrer.referral_count >= 3 and referrer.tier == WaitlistTier.STANDARD.value:
+        referrer.tier = WaitlistTier.PRIORITY.value
+        referrer.tags = [*(referrer.tags or []), "referral_upgrade"]
+
+
+async def add_to_waitlist(
     email: str,
     source: SignupSource = SignupSource.LANDING_PAGE,
     company: str = "",
@@ -153,7 +237,8 @@ def add_to_waitlist(
     Returns:
         Tuple of (entry, message). Entry is None if failed.
     """
-    global _position_counter
+    from app.database.engine import get_session
+    from app.database.growth_models import WaitlistEntryDB
 
     email = email.strip().lower()
 
@@ -163,123 +248,142 @@ def add_to_waitlist(
     if not _validate_email(email):
         return None, "Invalid email format"
 
-    if email in _email_index:
-        existing_id = _email_index[email]
-        existing = _waitlist_store.get(existing_id)
-        if existing:
-            return existing, "Already on waitlist"
+    for _ in range(_POSITION_ATTEMPTS):
+        async with get_session() as session:
+            existing = await _row_for_email(session, email)
+            if existing is not None:
+                return _to_entry(existing), "Already on waitlist"
 
-    _position_counter += 1
+            # The counter this replaces restarted at 0 with the process, so the
+            # first signup after a deploy was told it was #1 behind however many
+            # thousand people were already on the list.
+            next_position = (
+                await session.execute(select(func.max(WaitlistEntryDB.position)))
+            ).scalar() or 0
 
-    entry = WaitlistEntry(
-        id=_generate_id(),
-        email=email,
-        created_at=datetime.now(timezone.utc),
-        source=source,
-        company=company,
-        role=role,
-        team_size=team_size,
-        use_case=use_case,
-        referral_code=_generate_referral_code(email),
-        referred_by=referred_by,
-        position=_position_counter,
-        utm_source=utm_source,
-        utm_medium=utm_medium,
-        utm_campaign=utm_campaign,
-        ip_hash=_hash_ip(ip_address) if ip_address else "",
-        user_agent=user_agent[:200] if user_agent else "",
-    )
+            row = WaitlistEntryDB(
+                id=_generate_id(),
+                email=email,
+                position=next_position + 1,
+                tier=WaitlistTier.STANDARD.value,
+                source=source.value,
+                company=company,
+                role=role,
+                team_size=team_size,
+                use_case=use_case,
+                referral_code=_generate_referral_code(email),
+                referred_by=referred_by.strip().lower(),
+                utm_source=utm_source,
+                utm_medium=utm_medium,
+                utm_campaign=utm_campaign,
+                ip_hash=_hash_ip(ip_address) if ip_address else "",
+                user_agent=user_agent[:200] if user_agent else "",
+                tags=[],
+            )
+            session.add(row)
+            if referred_by:
+                await _credit_referrer(session, referred_by)
 
-    if referred_by and referred_by in _email_index:
-        referrer_id = _email_index[referred_by]
-        referrer = _waitlist_store.get(referrer_id)
-        if referrer:
-            referrer.referral_count += 1
-            if referrer.referral_count >= 3 and referrer.tier == WaitlistTier.STANDARD:
-                referrer.tier = WaitlistTier.PRIORITY
-                referrer.tags.append("referral_upgrade")
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Either the email or the position was taken between the read
+                # and the write. Both are settled by looping: the email lookup
+                # at the top returns the winner's entry, and MAX(position) is
+                # re-read.
+                await session.rollback()
+                continue
 
-    _waitlist_store[entry.id] = entry
-    _email_index[email] = entry.id
+            entry = _to_entry(row)
+            log.info(
+                "Waitlist signup: position=%d source=%s company=%s",
+                entry.position,
+                source.value,
+                company or "(none)",
+            )
+            return entry, "Successfully joined waitlist"
 
-    log.info(
-        "Waitlist signup: position=%d source=%s company=%s",
-        entry.position,
-        source.value,
-        company or "(none)",
-    )
-
-    return entry, "Successfully joined waitlist"
+    log.warning("waitlist signup gave up after %d position collisions", _POSITION_ATTEMPTS)
+    return None, "Could not join the waitlist right now — please try again."
 
 
-def get_waitlist_entry(email: str) -> WaitlistEntry | None:
+async def get_waitlist_entry(email: str) -> WaitlistEntry | None:
     """Get waitlist entry by email."""
-    email = email.strip().lower()
-    entry_id = _email_index.get(email)
-    if entry_id:
-        return _waitlist_store.get(entry_id)
-    return None
+    from app.database.engine import get_session
+
+    async with get_session() as session:
+        row = await _row_for_email(session, email.strip().lower())
+        return _to_entry(row) if row else None
 
 
-def get_waitlist_entries(
+async def get_waitlist_entries(
     tier: WaitlistTier | None = None,
     source: SignupSource | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[WaitlistEntry]:
     """Get waitlist entries with optional filtering."""
-    entries = list(_waitlist_store.values())
+    from app.database.engine import get_session
+    from app.database.growth_models import WaitlistEntryDB
 
+    stmt = select(WaitlistEntryDB)
     if tier:
-        entries = [e for e in entries if e.tier == tier]
-
+        stmt = stmt.where(WaitlistEntryDB.tier == tier.value)
     if source:
-        entries = [e for e in entries if e.source == source]
+        stmt = stmt.where(WaitlistEntryDB.source == source.value)
+    # Ordering, limit and offset are the database's job now; the dict version
+    # loaded every row into memory to sort and slice it.
+    stmt = stmt.order_by(WaitlistEntryDB.position).offset(offset).limit(limit)
 
-    entries.sort(key=lambda e: e.position)
+    async with get_session() as session:
+        rows = (await session.execute(stmt)).scalars().all()
+        return [_to_entry(r) for r in rows]
 
-    return entries[offset:offset + limit]
 
-
-def promote_to_early_access(
+async def promote_to_early_access(
     email: str,
     tier: WaitlistTier = WaitlistTier.EARLY_ACCESS,
 ) -> tuple[bool, str]:
     """Promote a waitlist entry to early access."""
-    entry = get_waitlist_entry(email)
-    if not entry:
-        return False, "Email not found in waitlist"
+    from app.database.engine import get_session
 
-    if entry.tier == WaitlistTier.FOUNDING_CUSTOMER:
-        return False, "Already a founding customer"
+    async with get_session() as session:
+        row = await _row_for_email(session, email.strip().lower())
+        if row is None:
+            return False, "Email not found in waitlist"
+        if row.tier == WaitlistTier.FOUNDING_CUSTOMER.value:
+            return False, "Already a founding customer"
 
-    entry.tier = tier
-    entry.invited_at = datetime.now(timezone.utc)
-    entry.tags.append(f"promoted_to_{tier.value}")
+        row.tier = tier.value
+        row.invited_at = datetime.now(timezone.utc)
+        row.tags = [*(row.tags or []), f"promoted_to_{tier.value}"]
+        await session.commit()
 
-    log.info("Promoted %s to %s", entry._mask_email(), tier.value)
+        log.info("Promoted %s to %s", _to_entry(row)._mask_email(), tier.value)
+        return True, f"Promoted to {tier.value}"
 
-    return True, f"Promoted to {tier.value}"
 
-
-def mark_converted(email: str) -> tuple[bool, str]:
+async def mark_converted(email: str) -> tuple[bool, str]:
     """Mark a waitlist entry as converted (became customer)."""
-    entry = get_waitlist_entry(email)
-    if not entry:
-        return False, "Email not found in waitlist"
+    from app.database.engine import get_session
 
-    entry.converted_at = datetime.now(timezone.utc)
-    entry.tier = WaitlistTier.FOUNDING_CUSTOMER
-    entry.tags.append("converted")
+    async with get_session() as session:
+        row = await _row_for_email(session, email.strip().lower())
+        if row is None:
+            return False, "Email not found in waitlist"
 
-    log.info("Conversion: %s", entry._mask_email())
+        row.converted_at = datetime.now(timezone.utc)
+        row.tier = WaitlistTier.FOUNDING_CUSTOMER.value
+        row.tags = [*(row.tags or []), "converted"]
+        await session.commit()
 
-    return True, "Marked as converted"
+        log.info("Conversion: %s", _to_entry(row)._mask_email())
+        return True, "Marked as converted"
 
 
-def get_waitlist_stats() -> dict[str, Any]:
+async def get_waitlist_stats() -> dict[str, Any]:
     """Get waitlist statistics for dashboard."""
-    entries = list(_waitlist_store.values())
+    entries = await get_waitlist_entries(limit=100_000)
 
     if not entries:
         return {
@@ -325,16 +429,16 @@ def get_waitlist_stats() -> dict[str, Any]:
         "total_signups": total,
         "by_tier": by_tier,
         "by_source": by_source,
-        "conversion_rate": converted / total if total > 0 else 0.0,
-        "referral_rate": referred / total if total > 0 else 0.0,
+        "conversion_rate": converted / total,
+        "referral_rate": referred / total,
         "conversions": converted,
         "signups_today": signups_today,
         "signups_this_week": signups_this_week,
-        "avg_position": sum(e.position for e in entries) / total if total > 0 else 0,
+        "avg_position": sum(e.position for e in entries) / total,
     }
 
 
-def export_waitlist(format: str = "csv") -> str:
+async def export_waitlist(format: str = "csv") -> str:
     """Export waitlist data.
 
     Args:
@@ -343,7 +447,7 @@ def export_waitlist(format: str = "csv") -> str:
     Returns:
         Exported data as string
     """
-    entries = get_waitlist_entries(limit=10000)
+    entries = await get_waitlist_entries(limit=10000)
 
     if format == "json":
         import json
@@ -380,13 +484,13 @@ class WaitlistManager:
     def __init__(self) -> None:
         pass
 
-    def signup(
+    async def signup(
         self,
         email: str,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Process a signup request."""
-        entry, message = add_to_waitlist(email, **kwargs)
+        entry, message = await add_to_waitlist(email, **kwargs)
 
         if entry is None:
             return {
@@ -402,17 +506,22 @@ class WaitlistManager:
             "tier": entry.tier.value,
         }
 
-    def get_position(self, email: str) -> dict[str, Any]:
+    async def get_position(self, email: str) -> dict[str, Any]:
         """Get waitlist position for an email."""
-        entry = get_waitlist_entry(email)
+        from app.database.engine import get_session
+        from app.database.growth_models import WaitlistEntryDB
 
-        if not entry:
-            return {
-                "found": False,
-                "error": "Email not found in waitlist",
-            }
-
-        total = len(_waitlist_store)
+        async with get_session() as session:
+            row = await _row_for_email(session, email.strip().lower())
+            if row is None:
+                return {
+                    "found": False,
+                    "error": "Email not found in waitlist",
+                }
+            entry = _to_entry(row)
+            total = (
+                await session.execute(select(func.count()).select_from(WaitlistEntryDB))
+            ).scalar() or 0
 
         return {
             "found": True,
@@ -424,14 +533,16 @@ class WaitlistManager:
             "invited": entry.invited_at is not None,
         }
 
-    def stats(self) -> dict[str, Any]:
+    async def stats(self) -> dict[str, Any]:
         """Get waitlist statistics."""
-        return get_waitlist_stats()
+        return await get_waitlist_stats()
 
 
-def clear_waitlist() -> None:
+async def clear_waitlist() -> None:
     """Clear all waitlist data (for testing)."""
-    global _position_counter
-    _waitlist_store.clear()
-    _email_index.clear()
-    _position_counter = 0
+    from app.database.engine import get_session
+    from app.database.growth_models import WaitlistEntryDB
+
+    async with get_session() as session:
+        await session.execute(delete(WaitlistEntryDB))
+        await session.commit()

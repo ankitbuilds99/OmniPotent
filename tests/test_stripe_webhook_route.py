@@ -138,6 +138,90 @@ def test_malformed_signature_headers_are_refused_not_crashed(client, header):
     assert r.status_code == 401, r.text
 
 
+def test_a_cancellation_drops_the_org_to_free(client):
+    c, org = client
+    asyncio.run(tenant_auth.get_store().set_plan(org.id, "team"))
+    body = json.dumps({
+        "type": "customer.subscription.deleted",
+        "data": {"object": {"metadata": {"org_id": org.id}}},
+    }).encode()
+
+    r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
+    assert r.json() == {"status": "applied", "org_id": org.id, "plan": "free"}
+
+    stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
+    assert stored.plan == "free"
+
+
+def test_a_catalog_tier_is_translated_to_the_plan_that_is_enforced(client):
+    """Stripe metadata carries a catalog tier; `orgs.plan` holds a quota plan.
+
+    "growth" is a real, sold tier that PLAN_QUOTAS has no bracket for. Untranslated
+    it hit `normalize_plan` and became `free` — a downgrade on a paid upgrade.
+    """
+    c, org = client
+    body = json.dumps({
+        "type": "customer.subscription.updated",
+        "data": {"object": {"metadata": {"org_id": org.id, "plan": "growth"}}},
+    }).encode()
+
+    r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
+    assert r.status_code == 200, r.text
+    assert r.json()["plan"] == "team"
+
+    stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
+    assert stored.plan == "team"
+
+
+@pytest.mark.parametrize("plan", ["pro_monthly", "starter_yearly", "platinum", ""])
+def test_a_plan_the_product_does_not_sell_is_rejected(client, plan):
+    """This answered 200 and left the customer on their old plan.
+
+    `pro_monthly` was in the receiver's own hardcoded allowlist, so the reply said
+    `{"status": "applied", "plan": "pro_monthly"}` — and `set_plan` normalised the
+    unrecognised value to `free`. 400 makes Stripe retry and show the failure.
+    """
+    c, org = client
+    body = json.dumps({
+        "type": "customer.subscription.updated",
+        "data": {"object": {"metadata": {"org_id": org.id, "plan": plan}}},
+    }).encode()
+
+    r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
+    assert r.status_code == 400, r.text
+    assert plan in r.json()["detail"] or "Unknown plan" in r.json()["detail"]
+
+    stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
+    assert stored.plan == "free", "a rejected event must not have changed anything"
+
+
+def test_an_event_for_an_org_that_does_not_exist_is_not_applied(client):
+    """The UPDATE matched zero rows and the receiver still said "applied"."""
+    c, _ = client
+    body = json.dumps({
+        "type": "customer.subscription.updated",
+        "data": {"object": {"metadata": {"org_id": "org_does_not_exist", "plan": "team"}}},
+    }).encode()
+
+    r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
+    assert r.status_code == 404, r.text
+    assert "org_does_not_exist" in r.json()["detail"]
+
+
+def test_a_non_subscription_event_is_still_ignored_not_rejected(client):
+    """Stripe sends plenty of event types we have nothing to do with; those must
+    stay 200-ignored, or every one of them becomes a retry loop."""
+    c, _ = client
+    body = json.dumps({
+        "type": "payment_intent.created",
+        "data": {"object": {"metadata": {"org_id": "whatever"}}},
+    }).encode()
+
+    r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
+    assert r.status_code == 200
+    assert r.json() == {"status": "ignored", "type": "payment_intent.created"}
+
+
 def test_the_duplicate_billing_receiver_is_gone(client):
     """404/405 — whatever the SPA static mount says about an unrouted path — but
     never a billing response (200/401/503), which would mean it is still wired."""
