@@ -68,18 +68,39 @@ def record(event: str, **fields) -> None:
             _audit.warning("could not append to audit log %s", _LOG_PATH)
 
 
-def verify_chain(events: list[dict] | None = None) -> dict:
+def verify_chain(events: list[dict] | None = None, org_id: str | None = None) -> dict:
     """Recompute the hash chain (oldest→newest) and report the first broken link —
-    the artifact auditors ask for. Defaults to the in-memory buffer."""
+    the artifact auditors ask for. Defaults to the in-memory buffer.
+
+    `org_id` scopes the *report* to one tenant. The buffer is shared by the whole
+    process and each entry's hash folds in the entry before it, whoever produced
+    it, so the walk still has to cover every entry — filtering first would report
+    a false "tampered" the moment two orgs interleave. Only the answer is scoped:
+    `count` is the caller's own events, and a broken link is named only when the
+    entry that broke it is theirs. Without this, every tenant's verify call
+    returned the fleet-wide event count and could surface another tenant's event
+    name.
+    """
     items = events if events is not None else list(_BUFFER)
+
+    def mine(entry: dict) -> bool:
+        return org_id is None or entry.get("org_id", "-") == org_id
+
+    total = sum(1 for e in items if mine(e))
     prev = ""
-    for i, e in enumerate(items):
+    seen = 0
+    for e in items:
         expected = _chain_hash(e, prev)
         if e.get("hash") != expected or e.get("prev_hash") != prev:
-            return {"valid": False, "checked": i, "broken_at": i,
-                    "event": e.get("event"), "count": len(items)}
+            theirs = mine(e)
+            return {"valid": False, "checked": seen,
+                    "broken_at": seen if theirs else None,
+                    "event": e.get("event") if theirs else None,
+                    "count": total}
+        if mine(e):
+            seen += 1
         prev = e["hash"]
-    return {"valid": True, "count": len(items)}
+    return {"valid": True, "count": total}
 
 
 def recent(

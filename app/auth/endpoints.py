@@ -235,13 +235,13 @@ async def oauth_callback(
 
         link_oauth_account(user_id, oauth_user)
 
-    org_id = _get_or_create_org_for_user(user_id, oauth_user.email)
+    org_id, role = await _get_or_create_org_for_user(user_id, oauth_user.email)
 
     session_token = create_session_token(
         user_id=user_id,
         org_id=org_id,
         email=oauth_user.email,
-        role="owner",
+        role=role,
         expires_hours=24,
     )
 
@@ -266,10 +266,30 @@ async def oauth_callback(
     return response
 
 
-def _get_or_create_org_for_user(user_id: str, email: str) -> str:
-    """Get or create an organization for a user."""
+async def _get_or_create_org_for_user(user_id: str, email: str) -> tuple[str, str]:
+    """Resolve the (org_id, role) this login should act as.
+
+    In multi-tenant mode the org must be a *real* row in the tenant store: that
+    membership is what `app.tenancy.auth.resolve_session` looks the user up by,
+    so a synthesised id would mint a session token that every API route rejects.
+    An existing member keeps their stored role (an invited viewer must not be
+    promoted to owner by logging in); a brand-new user gets their own org.
+    """
     domain = email.split("@")[1] if "@" in email else "personal"
-    return f"org_{domain.replace('.', '_')}"
+    if not get_settings().copilot_multi_tenant:
+        # Single-tenant: there is no org table to join, and the token is accepted
+        # on its signature alone. The id is informational only.
+        return f"org_{domain.replace('.', '_')}", "owner"
+
+    from app.tenancy.auth import get_store
+
+    store = get_store()
+    membership = await store.get_membership_by_email(email)
+    if membership:
+        return membership
+    org = await store.create_org(name=domain, owner_email=email)
+    log.info("Provisioned org %s for first login of %s", org.id, email)
+    return org.id, "owner"
 
 
 @router.post("/logout")

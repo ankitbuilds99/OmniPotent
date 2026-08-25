@@ -197,25 +197,80 @@ class TestProviderInfo:
 
 
 class TestGetOrCreateOrgForUser:
-    """Tests for _get_or_create_org_for_user helper."""
+    """Tests for _get_or_create_org_for_user helper.
+
+    The helper now returns (org_id, role) and is async: in multi-tenant mode it
+    has to create a *real* row in the tenant store, because that membership is
+    what authorizes the session token it is about to sign.
+    """
 
     def test_extracts_domain_from_email(self):
-        """Creates org ID based on email domain."""
-        org_id = _get_or_create_org_for_user("user_123", "alice@acme.com")
+        """Creates org ID based on email domain (single-tenant)."""
+        org_id, role = _run(_get_or_create_org_for_user("user_123", "alice@acme.com"))
 
         assert org_id == "org_acme_com"
+        assert role == "owner"
 
     def test_handles_subdomain(self):
         """Handles email with subdomain correctly."""
-        org_id = _get_or_create_org_for_user("user_123", "bob@mail.example.co.uk")
+        org_id, _ = _run(_get_or_create_org_for_user("user_123", "bob@mail.example.co.uk"))
 
         assert org_id == "org_mail_example_co_uk"
 
     def test_handles_missing_at_sign(self):
         """Returns 'personal' for invalid email format."""
-        org_id = _get_or_create_org_for_user("user_123", "invalidemailformat")
+        org_id, _ = _run(_get_or_create_org_for_user("user_123", "invalidemailformat"))
 
         assert org_id == "org_personal"
+
+    def test_multi_tenant_provisions_a_real_org(self, tmp_path, monkeypatch):
+        """Multi-tenant: a first login gets a store-backed org, not a synthetic id."""
+        from app.tenancy import auth as tenant_auth
+
+        monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
+        monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
+        get_settings.cache_clear()
+        tenant_auth.reset_store_cache()
+        try:
+            store = tenant_auth.get_store()
+            _run(store.setup())
+            org_id, role = _run(_get_or_create_org_for_user("user_123", "carol@acme.com"))
+            assert org_id != "org_acme_com"  # a real store id, not the string heuristic
+            assert role == "owner"
+            assert _run(store.get_org(org_id)) is not None
+            # The session token this org id goes into must now resolve.
+            assert _run(store.get_membership_by_email("carol@acme.com")) == (org_id, "owner")
+            # A second login reuses the same org instead of forking a new one.
+            assert _run(_get_or_create_org_for_user("user_123", "carol@acme.com")) == (
+                org_id,
+                "owner",
+            )
+        finally:
+            tenant_auth.reset_store_cache()
+            get_settings.cache_clear()
+
+    def test_multi_tenant_keeps_an_invited_members_role(self, tmp_path, monkeypatch):
+        """Logging in must not promote an invited viewer to owner."""
+        from app.tenancy import auth as tenant_auth
+
+        monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
+        monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
+        get_settings.cache_clear()
+        tenant_auth.reset_store_cache()
+        try:
+            store = tenant_auth.get_store()
+            _run(store.setup())
+            org = _run(store.create_org("Acme", owner_email="boss@acme.com"))
+            user = _run(store.create_user("intern@acme.com"))
+            _run(store.add_member(org.id, user.id, "viewer"))
+
+            assert _run(_get_or_create_org_for_user("user_9", "intern@acme.com")) == (
+                org.id,
+                "viewer",
+            )
+        finally:
+            tenant_auth.reset_store_cache()
+            get_settings.cache_clear()
 
 
 class TestExtractToken:

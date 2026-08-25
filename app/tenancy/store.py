@@ -354,6 +354,19 @@ class TenantStore:
             return None
         return self._dec(dek, row[0])
 
+    async def delete_integration_secret(self, org_id: str, name: str) -> bool:
+        """Remove one of an org's integration secrets. Returns True if one was
+        removed. This is what "Disconnect" in the integration marketplace needs;
+        without it a credential could be stored but never withdrawn."""
+        import aiosqlite
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "DELETE FROM integration_secrets WHERE org_id=? AND name=?", (org_id, name)
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
     async def get_integration_secrets(self, org_id: str) -> dict[str, str]:
         """All of an org's integration secrets, decrypted (for building a session)."""
         dek = await self._wrapped_dek(org_id)

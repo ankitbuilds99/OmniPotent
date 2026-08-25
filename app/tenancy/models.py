@@ -21,6 +21,9 @@ _PERMISSIONS: dict[str, str] = {
     "manage_integrations": "admin",   # set Datadog/GitHub/etc. credentials
     "manage_members": "admin",        # invite/remove members, change roles
     "manage_api_keys": "admin",       # issue/revoke API keys
+    # The trail names API-key ids, the actors that used them and every approval
+    # decision — reading it is an administrative act, not part of plain "view".
+    "view_audit": "admin",            # read /audit + verify the hash chain
     "manage_billing": "owner",        # change plan / billing
     "delete_org": "owner",
 }
