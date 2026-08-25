@@ -37,6 +37,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
+import anyio
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocketException
 from starlette.requests import HTTPConnection
@@ -492,6 +493,15 @@ async def require_auth(conn: HTTPConnection) -> None:
     # shared bearer token — PagerDuty/Slack don't send it.
     if conn.url.path.startswith("/webhooks/"):
         return
+    # The Slack bot router is mounted at /api/slack and is the same case: Slack
+    # signs every request with X-Slack-Signature and never sends an Authorization
+    # header, so demanding the shared bearer here makes the integration
+    # unreachable by Slack itself. This is not a hole — the router carries a
+    # router-wide `enforce_slack_signature` dependency that fails closed (503 when
+    # SLACK_SIGNING_SECRET is unset, 401 on a bad or replayed HMAC), so the
+    # credential check moves to the signature rather than disappearing.
+    if conn.url.path.startswith("/api/slack/"):
+        return
     # SCIM provisioning authenticates with its own IdP-issued bearer token, checked
     # in the handler (not the shared app token).
     if conn.url.path.startswith("/scim/"):
@@ -514,12 +524,17 @@ async def require_auth(conn: HTTPConnection) -> None:
     if s.copilot_multi_tenant:
         provided = _auth_header(conn)
         token = provided[7:].strip() if provided.startswith("Bearer ") else provided.strip()
-        # A `dcp_…` value is a tenant API key; anything with two dots is a JWT
-        # (Supabase/SSO login). Both resolve to the same TenantConfig + actor.
+        # A `dcp_…` value is a tenant API key; anything with two dots is a JWT.
+        # Two kinds of JWT reach us: a Supabase/SSO one, and the session token our
+        # own OAuth callback mints (app/auth/oauth.py, HS256 over COPILOT_SECRET_KEY).
+        # Both must be accepted — otherwise a user who completed GitHub/Google login
+        # holds a credential every route rejects. All resolve to a TenantConfig + actor.
         if token.startswith("dcp_"):
             resolved = await tenant_auth.resolve(token)
         elif token.count(".") == 2:
-            resolved = await tenant_auth.resolve_jwt(token)
+            resolved = await tenant_auth.resolve_jwt(token) or await tenant_auth.resolve_session(
+                token
+            )
         else:
             resolved = None
         if resolved is None:
@@ -534,8 +549,18 @@ async def require_auth(conn: HTTPConnection) -> None:
         return  # auth disabled (dev)
     provided = _auth_header(conn)
     # Constant-time compare so the token can't be recovered via response timing.
-    if not hmac.compare_digest(provided, f"Bearer {expected}"):
-        raise _reject(conn, "Missing or invalid API token.")
+    if hmac.compare_digest(provided, f"Bearer {expected}"):
+        return
+    # A single-tenant deployment can still have OAuth login switched on; the session
+    # token it mints is the only credential such a user has, so accept it too rather
+    # than leaving signed-in users locked out of every route.
+    token = provided[7:].strip() if provided.startswith("Bearer ") else ""
+    if token.count(".") == 2:
+        from app.auth.oauth import verify_session_token
+
+        if verify_session_token(token) is not None:
+            return
+    raise _reject(conn, "Missing or invalid API token.")
 
 
 def require_perm(action: str):
@@ -593,6 +618,12 @@ async def _meter_and_spend(tokens: int, idem: str = "") -> None:
     fleet-wide spend counter."""
     await metering.record_investigation(tokens, idem=idem)
     await _record_spend(tokens)
+    # The graph's nodes price every LLM call and park it on a queue (they run in
+    # worker threads and cannot await a write). This is where a turn's dollar
+    # cost reaches `llm_usage_records`; without it /usage and /stats report on
+    # nothing but hand-POSTed rows. Best-effort inside, like the meters above.
+    from app.model_router import usage_ledger
+    await usage_ledger.flush()
 
 
 def _record_slo_fields(
@@ -639,12 +670,19 @@ async def _record_history(req: Any, result: Any, latency_s: float) -> None:
 
 async def quota_gate() -> None:
     """Route dependency: block a new investigation when the tenant is over its monthly
-    plan quota (402), or when the FLEET-WIDE token cap is reached (429). No-op in
-    single-tenant mode / when the global cap is off."""
+    plan quota (402), over its own DOLLAR budget (402), or when the FLEET-WIDE token
+    cap is reached (429). No-op in single-tenant mode / when the caps are unset."""
     if await metering.over_quota():
         raise HTTPException(
             402, "Monthly investigation quota reached for your plan — upgrade to continue."
         )
+    # The model-router budget an org set through /api/model-router/budget/set.
+    # It had no callers outside its own HTTP handler, so `can_proceed: false`
+    # blocked nothing and a cap could be exceeded indefinitely.
+    from app.model_router.usage_store import over_budget
+    reason = await over_budget()
+    if reason:
+        raise HTTPException(402, f"LLM spend budget reached — {reason}.")
     s = get_settings()
     if s.copilot_global_token_cap > 0:
         from app.spend import over_cap
@@ -832,6 +870,7 @@ app.include_router(incidents_router, prefix="/api")
 
 # Include webhooks router for auto-triggering investigations.
 from app.webhooks import webhooks_router  # noqa: E402
+from app.webhooks import router as webhook_receivers  # noqa: E402  (result write-back)
 app.include_router(webhooks_router, prefix="/api")
 
 # Include Slack bot router for @mention support and slash commands.
@@ -879,6 +918,10 @@ app.include_router(slo_router)
 # Include public status page router for component status, incidents, and maintenance.
 from app.status_page.api_router import router as status_page_router  # noqa: E402
 app.include_router(status_page_router)
+
+# Include notification preferences router (channels + per-event routing rules).
+from app.notifications.router import router as notifications_router  # noqa: E402
+app.include_router(notifications_router, prefix="/api")
 
 # Register global exception handlers for consistent error responses.
 from app.middleware.error_handler import register_exception_handlers  # noqa: E402
@@ -1848,6 +1891,62 @@ def _stream_payload(thread_id: str, ev: dict) -> dict:
     return out
 
 
+def _transport_dead(exc: BaseException, _depth: int = 0) -> bool:
+    """True if `exc` (or anything it wraps) is a dead MCP stdio transport.
+
+    A session whose MCP subprocess connection has been closed raises
+    ``anyio.ClosedResourceError`` / ``BrokenResourceError`` from inside the
+    tools node, usually re-raised through an ExceptionGroup ("During task with
+    name 'tools'"). The request never reached the MCP server, so nothing ran and
+    the turn is safe to restart on a rebuilt session.
+    """
+    if _depth > 10:  # cheap cycle guard: __context__ chains can loop
+        return False
+    if isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError)):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_transport_dead(inner, _depth + 1) for inner in exc.exceptions)
+    return any(
+        inner is not None and _transport_dead(inner, _depth + 1)
+        for inner in (exc.__cause__, exc.__context__)
+    )
+
+
+async def _stream_chat_turn(tid: str, req: "ChatRequest", session: Any):
+    """Run one chat turn on `session`, yielding SSE payloads and doing the
+    end-of-turn bookkeeping (spend metering, SLO sample, history row)."""
+    _t0 = time.monotonic()
+    async for ev in session.ask_stream(req.message):
+        t = ev.get("type")
+        if t == "approval":
+            _AWAITING.add(tid)
+        elif t == "done":
+            _AWAITING.discard(tid)
+            await _meter_and_spend(ev.get("tokens_used", 0))
+            # This is the path the UI actually uses. It recorded neither an SLO
+            # sample nor a history row, which is why the SLO dashboard read as
+            # zero investigations and the history page had nothing to list.
+            elapsed = time.monotonic() - _t0
+            _record_slo_fields(
+                ev.get("report"),
+                ev.get("final_text", ""),
+                ev.get("tokens_used", 0),
+                elapsed,
+            )
+            await investigation_history.record(
+                req.thread_id,
+                req.message,
+                status="completed",
+                summary=(ev.get("report") or {}).get("root_cause")
+                or ev.get("final_text")
+                or None,
+                report=ev.get("report"),
+                tokens_used=ev.get("tokens_used", 0),
+                latency_ms=int(elapsed * 1000),
+            )
+        yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
+
+
 @app.post(
     "/chat/stream",
     tags=["Chat"],
@@ -1927,41 +2026,42 @@ async def chat_stream(req: ChatRequest):
                         }
                         return
                     _AWAITING.discard(tid)
-                    _t0 = time.monotonic()
-                    async for ev in session.ask_stream(req.message):
-                        t = ev.get("type")
-                        if t == "approval":
-                            _AWAITING.add(tid)
-                        elif t == "done":
-                            _AWAITING.discard(tid)
-                            await _meter_and_spend(ev.get("tokens_used", 0))
-                            # This is the path the UI actually uses. It recorded
-                            # neither an SLO sample nor a history row, which is
-                            # why the SLO dashboard read as zero investigations
-                            # and the history page had nothing to list.
-                            elapsed = time.monotonic() - _t0
-                            _record_slo_fields(
-                                ev.get("report"),
-                                ev.get("final_text", ""),
-                                ev.get("tokens_used", 0),
-                                elapsed,
+                    try:
+                        async for payload in _stream_chat_turn(tid, req, session):
+                            yield payload
+                    except Exception as exc:  # noqa: BLE001 — one retry, then report
+                        # A pooled session whose MCP transport died answers every
+                        # later message with the same error, which bricked the
+                        # thread for good. The failed call never reached the MCP
+                        # server, so rebuild the session and re-run the turn once.
+                        if not (existed and _transport_dead(exc)):
+                            raise
+                        log.warning(
+                            "chat stream hit a dead MCP transport (thread=%s); "
+                            "rebuilding the session and retrying the turn once",
+                            tid,
+                        )
+                        await _evict(tid)
+                        yield {
+                            "data": json.dumps(
+                                {
+                                    "type": "trace",
+                                    "thread_id": req.thread_id,
+                                    "line": "🔌 tool connection dropped — reconnecting "
+                                    "and restarting this step",
+                                }
                             )
-                            await investigation_history.record(
-                                req.thread_id,
-                                req.message,
-                                status="completed",
-                                summary=(ev.get("report") or {}).get("root_cause")
-                                or ev.get("final_text")
-                                or None,
-                                report=ev.get("report"),
-                                tokens_used=ev.get("tokens_used", 0),
-                                latency_ms=int(elapsed * 1000),
-                            )
-                        yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
+                        }
+                        session = await _get_session(tid)
+                        async for payload in _stream_chat_turn(tid, req, session):
+                            yield payload
                 except Exception as exc:  # noqa: BLE001
                     log.exception("chat stream failed (thread=%s)", tid)
-                    if not existed:
-                        await _evict(tid)
+                    # Always drop the session, not just a freshly built one: a
+                    # turn that raised may have left the MCP transport or the
+                    # graph in an unusable state, and keeping it in the pool made
+                    # every subsequent message on the thread fail identically.
+                    await _evict(tid)
                     yield {
                         "data": json.dumps(
                             {
@@ -2045,6 +2145,13 @@ async def approve_stream(req: ApproveRequest):
                         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
                 except Exception as exc:  # noqa: BLE001
                     log.exception("approve stream failed (thread=%s)", tid)
+                    # Drop the session so the thread isn't stuck on a broken one.
+                    # The checkpointer keeps the pending interrupt, so the human
+                    # can approve again on a rebuilt session. Unlike /chat/stream
+                    # this is never retried automatically: the approved action may
+                    # have run before the failure, and re-running a write blind is
+                    # exactly what the approval gate exists to prevent.
+                    await _evict(tid)
                     yield {
                         "data": json.dumps(
                             {
@@ -2366,11 +2473,60 @@ async def integration_status() -> dict:
 
 
 @app.get(
+    "/api/metrics/prometheus/query",
+    tags=["Metrics"],
+    summary="Run an instant PromQL query",
+    description="Proxy an instant PromQL query to the configured Prometheus. The browser "
+    "cannot reach Prometheus directly (it is not CORS-enabled and is usually not "
+    "internet-facing), so the Service Map goes through here. Returns 503 naming the "
+    "missing setting when PROMETHEUS_URL is not configured.",
+    responses={
+        200: {"description": "Prometheus instant-query vector"},
+        502: {"description": "Prometheus refused or could not be reached"},
+        503: {"description": "PROMETHEUS_URL is not configured"},
+    },
+)
+async def prometheus_instant_query(query: str) -> dict:
+    """Proxy one instant PromQL query.
+
+    Args:
+        query: PromQL expression.
+
+    Returns:
+        dict: ``{"result": [{"metric": str, "labels": {...}, "value": float,
+        "timestamp": iso}, ...], "source": url}``.
+    """
+    if not query.strip():
+        raise HTTPException(400, "query is required")
+    url = get_settings().prometheus_url.strip()
+    if not url:
+        raise HTTPException(
+            503,
+            "Prometheus is not configured. Set PROMETHEUS_URL to your Prometheus "
+            "HTTP API base (e.g. http://prometheus:9090).",
+        )
+
+    from app.connectors.base import ConnectorConfig
+    from app.connectors.prometheus import PrometheusConnector
+
+    connector = PrometheusConnector(ConnectorConfig(url=url))
+    try:
+        result = await connector.query(query)
+    finally:
+        await connector.close()
+    if not result.success:
+        raise HTTPException(502, f"Prometheus query failed: {result.error}")
+    return {"result": result.data, "source": url}
+
+
+@app.get(
     "/audit",
     tags=["Audit"],
     summary="Query audit trail",
     description="Query the audit trail for recent events. Returns approvals, model changes, "
-    "prompt-injection detections, and feedback events. Supports filtering by event type prefix.",
+    "prompt-injection detections, and feedback events. Supports filtering by event type prefix. "
+    "Requires view_audit permission (admin+).",
+    dependencies=[Depends(require_perm("view_audit"))],
     responses={
         200: {
             "description": "Audit events",
@@ -2410,7 +2566,9 @@ async def get_audit(limit: int = 100, event_prefix: str = "") -> dict:
     tags=["Audit"],
     summary="Verify audit chain integrity",
     description="Verify that the audit hash-chain is intact (tamper-evidence check). "
-    "Reports the first broken link if any tampering is detected.",
+    "Reports the first broken link if any tampering is detected. Scoped to the caller's "
+    "org and requires view_audit permission (admin+).",
+    dependencies=[Depends(require_perm("view_audit"))],
     responses={
         200: {
             "description": "Verification result",
@@ -2437,7 +2595,10 @@ async def audit_verify() -> dict:
     Returns:
         dict: Verification result with valid flag and count or broken index.
     """
-    return audit.verify_chain()
+    # Scoped to the caller's org: the buffer is process-wide, so an unscoped call
+    # reported every other tenant's event count (and, on a broken link, their
+    # event name). '-' in single-tenant mode, which matches every entry there.
+    return audit.verify_chain(org_id=tenant_context.tenant_id())
 
 
 # --------------------------------------------------------------------------- #
@@ -2715,6 +2876,34 @@ async def admin_set_integration(req: SetIntegrationRequest) -> dict:
     await tenant_auth.get_store().set_integration_secret(org_id, name, req.value)
     audit.record("secret.write", org=org_id, name=name)
     return {"status": "saved", "name": name}
+
+
+@app.delete(
+    "/admin/integrations/{name}",
+    tags=["Admin"],
+    summary="Disconnect an integration",
+    description="Delete the stored secret for an integration, disconnecting it. "
+    "Requires manage_integrations permission.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Integration disconnected"},
+        404: {"description": "No such integration is configured"},
+    },
+)
+async def admin_delete_integration(name: str) -> dict:
+    """Disconnect an integration by deleting its stored secret.
+
+    There was no delete route at all, so the marketplace's Disconnect button got
+    a 405 and a credential could be stored but never withdrawn.
+    """
+    org_id = _current_org_id()
+    key = name.strip()
+    if not key:
+        raise HTTPException(400, "integration name is required")
+    if not await tenant_auth.get_store().delete_integration_secret(org_id, key):
+        raise HTTPException(404, f"Integration '{key}' is not configured.")
+    audit.record("secret.delete", org=org_id, name=key)
+    return {"status": "disconnected", "name": key}
 
 
 def _operator_guard(request: Request) -> None:
@@ -2999,10 +3188,16 @@ async def _enqueue_investigation(incident: dict) -> None:
 
 
 async def _run_triggered_investigation(incident: dict) -> None:
-    thread_id = f"pd-{incident['id']}"
+    # "pd" unless the trigger says otherwise — alert webhooks and CI receivers
+    # feed this too, and a thread named pd-<x> for a GitLab pipeline is a lie.
+    source = str(incident.get("source") or "pd")
+    thread_id = f"{source}-{incident['id']}"
     title = incident.get("title") or thread_id
+    origin = {"pd": "A PagerDuty incident was triggered"}.get(
+        source, f"An alert was ingested from {source}"
+    )
     seed = (
-        f"A PagerDuty incident was triggered: {title}"
+        f"{origin}: {title}"
         + (f" (service: {incident['service']})" if incident.get("service") else "")
         + ". Investigate the root cause from logs, metrics, code, and recent changes, "
         "then propose a fix."
@@ -3031,8 +3226,15 @@ async def _run_triggered_investigation(incident: dict) -> None:
                     latency_ms=int(elapsed * 1000),
                 )
         await _post_to_slack(thread_id, title, result)
-    except Exception:  # noqa: BLE001 — best-effort background trigger
+        # An alert-ingested incident carries the row it came from: write the real
+        # verdict back onto it, so the stored investigation reflects this run
+        # rather than the placeholder values it was created with.
+        await webhook_receivers.record_incident_outcome(incident, result)
+    except Exception as exc:  # noqa: BLE001 — best-effort background trigger
         log.exception("triggered investigation failed (incident=%s)", incident.get("id"))
+        await webhook_receivers.record_incident_outcome(
+            incident, None, error=f"{type(exc).__name__}: {exc}"
+        )
 
 
 async def _slo_trigger(service: str, burn: dict) -> None:
@@ -3354,6 +3556,36 @@ def _verify_github_signature(secret: str, payload: bytes, signature: str) -> boo
     return hmac.compare_digest(expected, signature)
 
 
+async def _triage_event(
+    result: dict[str, object], raw: bytes, *, source: str, key: str, reason: str,
+    title: str, service: str,
+) -> None:
+    """Open a real investigation for a triage-worthy SCM/CI event.
+
+    The GitHub and GitLab receivers used to "auto-triage" by writing a string
+    into the response body (`result["auto_triage"] = "incident_detected"`) and
+    returning. Nothing read that string — not the queue, not the incident store,
+    not the UI — so a failed deployment or an incident-labelled issue produced
+    exactly one thing: a 200 with a word in it.
+
+    `auto_triage` is now only set when an investigation was actually queued;
+    when it can't be, the response says why instead of implying triage happened.
+    """
+    if not active_api_key():
+        result["auto_triage_skipped"] = (
+            f"{reason}: no LLM provider key configured, nothing was investigated"
+        )
+        return
+    if not _claim_delivery(raw):
+        result["auto_triage_skipped"] = f"{reason}: duplicate delivery"
+        return
+    await _enqueue_investigation(
+        {"id": key, "source": source, "title": title, "service": service}
+    )
+    result["auto_triage"] = reason
+    result["investigation_thread"] = f"{source}-{key}"
+
+
 @app.post(
     "/webhooks/github",
     tags=["Webhooks"],
@@ -3379,9 +3611,14 @@ async def github_webhook(request: Request) -> dict[str, object]:
     s = get_settings()
     sig = request.headers.get("x-hub-signature-256", "")
 
-    if s.github_webhook_secret and not _verify_github_signature(
-        s.github_webhook_secret, raw, sig
-    ):
+    # Fail closed. This used to be `if secret and not verified`, so with no
+    # secret configured — the default — the receiver accepted anything anyone
+    # posted at it, which is also what decides whether LLM spend is triggered.
+    if not s.github_webhook_secret:
+        raise HTTPException(
+            401, "GITHUB_WEBHOOK_SECRET is not configured; refusing unverified GitHub delivery"
+        )
+    if not _verify_github_signature(s.github_webhook_secret, raw, sig):
         raise HTTPException(401, "invalid GitHub webhook signature")
 
     try:
@@ -3399,52 +3636,80 @@ async def github_webhook(request: Request) -> dict[str, object]:
         "delivery_id": delivery_id,
         "processed": True,
     }
+    repo_name = (payload.get("repository") or {}).get("full_name") or "unknown"
 
     if event_type == "push":
         result["action"] = "deployment_tracked"
         result["ref"] = payload.get("ref", "")
-        result["commits"] = len(payload.get("commits", []))
-        result["repository"] = payload.get("repository", {}).get("full_name", "")
+        result["commits"] = len(payload.get("commits") or [])
+        result["repository"] = repo_name
 
     elif event_type == "pull_request":
         action = payload.get("action", "")
-        pr = payload.get("pull_request", {})
+        pr = payload.get("pull_request") or {}
         result["action"] = action
         result["pr_number"] = pr.get("number")
         result["pr_title"] = pr.get("title", "")
         result["pr_state"] = pr.get("state", "")
 
-        if action in ("opened", "synchronize") and active_api_key():
-            changes = pr.get("changed_files", 0)
-            if changes > 50:
-                result["auto_triage"] = "large_pr_flagged"
+        # A big PR is worth flagging, but it is not an incident — it does not
+        # open an investigation, so it does not claim to have been triaged.
+        if action in ("opened", "synchronize") and (pr.get("changed_files") or 0) > 50:
+            result["review_flags"] = ["large_pr"]
 
     elif event_type == "issues":
         action = payload.get("action", "")
-        issue = payload.get("issue", {})
+        issue = payload.get("issue") or {}
         result["action"] = action
         result["issue_number"] = issue.get("number")
         result["issue_title"] = issue.get("title", "")
 
-        if action == "opened" and active_api_key():
-            labels = [lbl.get("name", "").lower() for lbl in issue.get("labels", [])]
+        if action == "opened":
+            labels = [
+                str((lbl or {}).get("name", "")).lower() for lbl in (issue.get("labels") or [])
+            ]
             if "bug" in labels or "incident" in labels:
-                result["auto_triage"] = "incident_detected"
+                await _triage_event(
+                    result, raw,
+                    source="gh-issue",
+                    key=str(issue.get("number") or delivery_id or "unknown"),
+                    reason="incident_detected",
+                    title=f"GitHub issue #{issue.get('number')}: {issue.get('title', '')}".strip(),
+                    service=str(repo_name),
+                )
 
     elif event_type == "deployment_status":
-        deployment = payload.get("deployment", {})
+        deployment = payload.get("deployment") or {}
         result["deployment_id"] = deployment.get("id")
         result["environment"] = deployment.get("environment", "")
-        result["state"] = payload.get("deployment_status", {}).get("state", "")
+        result["state"] = (payload.get("deployment_status") or {}).get("state", "")
 
-        if result["state"] == "failure" and active_api_key():
-            result["auto_triage"] = "deployment_failure_detected"
+        if result["state"] == "failure":
+            await _triage_event(
+                result, raw,
+                source="gh-deploy",
+                key=str(deployment.get("id") or delivery_id or "unknown"),
+                reason="deployment_failure_detected",
+                title=(
+                    f"Deployment failed in {deployment.get('environment') or 'unknown'} "
+                    f"({repo_name or 'unknown repo'})"
+                ),
+                service=str(repo_name),
+            )
 
     elif event_type == "security_advisory":
-        advisory = payload.get("security_advisory", {})
+        advisory = payload.get("security_advisory") or {}
         result["severity"] = advisory.get("severity", "")
         result["summary"] = advisory.get("summary", "")
-        result["auto_triage"] = "security_alert"
+        await _triage_event(
+            result, raw,
+            source="gh-advisory",
+            key=str(advisory.get("ghsa_id") or delivery_id or "unknown"),
+            reason="security_alert",
+            title=f"GitHub security advisory ({advisory.get('severity', 'unknown')}): "
+                  f"{advisory.get('summary', '')}".strip(),
+            service=str(repo_name),
+        )
 
     return result
 
@@ -3453,9 +3718,9 @@ async def github_webhook(request: Request) -> dict[str, object]:
 # GitLab Webhook — auto-triage merge requests, issues, pipelines
 # --------------------------------------------------------------------------- #
 def _verify_gitlab_token(secret: str, token: str) -> bool:
-    """Verify GitLab webhook secret token."""
-    if not secret:
-        return True  # No secret configured, allow
+    """Verify GitLab webhook secret token (constant-time; no secret ⇒ no match)."""
+    if not secret or not token:
+        return False
     return hmac.compare_digest(secret, token)
 
 
@@ -3484,9 +3749,13 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
     s = get_settings()
     token = request.headers.get("x-gitlab-token", "")
 
-    if s.gitlab_webhook_secret and not _verify_gitlab_token(
-        s.gitlab_webhook_secret, token
-    ):
+    # Fail closed, as for GitHub: an unset GITLAB_WEBHOOK_SECRET used to skip the
+    # check entirely rather than refuse the delivery.
+    if not s.gitlab_webhook_secret:
+        raise HTTPException(
+            401, "GITLAB_WEBHOOK_SECRET is not configured; refusing unverified GitLab delivery"
+        )
+    if not _verify_gitlab_token(s.gitlab_webhook_secret, token):
         raise HTTPException(401, "invalid GitLab webhook token")
 
     try:
@@ -3502,51 +3771,81 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
         "event": event_type,
         "processed": True,
     }
+    project = (payload.get("project") or {}).get("path_with_namespace") or "unknown"
+    # `or {}`, not `.get(key, {})`: GitLab sends `"object_attributes": null` on
+    # some event kinds, and the default only applies when the key is absent —
+    # every one of these branches was a 500 on a real null.
+    attrs = payload.get("object_attributes") or {}
 
     if event_type == "push":
         result["ref"] = payload.get("ref", "")
-        result["commits"] = len(payload.get("commits", []))
-        result["project"] = payload.get("project", {}).get("path_with_namespace", "")
+        result["commits"] = len(payload.get("commits") or [])
+        result["project"] = project
 
     elif event_type == "merge_request":
-        attrs = payload.get("object_attributes", {})
         result["action"] = attrs.get("action", "")
         result["mr_iid"] = attrs.get("iid")
         result["mr_title"] = attrs.get("title", "")
         result["mr_state"] = attrs.get("state", "")
 
-        if attrs.get("action") == "open" and active_api_key():
-            changes = payload.get("changes", {})
-            if changes:
-                result["auto_triage"] = "mr_opened"
+        # An opened MR is not an incident; flag it, don't claim to have triaged it.
+        if attrs.get("action") == "open" and payload.get("changes"):
+            result["review_flags"] = ["mr_opened"]
 
     elif event_type == "issue":
-        attrs = payload.get("object_attributes", {})
         result["action"] = attrs.get("action", "")
         result["issue_iid"] = attrs.get("iid")
         result["issue_title"] = attrs.get("title", "")
 
-        if attrs.get("action") == "open" and active_api_key():
-            labels = [lbl.get("title", "").lower() for lbl in payload.get("labels", [])]
+        if attrs.get("action") == "open":
+            labels = [
+                str((lbl or {}).get("title", "")).lower() for lbl in (payload.get("labels") or [])
+            ]
             if "bug" in labels or "incident" in labels:
-                result["auto_triage"] = "incident_detected"
+                await _triage_event(
+                    result, raw,
+                    source="gl-issue",
+                    key=str(attrs.get("iid") or attrs.get("id") or "unknown"),
+                    reason="incident_detected",
+                    title=f"GitLab issue #{attrs.get('iid')}: {attrs.get('title', '')}".strip(),
+                    service=str(project),
+                )
 
     elif event_type == "pipeline":
-        attrs = payload.get("object_attributes", {})
         result["pipeline_id"] = attrs.get("id")
         result["status"] = attrs.get("status", "")
         result["ref"] = attrs.get("ref", "")
 
-        if attrs.get("status") == "failed" and active_api_key():
-            result["auto_triage"] = "pipeline_failure_detected"
+        if attrs.get("status") == "failed":
+            await _triage_event(
+                result, raw,
+                source="gl-pipeline",
+                key=str(attrs.get("id") or "unknown"),
+                reason="pipeline_failure_detected",
+                title=(
+                    f"GitLab pipeline {attrs.get('id')} failed on "
+                    f"{attrs.get('ref') or 'unknown ref'} ({project})"
+                ),
+                service=str(project),
+            )
 
     elif event_type == "deployment":
         result["deployment_id"] = payload.get("deployment_id")
         result["environment"] = payload.get("environment", "")
         result["status"] = payload.get("status", "")
 
-        if payload.get("status") == "failed" and active_api_key():
-            result["auto_triage"] = "deployment_failure_detected"
+        if payload.get("status") == "failed":
+            await _triage_event(
+                result, raw,
+                source="gl-deploy",
+                key=str(payload.get("deployment_id") or "unknown"),
+                reason="deployment_failure_detected",
+                title=(
+                    f"GitLab deployment to {payload.get('environment') or 'unknown'} "
+                    f"failed ({project})"
+                ),
+                service=str(project),
+            )
 
     return result
 

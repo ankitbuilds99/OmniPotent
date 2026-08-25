@@ -1020,3 +1020,80 @@ class StatusSubscriber(Base):
         ),
         Index("ix_status_subscribers_org_target", "org_id", "target", unique=True),
     )
+
+
+class GraphNode(Base):
+    """One node of an org's infrastructure knowledge graph.
+
+    `Neo4jKnowledgeGraph` falls back to a plain dict when no Neo4j server is
+    configured — which is the default deployment — so every service, deployment,
+    incident, change and alert the sync engine discovered disappeared on
+    restart, and a blast radius computed by one worker disagreed with the next.
+    These two tables are that fallback's storage.
+
+    The shape is deliberately generic (`label` + `properties`) rather than one
+    table per node type: the graph's whole point is that the traversals do not
+    care what a node is, and Neo4j itself stores labelled property bags. `label`
+    is a `NodeType` value ("Service", "Deployment", …) and `node_id` is the id
+    the API exposes, so identity is (org_id, label, node_id) — the same
+    `MERGE (s:Service {id: $id})` key the Cypher branch uses.
+    """
+
+    __tablename__ = "graph_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    node_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_graph_nodes_org_label_node", "org_id", "label", "node_id", unique=True),
+        Index("ix_graph_nodes_org_label", "org_id", "label"),
+    )
+
+
+class GraphEdge(Base):
+    """One relationship of an org's infrastructure knowledge graph.
+
+    Endpoints are stored as the bare node ids the API accepts, because
+    `create_relationship` matches on `(a {id: $source_id})` without a label —
+    a relationship may join any two node types. The traversals resolve an id to
+    its node by looking it up in `graph_nodes`.
+    """
+
+    __tablename__ = "graph_edges"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    rel_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    properties: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_graph_edges_org_triple",
+            "org_id",
+            "source_id",
+            "target_id",
+            "rel_type",
+            unique=True,
+        ),
+        Index("ix_graph_edges_org_target", "org_id", "target_id"),
+    )

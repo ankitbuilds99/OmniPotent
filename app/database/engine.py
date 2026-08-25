@@ -186,6 +186,8 @@ async def init_db() -> None:
     # metadata; create_all only creates what has been imported.
     from app.database.models import Base
     import app.oncall.models  # noqa: F401
+    import app.model_router.models  # noqa: F401
+    import app.notifications.models  # noqa: F401
 
     engine = get_engine()
     url = _get_database_url()

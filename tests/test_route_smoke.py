@@ -37,7 +37,9 @@ from app.database import engine as db_engine
 CONFIGURED_AWAY = {
     "/billing/subscription/cancel",
     "/billing/subscription/reactivate",
-    "/billing/webhooks/stripe",
+    # /billing/webhooks/stripe is deliberately absent: it was a duplicate Stripe
+    # receiver behind require_auth, which Stripe could never reach. The live one
+    # is POST /webhooks/stripe (tests/test_stripe_webhook_route.py).
     "/api/slack/events",
     "/api/slack/interactivity",
     "/api/slack/commands/rca",
@@ -48,6 +50,14 @@ CONFIGURED_AWAY = {
     "/api/slack/commands/postmortem",
     "/api/slack/commands/stakeholder",
     "/api/slack/commands/help",
+}
+
+# The same rule for reads: a GET that can only answer from a backend the operator
+# never configured refuses by name rather than serving zeros, which would read as
+# a real measurement. Each entry pairs the path with the setting its 503 must
+# name, so "unconfigured" stays distinguishable from "crashed".
+UNCONFIGURED_READS = {
+    "/api/knowledge-graph/service-metrics": "PROMETHEUS_URL",
 }
 
 # A syntactically valid UUID that owns nothing, so path-parameter routes reach
@@ -119,6 +129,8 @@ def test_no_route_raises(client):
             continue
         if response.status_code == 503 and path in CONFIGURED_AWAY:
             continue
+        if response.status_code == 503 and path in UNCONFIGURED_READS:
+            continue
         crashed.append(f"{response.status_code} {method} {path} -> {response.text[:160]}")
 
     assert not crashed, "routes returned 5xx:\n" + "\n".join(crashed)
@@ -134,3 +146,10 @@ def test_unconfigured_integrations_explain_themselves(client):
         response = client.request("POST", path, json={})
         assert response.status_code == 503, f"{path}: {response.status_code}"
         assert "not configured" in response.json()["detail"].lower(), path
+
+    for path, setting in sorted(UNCONFIGURED_READS.items()):
+        response = client.request("GET", path)
+        assert response.status_code == 503, f"{path}: {response.status_code}"
+        # Naming the setting is what makes the refusal actionable, and what a
+        # genuine crash surfacing as a 503 would not do.
+        assert setting in response.json()["detail"], path
