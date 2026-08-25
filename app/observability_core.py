@@ -16,6 +16,7 @@ import contextvars
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
@@ -51,24 +52,49 @@ class _JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    """Install a single root handler. Honors LOG_LEVEL (default INFO) and
-    LOG_FORMAT (json|text); defaults to json in production, text otherwise."""
-    level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    default_fmt = "json" if get_settings().is_production else "text"
-    fmt = os.environ.get("LOG_FORMAT", default_fmt).lower()
+    """Install the root handlers from configuration.
 
-    handler = logging.StreamHandler()
-    handler.addFilter(_RequestIdFilter())
+    Level comes from COPILOT_LOG_LEVEL, format from COPILOT_LOG_FORMAT
+    (json|text, "human" is an alias for text; empty means json in production and
+    text elsewhere), and COPILOT_LOG_FILE adds a second handler writing the same
+    records to a file.
+
+    The unprefixed LOG_LEVEL / LOG_FORMAT stay supported because render.yaml,
+    .env.example and README document them, and an explicitly-exported
+    unprefixed variable wins. What changed: the COPILOT_-prefixed settings used
+    to be declared in app/config.py and read by nobody, so
+    deploy/kubernetes/configmap.yaml's COPILOT_LOG_LEVEL/COPILOT_LOG_FORMAT and
+    the Helm chart's equivalents were silent no-ops.
+    """
+    s = get_settings()
+    level = (os.environ.get("LOG_LEVEL") or s.copilot_log_level or "INFO").upper()
+    default_fmt = "json" if s.is_production else "text"
+    fmt = (os.environ.get("LOG_FORMAT") or s.copilot_log_format or default_fmt).lower()
+
     if fmt == "json":
-        handler.setFormatter(_JsonFormatter())
+        formatter: logging.Formatter = _JsonFormatter()
     else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)-5s %(name)s [%(request_id)s] :: %(message)s")
+        formatter = logging.Formatter(
+            "%(asctime)s %(levelname)-5s %(name)s [%(request_id)s] :: %(message)s"
         )
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if s.copilot_log_file.strip():
+        # Fail loudly rather than silently dropping the file sink: an operator
+        # who set COPILOT_LOG_FILE is entitled to know it did not take effect.
+        path = Path(s.copilot_log_file.strip())
+        if str(path.parent) not in ("", "."):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(path, encoding="utf-8"))
+
+    for handler in handlers:
+        handler.addFilter(_RequestIdFilter())
+        handler.setFormatter(formatter)
 
     root = logging.getLogger()
     root.handlers.clear()
-    root.addHandler(handler)
+    for handler in handlers:
+        root.addHandler(handler)
     root.setLevel(level)
 
 
@@ -106,8 +132,11 @@ def setup_datadog_apm() -> None:
     llmobs_on = _truthy(os.environ.get("DD_LLMOBS_ENABLED", ""))
     if not (get_settings().dd_trace_enabled or llmobs_on):
         return
-    os.environ.setdefault("DD_SERVICE", "omnipotent")
-    os.environ.setdefault("DD_ENV", get_settings().copilot_env)
+    settings = get_settings()
+    os.environ.setdefault("DD_SERVICE", settings.service_name)
+    os.environ.setdefault("DD_ENV", settings.copilot_env)
+    # DD_VERSION is what groups traces by deploy in Datadog's version tracking.
+    os.environ.setdefault("DD_VERSION", settings.service_version)
     try:
         import ddtrace.auto  # noqa: F401  — auto-instruments imported libraries on import
     except ImportError:
@@ -169,6 +198,10 @@ def setup_sentry() -> None:
     sentry_sdk.init(
         dsn=s.sentry_dsn,
         environment=s.copilot_env,
+        # Without a release, Sentry cannot say which deploy introduced an issue
+        # and "regressed in" is blank on every event. SERVICE_NAME/SERVICE_VERSION
+        # were declared in config and read by nobody until this line.
+        release=f"{s.service_name}@{s.service_version}",
         traces_sample_rate=traces_sample_rate,
         profiles_sample_rate=profiles_sample_rate,
         send_default_pii=False,

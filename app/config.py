@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # (needs the `kubernetes` client); otherwise it serves offline pod/event fixtures.
     kube_config_path: str = ""
     kube_namespace: str = "default"
+    # Binaries a runbook `command` step may execute, comma separated (e.g.
+    # "kubectl,redis-cli"). Runbooks are operator-authored text that runs against
+    # production, so the default is empty: command steps then fail with a message
+    # naming this setting instead of running anything.
+    runbook_command_allowlist: str = ""
     # Sentry connector. With an auth token it queries the real API; otherwise it
     # serves offline issue/event fixtures. SENTRY_ORG/SENTRY_PROJECT scope live calls.
     sentry_api_token: str = ""
@@ -73,6 +78,13 @@ class Settings(BaseSettings):
     # Incident-memory corpus (prior RCAs/runbooks for similarity search). Blank =
     # the bundled demo corpus; point at your own JSON to search real postmortems.
     incident_corpus_path: str = ""
+    # Evidence backends for the verification agent (claim verification, action
+    # safety). Blank means the backend is absent: the verification endpoints then
+    # refuse to answer (503) instead of reporting an unverifiable claim as
+    # "refuted". Never point these at a stub.
+    prometheus_url: str = ""   # Prometheus HTTP API base, e.g. http://prom:9090
+    loki_url: str = ""         # Loki HTTP API base, e.g. http://loki:3100
+    elasticsearch_url: str = ""  # Elasticsearch base, e.g. http://es:9200
     # Distributed-traces connector. With a Jaeger-compatible query URL it queries
     # real traces; otherwise it serves offline OpenTelemetry-style span fixtures.
     traces_api_url: str = ""
@@ -96,11 +108,11 @@ class Settings(BaseSettings):
     # GCP credentials for multi-cloud connector. Project ID + service account key.
     gcp_project_id: str = ""
     gcp_region: str = "us-central1"
-    # Azure credentials for multi-cloud connector.
+    # Azure credentials for multi-cloud connector. Only the subscription id and
+    # region are forwarded to the multicloud MCP server (app/mcp/client.py); a
+    # service-principal triple (client id/secret/tenant) was declared here and
+    # read by nothing, so it is gone rather than pretending to authenticate.
     azure_subscription_id: str = ""
-    azure_client_id: str = ""
-    azure_client_secret: str = ""
-    azure_tenant_id: str = ""
     azure_region: str = "eastus"
 
     # --- Trigger / delivery (webhooks → investigate → Slack) ---
@@ -177,53 +189,26 @@ class Settings(BaseSettings):
     copilot_secret_key: str = ""
 
     # --- HTTP Client Settings ---
-    # Default timeout for external HTTP requests (seconds)
+    # Default timeout for external HTTP requests (seconds). Read by the alerting
+    # webhook sender, the background task runner and the OAuth token exchange.
     http_timeout_default: float = 30.0
-    # Timeout for health checks
-    http_timeout_health: float = 5.0
-    # Timeout for GitHub API calls
+    # Timeout for GitHub REST calls. The GitHub MCP server runs as a subprocess
+    # and reads env rather than this model, so app/mcp/client.py forwards this
+    # value to it as HTTP_TIMEOUT_GITHUB.
     http_timeout_github: float = 15.0
-    # Timeout for MCP server calls
-    http_timeout_mcp: float = 20.0
-
-    # --- Redis Connection Pool ---
-    redis_min_connections: int = 5
-    redis_max_connections: int = 50
-    redis_connection_timeout: float = 2.0
-    redis_socket_timeout: float = 1.0
-
-    # --- Safety Gates Thresholds ---
-    # Confidence gate threshold (0.0 - 1.0)
-    safety_confidence_threshold: float = 0.80
-    # Action-specific confidence thresholds (JSON string)
-    safety_action_thresholds: str = '{"rollback": 0.75, "scale_up": 0.70, "scale_down": 0.85, "restart": 0.80, "deploy_fix": 0.90, "run_command": 0.85, "create_pr": 0.70}'
-    # Max blast radius per action type (JSON string)
-    safety_max_blast_radius: str = '{"scale_down": 3, "rollback": 5, "restart": 2, "deploy_fix": 10, "run_command": 1, "scale_up": 10}'
-    # Protected services (comma-separated)
-    safety_protected_services: str = "payments,auth,database"
-
-    # --- Cost Optimization Thresholds ---
-    cost_underutilized_threshold: float = 20.0  # percentage
-    cost_idle_threshold: float = 5.0  # percentage
-    cost_anomaly_threshold: float = 1.5  # multiplier (50% increase)
-    cost_budget_alert_threshold: float = 0.8  # percentage of budget
-
-    # --- Anomaly Detection ---
-    anomaly_z_threshold: float = 3.0
-    anomaly_trend_threshold: float = 0.1
-    anomaly_pattern_threshold: float = 0.8
-
-    # --- Semantic Cache ---
-    cache_similarity_threshold_high: float = 0.95
-    cache_similarity_threshold_medium: float = 0.92
-    cache_similarity_threshold_low: float = 0.90
-    cache_max_entries_small: int = 1000
-    cache_max_entries_medium: int = 5000
-    cache_max_entries_large: int = 20000
-
-    # --- Log Clustering ---
-    log_similarity_threshold: float = 0.6
-    similar_incident_threshold: float = 0.7
+    #
+    # Deliberately absent (deleted rather than left as decoration): a knob in
+    # this file that no code reads is indistinguishable, from the operator's
+    # side, from one that is silently ignored — Settings is extra="ignore", so
+    # setting it produces no error and no effect. Removed here because nothing
+    # in app/ consumed them: HTTP_TIMEOUT_HEALTH / HTTP_TIMEOUT_MCP (the MCP
+    # servers are stdio subprocesses, not HTTP clients), the REDIS_*
+    # connection-pool quartet (app/redis_pool.py tunes per workload in
+    # POOL_CONFIGS), SAFETY_* gate thresholds, COST_* thresholds, ANOMALY_*
+    # thresholds (app/event_intelligence/noise_reduction.py carries its own
+    # NoiseReductionConfig), the CACHE_SIMILARITY_*/CACHE_MAX_ENTRIES_* sextet,
+    # LOG_SIMILARITY_THRESHOLD and SIMILAR_INCIDENT_THRESHOLD. Re-add one only
+    # together with the line that reads it.
 
     # --- Observability ---
     langchain_tracing_v2: bool = False
@@ -302,13 +287,16 @@ class Settings(BaseSettings):
     # Response cache backend: "memory" (default), "redis", or "none" (disabled).
     # Redis uses COPILOT_REDIS_URL; falls back to memory if unavailable.
     copilot_cache_backend: str = "memory"
-    # Default cache TTL in seconds. Individual operations may override.
-    copilot_cache_ttl_default: int = 300
-    # Max entries in the in-memory cache (LRU eviction past this).
+    # Max entries in the in-memory cache (LRU eviction past this). Read by
+    # app/cache.py:get_cache.
     copilot_cache_max_size: int = 1000
-    # Data governance: purge usage/metering rows older than this many days (0 = keep
-    # forever). GDPR erasure + audit export are on-demand (see app/governance.py).
-    copilot_retention_days: int = 0
+    # COPILOT_CACHE_TTL_DEFAULT used to live here. The only things that would
+    # have honoured it are app/cache.py's @cached/@cached_async decorators,
+    # which nothing in app/ applies, so it was a knob with no reachable effect.
+    # COPILOT_RETENTION_DAYS likewise: app/governance.apply_retention() is
+    # never scheduled by the app, so a retention window set here would have
+    # purged nothing while promising GDPR-style pruning. Both are removed;
+    # re-add whichever one gets a caller.
     # Prompt caching (Anthropic): cache the stable system prompt + bound tool
     # schemas so the agent's many loop iterations re-read them at ~0.1x cost
     # instead of re-paying full input price each turn. No-op for other providers.
@@ -417,6 +405,19 @@ class Settings(BaseSettings):
     # project root.
     copilot_vector_persist_dir: str = ""
 
+    # --- Knowledge graph (Neo4j) ---
+    # Bolt URI of a Neo4j server, e.g. bolt://neo4j:7687. Empty (the default)
+    # means the knowledge graph is served from the `graph_nodes`/`graph_edges`
+    # tables in `copilot_database_url` instead — durable and org-scoped, but
+    # without Cypher. When this IS set and the server cannot be reached, the
+    # knowledge-graph routes return 503 rather than silently writing somewhere
+    # else, because "the graph looks empty" is indistinguishable from "the graph
+    # says nothing depends on this service" to the person reading a blast radius.
+    copilot_neo4j_uri: str = ""
+    copilot_neo4j_username: str = "neo4j"
+    copilot_neo4j_password: str = ""
+    copilot_neo4j_database: str = "neo4j"
+
     # --- Database (production persistence) ---
     # Database URL: postgresql://user:pass@host:5432/db or sqlite:///path.db
     # Empty = SQLite at data/copilot.db (dev default).
@@ -432,22 +433,29 @@ class Settings(BaseSettings):
     # --- Logging ---
     # Log level: DEBUG | INFO | WARNING | ERROR | CRITICAL
     copilot_log_level: str = "INFO"
-    # Log format: json (production) | human (dev)
-    copilot_log_format: str = "human"
-    # Log file path (optional, stdout by default)
+    # Log format: json | text (aliases: "human" == "text"). Empty (the default)
+    # means "decide from the environment": json in production, text elsewhere.
+    # It has to be empty rather than "human", otherwise a production deployment
+    # that never set the variable would be pushed off JSON logs.
+    # Read by app/observability_core.configure_logging.
+    copilot_log_format: str = ""
+    # Log file path. Empty (the default) = stdout only; when set, records go to
+    # BOTH stdout and this file. Read by configure_logging, which creates the
+    # parent directory.
     copilot_log_file: str = ""
 
     # --- Service Metadata ---
+    # Reported to Datadog (DD_SERVICE/DD_VERSION) and Sentry (release=) by
+    # app/observability_core.py so traces and errors are grouped per deploy.
     service_name: str = "omnipotent"
     service_version: str = "1.0.0"
 
-    # --- Deployment Strategy Defaults ---
-    deployment_canary_steps: str = "10,25,50,75,100"  # percentage steps
-    deployment_max_error_rate: float = 0.05
-    deployment_max_latency_p99_ms: float = 2000.0
-    deployment_min_success_rate: float = 0.95
-    deployment_health_check_interval_s: int = 10
-    deployment_rollback_on_failure: bool = True
+    # DEPLOYMENT_* (canary steps, max error rate, max p99 latency, min success
+    # rate, health-check interval, rollback-on-failure) used to be declared here
+    # with a get_canary_steps() helper. Nothing progressive-delivery related read
+    # any of them — the canary rollout the names imply is ArgoCD's, configured in
+    # deploy/argocd/, not by this process — so they promised control the app
+    # never had. Removed rather than left as decoration.
 
     # --- Email Notifications ---
     # Email provider: smtp | ses | sendgrid | resend
@@ -564,47 +572,11 @@ class Settings(BaseSettings):
         local demo fixtures instead of the real API."""
         return not self.github_token
 
-    def get_action_confidence_thresholds(self) -> dict[str, float]:
-        """Parse action-specific confidence thresholds from JSON string."""
-        import json
-        try:
-            return json.loads(self.safety_action_thresholds)
-        except (json.JSONDecodeError, TypeError):
-            return {
-                "rollback": 0.75,
-                "scale_up": 0.70,
-                "scale_down": 0.85,
-                "restart": 0.80,
-                "deploy_fix": 0.90,
-                "run_command": 0.85,
-                "create_pr": 0.70,
-            }
-
-    def get_max_blast_radius(self) -> dict[str, int]:
-        """Parse max blast radius per action from JSON string."""
-        import json
-        try:
-            return json.loads(self.safety_max_blast_radius)
-        except (json.JSONDecodeError, TypeError):
-            return {
-                "scale_down": 3,
-                "rollback": 5,
-                "restart": 2,
-                "deploy_fix": 10,
-                "run_command": 1,
-                "scale_up": 10,
-            }
-
-    def get_protected_services(self) -> list[str]:
-        """Parse protected services from comma-separated string."""
-        return [s.strip() for s in self.safety_protected_services.split(",") if s.strip()]
-
-    def get_canary_steps(self) -> list[int]:
-        """Parse canary deployment steps from comma-separated string."""
-        try:
-            return [int(s.strip()) for s in self.deployment_canary_steps.split(",") if s.strip()]
-        except ValueError:
-            return [10, 25, 50, 75, 100]
+    # get_action_confidence_thresholds / get_max_blast_radius /
+    # get_protected_services / get_canary_steps lived here and had no callers —
+    # they parsed SAFETY_* and DEPLOYMENT_* settings that were themselves read by
+    # nothing, so the safety gate they appeared to configure did not exist. They
+    # are removed along with those fields.
 
 
 @lru_cache

@@ -28,6 +28,10 @@ from app.config import get_settings
 log = logging.getLogger("omnipotent.llm")
 
 # Per-provider default models: (main, fast).
+# Every id here must also have a price in
+# app/model_router/cost_optimizer.py:CostOptimizer.DEFAULT_COSTS — otherwise the
+# cost tracker bills real traffic at its most-expensive-known fallback rate.
+# tests/test_model_router_pricing.py enforces that.
 _DEFAULTS = {
     "anthropic": {"main": "claude-opus-4-8", "fast": "claude-haiku-4-5"},
     "openai": {"main": "gpt-4o", "fast": "gpt-4o-mini"},
