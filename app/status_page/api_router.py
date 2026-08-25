@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, EmailStr
 
+from app.config import get_settings
 from app.status_page.models import (
     ComponentStatus,
     IncidentSeverity,
@@ -18,7 +20,12 @@ from app.status_page.models import (
     MaintenanceStatus,
     SubscriptionType,
 )
-from app.status_page.notifications import get_status_notifier
+from app.status_page.notifications import (
+    EMAIL_DELIVERY_REQUIREMENTS,
+    email_delivery_configured,
+    get_status_notifier,
+    send_verification_email,
+)
 from app.status_page.store import get_status_store
 
 router = APIRouter(prefix="/api/status", tags=["Status Page"])
@@ -271,13 +278,39 @@ async def list_maintenances(
     return [MaintenanceResponse(**m.to_dict()) for m in maintenances]
 
 
+def _verification_link(http_request: Request, subscriber_id: str, token: str) -> str:
+    """Where the verification link in the email points.
+
+    `status_page_url` when an operator has set one, in preference to the host
+    the request arrived on: the Host header is client-controlled, and this link
+    carries a bearer token into somebody's inbox. Unset — the default — it falls
+    back to the request's own base URL, which is correct for a single-origin
+    deployment and is at worst the host the subscriber just used themselves.
+    """
+    query = urlencode({"id": subscriber_id, "token": token})
+    path = router.url_path_for("verify_subscription")
+    configured = (get_settings().status_page_url or "").strip().rstrip("/")
+    base = configured or str(http_request.base_url).rstrip("/")
+    return f"{base}{path}?{query}"
+
+
 @router.post("/subscribe", response_model=SubscribeResponse, status_code=201)
-async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
+async def subscribe_to_updates(
+    request: SubscribeRequest,
+    http_request: Request,
+) -> SubscribeResponse:
     """Subscribe to status page updates.
 
-    Provide either an email address or a webhook URL. For email subscriptions,
-    a verification email will be sent. For webhooks, a verification POST will
-    be sent with a challenge parameter.
+    Provide either an email address or a webhook URL.
+
+    An email subscription is stored unverified and the verification link is
+    mailed to the address; only a verified subscription is ever notified, so an
+    address that never opens the link never hears from us. Email therefore needs
+    a configured email provider — without one this returns 503 rather than
+    accepting an address it could never verify.
+
+    A webhook subscription is verified on creation: possession of the URL is the
+    only credential a webhook has.
     """
     store = get_status_store()
 
@@ -299,6 +332,17 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
     # Check for existing subscription
     existing = await store.get_subscriber_by_target(target)
     if existing:
+        if existing.verified:
+            existing_message = "Already subscribed."
+        else:
+            # No second email: this form is public and unauthenticated, so
+            # re-sending on every POST would turn it into a way to mail an
+            # address repeatedly. The link already sent still works, and
+            # DELETE /api/status/subscribe/{id} clears the way for a new one.
+            existing_message = (
+                "Already subscribed, but not verified yet. Open the verification "
+                "link already emailed to this address."
+            )
         return SubscribeResponse(
             id=existing.id,
             subscription_type=existing.subscription_type.value,
@@ -306,7 +350,7 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
             components=existing.components,
             verified=existing.verified,
             created_at=existing.created_at,
-            message="Already subscribed. Check your email for verification if not yet verified.",
+            message=existing_message,
         )
 
     # Validate component IDs if provided
@@ -316,9 +360,19 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
             if not comp:
                 raise HTTPException(400, f"Invalid component ID: {comp_id}")
 
-    # TODO: Send verification email/webhook
-    # For now, auto-verify webhooks and mark emails as pending
     is_webhook = subscription_type == SubscriptionType.WEBHOOK
+
+    # Asked before the address is stored. An unverified subscriber is never
+    # notified, and the only way to verify one is the emailed link, so with no
+    # transport the row would be a customer's email address kept forever for
+    # nothing while the response told them to check their inbox.
+    if not is_webhook and not email_delivery_configured():
+        raise HTTPException(
+            503,
+            "Email subscriptions are unavailable: no email provider is configured, "
+            "so the verification link cannot be sent. To enable them, "
+            f"{EMAIL_DELIVERY_REQUIREMENTS}.",
+        )
 
     # The preferences and the auto-verify go in with the row. They used to be
     # assigned to the returned object afterwards, which only stored anything
@@ -335,8 +389,26 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
 
     if is_webhook:
         message = "Webhook subscription created and verified."
+    elif subscriber.verified or not subscriber.verification_token:
+        # A concurrent request for the same address won the insert and that
+        # subscription is already verified; there is nothing left to mail.
+        message = "Already subscribed."
     else:
-        message = "Subscription created. Please check your email to verify."
+        verify_url = _verification_link(
+            http_request, subscriber.id, subscriber.verification_token
+        )
+        if not await send_verification_email(target, verify_url):
+            # The row would be unverifiable: the token only ever leaves the
+            # server in that email. Rolled back so the address is not kept and
+            # so a retry is a fresh attempt rather than "already subscribed".
+            await store.delete_subscriber(subscriber.id)
+            raise HTTPException(
+                502,
+                f"Subscription not created: the verification email to {target} "
+                "could not be delivered. Check the email provider configuration "
+                "and try again.",
+            )
+        message = "Subscription created. Check your email for the verification link."
 
     return SubscribeResponse(
         id=subscriber.id,

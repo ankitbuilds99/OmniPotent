@@ -15,7 +15,6 @@ announcing it.
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -50,11 +49,6 @@ def db(tmp_path, monkeypatch):
     db_engine._engine = None
     db_engine._session_factory = None
     tenant_context.current_tenant.set(None)
-
-
-# Long enough that an outage is unmistakably longer than the store calls around
-# it, short enough not to slow the suite down.
-_OUTAGE = 0.3
 
 
 def _as(org: str, coro_factory):
@@ -472,6 +466,57 @@ def test_notification_timestamps_persist(db):
 # --- uptime ------------------------------------------------------------------
 
 
+_DAY = 24 * 60.0  # minutes, the unit uptime records are stored in
+
+
+async def _backdate(
+    component_id: str,
+    *,
+    status_since: timedelta | None = None,
+    records: timedelta | None = None,
+) -> None:
+    """Move a component's stored clock back.
+
+    Uptime over days is not observable in a test that runs in a second, and
+    sleeping for a fraction of one and asserting on the ratio is a race against
+    the scheduler now that the interval a component is *currently* in counts
+    too. So the timeline is written where the store keeps it: `status_since`
+    says when the current status began, and an uptime record's `recorded_at` is
+    when the interval it covers ended.
+    """
+    from sqlalchemy import select
+
+    from app.database.engine import get_session
+    from app.database.models import StatusComponent, StatusUptimeRecord
+    from app.status_page.store import _ensure_seeded
+
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        org = await _ensure_seeded(session)
+        if status_since is not None:
+            row = (
+                await session.execute(
+                    select(StatusComponent).where(
+                        StatusComponent.org_id == org,
+                        StatusComponent.component_id == component_id,
+                    )
+                )
+            ).scalar_one()
+            row.status_since = now - status_since
+        if records is not None:
+            rows = (
+                await session.execute(
+                    select(StatusUptimeRecord).where(
+                        StatusUptimeRecord.org_id == org,
+                        StatusUptimeRecord.component_id == component_id,
+                    )
+                )
+            ).scalars()
+            for record in rows:
+                record.recorded_at = now - records
+        await session.commit()
+
+
 def test_uptime_records_the_interval_a_component_was_down(db):
     """No uptime record was ever written. `update_component` measured the
     interval as `now - updated_at` after setting `updated_at = now`, so it was
@@ -486,12 +531,15 @@ def test_uptime_records_the_interval_a_component_was_down(db):
 
 def test_a_status_change_writes_the_interval_it_ends(db):
     _as("acme", lambda s: s.update_component("api", status="major_outage"))
-    time.sleep(_OUTAGE)
+    # Ten days into the outage, without waiting ten days. This used to sleep
+    # for a third of a second and compare the resulting ratio, which is a race
+    # against the scheduler now that the interval since the recovery counts.
+    _as("acme", lambda s: _backdate("api", status_since=timedelta(days=10)))
     _as("acme", lambda s: s.update_component("api", status="operational"))
 
-    # The component was up for the few milliseconds before the outage and down
-    # for the sleep, so uptime is a small fraction. Without a record of either
-    # this reads 100.0 — which is what it always read.
+    # Ten days down against the moments it was up on either side, so uptime is
+    # a small fraction. Without a record of either this reads 100.0 — which is
+    # what it always read.
     assert _as("acme", lambda s: s.calculate_uptime("api", days=30)) < 25.0
 
 
@@ -500,13 +548,13 @@ def test_renaming_a_component_does_not_end_its_outage(db):
     last time the row was touched, an edit part-way through an outage would
     erase the downtime before it and only the tail would be counted."""
     _as("acme", lambda s: s.update_component("api", status="major_outage"))
-    time.sleep(_OUTAGE)
+    _as("acme", lambda s: _backdate("api", status_since=timedelta(days=10)))
     _as("acme", lambda s: s.update_component("api", name="Public API"))
     _as("acme", lambda s: s.update_component("api", status="operational"))
 
-    # The outage interval has to cover the sleep, which dwarfs the millisecond
-    # the component was up beforehand. Restarted by the rename, it would be
-    # milliseconds too, and this would sit near 50%.
+    # The outage interval has to cover all ten days. Restarted by the rename it
+    # would be the millisecond between the rename and the recovery, and this
+    # would sit near 50%.
     assert _as("acme", lambda s: s.calculate_uptime("api", days=30)) < 25.0
 
 
@@ -531,6 +579,62 @@ def test_deleting_a_component_takes_its_uptime_history(db):
     # Not merely unreachable through the component — actually gone, so a
     # component later created with the same id does not inherit it.
     assert _as("acme", lambda s: s.calculate_uptime("api")) == 100.0
+
+
+def test_uptime_counts_the_interval_the_component_is_still_in(db):
+    """Nothing records the status a component is sitting in until it leaves it.
+
+    Summing only closed intervals froze the number at the last transition: a
+    component that went down for ten days and recovered twenty days ago kept
+    advertising the uptime it had the instant it recovered — 0%, since the only
+    closed interval in the window was the outage — and would keep advertising
+    it until it next changed status.
+    """
+    # Ten days down, ending twenty days ago; operational ever since.
+    _as("acme", lambda s: s.record_uptime("api", 10 * _DAY, False))
+    _as(
+        "acme",
+        lambda s: _backdate(
+            "api", status_since=timedelta(days=20), records=timedelta(days=20)
+        ),
+    )
+
+    # Twenty of the last thirty days up: 66.7%, not the 0% the closed intervals
+    # alone report.
+    uptime = _as("acme", lambda s: s.calculate_uptime("api", days=30))
+    assert 66.0 < uptime < 67.5, uptime
+    assert _as("acme", lambda s: s.get_component("api")).status is ComponentStatus.OPERATIONAL
+
+
+def test_uptime_is_clipped_to_the_window_it_claims(db):
+    """"Uptime over 30 days" has to mean the last 30 days.
+
+    Whole record durations were summed if the record merely *ended* inside the
+    window, so an outage that began forty-five days ago counted in full against
+    the 30-day figure — and the 90-day figure came out identical to it, because
+    both summed exactly the same rows.
+    """
+    # Twenty days down, ending twenty-five days ago; operational ever since.
+    _as("acme", lambda s: s.record_uptime("api", 20 * _DAY, False))
+    _as(
+        "acme",
+        lambda s: _backdate(
+            "api", status_since=timedelta(days=25), records=timedelta(days=25)
+        ),
+    )
+
+    # The last 30 days saw only the final five days of that outage: 25/30 up.
+    thirty = _as("acme", lambda s: s.calculate_uptime("api", days=30))
+    assert 83.0 < thirty < 84.0, thirty
+
+    # The 90-day view sees the whole of it: 25 days up out of the 45 measured.
+    ninety = _as("acme", lambda s: s.calculate_uptime("api", days=90))
+    assert 55.0 < ninety < 56.5, ninety
+
+    summary = _as("acme", lambda s: s.get_status_summary())
+    assert summary["uptimes_30d"]["api"] == thirty
+    assert summary["uptimes_90d"]["api"] == ninety
+    assert summary["groups"]["Core"][0]["uptime_30d"] == thirty
 
 
 # --- the page itself ---------------------------------------------------------

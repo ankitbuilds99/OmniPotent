@@ -17,6 +17,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html import escape
 from typing import Any
 
 import httpx
@@ -101,6 +102,98 @@ class NotificationPayload:
         return "\n".join(lines)
 
 
+# --- Subscription verification -----------------------------------------------
+#
+# A subscription that is never verified is never notified: `notify_subscribers`
+# skips `verified=False`. Nothing in the subscribe path ever sent the
+# verification link, so every email address collected through the public form
+# was inert. These are the delivery half of that; the router owns the HTTP half.
+
+# What a deployment has to set for `get_email_provider()` to have a transport.
+# Named in the 503 the subscribe endpoint returns, so an operator reading the
+# response knows what is missing instead of guessing.
+EMAIL_DELIVERY_REQUIREMENTS = (
+    "set SMTP_HOST, SMTP_USERNAME and SMTP_PASSWORD, "
+    "or SENDGRID_API_KEY and SENDGRID_FROM_EMAIL, "
+    "or AWS_SES_ENABLED with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and SES_FROM_EMAIL"
+)
+
+
+def _mask_email(email: str) -> str:
+    """An address that can go in a log line."""
+    local, _, domain = email.partition("@")
+    if not domain:
+        return "***"
+    return f"{local[:2]}***@{domain}" if len(local) > 2 else f"***@{domain}"
+
+
+def email_delivery_configured() -> bool:
+    """Whether the configured email provider can actually send anything."""
+    from app.notifications.email import get_email_provider
+
+    return bool(get_email_provider().is_configured())
+
+
+def verification_email_body(verify_url: str) -> tuple[str, str]:
+    """(text, html) for the verification email. Split out so tests can read it."""
+    text = "\n".join(
+        [
+            "Confirm your status page subscription",
+            "",
+            "Someone (probably you) asked for status updates at this address.",
+            "Open the link below to confirm it. The link is single-use.",
+            "",
+            verify_url,
+            "",
+            "If this was not you, ignore this email: without the link the",
+            "subscription stays unverified and is never notified.",
+        ]
+    )
+    # The URL is built from configuration or the request's own base URL, and
+    # part of that is the client-supplied Host header, so it is escaped rather
+    # than trusted into an attribute.
+    safe_url = escape(verify_url, quote=True)
+    body_html = (
+        "<html><body>"
+        "<h2>Confirm your status page subscription</h2>"
+        "<p>Someone &mdash; probably you &mdash; asked for status updates at this "
+        "address. Confirm it with the link below. The link is single-use.</p>"
+        f'<p><a href="{safe_url}">Confirm this subscription</a></p>'
+        f"<p>Or paste this into your browser:<br>{safe_url}</p>"
+        "<p>If this was not you, ignore this email: without the link the "
+        "subscription stays unverified and is never notified.</p>"
+        "</body></html>"
+    )
+    return text, body_html
+
+
+async def send_verification_email(email: str, verify_url: str) -> bool:
+    """Send the verification link. Returns what the provider actually did."""
+    from app.notifications.email import send_email
+
+    text, html = verification_email_body(verify_url)
+    try:
+        delivered = await send_email(
+            to=email,
+            subject="Confirm your status page subscription",
+            body_text=text,
+            body_html=html,
+        )
+    except Exception as e:  # a broken provider must not 500 the subscribe form
+        log.error(
+            "verification email failed",
+            extra={"email": _mask_email(email), "error": str(e)},
+        )
+        return False
+
+    log.info(
+        "verification email %s",
+        "sent" if delivered else "not delivered",
+        extra={"email": _mask_email(email)},
+    )
+    return bool(delivered)
+
+
 class StatusNotifier:
     """Handles sending notifications to subscribers."""
 
@@ -127,6 +220,12 @@ class StatusNotifier:
         success: list[str] = []
         failed: list[str] = []
 
+        # Kept alongside the tasks: the loop below skips unverified subscribers
+        # and subscribers whose preferences exclude this event, so the results
+        # line up with the *sent* list, not with `subscribers`. Zipped against
+        # the full list, one skipped subscriber shifted every result after it
+        # onto the wrong id.
+        targets: list[Subscriber] = []
         tasks = []
         for subscriber in subscribers:
             if not subscriber.verified:
@@ -147,11 +246,12 @@ class StatusNotifier:
                 if not any(c in subscriber.components for c in payload.affected_components):
                     continue
 
+            targets.append(subscriber)
             tasks.append(self._send_notification(subscriber, payload))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for subscriber, result in zip(subscribers, results):
+        for subscriber, result in zip(targets, results):
             if isinstance(result, Exception):
                 log.error(
                     "notification failed",
@@ -183,24 +283,32 @@ class StatusNotifier:
         return False
 
     async def _send_email(self, email: str, payload: NotificationPayload) -> bool:
-        """Send an email notification."""
-        try:
-            # Try to use the notifications module if available
-            from app.notifications import send_email
+        """Send an email notification.
 
-            await send_email(
+        The provider's answer is the answer. This used to discard it and return
+        True, so an unconfigured SMTP host — which makes `send_email` log a
+        warning and return False without opening a socket — was reported to the
+        caller as a delivered notification.
+        """
+        try:
+            from app.notifications.email import send_email
+
+            delivered = await send_email(
                 to=email,
                 subject=payload.to_email_subject(),
                 body_text=payload.to_email_body(),
             )
-            log.info("email sent", extra={"email": email[:20] + "***"})
-            return True
-        except ImportError:
-            log.warning("email provider not configured, skipping email notification")
-            return False
         except Exception as e:
             log.error("email send failed", extra={"error": str(e)})
             return False
+
+        if delivered:
+            log.info("email sent", extra={"email": _mask_email(email)})
+        else:
+            log.warning(
+                "email not delivered", extra={"email": _mask_email(email)}
+            )
+        return bool(delivered)
 
     async def _send_webhook(self, url: str, payload: NotificationPayload) -> bool:
         """Send a webhook notification with retry."""

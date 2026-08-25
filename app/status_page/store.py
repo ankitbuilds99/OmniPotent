@@ -37,7 +37,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.database.orgs import ensure_org_row
@@ -1189,45 +1189,91 @@ class StatusStore:
         component_ids: list[str],
         days: int,
     ) -> dict[str, float]:
-        """Uptime percentage per component, in one aggregate.
+        """Uptime percentage per component over the last `days`.
 
-        A component with no records is left out; every caller reads that as
-        100%, which is what a component that has never left OPERATIONAL means.
+        The window is a stretch of real time, not "whichever intervals happened
+        to close inside it". Two things follow, and neither used to be true:
+
+        * The interval the component is sitting in *now* — `status_since` to
+          now — counts. No record covers it until the next status change, so
+          summing only closed records froze the figure at the last transition:
+          a component that recovered three weeks ago went on advertising the
+          50% it had the instant it recovered, and would until it next changed
+          status.
+        * Each stored interval is clipped to the window. Summing whole
+          durations selected by `recorded_at` alone counted downtime from
+          before the window in full, and made the 90-day figure identical to
+          the 30-day one whenever both selected the same records.
+
+        A component with no measured time is left out; every caller reads that
+        as 100%, which is what a component that has never left OPERATIONAL
+        means.
         """
-        from app.database.models import StatusUptimeRecord
+        from app.database.models import StatusComponent, StatusUptimeRecord
 
         if not component_ids:
             return {}
 
-        cutoff = _as_utc(_now() - timedelta(days=days))
-        rows = await session.execute(
+        now = _now()
+        cutoff = _as_utc(now - timedelta(days=days))
+
+        measured: dict[str, float] = {}
+        operational: dict[str, float] = {}
+
+        def _add(component_id: str, minutes: float, was_operational: bool) -> None:
+            if minutes <= 0:
+                return
+            measured[component_id] = measured.get(component_id, 0.0) + minutes
+            if was_operational:
+                operational[component_id] = operational.get(component_id, 0.0) + minutes
+
+        # Closed intervals. A record is the span [recorded_at - duration,
+        # recorded_at]; records that ended before the cutoff are excluded by
+        # the query, and one that straddles it contributes only its tail.
+        records = await session.execute(
             select(
                 StatusUptimeRecord.component_id,
-                func.sum(StatusUptimeRecord.duration_minutes),
-                func.sum(
-                    case(
-                        (
-                            StatusUptimeRecord.was_operational.is_(True),
-                            StatusUptimeRecord.duration_minutes,
-                        ),
-                        else_=0.0,
-                    )
-                ),
-            )
-            .where(
+                StatusUptimeRecord.recorded_at,
+                StatusUptimeRecord.duration_minutes,
+                StatusUptimeRecord.was_operational,
+            ).where(
                 StatusUptimeRecord.org_id == org,
                 StatusUptimeRecord.component_id.in_(component_ids),
                 StatusUptimeRecord.recorded_at >= cutoff,
             )
-            .group_by(StatusUptimeRecord.component_id)
         )
+        for component_id, recorded_at, duration_minutes, was_operational in records:
+            ended = _utc(recorded_at)
+            began = ended - timedelta(minutes=duration_minutes or 0.0)
+            overlap = (min(ended, now) - max(began, cutoff)).total_seconds() / 60
+            _add(component_id, overlap, bool(was_operational))
 
-        uptimes: dict[str, float] = {}
-        for component_id, total, operational in rows:
-            if not total:
-                continue
-            uptimes[component_id] = round((operational or 0.0) / total * 100, 2)
-        return uptimes
+        # The open interval, which abuts the newest closed record rather than
+        # overlapping it: `_record_transition` ends a record exactly where the
+        # next `status_since` begins.
+        rows = await session.execute(
+            select(
+                StatusComponent.component_id,
+                StatusComponent.status,
+                StatusComponent.status_since,
+            ).where(
+                StatusComponent.org_id == org,
+                StatusComponent.component_id.in_(component_ids),
+            )
+        )
+        for component_id, status, status_since in rows:
+            began = max(_utc(status_since), cutoff)
+            _add(
+                component_id,
+                (now - began).total_seconds() / 60,
+                status == ComponentStatus.OPERATIONAL.value,
+            )
+
+        return {
+            component_id: round(operational.get(component_id, 0.0) / total * 100, 2)
+            for component_id, total in measured.items()
+            if total > 0
+        }
 
     # --- Status Summary ---
 
