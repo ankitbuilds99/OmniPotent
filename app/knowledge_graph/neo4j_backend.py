@@ -11,10 +11,17 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 
+from app.knowledge_graph import graph_store
+
 log = logging.getLogger("omnipotent.knowledge_graph.neo4j")
+
+# The Cypher blast-radius query walks `*1..5`; the relational traversal below
+# has to agree with it or the same graph would answer differently depending on
+# which backend happened to be configured.
+BLAST_RADIUS_MAX_DEPTH = 5
 
 
 class NodeType(str, Enum):
@@ -42,6 +49,7 @@ class RelationType(str, Enum):
     AFFECTED = "AFFECTED"
     RESOLVED_BY = "RESOLVED_BY"
     CALLS = "CALLS"
+    TRIGGERED_ON = "TRIGGERED_ON"
     PRODUCES = "PRODUCES"
     CONSUMES = "CONSUMES"
     RUNS_ON = "RUNS_ON"
@@ -249,20 +257,139 @@ class Relationship:
         }
 
 
-class Neo4jKnowledgeGraph:
-    """Neo4j-backed knowledge graph for infrastructure.
+# The relationships that mean "this service needs that service in order to
+# work". The Cypher traversals match `[:DEPENDS_ON|CALLS]`; the relational ones
+# below filter on the same pair, so a RELATED_TO or an OWNS edge does not
+# inflate a blast radius.
+DEPENDENCY_RELATIONS = frozenset({RelationType.DEPENDS_ON.value, RelationType.CALLS.value})
 
-    Features:
-    - Real Neo4j connection with async driver
-    - CRUD operations for all node types
-    - Complex graph queries for RCA
-    - Real-time change tracking
-    - Efficient path finding for blast radius
+
+def _node_key(label: str, node_id: str) -> str:
+    """`"Label:id"`, the key `graph_store.snapshot()` returns nodes under."""
+    return graph_store.node_key(label, node_id)
+
+
+def _nodes_of(
+    nodes: Mapping[str, dict[str, Any]], label: str
+) -> list[dict[str, Any]]:
+    """Every node carrying `label`, in the order the store returned them."""
+    prefix = f"{label}:"
+    return [node for key, node in nodes.items() if key.startswith(prefix)]
+
+
+def _sources_pointing_at(
+    edges: Iterable[Mapping[str, Any]], rel_type: str, target_id: str
+) -> set[str]:
+    """Ids of the nodes joined to `target_id` by `rel_type`, following the arrow.
+
+    The Cypher equivalent is `MATCH (x)-[:REL]->(target) RETURN x.id`.
+    """
+    return {
+        str(edge["source"])
+        for edge in edges
+        if edge.get("type") == rel_type and edge.get("target") == target_id
+    }
+
+
+def _walk_services(
+    nodes: Mapping[str, dict[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+    service_id: str,
+    *,
+    direction: str = "both",
+    max_depth: int = 3,
+) -> dict[str, int]:
+    """Breadth-first walk of the dependency edges out of one service.
+
+    Returns `{service_id: hop distance}` for every *Service* reachable within
+    `max_depth` hops, which is what both `find_dependencies` and
+    `find_blast_radius` need and what the Cypher branch computes with
+    `min(length(path))`. Breadth-first order means the first time a node is
+    reached is by its shortest path, so no relaxation pass is needed.
+
+    `direction` uses this module's existing vocabulary, taken from the Cypher:
+
+    * `upstream` follows `<-[:DEPENDS_ON|CALLS]-`, i.e. the services that depend
+      on this one. That is the blast radius.
+    * `downstream` follows `-[:DEPENDS_ON|CALLS]->`, i.e. the services this one
+      depends on.
+    * anything else walks both, as the undirected Cypher pattern does.
+
+    Intermediate hops may be any node type — a service can reach another through
+    a Database or Queue node, exactly as the unlabelled variable-length Cypher
+    pattern allows — but only Service nodes are reported, and the start service
+    is never reported as its own dependency even if the graph has a cycle.
+    """
+    if _node_key(NodeType.SERVICE.value, service_id) not in nodes:
+        return {}
+
+    depth = max(0, int(max_depth))
+    if depth == 0:
+        return {}
+
+    outgoing: dict[str, set[str]] = {}
+    incoming: dict[str, set[str]] = {}
+    for edge in edges:
+        if edge.get("type") not in DEPENDENCY_RELATIONS:
+            continue
+        source, target = str(edge["source"]), str(edge["target"])
+        outgoing.setdefault(source, set()).add(target)
+        incoming.setdefault(target, set()).add(source)
+
+    adjacency: tuple[dict[str, set[str]], ...]
+    if direction == "upstream":
+        adjacency = (incoming,)
+    elif direction == "downstream":
+        adjacency = (outgoing,)
+    else:
+        adjacency = (outgoing, incoming)
+
+    service_ids = {
+        str(node.get("id", ""))
+        for node in _nodes_of(nodes, NodeType.SERVICE.value)
+    }
+
+    distances: dict[str, int] = {}
+    seen = {service_id}
+    frontier = [service_id]
+    for hop in range(1, depth + 1):
+        next_frontier: list[str] = []
+        for node_id in frontier:
+            for adjacent in adjacency:
+                for neighbour in sorted(adjacent.get(node_id, ())):
+                    if neighbour in seen:
+                        continue
+                    seen.add(neighbour)
+                    next_frontier.append(neighbour)
+                    if neighbour in service_ids:
+                        distances[neighbour] = hop
+        if not next_frontier:
+            break
+        frontier = next_frontier
+
+    return distances
+
+
+class Neo4jKnowledgeGraph:
+    """Knowledge graph for infrastructure, over Neo4j or the relational store.
+
+    Two backends, chosen by whether a Neo4j URI is configured:
+
+    * `uri` set — Cypher against that server, and if it cannot be reached
+      `connect()` records `connect_error` and every operation refuses. It used
+      to swallow the failure and write to a process-local dict instead, which is
+      the worst possible outcome: an operator who configured a production Neo4j
+      got HTTP 200s, an empty blast radius and no indication that any of it was
+      fiction.
+    * `uri` empty (the default) — the `graph_nodes` / `graph_edges` tables via
+      `app.knowledge_graph.graph_store`, scoped to the requesting org. Durable
+      across restarts and shared between workers; the traversals below are
+      implemented directly instead of delegating to Cypher.
     """
 
     def __init__(
         self,
-        uri: str = "bolt://localhost:7687",
+        uri: str = "",
         username: str = "neo4j",
         password: str = "",
         database: str = "neo4j",
@@ -273,10 +400,25 @@ class Neo4jKnowledgeGraph:
         self.database = database
         self._driver: Any = None
         self._connected = False
+        # Non-empty only when a Neo4j server was configured and is unusable.
+        # The router turns it into a 503 rather than serving a half-graph.
+        self.connect_error = ""
         self._subscriptions: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
 
+    @property
+    def connected(self) -> bool:
+        """True when Cypher is being used; False for the relational store."""
+        return self._connected
+
     async def connect(self) -> bool:
-        """Connect to Neo4j database."""
+        """Connect to Neo4j, if one is configured. Returns True only for Cypher."""
+        self.connect_error = ""
+
+        if not self.uri:
+            self._connected = False
+            log.info("No COPILOT_NEO4J_URI set; knowledge graph uses the database")
+            return False
+
         try:
             from neo4j import AsyncGraphDatabase
 
@@ -292,17 +434,22 @@ class Neo4jKnowledgeGraph:
             return True
 
         except ImportError:
-            log.warning("neo4j package not installed, using in-memory fallback")
             self._connected = False
-            self._in_memory_nodes: dict[str, dict[str, Any]] = {}
-            self._in_memory_rels: list[dict[str, Any]] = []
+            self.connect_error = (
+                f"COPILOT_NEO4J_URI is set to {self.uri} but the 'neo4j' driver is not "
+                "installed. Install the 'knowledge-graph' extra, or unset "
+                "COPILOT_NEO4J_URI to use the database-backed graph."
+            )
+            log.error("%s", self.connect_error)
             return False
 
         except Exception as e:
-            log.warning("Failed to connect to Neo4j: %s", e)
             self._connected = False
-            self._in_memory_nodes = {}
-            self._in_memory_rels = []
+            self.connect_error = (
+                f"Cannot reach the Neo4j server at {self.uri}: {e}. Fix the server or "
+                "unset COPILOT_NEO4J_URI to use the database-backed graph."
+            )
+            log.error("%s", self.connect_error)
             return False
 
     async def close(self) -> None:
@@ -358,10 +505,9 @@ class Neo4jKnowledgeGraph:
                     props=service.to_cypher_properties(),
                 )
             else:
-                self._in_memory_nodes[f"Service:{service.id}"] = {
-                    "type": "Service",
-                    **service.to_cypher_properties(),
-                }
+                await graph_store.put_node(
+                    NodeType.SERVICE.value, service.id, service.to_cypher_properties()
+                )
 
         await self._notify_subscribers("Service", "create", service.id)
         return service
@@ -378,9 +524,9 @@ class Neo4jKnowledgeGraph:
                 if record:
                     return self._node_to_service(record["s"])
             else:
-                key = f"Service:{service_id}"
-                if key in self._in_memory_nodes:
-                    return self._dict_to_service(self._in_memory_nodes[key])
+                node = await graph_store.get_node(NodeType.SERVICE.value, service_id)
+                if node is not None:
+                    return self._dict_to_service(node)
         return None
 
     async def list_services(
@@ -414,9 +560,7 @@ class Neo4jKnowledgeGraph:
                 return [self._node_to_service(r["s"]) for r in records]
             else:
                 services = []
-                for key, node in self._in_memory_nodes.items():
-                    if not key.startswith("Service:"):
-                        continue
+                for node in await graph_store.list_nodes(NodeType.SERVICE.value):
                     if namespace and node.get("namespace") != namespace:
                         continue
                     if team and node.get("team") != team:
@@ -446,15 +590,16 @@ class Neo4jKnowledgeGraph:
                     props=deployment.to_cypher_properties(),
                 )
             else:
-                self._in_memory_nodes[f"Deployment:{deployment.id}"] = {
-                    "type": "Deployment",
-                    **deployment.to_cypher_properties(),
-                }
-                self._in_memory_rels.append({
-                    "source": f"Deployment:{deployment.id}",
-                    "target": f"Service:{deployment.service_id}",
-                    "type": "DEPLOYED_TO",
-                })
+                await graph_store.put_node(
+                    NodeType.DEPLOYMENT.value,
+                    deployment.id,
+                    deployment.to_cypher_properties(),
+                )
+                await graph_store.put_edge(
+                    deployment.id,
+                    deployment.service_id,
+                    RelationType.DEPLOYED_TO.value,
+                )
 
         await self._notify_subscribers("Deployment", "create", deployment.id)
         return deployment
@@ -496,10 +641,8 @@ class Neo4jKnowledgeGraph:
                 return [self._node_to_deployment(r["d"]) for r in records]
             else:
                 deployments = []
-                for key, node in self._in_memory_nodes.items():
-                    if not key.startswith("Deployment:"):
-                        continue
-                    deployed_at = datetime.fromisoformat(node["deployed_at"])
+                for node in await graph_store.list_nodes(NodeType.DEPLOYMENT.value):
+                    deployed_at = self._parse_datetime(node.get("deployed_at"))
                     if deployed_at < cutoff:
                         continue
                     if service_id and node.get("service_id") != service_id:
@@ -538,16 +681,13 @@ class Neo4jKnowledgeGraph:
                         service_id=service_id,
                     )
             else:
-                self._in_memory_nodes[f"Incident:{incident.id}"] = {
-                    "type": "Incident",
-                    **incident.to_cypher_properties(),
-                }
+                await graph_store.put_node(
+                    NodeType.INCIDENT.value, incident.id, incident.to_cypher_properties()
+                )
                 for service_id in incident.affected_services:
-                    self._in_memory_rels.append({
-                        "source": f"Incident:{incident.id}",
-                        "target": f"Service:{service_id}",
-                        "type": "AFFECTED",
-                    })
+                    await graph_store.put_edge(
+                        incident.id, service_id, RelationType.AFFECTED.value
+                    )
 
         await self._notify_subscribers("Incident", "create", incident.id)
         return incident
@@ -564,9 +704,9 @@ class Neo4jKnowledgeGraph:
                 if record:
                     return self._node_to_incident(record["i"])
             else:
-                key = f"Incident:{incident_id}"
-                if key in self._in_memory_nodes:
-                    return self._dict_to_incident(self._in_memory_nodes[key])
+                node = await graph_store.get_node(NodeType.INCIDENT.value, incident_id)
+                if node is not None:
+                    return self._dict_to_incident(node)
         return None
 
     async def create_change(self, change: ChangeNode) -> ChangeNode:
@@ -584,10 +724,9 @@ class Neo4jKnowledgeGraph:
                     props=change.to_cypher_properties(),
                 )
             else:
-                self._in_memory_nodes[f"Change:{change.id}"] = {
-                    "type": "Change",
-                    **change.to_cypher_properties(),
-                }
+                await graph_store.put_node(
+                    NodeType.CHANGE.value, change.id, change.to_cypher_properties()
+                )
 
         await self._notify_subscribers("Change", "create", change.id)
         return change
@@ -613,10 +752,18 @@ class Neo4jKnowledgeGraph:
                     props=alert.to_cypher_properties(),
                 )
             else:
-                self._in_memory_nodes[f"Alert:{alert.id}"] = {
-                    "type": "Alert",
-                    **alert.to_cypher_properties(),
-                }
+                await graph_store.put_node(
+                    NodeType.ALERT.value, alert.id, alert.to_cypher_properties()
+                )
+                # The Cypher branch links the alert to its service when one
+                # exists; the fallback used to skip this, so `get_service_timeline`
+                # had nothing to join on.
+                if alert.service and await graph_store.get_node(
+                    NodeType.SERVICE.value, alert.service
+                ):
+                    await graph_store.put_edge(
+                        alert.id, alert.service, RelationType.TRIGGERED_ON.value
+                    )
 
         await self._notify_subscribers("Alert", "create", alert.id)
         return alert
@@ -639,12 +786,12 @@ class Neo4jKnowledgeGraph:
                     props=rel.to_cypher_properties(),
                 )
             else:
-                self._in_memory_rels.append({
-                    "source": rel.source_id,
-                    "target": rel.target_id,
-                    "type": rel.rel_type.value,
-                    "properties": rel.properties,
-                })
+                await graph_store.put_edge(
+                    rel.source_id,
+                    rel.target_id,
+                    rel.rel_type.value,
+                    rel.properties,
+                )
 
         return rel
 
@@ -686,11 +833,26 @@ class Neo4jKnowledgeGraph:
                     "dependencies": dependencies,
                 }
             else:
+                nodes, edges = await graph_store.snapshot()
+                distances = _walk_services(
+                    nodes, edges, service_id, direction=direction, max_depth=depth
+                )
+                dependencies = [
+                    {
+                        "service": self._dict_to_service(
+                            nodes[_node_key(NodeType.SERVICE.value, dep_id)]
+                        ),
+                        "distance": distance,
+                    }
+                    for dep_id, distance in sorted(
+                        distances.items(), key=lambda item: (item[1], item[0])
+                    )
+                ]
                 return {
                     "service_id": service_id,
                     "direction": direction,
                     "max_depth": depth,
-                    "dependencies": [],
+                    "dependencies": dependencies,
                 }
 
     async def find_blast_radius(
@@ -732,11 +894,36 @@ class Neo4jKnowledgeGraph:
                     "affected_services": affected_services,
                 }
             else:
+                nodes, edges = await graph_store.snapshot()
+                distances = _walk_services(
+                    nodes,
+                    edges,
+                    service_id,
+                    direction="upstream",
+                    max_depth=BLAST_RADIUS_MAX_DEPTH,
+                )
+
+                affected_services = []
+                total_impact_score = 0.0
+                for affected_id, distance in sorted(
+                    distances.items(), key=lambda item: (item[1], item[0])
+                ):
+                    svc = self._dict_to_service(
+                        nodes[_node_key(NodeType.SERVICE.value, affected_id)]
+                    )
+                    impact = svc.criticality / distance
+                    total_impact_score += impact
+                    affected_services.append({
+                        "service": svc,
+                        "distance": distance,
+                        "impact_score": impact,
+                    })
+
                 return {
                     "source_service": service_id,
-                    "affected_count": 0,
-                    "total_impact_score": 0.0,
-                    "affected_services": [],
+                    "affected_count": len(affected_services),
+                    "total_impact_score": total_impact_score,
+                    "affected_services": affected_services,
                 }
 
     async def find_changes_before_incident(
@@ -773,10 +960,8 @@ class Neo4jKnowledgeGraph:
                 return [self._node_to_change(r["c"]) for r in records]
             else:
                 changes = []
-                for key, node in self._in_memory_nodes.items():
-                    if not key.startswith("Change:"):
-                        continue
-                    ts = datetime.fromisoformat(node["timestamp"])
+                for node in await graph_store.list_nodes(NodeType.CHANGE.value):
+                    ts = self._parse_datetime(node.get("timestamp"))
                     if window_start <= ts <= incident.started_at:
                         changes.append(self._dict_to_change(node))
                 changes.sort(key=lambda c: c.timestamp, reverse=True)
@@ -848,7 +1033,66 @@ class Neo4jKnowledgeGraph:
                 timeline.sort(key=lambda x: str(x["timestamp"]), reverse=True)
                 return timeline
             else:
-                return []
+                nodes, edges = await graph_store.snapshot()
+                if _node_key(NodeType.SERVICE.value, service_id) not in nodes:
+                    return []
+
+                timeline = []
+
+                # A node belongs on this service's timeline if it is joined to
+                # the service by the same relationship the Cypher branch walks,
+                # or if it names the service in the property the writer set.
+                # Both, because the sync engine writes the property and the API
+                # writes the edge.
+                deployed = _sources_pointing_at(
+                    edges, RelationType.DEPLOYED_TO.value, service_id
+                )
+                for node in _nodes_of(nodes, NodeType.DEPLOYMENT.value):
+                    if node.get("id") not in deployed and node.get("service_id") != service_id:
+                        continue
+                    dep = self._dict_to_deployment(node)
+                    if dep.deployed_at < cutoff:
+                        continue
+                    timeline.append({
+                        "type": "deployment",
+                        "timestamp": dep.deployed_at.isoformat(),
+                        "data": dep,
+                    })
+
+                fired = _sources_pointing_at(
+                    edges, RelationType.TRIGGERED_ON.value, service_id
+                )
+                for node in _nodes_of(nodes, NodeType.ALERT.value):
+                    if node.get("id") not in fired and node.get("service") != service_id:
+                        continue
+                    alert = self._node_to_alert(node)
+                    if alert.fired_at < cutoff:
+                        continue
+                    timeline.append({
+                        "type": "alert",
+                        "timestamp": alert.fired_at.isoformat(),
+                        "data": alert,
+                    })
+
+                impacted = _sources_pointing_at(
+                    edges, RelationType.AFFECTED.value, service_id
+                )
+                for node in _nodes_of(nodes, NodeType.INCIDENT.value):
+                    if node.get("id") not in impacted and service_id not in (
+                        node.get("affected_services") or []
+                    ):
+                        continue
+                    inc = self._dict_to_incident(node)
+                    if inc.started_at < cutoff:
+                        continue
+                    timeline.append({
+                        "type": "incident",
+                        "timestamp": inc.started_at.isoformat(),
+                        "data": inc,
+                    })
+
+                timeline.sort(key=lambda x: str(x["timestamp"]), reverse=True)
+                return timeline
 
     async def subscribe(
         self,
@@ -1100,14 +1344,11 @@ class Neo4jKnowledgeGraph:
                     "relationship_count": rel_count,
                 }
             else:
-                mem_node_counts: dict[str, int] = {}
-                for key in self._in_memory_nodes:
-                    node_type = key.split(":")[0]
-                    mem_node_counts[node_type] = mem_node_counts.get(node_type, 0) + 1
+                node_counts, rel_count = await graph_store.counts()
 
                 return {
                     "connected": False,
-                    "mode": "in-memory",
-                    "node_counts": mem_node_counts,
-                    "relationship_count": len(self._in_memory_rels),
+                    "mode": "database",
+                    "node_counts": node_counts,
+                    "relationship_count": rel_count,
                 }
