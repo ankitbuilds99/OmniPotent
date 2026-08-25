@@ -1,7 +1,9 @@
 # DevOps Copilot — full local development stack
 #
 # Run: docker compose up -d
-# Access: http://localhost:8000 (API) | http://localhost:5173 (Frontend)
+# Access: http://localhost:8000 — the image bakes in the built SPA and FastAPI
+# serves it at /, so there is no separate frontend container here. For the Vite
+# dev server with hot reload, run `npm run dev` in frontend/ (http://localhost:5173).
 #
 # Optional services for production-like setup:
 #   docker compose --profile monitoring up -d
@@ -20,8 +22,12 @@ services:
       COPILOT_RATE_LIMIT_PER_MIN: ${COPILOT_RATE_LIMIT_PER_MIN:-120}
       COPILOT_MAX_SESSIONS: ${COPILOT_MAX_SESSIONS:-50}
       # --- database ---
-      DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # These must carry the COPILOT_ prefix: app/config.py declares
+      # copilot_database_url / copilot_redis_url with no alias, and Settings is
+      # extra="ignore", so bare DATABASE_URL/REDIS_URL were silently dropped and
+      # the app fell back to SQLite while postgres and redis idled beside it.
+      COPILOT_DATABASE_URL: ${COPILOT_DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
+      COPILOT_REDIS_URL: ${COPILOT_REDIS_URL:-redis://redis:6379/0}
       # --- LLM provider + keys ---
       COPILOT_PROVIDER: ${COPILOT_PROVIDER:-anthropic}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -49,7 +55,10 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # /healthz is the API's liveness route. /health is not a route at all: the
+      # SPA catch-all answers it with index.html, so the container stayed
+      # "healthy" no matter what the API was doing.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3

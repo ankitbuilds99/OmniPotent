@@ -1,5 +1,14 @@
-# Database Migration Job Template
-# Used for manual/scheduled migrations and pre-deployment hooks
+# Database migration Job — runs `alembic upgrade head` from the application image.
+#
+# Wired into deploy/kubernetes/kustomization.yaml, so `kustomize build` /
+# `kubectl apply -k` and ArgoCD both produce it. The ArgoCD hook annotations make
+# it run *before* the Deployment rolls (sync-wave -1) and be recreated on every
+# sync; under plain kubectl the annotations are inert and the Job simply runs once
+# (re-applying after an image change fails on Job immutability — delete it first).
+#
+# The image must contain alembic.ini + migrations/ + the `migrations` extra; see
+# the Dockerfile. The break-glass downgrade lives in migration-rollback-job.yaml
+# and is deliberately NOT applied automatically.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -8,6 +17,10 @@ metadata:
     app.kubernetes.io/name: omnipotent-migration
     app.kubernetes.io/component: database
     app.kubernetes.io/part-of: omnipotent
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
 spec:
   ttlSecondsAfterFinished: 3600
   backoffLimit: 3
@@ -21,11 +34,16 @@ spec:
         sidecar.istio.io/inject: "false"
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: omnipotent-api
+      # `omnipotent` is the only ServiceAccount this kustomization creates
+      # (serviceaccount.yaml). Naming a missing one makes the ServiceAccount
+      # admission controller reject the pod outright, so the Job never starts.
+      serviceAccountName: omnipotent
+      # UID 10001 is the `appuser` the Dockerfile creates and chowns /app to; with
+      # readOnlyRootFilesystem the container cannot fix up ownership at runtime.
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        fsGroup: 10001
 
       initContainers:
         - name: wait-for-db
@@ -39,28 +57,42 @@ spec:
             - /bin/sh
             - -c
             - |
-              echo "Waiting for database to be ready..."
-              until pg_isready -h $DB_HOST -p $DB_PORT -U $DB_USER; do
+              set -e
+              # Host/port/user are derived from the one connection string the app
+              # itself uses. A previous version read them from three keys of a
+              # Secret named `omnipotent-db-credentials` that this kustomization
+              # never creates, so the pod died in CreateContainerConfigError
+              # before the migration container was ever scheduled.
+              case "$COPILOT_DATABASE_URL" in
+                postgres://*|postgresql://*) ;;
+                *)
+                  echo "COPILOT_DATABASE_URL is not a Postgres URL; nothing to wait for."
+                  exit 0
+                  ;;
+              esac
+              authority=${COPILOT_DATABASE_URL#*://}
+              authority=${authority%%\?*}
+              userinfo=${authority%%@*}
+              hostport=${authority#*@}
+              hostport=${hostport%%/*}
+              DB_USER=${userinfo%%:*}
+              DB_HOST=${hostport%%:*}
+              case "$hostport" in
+                *:*) DB_PORT=${hostport##*:} ;;
+                *)   DB_PORT=5432 ;;
+              esac
+              echo "Waiting for ${DB_HOST}:${DB_PORT} (user ${DB_USER}) to accept connections..."
+              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER"; do
                 echo "Database not ready, waiting..."
                 sleep 2
               done
               echo "Database is ready"
           env:
-            - name: DB_HOST
+            - name: COPILOT_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: host
-            - name: DB_PORT
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: port
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: username
+                  name: omnipotent-secrets
+                  key: COPILOT_DATABASE_URL
           resources:
             requests:
               cpu: 10m
@@ -71,8 +103,10 @@ spec:
 
       containers:
         - name: migrate
-          image: omnipotent-api:latest
+          # Rewritten by the `images:` entry in deploy/kubernetes/kustomization.yaml.
+          image: ghcr.io/ankit25bcs10610/omnipotent:latest
           imagePullPolicy: Always
+          workingDir: /app
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -83,230 +117,23 @@ spec:
             - -c
             - |
               set -e
-              echo "Starting database migration..."
               echo "Current migration state:"
               alembic current || echo "No migrations applied yet"
 
               echo "Applying migrations..."
               alembic upgrade head
 
-              echo "Migration completed successfully"
               echo "New migration state:"
               alembic current
           env:
-            - name: DATABASE_URL
+            # migrations/env.py reads COPILOT_DATABASE_URL first, then DATABASE_URL.
+            # Same key the Deployment gets via `envFrom: secretRef` — the schema is
+            # migrated in exactly the database the app then talks to.
+            - name: COPILOT_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: url
-            - name: PYTHONUNBUFFERED
-              value: "1"
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-
-      volumes:
-        - name: tmp
-          emptyDir: {}
----
-# Pre-sync hook for ArgoCD
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: omnipotent-migration-presync
-  labels:
-    app.kubernetes.io/name: omnipotent-migration
-    app.kubernetes.io/component: database
-    app.kubernetes.io/part-of: omnipotent
-  annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-    argocd.argoproj.io/sync-wave: "-1"
-spec:
-  ttlSecondsAfterFinished: 3600
-  backoffLimit: 2
-  activeDeadlineSeconds: 900
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: omnipotent-migration
-        app.kubernetes.io/component: database
-      annotations:
-        sidecar.istio.io/inject: "false"
-    spec:
-      restartPolicy: OnFailure
-      serviceAccountName: omnipotent-api
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
-
-      initContainers:
-        - name: wait-for-db
-          image: postgres:15-alpine
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          command:
-            - /bin/sh
-            - -c
-            - |
-              until pg_isready -h $DB_HOST -p $DB_PORT -U $DB_USER; do
-                sleep 2
-              done
-          env:
-            - name: DB_HOST
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: host
-            - name: DB_PORT
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: port
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: username
-          resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              cpu: 50m
-              memory: 32Mi
-
-      containers:
-        - name: migrate
-          image: omnipotent-api:latest
-          imagePullPolicy: Always
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              echo "Running pre-sync migration check..."
-
-              # Check current state
-              CURRENT=$(alembic current 2>/dev/null | head -1 || echo "none")
-              HEAD=$(alembic heads 2>/dev/null | head -1)
-
-              echo "Current: $CURRENT"
-              echo "Target: $HEAD"
-
-              if [ "$CURRENT" = "$HEAD" ]; then
-                echo "No migrations needed"
-                exit 0
-              fi
-
-              echo "Applying migrations..."
-              alembic upgrade head
-
-              echo "Pre-sync migration completed"
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: url
-            - name: PYTHONUNBUFFERED
-              value: "1"
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-
-      volumes:
-        - name: tmp
-          emptyDir: {}
----
-# Rollback job template
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: omnipotent-migration-rollback
-  labels:
-    app.kubernetes.io/name: omnipotent-migration-rollback
-    app.kubernetes.io/component: database
-    app.kubernetes.io/part-of: omnipotent
-  annotations:
-    argocd.argoproj.io/hook: SyncFail
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-spec:
-  ttlSecondsAfterFinished: 7200
-  backoffLimit: 1
-  activeDeadlineSeconds: 600
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: omnipotent-migration-rollback
-        app.kubernetes.io/component: database
-      annotations:
-        sidecar.istio.io/inject: "false"
-    spec:
-      restartPolicy: Never
-      serviceAccountName: omnipotent-api
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
-
-      containers:
-        - name: rollback
-          image: omnipotent-api:latest
-          imagePullPolicy: Always
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              echo "SYNC FAILED - Attempting migration rollback..."
-
-              CURRENT=$(alembic current 2>/dev/null | head -1 || echo "none")
-              echo "Current migration: $CURRENT"
-
-              # Rollback one step
-              echo "Rolling back one migration..."
-              alembic downgrade -1 || {
-                echo "WARNING: Rollback failed - manual intervention may be required"
-                exit 1
-              }
-
-              NEW_STATE=$(alembic current 2>/dev/null | head -1 || echo "none")
-              echo "Rolled back to: $NEW_STATE"
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: omnipotent-db-credentials
-                  key: url
+                  name: omnipotent-secrets
+                  key: COPILOT_DATABASE_URL
             - name: PYTHONUNBUFFERED
               value: "1"
           volumeMounts:

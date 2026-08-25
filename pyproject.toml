@@ -111,6 +111,17 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.7.0",
     "mypy>=1.11.0",
+    # CI installs only this extra (`uv sync --extra dev`) and then runs the whole
+    # suite; tests/test_alembic_migrations.py imports alembic at module scope and
+    # migrates a temporary aiosqlite database, so both belong here as well as in
+    # the `migrations` extra.
+    "alembic>=1.13.0",
+    "aiosqlite>=0.19.0",
+    # A real in-process Redis implementation, used by the tests that cover the
+    # Redis-backed persistence paths (event-intelligence feature store,
+    # verification calibration). Without it those paths are only ever exercised
+    # with redis_client=None, i.e. never.
+    "fakeredis>=2.23.0",
 ]
 test = [
     "pytest>=8.3.0",

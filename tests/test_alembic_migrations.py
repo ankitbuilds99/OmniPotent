@@ -139,3 +139,23 @@ def test_database_url_is_honoured_as_a_fallback(tmp_path, monkeypatch):
 
     assert db_path.is_file()
     assert ONCALL_TABLES <= _tables(db_path)
+
+
+def test_upgrade_creates_the_sqlite_parent_directory(tmp_path, monkeypatch):
+    """The documented default is `sqlite:///data/copilot.db` and `data/` is untracked.
+
+    SQLite will not create the directory holding the database file, it just
+    fails with "unable to open database file", so on a fresh clone
+    `alembic upgrade head` died before running a single revision.
+    """
+    db_path = tmp_path / "not" / "created" / "yet" / "copilot.db"
+    assert not db_path.parent.exists()
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    assert db_path.is_file()
+    assert CORE_TABLES <= _tables(db_path)

@@ -1,0 +1,56 @@
+# Prometheus scrape configuration for the local docker-compose stack.
+#
+#   docker compose --profile monitoring up -d
+#   open http://localhost:9090/targets
+#
+# docker-compose.yml bind-mounts this file at /etc/prometheus/prometheus.yml.
+# It used not to exist, so Docker created a *directory* at that path and
+# Prometheus exited immediately with
+#   "error loading config ... read /etc/prometheus/prometheus.yml: is a directory".
+#
+# Scrape path note: the API exposes two different things.
+#   /metrics      -> JSON for the dashboard. NOT Prometheus exposition format.
+#   /metrics/slo  -> text/plain; version=0.0.4, the real scrape target.
+# Both are wired below only via /metrics/slo; pointing Prometheus at /metrics
+# yields "invalid metric type" parse errors on every scrape.
+#
+# Honest caveat about alerts.yaml (loaded below): it was written against metric
+# names this application does not emit - omnipotent_investigations_total,
+# http_requests_total, omnipotent_db_query_duration_seconds_bucket,
+# redis_memory_used_bytes, container_cpu_usage_seconds_total. The app's SLO
+# endpoint emits copilot_*-prefixed series (copilot_investigations_total,
+# copilot_investigation_latency_seconds_bucket, ...), and there is no
+# redis_exporter or cAdvisor in this compose stack to produce the redis_* /
+# container_* families. The only rule here that evaluates against a real series
+# today is ServiceDown (up{job="omnipotent"}), which the job name below is
+# chosen to satisfy. The rest are inert until either the exporters are added or
+# the rules are renamed; they are loaded rather than deleted so the mismatch is
+# visible in http://localhost:9090/rules instead of silently absent.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: omnipotent-local
+
+rule_files:
+  # Mounted read-only by the prometheus service in docker-compose.yml.
+  - /etc/prometheus/alerts.yaml
+
+scrape_configs:
+  # The API. Job name must stay "omnipotent": alerts.yaml keys ServiceDown off
+  # up{job="omnipotent"}.
+  - job_name: omnipotent
+    metrics_path: /metrics/slo
+    scheme: http
+    static_configs:
+      - targets: ["copilot:8000"]
+        labels:
+          service: omnipotent
+    # /metrics/slo is in _OPEN_PATHS (app/api/main.py), so no bearer token is
+    # needed even when COPILOT_API_TOKEN is set.
+
+  # Prometheus' own metrics, so the stack can tell "no data" from "not scraping".
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

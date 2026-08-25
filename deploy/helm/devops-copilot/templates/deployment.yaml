@@ -43,25 +43,30 @@ spec:
             - configMapRef:
                 name: {{ include "omnipotent.fullname" . }}-config
             - secretRef:
-                name: {{ include "omnipotent.fullname" . }}-secrets
+                name: {{ include "omnipotent.secretName" . }}
           env:
             {{- if .Values.redis.enabled }}
-            - name: REDIS_URL
-              value: "redis://:$(REDIS_PASSWORD)@{{ include "omnipotent.fullname" . }}-redis-master:6379/0"
+            # $(VAR) expansion needs the referenced var declared first.
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "omnipotent.fullname" . }}-redis
                   key: redis-password
+            - name: COPILOT_REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@{{ include "omnipotent.fullname" . }}-redis-master:6379/0"
             {{- end }}
             {{- if .Values.postgresql.enabled }}
-            - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "omnipotent.fullname" . }}-postgresql
                   key: password
+            - name: COPILOT_DATABASE_URL
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
+            # The LangGraph checkpointer is separate from the ORM database; left at
+            # its default it writes SQLite into the (read-only) container root.
+            - name: COPILOT_CHECKPOINT_DB
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
             {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}

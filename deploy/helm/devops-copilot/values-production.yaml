@@ -1,0 +1,46 @@
+# Production overlay for the omnipotent chart.
+#
+# Referenced by deploy/argocd/applicationset.yaml (`valueFiles`). Replicas,
+# autoscaling bounds and resources are supplied there as Helm `parameters`, so
+# this file only carries what a --set cannot express cleanly: the hostnames and
+# the environment-specific behaviour switches.
+#
+# Credentials are NOT in here. `secrets.existingSecret` must name a Secret
+# managed by the external-secrets operator; with environment=production the app
+# refuses to start unless it contains COPILOT_API_TOKEN (and COPILOT_SECRET_KEY,
+# because config.multiTenant is true).
+
+environment: production
+
+image:
+  tag: v1.0.0
+  pullPolicy: IfNotPresent
+
+config:
+  logLevel: INFO
+  logFormat: json
+  multiTenant: true
+  corsOrigins: "https://app.omnipotent.example.com"
+
+ingress:
+  hosts:
+    - host: api.omnipotent.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: omnipotent-production-tls
+      hosts:
+        - api.omnipotent.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+secrets:
+  existingSecret: omnipotent-secrets
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

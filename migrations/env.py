@@ -17,6 +17,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from app.database.engine import _ensure_sqlite_directory
 from app.database.models import Base
 
 # Importing the model modules is what puts their tables on Base.metadata;
@@ -24,6 +25,8 @@ from app.database.models import Base
 # tables were absent from every generated revision — and would have been
 # dropped by one, since autogenerate reads absence as "delete this table".
 import app.oncall.models  # noqa: E402,F401
+import app.model_router.models  # noqa: E402,F401
+import app.notifications.models  # noqa: E402,F401
 
 config = context.config
 
@@ -51,6 +54,15 @@ def get_url() -> str:
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
     elif url.startswith("sqlite://") and "+aiosqlite" not in url:
         url = url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+
+    if url.startswith("sqlite"):
+        # SQLite does not create the directory holding the database file; it just
+        # fails with "unable to open database file". The documented default is
+        # `sqlite:///data/copilot.db` and `data/` is untracked, so on a fresh
+        # clone `alembic upgrade head` died before running a single revision.
+        # The app's own startup path already does this (app/database/engine.py);
+        # reuse it so the two agree on how a URL maps to a filesystem path.
+        _ensure_sqlite_directory(url)
 
     return url
 

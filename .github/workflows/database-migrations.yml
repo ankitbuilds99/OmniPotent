@@ -3,16 +3,23 @@ name: Database Migrations
 on:
   push:
     branches: [main]
+    # Revisions live in migrations/versions/, and the metadata autogenerate
+    # compares against is app/database/models.py + app/oncall/models.py (both
+    # imported by migrations/env.py). There is no alembic/ or app/db/ directory.
     paths:
-      - 'alembic/**'
       - 'migrations/**'
-      - 'app/db/models/**'
+      - 'alembic.ini'
+      - 'app/database/models.py'
+      - 'app/database/types.py'
+      - 'app/oncall/models.py'
   pull_request:
     branches: [main]
     paths:
-      - 'alembic/**'
       - 'migrations/**'
-      - 'app/db/models/**'
+      - 'alembic.ini'
+      - 'app/database/models.py'
+      - 'app/database/types.py'
+      - 'app/oncall/models.py'
   workflow_dispatch:
     inputs:
       environment:
@@ -144,21 +151,17 @@ jobs:
         run: |
           echo "Checking for unmigrated model changes..."
 
-          # Generate migration to check for differences
-          OUTPUT=$(uv run alembic revision --autogenerate -m "check_consistency" 2>&1 || true)
-
-          # Check if the generated migration has actual changes
-          LATEST_MIGRATION=$(ls -t alembic/versions/*.py 2>/dev/null | head -1)
-          if [ -n "$LATEST_MIGRATION" ]; then
-            if grep -q "pass" "$LATEST_MIGRATION" && ! grep -q "op\." "$LATEST_MIGRATION"; then
-              echo "Models and migrations are in sync"
-              rm -f "$LATEST_MIGRATION"
-            else
-              echo "::warning::Detected model changes without corresponding migrations"
-              cat "$LATEST_MIGRATION"
-              rm -f "$LATEST_MIGRATION"
-            fi
+          # `alembic check` diffs the ORM metadata against the migrated database
+          # and exits non-zero when a revision is missing. It replaces a
+          # hand-rolled `revision --autogenerate` + glob, which globbed
+          # alembic/versions/ (a directory that does not exist) and so silently
+          # passed while leaving the generated file behind in migrations/versions/.
+          if ! uv run alembic check; then
+            echo "::error::Model changes have no corresponding migration."
+            echo "Run: uv run alembic revision --autogenerate -m '<description>'"
+            exit 1
           fi
+          echo "Models and migrations are in sync"
 
       - name: Migration summary
         run: |
@@ -183,9 +186,15 @@ jobs:
 
       - name: Check for new migrations
         id: new-migrations
+        env:
+          # Via env rather than ${{ }} interpolation: a branch name is attacker
+          # controlled and would otherwise be spliced into the shell command.
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          # Find new migration files in this PR
-          NEW_MIGRATIONS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '^alembic/versions/.*\.py$' || true)
+          # Find new migration files in this PR. Revisions live in
+          # migrations/versions/ — the old '^alembic/versions/' pattern could
+          # never match, so this job always reported "no new migrations".
+          NEW_MIGRATIONS=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep -E '^migrations/versions/.*\.py$' || true)
 
           if [ -n "$NEW_MIGRATIONS" ]; then
             echo "has_new=true" >> $GITHUB_OUTPUT

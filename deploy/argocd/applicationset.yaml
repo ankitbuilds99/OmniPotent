@@ -20,6 +20,8 @@ spec:
                 - env: staging
                   cluster: https://staging.k8s.example.com
                   namespace: omnipotent-staging
+                  targetRevision: main
+                  imageTag: latest
                   replicaCount: "2"
                   autoscaling: "true"
                   minReplicas: "2"
@@ -31,6 +33,8 @@ spec:
                 - env: production
                   cluster: https://production.k8s.example.com
                   namespace: omnipotent-production
+                  targetRevision: HEAD
+                  imageTag: v1.0.0
                   replicaCount: "3"
                   autoscaling: "true"
                   minReplicas: "3"
@@ -39,14 +43,19 @@ spec:
                   memoryRequest: "1Gi"
                   cpuLimit: "4000m"
                   memoryLimit: "4Gi"
-          # Component generator
+          # Component generator.
+          #
+          # Only `api` exists. A `worker` element used to be listed here pointing
+          # at a values-worker.yaml that was never written, which made ArgoCD fail
+          # the whole Application. Deploying the Dramatiq worker
+          # (`python -m app.tasks.worker`) needs two things that do not exist yet:
+          # a worker Deployment template in the chart, and the `tasks` extra in
+          # the runtime image (the Dockerfile installs `.[postgres,migrations]`,
+          # so `import dramatiq` fails). Add both before re-adding the component.
           - list:
               elements:
                 - component: api
                   path: deploy/helm/devops-copilot
-                - component: worker
-                  path: deploy/helm/devops-copilot
-                  valuesFile: values-worker.yaml
 
   # Sync policy for progressive delivery
   strategy:
@@ -86,7 +95,10 @@ spec:
       # Source configuration
       source:
         repoURL: https://github.com/ankit25bcs10610/OmniPotent.git
-        targetRevision: '{{#if (eq env "production")}}HEAD{{else}}main{{/if}}'
+        # ApplicationSet templating here is fasttemplate, not handlebars: block
+        # helpers are copied through verbatim and end up as the revision string.
+        # Per-environment revisions come from the list generator instead.
+        targetRevision: '{{targetRevision}}'
         path: '{{path}}'
         helm:
           releaseName: 'omnipotent-{{component}}-{{env}}'
@@ -113,7 +125,7 @@ spec:
             - name: environment
               value: '{{env}}'
             - name: image.tag
-              value: '{{revision}}'
+              value: '{{imageTag}}'
 
       # Destination cluster and namespace
       destination:

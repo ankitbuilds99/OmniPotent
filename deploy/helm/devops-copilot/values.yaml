@@ -3,8 +3,13 @@
 
 replicaCount: 2
 
+# COPILOT_ENV. "production" makes Settings fail closed without an API token and
+# turns on JSON logging + HSTS. The ArgoCD ApplicationSet overrides this per env.
+environment: production
+
 image:
-  repository: omnipotent-api
+  # The image the release pipeline publishes (see deploy/kubernetes/kustomization.yaml).
+  repository: ghcr.io/ankit25bcs10610/omnipotent
   pullPolicy: IfNotPresent
   tag: "latest"
 
@@ -20,10 +25,13 @@ serviceAccount:
 podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: "8000"
-  prometheus.io/path: "/metrics"
+  # /metrics returns the dashboard's JSON metric series; /metrics/slo is the
+  # Prometheus text exposition endpoint (app/api/main.py).
+  prometheus.io/path: "/metrics/slo"
 
+# UID 10001 is the `appuser` the Dockerfile creates and chowns /app + /data to.
 podSecurityContext:
-  fsGroup: 1000
+  fsGroup: 10001
   runAsNonRoot: true
 
 securityContext:
@@ -33,7 +41,7 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
   runAsNonRoot: true
-  runAsUser: 1000
+  runAsUser: 10001
 
 service:
   type: ClusterIP
@@ -87,23 +95,33 @@ affinity:
                   - omnipotent
           topologyKey: kubernetes.io/hostname
 
-# Application configuration
+# Application configuration -> ConfigMap. Each entry maps to a Settings field in
+# app/config.py; see templates/configmap.yaml for the env-var spelling.
 config:
-  logLevel: INFO
-  multiTenant: true
-  corsOrigins: "*"
+  logLevel: INFO          # COPILOT_LOG_LEVEL
+  logFormat: json         # COPILOT_LOG_FORMAT (json|human)
+  multiTenant: true       # COPILOT_MULTI_TENANT
+  corsOrigins: ""         # CORS_ORIGINS, comma-separated; empty = same-origin only
 
-# External secrets (use external-secrets operator or sealed-secrets in production)
+# External secrets. Prefer `existingSecret` populated by the external-secrets
+# operator / sealed-secrets; the inline values below are for dev clusters only.
 secrets:
-  # Set these via --set or external secret management
+  existingSecret: ""
+  # COPILOT_API_TOKEN — required when environment=production, the app refuses to
+  # start without it. Set via `--set secrets.apiToken=...` or existingSecret.
+  apiToken: ""
+  # COPILOT_SECRET_KEY — required when config.multiTenant=true in production.
+  secretKey: ""
   anthropicApiKey: ""
   supabaseUrl: ""
   supabaseAnonKey: ""
-  supabaseServiceKey: ""
-  stripeSecretKey: ""
+  supabaseServiceRoleKey: ""
+  stripeApiKey: ""
+  stripeWebhookSecret: ""
   slackBotToken: ""
   pagerdutyApiKey: ""
   datadogApiKey: ""
+  sentryDsn: ""
 
 # Redis configuration
 redis:
@@ -141,7 +159,9 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /healthz
+    # /readyz, not /healthz: readiness must be able to fail (503 when the pod
+    # cannot actually serve investigations). /healthz is liveness-only.
+    path: /readyz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5
