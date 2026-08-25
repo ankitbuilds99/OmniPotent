@@ -455,6 +455,13 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // True while the runbook on screen has never been persisted. It used to be
+  // derived from the id with `id.startsWith("rb-") && !id.includes("-")` — a
+  // predicate that is false for every possible string, so a brand-new runbook
+  // was PUT at an id the server had never heard of and the save was lost.
+  const [isNew, setIsNew] = useState(true);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
 
   const fetchRunbook = useCallback(async () => {
     try {
@@ -486,18 +493,23 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
               execution_count: 0,
             };
             setRunbook(loadedRunbook);
+            setIsNew(false); // came from the server, so Save must PUT
           } else {
             setRunbook(EmptyRunbook());
+            setIsNew(true);
           }
         } else {
           setRunbook(EmptyRunbook());
+          setIsNew(true);
         }
       } else {
         setRunbook(EmptyRunbook());
+        setIsNew(true);
       }
     } catch (error) {
       console.error("Failed to fetch runbook:", error);
       setRunbook(EmptyRunbook());
+      setIsNew(true);
     } finally {
       setLoading(false);
     }
@@ -511,6 +523,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
     if (!runbook) return;
 
     setSaving(true);
+    setSaveError(null);
     try {
       const payload = {
         name: runbook.name,
@@ -527,7 +540,6 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
         })),
       };
 
-      const isNew = runbook.id.startsWith("rb-") && !runbook.id.includes("-");
       const url = isNew ? "/api/runbooks" : `/api/runbooks/${runbook.id}`;
       const method = isNew ? "POST" : "PUT";
 
@@ -537,12 +549,31 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        const saved = await res.json();
-        setRunbook({ ...runbook, id: saved.id });
+      if (!res.ok) {
+        // Save used to only act on res.ok, so a 405/401/404 left the button
+        // looking successful while nothing had been written.
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (typeof body?.detail === "string" && body.detail) detail = body.detail;
+        } catch {
+          /* non-JSON error body */
+        }
+        setSaveError(`Save failed: ${detail}`);
+        setSavedAt(null);
+        return;
       }
+
+      const saved = await res.json();
+      setRunbook({ ...runbook, id: saved.id });
+      setIsNew(false); // it exists on the server now; further saves are PUTs
+      setSavedAt(new Date().toLocaleTimeString());
     } catch (error) {
       console.error("Failed to save runbook:", error);
+      setSaveError(
+        `Save failed: ${error instanceof Error ? error.message : "network error"}`
+      );
+      setSavedAt(null);
     } finally {
       setSaving(false);
     }
@@ -649,6 +680,16 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
               >
                 {saving ? "Saving..." : "Save Draft"}
               </button>
+              {saveError && (
+                <span role="alert" className="text-sm text-red-600 dark:text-red-400">
+                  {saveError}
+                </span>
+              )}
+              {!saveError && savedAt && (
+                <span className="text-sm text-green-600 dark:text-green-400">
+                  Saved {savedAt}
+                </span>
+              )}
               <button className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
                 Publish
               </button>

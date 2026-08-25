@@ -200,6 +200,39 @@ async def create_runbook(rb: Runbook) -> Runbook:
     return rb
 
 
+async def update_runbook(rb: Runbook) -> Runbook | None:
+    """Overwrite an existing runbook in this org. Returns None if it does not exist.
+
+    The Runbook Builder's Save button had nowhere to send an edit — there was no
+    update path at all — so every change to a saved runbook was discarded.
+    """
+    from app.database.engine import get_session
+    from app.database.models import Runbook as RunbookRow
+
+    async with get_session() as session:
+        await _ensure_seeded(session)
+        row = (
+            await session.execute(
+                select(RunbookRow).where(
+                    RunbookRow.org_id == org_uuid(),
+                    RunbookRow.runbook_id == rb.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        row.name = rb.name
+        row.description = rb.description
+        row.service = rb.service
+        row.trigger = rb.trigger
+        row.execution_mode = rb.execution_mode.value
+        row.steps = [s.to_dict() for s in rb.steps]
+        row.labels = rb.labels
+        row.enabled = rb.enabled
+        await session.commit()
+    return rb
+
+
 async def delete_runbook(runbook_id: str) -> bool:
     from app.database.engine import get_session
     from app.database.models import Runbook as RunbookRow
@@ -242,6 +275,63 @@ async def record_execution(
             started_at=_now(),
         )
         session.add(row)
+        await session.commit()
+        return _to_execution(row)
+
+
+async def get_execution(execution_id: str) -> RunbookExecution | None:
+    """Read one execution of this org, or None."""
+    from app.database.engine import get_session
+    from app.database.models import RunbookExecution as ExecutionRow
+
+    try:
+        key = uuid.UUID(execution_id)
+    except ValueError:
+        return None
+
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(ExecutionRow).where(
+                    ExecutionRow.id == key, ExecutionRow.org_id == org_uuid()
+                )
+            )
+        ).scalar_one_or_none()
+        return _to_execution(row) if row else None
+
+
+async def append_step_result(execution_id: str, step: StepExecution) -> RunbookExecution | None:
+    """Append one finished step to an execution's durable results.
+
+    Written as each step completes rather than once at the end: the row is the
+    audit trail for what ran against production, so a crash or a restart
+    mid-runbook has to leave behind the steps that really executed. It also
+    doubles as the resume point — the next step to run is always
+    `len(execution.steps)`.
+    """
+    from app.database.engine import get_session
+    from app.database.models import RunbookExecution as ExecutionRow
+
+    try:
+        key = uuid.UUID(execution_id)
+    except ValueError:
+        return None
+
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(ExecutionRow).where(
+                    ExecutionRow.id == key, ExecutionRow.org_id == org_uuid()
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        results = dict(row.results or {})
+        # Rebound, not appended in place: SQLAlchemy does not track mutation
+        # inside a plain JSON value, so `results["steps"].append(...)` would be
+        # dropped on flush and every step result would be lost.
+        row.results = {**results, "steps": [*results.get("steps", []), step.to_dict()]}
         await session.commit()
         return _to_execution(row)
 

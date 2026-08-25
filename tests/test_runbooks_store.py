@@ -267,3 +267,48 @@ def test_an_execution_can_hold_any_trigger_its_runbook_can(db):
     _as("acme", lambda: store.record_execution(rb, StepStatus.PENDING, {}))
 
     assert _as("acme", lambda: store.list_executions())
+
+
+def test_an_edited_runbook_keeps_its_edits(db):
+    """The Runbook Builder's Save had no update path at all — `PUT
+    /api/runbooks/{id}` was 405 — so every edit to a saved runbook was
+    discarded. update_runbook() is that path."""
+    _as("acme", lambda: store.create_runbook(_runbook()))
+
+    edited = _runbook()
+    edited.name = "Roll back pay (v2)"
+    edited.description = "now with a smoke test"
+    edited.steps.append(
+        RunbookStep(
+            id="verify",
+            name="Verify",
+            description="check it came back",
+            step_type=StepType.COMMAND,
+            action="curl -sf http://pay/healthz",
+        )
+    )
+    assert _as("acme", lambda: store.update_runbook(edited)) is not None
+
+    fetched = _as("acme", lambda: store.get_runbook("acme-rollback"))
+    assert fetched is not None
+    assert fetched.name == "Roll back pay (v2)"
+    assert fetched.description == "now with a smoke test"
+    assert [s.id for s in fetched.steps] == ["undo", "verify"]
+
+
+def test_updating_an_unknown_runbook_reports_failure(db):
+    """A missing runbook must not be silently created by an update."""
+    assert _as("acme", lambda: store.update_runbook(_runbook("does-not-exist"))) is None
+    assert _as("acme", lambda: store.get_runbook("does-not-exist")) is None
+
+
+def test_one_org_cannot_edit_another_orgs_runbook(db):
+    _as("acme", lambda: store.create_runbook(_runbook()))
+
+    hijack = _runbook()
+    hijack.name = "pwned"
+    assert _as("umbrella", lambda: store.update_runbook(hijack)) is None
+
+    fetched = _as("acme", lambda: store.get_runbook("acme-rollback"))
+    assert fetched is not None
+    assert fetched.name == "Roll back pay"
