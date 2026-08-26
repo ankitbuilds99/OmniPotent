@@ -26,6 +26,7 @@ from app.postmortems import (
     PostmortemUnavailable,
     generate_postmortem,
 )
+from app.postmortems.store import ACTION_STATUSES, get_postmortem_store
 from app.tenant_context import get_actor, tenant_id
 
 log = logging.getLogger("omnipotent.incidents.api")
@@ -371,7 +372,7 @@ async def create_postmortem(incident_id: UUID, request: PostmortemRequest | None
                 ),
             )
     try:
-        return await generate_postmortem(incident, sections)
+        document = await generate_postmortem(incident, sections)
     except PostmortemUnavailable as exc:
         raise HTTPException(
             status_code=503,
@@ -387,6 +388,105 @@ async def create_postmortem(incident_id: UUID, request: PostmortemRequest | None
             status_code=502,
             detail={"error": "generation_failed", "message": str(exc)},
         ) from exc
+
+    # Persist it. The generated draft used to be returned and forgotten, so the
+    # page re-ran the model on every visit and any edit made in between was
+    # overwritten by a document that had never seen it. `sections_only` keeps a
+    # per-section Regenerate from resetting the rest.
+    return await get_postmortem_store().save(
+        incident_id, document, sections_only=sections is not None
+    )
+
+
+@router.get(
+    "/{incident_id}/postmortem",
+    summary="The stored postmortem for an incident",
+    description=(
+        "Returns the saved document, including any edits made to it. 404 when "
+        "no postmortem has been generated for this incident yet — POST to the "
+        "same path to write one."
+    ),
+)
+async def get_stored_postmortem(incident_id: UUID) -> dict:
+    document = await get_postmortem_store().get(incident_id)
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No postmortem has been generated for this incident yet.",
+        )
+    return document
+
+
+class SectionUpdate(BaseModel):
+    """An operator's rewrite of one section."""
+
+    content: str
+
+
+@router.patch(
+    "/{incident_id}/postmortem/sections/{section_id}",
+    summary="Save an edited postmortem section",
+    description=(
+        "Replaces one section's prose and marks it as human-edited. The Save "
+        "button on the postmortem page had no endpoint behind it: the edit went "
+        "into React state and was gone on the next reload."
+    ),
+)
+async def update_postmortem_section(
+    incident_id: UUID, section_id: str, update: SectionUpdate
+) -> dict:
+    try:
+        document = await get_postmortem_store().update_section(
+            incident_id, section_id, update.content
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"This postmortem has no {section_id!r} section."
+        ) from None
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No postmortem has been generated for this incident yet.",
+        )
+    return document
+
+
+class ActionItemUpdate(BaseModel):
+    """A new status for one action item."""
+
+    status: str
+
+
+@router.patch(
+    "/{incident_id}/postmortem/action-items/{item_id}",
+    summary="Update a postmortem action item's status",
+    description=(
+        "Action items are the part of a postmortem that outlives the incident. "
+        "Their status dropdown was local component state, so nothing an operator "
+        "marked done stayed done. Accepted statuses: "
+        + ", ".join(f"`{s}`" for s in ACTION_STATUSES)
+        + "."
+    ),
+)
+async def update_postmortem_action_item(
+    incident_id: UUID, item_id: str, update: ActionItemUpdate
+) -> dict:
+    try:
+        document = await get_postmortem_store().update_action_item(
+            incident_id, item_id, update.status
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"This postmortem has no action item {item_id!r}."
+        ) from None
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No postmortem has been generated for this incident yet.",
+        )
+    return document
 
 
 @router.get("/{incident_id}/timeline")

@@ -30,7 +30,11 @@ interface SLO {
   budget_burn_rate: number;
   /** SLI samples behind `current`; 0 means the SLO exists but has no data yet. */
   sample_count: number;
-  status: "healthy" | "warning" | "critical" | "exhausted";
+  /** `no_data` is a real answer from the tracker, not an absence of one: the SLO
+   *  exists but nothing has recorded an SLI against it in the window. It used to
+   *  fall through to `healthy`, which is the one reading it definitely is not —
+   *  an SLO nobody is measuring looked identical to one that is passing. */
+  status: "healthy" | "warning" | "critical" | "exhausted" | "no_data";
   alerts: SLOAlert[];
 }
 
@@ -49,17 +53,21 @@ interface BudgetResponse {
 
 function StatusBadge({ status }: { status: SLO["status"] }) {
   const config = {
-    healthy: { bg: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300", icon: "check" },
-    warning: { bg: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300", icon: "alert-triangle" },
-    critical: { bg: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300", icon: "alert-circle" },
-    exhausted: { bg: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300", icon: "x-circle" },
+    healthy: { bg: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300", icon: "check", label: "healthy" },
+    warning: { bg: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300", icon: "alert-triangle", label: "warning" },
+    critical: { bg: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300", icon: "alert-circle", label: "critical" },
+    exhausted: { bg: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300", icon: "x-circle", label: "exhausted" },
+    // Blue, not green and not red: nothing is wrong with the service and nothing
+    // is known to be right with it either. The label is spelled out because the
+    // badge used to render the raw key, which would have read "no_data".
+    no_data: { bg: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300", icon: "help", label: "no data" },
   };
   const c = config[status];
 
   return (
     <span className={`px-2 py-0.5 text-xs font-medium rounded-full flex items-center gap-1 ${c.bg}`}>
-      <Icon name={c.icon as "check" | "alert-triangle" | "alert-circle" | "x-circle"} size={12} />
-      {status}
+      <Icon name={c.icon as "check" | "alert-triangle" | "alert-circle" | "x-circle" | "help"} size={12} />
+      {c.label}
     </span>
   );
 }
@@ -69,6 +77,17 @@ function BudgetGauge({ remaining, total, status }: { remaining: number | null; t
     return (
       <div className="w-full text-xs text-gray-500">
         Error budget unavailable — the budget endpoint could not be read.
+      </div>
+    );
+  }
+  if (status === "no_data") {
+    // An untouched budget is arithmetically full, and drawing it as a complete
+    // green bar says "you have spent none of your allowance" when the truth is
+    // "nothing has been measured". Those look the same on a gauge and mean
+    // opposite things to whoever is deciding whether it is safe to ship.
+    return (
+      <div className="w-full text-xs text-gray-500">
+        No SLI recorded in this window — the budget cannot be computed yet.
       </div>
     );
   }
@@ -141,6 +160,7 @@ function SLOCard({ slo, onSelect }: { slo: SLO; onSelect: () => void }) {
         slo.status === "healthy" ? "border-green-200 dark:border-green-800" :
         slo.status === "warning" ? "border-yellow-200 dark:border-yellow-800" :
         slo.status === "critical" ? "border-red-200 dark:border-red-800" :
+        slo.status === "no_data" ? "border-blue-200 dark:border-blue-800" :
         "border-gray-300 dark:border-gray-600"
       }`}
     >
@@ -417,7 +437,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
   const [slos, setSlos] = useState<SLO[]>([]);
   const [selectedSLO, setSelectedSLO] = useState<SLO | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [filter, setFilter] = useState<"all" | "healthy" | "warning" | "critical">("all");
+  const [filter, setFilter] = useState<"all" | "healthy" | "warning" | "critical" | "no_data">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -447,10 +467,17 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
             // borrowing a number from somewhere else.
           }
 
+          // Order matters, and "no data" has to be tested first. The tracker
+          // returns `no_data` with remaining=1.0 and burn_rate=0 when nothing has
+          // been measured, which sailed past every branch below and landed on the
+          // default — so an SLO with no SLI recorded against it at all reported a
+          // full error budget and a green badge.
           let status: SLO["status"] = "healthy";
-          if (budget?.status === "breached") status = "exhausted";
-          else if (budget?.status === "at_risk") status = "critical";
-          else if ((budget?.burn_rate ?? 0) > 1) status = "warning";
+          if (!budget || budget.status === "no_data" || budget.total_count === 0) {
+            status = "no_data";
+          } else if (budget.status === "breached") status = "exhausted";
+          else if (budget.status === "at_risk") status = "critical";
+          else if (budget.burn_rate > 1) status = "warning";
 
           return {
             id: slo.id as string,
@@ -538,6 +565,10 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
     healthy: slos.filter(s => s.status === "healthy").length,
     warning: slos.filter(s => s.status === "warning").length,
     critical: slos.filter(s => s.status === "critical" || s.status === "exhausted").length,
+    // Counted and shown rather than left as the difference between Total and the
+    // other three. An SLO measuring nothing is a broken instrumentation job, and
+    // the only way anyone finds out is if the page puts a number on it.
+    noData: slos.filter(s => s.status === "no_data").length,
   };
 
   return (
@@ -584,7 +615,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
         ) : (
           <>
             {/* Summary */}
-            <div className="grid grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
               <div
                 onClick={() => setFilter("all")}
                 className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
@@ -620,6 +651,15 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
               >
                 <div className="text-sm text-gray-500">Critical</div>
                 <div className="text-3xl font-bold text-red-600">{summary.critical}</div>
+              </div>
+              <div
+                onClick={() => setFilter("no_data")}
+                className={`bg-white dark:bg-gray-800 rounded-lg border p-4 cursor-pointer transition-all ${
+                  filter === "no_data" ? "border-blue-500 ring-2 ring-blue-200" : "border-gray-200 dark:border-gray-700"
+                }`}
+              >
+                <div className="text-sm text-gray-500">No Data</div>
+                <div className="text-3xl font-bold text-blue-600">{summary.noData}</div>
               </div>
             </div>
 

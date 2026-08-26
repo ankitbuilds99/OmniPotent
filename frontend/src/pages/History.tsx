@@ -3,7 +3,7 @@
  * Shows past investigations with ability to view details
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import {
   Search,
@@ -26,7 +26,7 @@ import { downloadInvestigation } from '../utils/exportReport'
 import { shareToSlack } from '../api'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
 import { initSupabase } from '../lib/supabase'
-import { apiFetch } from "../lib/apiClient";
+import { apiFetch, describeFailure } from "../lib/apiClient";
 
 interface Investigation {
   id: string
@@ -55,55 +55,84 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [page, setPage] = useState(1)
+  const [hasMore, setHasMore] = useState(false)
   const [selectedInvestigation, setSelectedInvestigation] = useState<Investigation | null>(null)
   const pageSize = 10
 
-  useEffect(() => {
-    loadInvestigations()
-  }, [user, page, statusFilter])
-
-  const loadInvestigations = async () => {
+  const loadInvestigations = useCallback(async () => {
     setLoading(true)
     setError(null)
 
     try {
       const supabase = await initSupabase()
+      let rows: Investigation[]
+
       if (!supabase) {
-        // Fallback to API if Supabase not configured
-        const res = await apiFetch('/api/investigations?limit=50')
-        if (res.ok) {
-          const data = await res.json()
-          setInvestigations(data.investigations || [])
+        // Fallback when Supabase is not configured.
+        //
+        // This request used to be the literal string '/api/investigations?limit=50'.
+        // Neither the status dropdown nor the pager reached it: every page of
+        // every filter fetched the same first fifty rows, so "Next" advanced the
+        // page counter and redrew an identical list, and selecting "Error" showed
+        // completed investigations. The endpoint has taken `status`, `limit` and
+        // `offset` the whole time (app/api/main.py:2546).
+        const params = new URLSearchParams({
+          limit: String(pageSize),
+          offset: String((page - 1) * pageSize),
+        })
+        if (statusFilter !== 'all') params.set('status', statusFilter)
+
+        const res = await apiFetch(`/api/investigations?${params}`)
+        // A non-OK response used to leave `investigations` at its previous value
+        // and stop, so a 401 or a 500 looked like whatever was already on screen.
+        if (!res.ok) throw new Error(await describeFailure(res))
+        const data = await res.json()
+        rows = (data.investigations || []) as Investigation[]
+      } else {
+        let query = supabase
+          .from('investigations')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .range((page - 1) * pageSize, page * pageSize - 1)
+
+        if (statusFilter !== 'all') {
+          query = query.eq('status', statusFilter)
         }
-        setLoading(false)
-        return
+
+        const { data, error: queryError } = await query
+        if (queryError) throw queryError
+        rows = (data || []) as Investigation[]
       }
 
-      let query = supabase
-        .from('investigations')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .range((page - 1) * pageSize, page * pageSize - 1)
-
-      if (statusFilter !== 'all') {
-        query = query.eq('status', statusFilter)
-      }
-
-      const { data, error: queryError } = await query
-
-      if (queryError) {
-        throw queryError
-      }
-
-      setInvestigations(data || [])
+      setInvestigations(rows)
+      // A full page back means there is plausibly another one. Measured on what
+      // the server returned, not on the search-filtered list — "Next" used to be
+      // disabled by `filteredInvestigations.length < pageSize`, so typing a
+      // search term that matched three rows disabled paging altogether.
+      setHasMore(rows.length === pageSize)
     } catch (err) {
       console.error('Failed to load investigations:', err)
-      setError('Failed to load investigation history')
+      setError(err instanceof Error ? err.message : 'Failed to load investigation history')
       setInvestigations([])
+      setHasMore(false)
     } finally {
       setLoading(false)
     }
-  }
+    // `user` is not read in the body, but the Supabase rows are scoped by the
+    // signed-in session under RLS: signing in or out changes what this query
+    // returns, so the identity belongs in the dependency list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, page, statusFilter])
+
+  useEffect(() => {
+    loadInvestigations()
+  }, [loadInvestigations])
+
+  // Changing the filter while on page 4 would otherwise ask for rows 31-40 of a
+  // result set that may only have six.
+  useEffect(() => {
+    setPage(1)
+  }, [statusFilter])
 
   const filteredInvestigations = investigations.filter(inv =>
     searchQuery === '' ||
@@ -184,9 +213,12 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
                   className="absolute left-3 top-1/2 -translate-y-1/2"
                   style={{ color: 'var(--text-2)' }}
                 />
+                {/* "Search investigations..." overpromised: this only matches
+                    against the rows already loaded for the current page. Neither
+                    the API nor the Supabase query takes a text filter. */}
                 <input
                   type="text"
-                  placeholder="Search investigations..."
+                  placeholder="Filter this page..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-10 pr-4 py-2 rounded-lg"
@@ -259,8 +291,20 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
             </div>
           )}
 
-          {/* Empty State */}
-          {!loading && filteredInvestigations.length === 0 && (
+          {/* Empty State — only when there is genuinely nothing, not when the
+              page-local filter or the status dropdown hid it all. */}
+          {!loading && !error && filteredInvestigations.length === 0 && investigations.length > 0 && (
+            <div
+              className="rounded-xl p-8 text-center"
+              style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+            >
+              <p style={{ color: 'var(--text-2)' }}>
+                None of the {investigations.length} investigations on this page match "{searchQuery}".
+              </p>
+            </div>
+          )}
+
+          {!loading && !error && investigations.length === 0 && (
             <div
               className="rounded-xl p-12 text-center"
               style={{
@@ -277,10 +321,16 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
                 className="text-xl font-semibold mb-2"
                 style={{ color: 'var(--text)' }}
               >
-                No investigations yet
+                {statusFilter === 'all' && page === 1
+                  ? 'No investigations yet'
+                  : 'Nothing to show here'}
               </h2>
               <p style={{ color: 'var(--text-2)' }}>
-                Start an investigation from the console to see it here.
+                {statusFilter !== 'all'
+                  ? `No investigations with status "${statusFilter}".`
+                  : page > 1
+                    ? 'This page is past the end of the history.'
+                    : 'Start an investigation from the console to see it here.'}
               </p>
             </div>
           )}
@@ -491,8 +541,9 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
             </div>
           )}
 
-          {/* Pagination */}
-          {!loading && filteredInvestigations.length > 0 && (
+          {/* Pagination — shown whenever there is somewhere to go, not only when
+              the current page happens to have visible rows. */}
+          {!loading && (investigations.length > 0 || page > 1) && (
             <div className="flex items-center justify-between mt-6">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
@@ -514,7 +565,7 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
 
               <button
                 onClick={() => setPage(p => p + 1)}
-                disabled={filteredInvestigations.length < pageSize}
+                disabled={!hasMore}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--surface)',

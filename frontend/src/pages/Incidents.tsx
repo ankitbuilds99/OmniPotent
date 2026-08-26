@@ -21,33 +21,55 @@ import {
   Loader2
 } from "lucide-react";
 
-import { apiFetch } from "../lib/apiClient";
+import { apiFetch, describeFailure } from "../lib/apiClient";
 
-interface AgentResult {
-  agent_type: "knowledge" | "reasoning" | "action" | "learning" | "collaboration" | "ambient";
-  status: "pending" | "running" | "completed" | "failed" | "timeout";
-  confidence_score: number;
-  findings_count: number;
-  duration_ms: number;
+// These mirror GET /api/incidents/{id}/investigation exactly (app/incidents/router.py:283).
+// The page used to declare its own shape and then build an object to fit it out
+// of the list response's `has_investigation` boolean — see `fetchIncidents`.
+
+/** `AgentStatus` in app/incidents/models.py:28. Not "completed"/"failed": the
+ *  old union used those two spellings, so the status indicator's checks could
+ *  never match and every agent rendered with the neutral pending clock. */
+type AgentStatus = "idle" | "running" | "complete" | "error";
+
+interface AgentFinding {
+  finding: string;
+  confidence: number;
+  timestamp: string;
 }
 
-interface SafetyEvaluation {
-  overall_decision: "approved" | "blocked" | "escalated";
-  gates: {
-    confidence: { passed: boolean; score: number; threshold: number };
-    policy: { passed: boolean; violations: string[] };
-    sandbox: { passed: boolean; test_result: string };
-  };
+interface AgentResult {
+  agent_type: string;
+  status: AgentStatus;
+  /** 0-100, straight from the agent's own progress field. */
+  progress: number;
+  current_action: string | null;
+  findings: AgentFinding[];
+}
+
+/** `SafetyGateStatus` in app/incidents/models.py:35. The API returns a list of
+ *  these, whatever gates the investigation happened to run. The page previously
+ *  modelled it as a fixed three — confidence, policy, sandbox — with an
+ *  `overall_decision` the API does not send. */
+interface SafetyGate {
+  gate_type: string;
+  status: "pending" | "passed" | "failed" | "bypassed";
+  threshold: number | null;
+  current_value: number | null;
+  message: string | null;
 }
 
 interface Investigation {
   id: string;
-  status: "pending" | "running" | "completed" | "failed";
-  confidence_score: number;
-  root_cause_hypothesis: string;
-  agent_results: AgentResult[];
-  safety_evaluation?: SafetyEvaluation;
-  duration_ms: number;
+  incident_id: string;
+  status: "running" | "completed";
+  started_at: string | null;
+  completed_at: string | null;
+  overall_confidence: number;
+  root_cause: string | null;
+  recommended_actions: string[];
+  agents: Record<string, AgentResult>;
+  safety_gates: SafetyGate[];
 }
 
 interface Incident {
@@ -59,7 +81,10 @@ interface Incident {
   created_at: string;
   updated_at: string;
   assigned_to?: string;
-  investigation?: Investigation;
+  /** From the list response. Says an investigation exists; says nothing about
+   *  what it found. The detail view fetches the investigation itself. */
+  has_investigation: boolean;
+  investigation_confidence: number | null;
 }
 
 function SeverityBadge({ severity }: { severity: Incident["severity"] }) {
@@ -98,24 +123,26 @@ function StatusBadge({ status }: { status: Incident["status"] }) {
   );
 }
 
-function AgentIcon({ type }: { type: AgentResult["agent_type"] }) {
-  const icons = {
-    knowledge: Brain,
-    reasoning: Brain,
-    action: Zap,
-    learning: BookOpen,
-    collaboration: Users,
-    ambient: Radio,
-  };
-  const Icon = icons[type];
+// `agent_type` is a free-form string on the server side, so an unrecognised one
+// gets a generic icon instead of crashing on `icons[type]` being undefined.
+const AGENT_ICONS: Record<string, typeof Brain> = {
+  knowledge: BookOpen,
+  reasoning: Brain,
+  action: Zap,
+  learning: BookOpen,
+  collaboration: Users,
+  ambient: Radio,
+};
+
+function AgentIcon({ type }: { type: string }) {
+  const Icon = AGENT_ICONS[type] ?? Brain;
   return <Icon size={14} />;
 }
 
-function AgentStatusIndicator({ status }: { status: AgentResult["status"] }) {
-  if (status === "completed") return <CheckCircle size={14} style={{ color: "var(--ok)" }} />;
+function AgentStatusIndicator({ status }: { status: AgentStatus }) {
+  if (status === "complete") return <CheckCircle size={14} style={{ color: "var(--ok)" }} />;
   if (status === "running") return <RefreshCw size={14} className="animate-spin" style={{ color: "var(--accent)" }} />;
-  if (status === "failed") return <XCircle size={14} style={{ color: "var(--bad)" }} />;
-  if (status === "timeout") return <Clock size={14} style={{ color: "#eab308" }} />;
+  if (status === "error") return <XCircle size={14} style={{ color: "var(--bad)" }} />;
   return <Clock size={14} style={{ color: "var(--text-2)" }} />;
 }
 
@@ -165,13 +192,30 @@ function EmptyState() {
   );
 }
 
-function SafetyGatesCard({ evaluation }: { evaluation: SafetyEvaluation }) {
+/** The gates the investigation actually ran, in the order the API returned them.
+ *
+ *  There is no `overall_decision` field on the response, so the header verdict is
+ *  derived here: any failed gate fails the set, any still pending holds it open,
+ *  and everything passed passes. The previous version read `overall_decision`
+ *  off an object the frontend had built itself, and rendered a fixed three-gate
+ *  "3-Layer Defense" whether or not those were the gates that ran. */
+function SafetyGatesCard({ gates }: { gates: SafetyGate[] }) {
+  const decision = gates.some(g => g.status === "failed")
+    ? "blocked"
+    : gates.some(g => g.status === "pending")
+      ? "pending"
+      : "approved";
   const decisionColors = {
     approved: { border: "var(--ok)", bg: "rgba(45, 212, 167, 0.1)" },
     blocked: { border: "var(--bad)", bg: "rgba(255, 107, 107, 0.1)" },
-    escalated: { border: "#eab308", bg: "rgba(234, 179, 8, 0.1)" },
+    pending: { border: "#eab308", bg: "rgba(234, 179, 8, 0.1)" },
   };
-  const colors = decisionColors[evaluation.overall_decision];
+  const colors = decisionColors[decision];
+
+  const mark = (status: SafetyGate["status"]) =>
+    status === "passed" ? "✓" : status === "failed" ? "✗" : status === "bypassed" ? "⤳" : "⏳";
+  const markColor = (status: SafetyGate["status"]) =>
+    status === "passed" ? "var(--ok)" : status === "failed" ? "var(--bad)" : "#eab308";
 
   return (
     <div
@@ -181,77 +225,62 @@ function SafetyGatesCard({ evaluation }: { evaluation: SafetyEvaluation }) {
       <div className="flex items-center justify-between mb-4">
         <h4 className="font-semibold flex items-center gap-2" style={{ color: "var(--text)" }}>
           <Shield size={18} style={{ color: colors.border }} />
-          Safety Gates (3-Layer Defense)
+          Safety Gates ({gates.length})
         </h4>
         <span
           className="px-3 py-1 rounded-full text-sm font-medium"
-          style={{
-            backgroundColor: colors.border,
-            color: evaluation.overall_decision === "escalated" ? "black" : "white",
-          }}
+          style={{ backgroundColor: colors.border, color: decision === "pending" ? "black" : "white" }}
         >
-          {evaluation.overall_decision.toUpperCase()}
+          {decision.toUpperCase()}
         </span>
       </div>
 
       <div className="space-y-3">
-        <div
-          className="flex items-center justify-between p-2 rounded"
-          style={{ backgroundColor: "var(--surface)" }}
-        >
-          <div className="flex items-center gap-2">
-            <span style={{ color: evaluation.gates.confidence.passed ? "var(--ok)" : "var(--bad)" }}>
-              {evaluation.gates.confidence.passed ? "✓" : "✗"}
-            </span>
-            <span className="font-medium" style={{ color: "var(--text)" }}>Gate 1: Confidence</span>
-            <span className="text-xs" style={{ color: "var(--text-2)" }}>
-              (threshold: {evaluation.gates.confidence.threshold * 100}%)
-            </span>
+        {gates.map((gate, i) => (
+          <div
+            key={`${gate.gate_type}-${i}`}
+            className="flex items-center justify-between gap-3 p-2 rounded"
+            style={{ backgroundColor: "var(--surface)" }}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span style={{ color: markColor(gate.status) }}>{mark(gate.status)}</span>
+              <span className="font-medium" style={{ color: "var(--text)" }}>{gate.gate_type}</span>
+              {gate.threshold !== null && (
+                <span className="text-xs whitespace-nowrap" style={{ color: "var(--text-2)" }}>
+                  (threshold: {gate.threshold})
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3 min-w-0">
+              {gate.message && (
+                <span className="text-xs truncate" style={{ color: "var(--text-2)" }} title={gate.message}>
+                  {gate.message}
+                </span>
+              )}
+              {gate.current_value !== null && (
+                <span className="font-mono text-sm whitespace-nowrap" style={{ color: "var(--text)" }}>
+                  {gate.current_value}
+                </span>
+              )}
+            </div>
           </div>
-          <span className="font-mono text-sm" style={{ color: "var(--text)" }}>
-            {Math.round(evaluation.gates.confidence.score * 100)}%
-          </span>
-        </div>
-
-        <div
-          className="flex items-center justify-between p-2 rounded"
-          style={{ backgroundColor: "var(--surface)" }}
-        >
-          <div className="flex items-center gap-2">
-            <span style={{ color: evaluation.gates.policy.passed ? "var(--ok)" : "var(--bad)" }}>
-              {evaluation.gates.policy.passed ? "✓" : "✗"}
-            </span>
-            <span className="font-medium" style={{ color: "var(--text)" }}>Gate 2: Policy Guardrails</span>
-          </div>
-          {evaluation.gates.policy.violations.length > 0 && (
-            <span className="text-xs" style={{ color: "var(--bad)" }}>
-              {evaluation.gates.policy.violations.join(", ")}
-            </span>
-          )}
-        </div>
-
-        <div
-          className="flex items-center justify-between p-2 rounded"
-          style={{ backgroundColor: "var(--surface)" }}
-        >
-          <div className="flex items-center gap-2">
-            <span style={{ color: evaluation.gates.sandbox.passed ? "var(--ok)" : "#eab308" }}>
-              {evaluation.gates.sandbox.passed ? "✓" : "⏳"}
-            </span>
-            <span className="font-medium" style={{ color: "var(--text)" }}>Gate 3: Sandbox Test</span>
-          </div>
-          <span className="text-xs" style={{ color: "var(--text-2)" }}>
-            {evaluation.gates.sandbox.test_result}
-          </span>
-        </div>
+        ))}
       </div>
     </div>
   );
 }
 
 function InvestigationCard({ investigation }: { investigation: Investigation }) {
-  const completedAgents = investigation.agent_results.filter(a => a.status === "completed").length;
-  const totalAgents = investigation.agent_results.length;
+  const agents = Object.entries(investigation.agents).map(([agent_type, a]) => ({ ...a, agent_type }));
+  const completedAgents = agents.filter(a => a.status === "complete").length;
+  const totalAgents = agents.length;
+
+  // Elapsed time, from the investigation's own timestamps. `duration_ms` was
+  // always the literal 0 the page had assigned itself, so the header read "..."
+  // for every investigation ever run, finished or not.
+  const started = investigation.started_at ? new Date(investigation.started_at).getTime() : null;
+  const finished = investigation.completed_at ? new Date(investigation.completed_at).getTime() : null;
+  const elapsedMs = started === null ? null : (finished ?? Date.now()) - started;
 
   return (
     <div
@@ -265,40 +294,40 @@ function InvestigationCard({ investigation }: { investigation: Investigation }) 
           <span
             className="text-xs px-2 py-0.5 rounded"
             style={{
-              backgroundColor: investigation.status === "completed" ? "rgba(45, 212, 167, 0.2)" :
-                investigation.status === "running" ? "rgba(100, 145, 255, 0.2)" :
-                "rgba(255, 107, 107, 0.2)",
-              color: investigation.status === "completed" ? "var(--ok)" :
-                investigation.status === "running" ? "var(--accent)" :
-                "var(--bad)",
+              backgroundColor: investigation.status === "completed"
+                ? "rgba(45, 212, 167, 0.2)"
+                : "rgba(100, 145, 255, 0.2)",
+              color: investigation.status === "completed" ? "var(--ok)" : "var(--accent)",
             }}
           >
             {investigation.status}
           </span>
         </h3>
         <span className="text-sm" style={{ color: "var(--text-2)" }}>
-          {investigation.duration_ms ? `${(investigation.duration_ms / 1000).toFixed(1)}s` : "..."}
+          {elapsedMs === null ? "—" : `${(elapsedMs / 1000).toFixed(1)}s`}
         </span>
       </div>
 
       {totalAgents > 0 && (
         <div>
           <div className="flex items-center justify-between text-sm mb-2">
-            <span style={{ color: "var(--text-2)" }}>6-Agent Parallel Investigation</span>
+            <span style={{ color: "var(--text-2)" }}>Agents</span>
             <span className="font-mono" style={{ color: "var(--text)" }}>{completedAgents}/{totalAgents}</span>
           </div>
-          <div className="grid grid-cols-6 gap-1">
-            {investigation.agent_results.map((agent) => (
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1">
+            {agents.map((agent) => (
               <div
                 key={agent.agent_type}
                 className="p-2 rounded text-center text-xs"
                 style={{
-                  backgroundColor: agent.status === "completed" ? "rgba(45, 212, 167, 0.15)" :
+                  backgroundColor: agent.status === "complete" ? "rgba(45, 212, 167, 0.15)" :
                     agent.status === "running" ? "rgba(100, 145, 255, 0.15)" :
-                    agent.status === "failed" ? "rgba(255, 107, 107, 0.15)" :
+                    agent.status === "error" ? "rgba(255, 107, 107, 0.15)" :
                     "var(--bg)",
                 }}
-                title={`${agent.agent_type}: ${agent.findings_count} findings, ${agent.confidence_score * 100}% confidence`}
+                title={`${agent.agent_type}: ${agent.findings.length} findings, ${agent.progress}%${
+                  agent.current_action ? ` — ${agent.current_action}` : ""
+                }`}
               >
                 <div className="flex justify-center mb-1">
                   <AgentStatusIndicator status={agent.status} />
@@ -314,22 +343,45 @@ function InvestigationCard({ investigation }: { investigation: Investigation }) 
 
       <div>
         <div className="text-sm mb-1" style={{ color: "var(--text-2)" }}>Overall Confidence</div>
-        <ConfidenceBar score={investigation.confidence_score} />
+        <ConfidenceBar score={investigation.overall_confidence} />
       </div>
 
-      {investigation.root_cause_hypothesis && (
+      {/* Rendered only when the investigation has actually produced one. It used
+          to show the literal string "Investigation in progress..." under a "Root
+          Cause Hypothesis" heading — a sentence the frontend wrote, presented as
+          the AI's finding. An investigation that has not concluded says so. */}
+      {investigation.root_cause ? (
         <div className="p-3 rounded-lg" style={{ backgroundColor: "var(--bg)" }}>
           <div className="text-xs uppercase tracking-wide mb-1" style={{ color: "var(--text-2)" }}>
-            Root Cause Hypothesis
+            Root Cause
           </div>
           <p className="text-sm font-medium" style={{ color: "var(--text)" }}>
-            {investigation.root_cause_hypothesis}
+            {investigation.root_cause}
           </p>
+        </div>
+      ) : (
+        <div className="p-3 rounded-lg text-sm" style={{ backgroundColor: "var(--bg)", color: "var(--text-2)" }}>
+          {investigation.status === "running"
+            ? "No root cause yet — the investigation is still running."
+            : "The investigation finished without identifying a root cause."}
         </div>
       )}
 
-      {investigation.safety_evaluation && (
-        <SafetyGatesCard evaluation={investigation.safety_evaluation} />
+      {investigation.recommended_actions.length > 0 && (
+        <div className="p-3 rounded-lg" style={{ backgroundColor: "var(--bg)" }}>
+          <div className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--text-2)" }}>
+            Recommended Actions
+          </div>
+          <ul className="text-sm space-y-1" style={{ color: "var(--text)" }}>
+            {investigation.recommended_actions.map((action, i) => (
+              <li key={i}>• {action}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {investigation.safety_gates.length > 0 && (
+        <SafetyGatesCard gates={investigation.safety_gates} />
       )}
     </div>
   );
@@ -367,19 +419,21 @@ function IncidentRow({ incident, onSelect }: { incident: Incident; onSelect: () 
         {timeAgo(incident.created_at)}
       </td>
       <td className="px-4 py-3">
-        {incident.investigation && (
+        {/* The list response says only whether an investigation exists and, if it
+            has one, its confidence. It does not say whether it is still running,
+            so the dot no longer pulses on a guess — the row used to hardcode
+            `status: "running"` for every investigated incident, including ones
+            that finished days ago. */}
+        {incident.has_investigation && (
           <div className="flex items-center gap-1">
             <span
               className="w-2 h-2 rounded-full"
-              style={{
-                backgroundColor: incident.investigation.status === "completed" ? "var(--ok)" :
-                  incident.investigation.status === "running" ? "var(--accent)" :
-                  "var(--text-2)",
-                animation: incident.investigation.status === "running" ? "pulse 2s infinite" : "none",
-              }}
+              style={{ backgroundColor: "var(--accent)" }}
             />
             <span className="text-xs" style={{ color: "var(--text)" }}>
-              {Math.round(incident.investigation.confidence_score * 100)}%
+              {incident.investigation_confidence === null
+                ? "—"
+                : `${Math.round(incident.investigation_confidence * 100)}%`}
             </span>
           </div>
         )}
@@ -399,6 +453,50 @@ function IncidentDetail({
   onAcknowledge: () => void;
   onResolve: () => void;
 }) {
+  // The real investigation, fetched here rather than assembled in the list
+  // transform. GET /api/incidents/{id}/investigation has existed all along and
+  // nothing in the frontend called it.
+  const [investigation, setInvestigation] = useState<Investigation | null>(null);
+  const [invError, setInvError] = useState<string | null>(null);
+  const [invLoading, setInvLoading] = useState(false);
+
+  useEffect(() => {
+    if (!incident.has_investigation) {
+      setInvestigation(null);
+      setInvError(null);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      setInvLoading(true);
+      try {
+        const res = await apiFetch(`/api/incidents/${incident.id}/investigation`);
+        if (!res.ok) throw new Error(await describeFailure(res));
+        const data: Investigation = await res.json();
+        if (!cancelled) {
+          setInvestigation(data);
+          setInvError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setInvestigation(null);
+          setInvError(err instanceof Error ? err.message : "Could not load the investigation");
+        }
+      } finally {
+        if (!cancelled) setInvLoading(false);
+      }
+    };
+    load();
+    // A running investigation changes underneath the page, so poll it.
+    const interval = setInterval(() => {
+      if (!cancelled) load();
+    }, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [incident.id, incident.has_investigation]);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -443,8 +541,21 @@ function IncidentDetail({
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          {incident.investigation && (
-            <InvestigationCard investigation={incident.investigation} />
+          {investigation && <InvestigationCard investigation={investigation} />}
+          {invError && (
+            <div
+              className="rounded-xl p-4 text-sm"
+              style={{ backgroundColor: "rgba(255, 107, 107, 0.1)", border: "1px solid var(--bad)", color: "var(--bad)" }}
+            >
+              {invError}
+            </div>
+          )}
+          {invLoading && !investigation && !invError && (
+            <div className="rounded-xl p-4 flex items-center gap-2 text-sm"
+              style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)", color: "var(--text-2)" }}>
+              <Loader2 size={14} className="animate-spin" />
+              Loading investigation...
+            </div>
           )}
 
           <div
@@ -465,7 +576,10 @@ function IncidentDetail({
                   </div>
                 </div>
               </div>
-              {incident.investigation && (
+              {/* "6 parallel agents dispatched" was printed whether six agents
+                  ran or none did. The count comes off the investigation now, and
+                  the entry carries the time it actually started. */}
+              {investigation && (
                 <div className="flex gap-3">
                   <span
                     className="w-2 h-2 mt-1.5 rounded-full flex-shrink-0"
@@ -473,7 +587,28 @@ function IncidentDetail({
                   />
                   <div>
                     <div className="font-medium" style={{ color: "var(--text)" }}>AI investigation started</div>
-                    <div style={{ color: "var(--text-2)" }}>6 parallel agents dispatched</div>
+                    <div style={{ color: "var(--text-2)" }}>
+                      {investigation.started_at
+                        ? new Date(investigation.started_at).toLocaleString()
+                        : "start time not recorded"}
+                      {" · "}
+                      {Object.keys(investigation.agents).length} agent
+                      {Object.keys(investigation.agents).length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {investigation?.completed_at && (
+                <div className="flex gap-3">
+                  <span
+                    className="w-2 h-2 mt-1.5 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: "var(--ok)" }}
+                  />
+                  <div>
+                    <div className="font-medium" style={{ color: "var(--text)" }}>AI investigation completed</div>
+                    <div style={{ color: "var(--text-2)" }}>
+                      {new Date(investigation.completed_at).toLocaleString()}
+                    </div>
                   </div>
                 </div>
               )}
@@ -500,27 +635,166 @@ function IncidentDetail({
             </div>
           </div>
 
-          <div
-            className="rounded-xl p-4"
-            style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
-          >
-            <h3 className="font-semibold mb-3" style={{ color: "var(--text)" }}>Quick Actions</h3>
-            <div className="space-y-2">
-              {["Rollback last deployment", "Scale up replicas", "Restart service", "Run diagnostic runbook"].map((action) => (
-                <button
-                  key={action}
-                  className="w-full px-3 py-2 text-left text-sm rounded transition-colors"
-                  style={{ border: "1px solid var(--border)", color: "var(--text)" }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-                >
-                  {action}
-                </button>
-              ))}
+          {/* A "Quick Actions" panel used to sit here with four buttons —
+              "Rollback last deployment", "Scale up replicas", "Restart service",
+              "Run diagnostic runbook" — none of which had an onClick handler.
+              Clicking them did nothing at all, on an incident page, during an
+              incident. Removed rather than left in place: a button that looks
+              like it can roll back a deployment is worse than no button when the
+              person pressing it is under pressure. What the AI recommends for
+              this incident is shown in the investigation card, which reads
+              `recommended_actions` from the server. */}
+          {investigation && investigation.recommended_actions.length === 0 && investigation.status === "completed" && (
+            <div
+              className="rounded-xl p-4 text-sm"
+              style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)", color: "var(--text-2)" }}
+            >
+              The investigation did not recommend any actions.
             </div>
-          </div>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The form behind "Declare Incident".
+ *
+ *  That button had no onClick. It rendered in the header of the incidents page,
+ *  styled in the danger colour, and did nothing when pressed — there was no way
+ *  to open an incident from this UI at all, even though POST /api/incidents has
+ *  existed the whole time. `title`, `severity` and `service` are the three
+ *  fields CreateIncidentRequest requires (app/incidents/models.py:115). */
+function DeclareIncidentModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [title, setTitle] = useState("");
+  const [service, setService] = useState("");
+  const [severity, setSeverity] = useState<Incident["severity"]>("high");
+  const [description, setDescription] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setFormError(null);
+    try {
+      const res = await apiFetch("/api/incidents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title.trim(),
+          service: service.trim(),
+          severity,
+          description: description.trim() || null,
+        }),
+      });
+      if (!res.ok) throw new Error(await describeFailure(res));
+      onCreated();
+      onClose();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Failed to declare incident");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const inputStyle = {
+    backgroundColor: "var(--bg)",
+    border: "1px solid var(--border)",
+    color: "var(--text)",
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: "rgba(0,0,0,0.5)" }}
+      onClick={onClose}
+    >
+      <motion.form
+        initial={{ opacity: 0, scale: 0.96 }}
+        animate={{ opacity: 1, scale: 1 }}
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-full max-w-lg rounded-xl p-6 space-y-4"
+        style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
+      >
+        <h2 className="text-lg font-semibold" style={{ color: "var(--text)" }}>Declare Incident</h2>
+
+        <label className="block">
+          <span className="text-sm" style={{ color: "var(--text-2)" }}>Title</span>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            required
+            autoFocus
+            className="w-full mt-1 px-3 py-2 rounded-lg text-sm"
+            style={inputStyle}
+            placeholder="Checkout API returning 500s"
+          />
+        </label>
+
+        <div className="grid grid-cols-2 gap-4">
+          <label className="block">
+            <span className="text-sm" style={{ color: "var(--text-2)" }}>Service</span>
+            <input
+              value={service}
+              onChange={(e) => setService(e.target.value)}
+              required
+              className="w-full mt-1 px-3 py-2 rounded-lg text-sm"
+              style={inputStyle}
+              placeholder="payments-api"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm" style={{ color: "var(--text-2)" }}>Severity</span>
+            <select
+              value={severity}
+              onChange={(e) => setSeverity(e.target.value as Incident["severity"])}
+              className="w-full mt-1 px-3 py-2 rounded-lg text-sm"
+              style={inputStyle}
+            >
+              {(["critical", "high", "medium", "low"] as const).map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <label className="block">
+          <span className="text-sm" style={{ color: "var(--text-2)" }}>Description (optional)</span>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            className="w-full mt-1 px-3 py-2 rounded-lg text-sm"
+            style={inputStyle}
+          />
+        </label>
+
+        {formError && (
+          <p className="text-sm" style={{ color: "var(--bad)" }}>{formError}</p>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg text-sm"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={submitting || !title.trim() || !service.trim()}
+            className="px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2"
+            style={{ backgroundColor: "var(--bad)", color: "white", opacity: submitting ? 0.6 : 1 }}
+          >
+            {submitting && <Loader2 size={14} className="animate-spin" />}
+            Declare
+          </button>
+        </div>
+      </motion.form>
     </div>
   );
 }
@@ -530,34 +804,35 @@ export function Incidents({ onBack }: { onBack: () => void }) {
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("active");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [declaring, setDeclaring] = useState(false);
 
   const fetchIncidents = useCallback(async () => {
     try {
       const res = await apiFetch(`/api/incidents`);
-      if (res.ok) {
-        const data = await res.json();
-        const transformed: Incident[] = data.map((inc: Record<string, unknown>) => ({
-          id: inc.id,
-          title: inc.title,
-          severity: inc.severity || "medium",
-          status: inc.status || "triggered",
-          affected_services: inc.service ? [inc.service] : [],
-          created_at: inc.triggered_at || new Date().toISOString(),
-          updated_at: inc.acknowledged_at || inc.triggered_at || new Date().toISOString(),
-          assigned_to: inc.assignee || undefined,
-          investigation: inc.has_investigation ? {
-            id: `inv-${inc.id}`,
-            status: "running" as const,
-            confidence_score: (inc.investigation_confidence as number) || 0,
-            root_cause_hypothesis: "Investigation in progress...",
-            agent_results: [],
-            duration_ms: 0,
-          } : undefined,
-        }));
-        setIncidents(transformed);
-      }
-    } catch (error) {
-      console.error("Failed to fetch incidents:", error);
+      if (!res.ok) throw new Error(await describeFailure(res));
+      const data: Record<string, unknown>[] = await res.json();
+      // A straight mapping of the list response. The `investigation` object this
+      // used to synthesise here — a fabricated `inv-${id}`, a hardcoded "running"
+      // status, an empty agent list and the literal root cause "Investigation in
+      // progress..." — is gone; the detail view fetches the real one.
+      setIncidents(data.map((inc) => ({
+        id: inc.id as string,
+        title: inc.title as string,
+        severity: (inc.severity as Incident["severity"]) || "medium",
+        status: (inc.status as Incident["status"]) || "triggered",
+        affected_services: inc.service ? [inc.service as string] : [],
+        created_at: (inc.triggered_at as string) || new Date().toISOString(),
+        updated_at: (inc.acknowledged_at as string) || (inc.triggered_at as string) || new Date().toISOString(),
+        assigned_to: (inc.assignee as string) || undefined,
+        has_investigation: inc.has_investigation === true,
+        investigation_confidence:
+          typeof inc.investigation_confidence === "number" ? inc.investigation_confidence : null,
+      })));
+      setError(null);
+    } catch (err) {
+      console.error("Failed to fetch incidents:", err);
+      setError(err instanceof Error ? err.message : "Failed to load incidents");
     } finally {
       setLoading(false);
     }
@@ -569,25 +844,28 @@ export function Incidents({ onBack }: { onBack: () => void }) {
     return () => clearInterval(interval);
   }, [fetchIncidents]);
 
-  const handleAcknowledge = async (incidentId: string) => {
+  // Neither of these checked `res.ok`. `await apiFetch(...)` resolves for a 404,
+  // a 422 or a 500 exactly as it does for a 200, so the page closed the detail
+  // view and refreshed the list either way — and the incident was still sitting
+  // there unacknowledged with nothing on screen to say why.
+  const runAction = async (label: string, incidentId: string, path: string) => {
     try {
-      await apiFetch(`/api/incidents/${incidentId}/acknowledge`, { method: "POST" });
-      fetchIncidents();
+      const res = await apiFetch(path, { method: "POST" });
+      if (!res.ok) throw new Error(await describeFailure(res));
+      setError(null);
       setSelectedIncident(null);
-    } catch (error) {
-      console.error("Failed to acknowledge incident:", error);
+      await fetchIncidents();
+    } catch (err) {
+      console.error(`Failed to ${label} incident:`, err);
+      setError(`Could not ${label} incident ${incidentId}: ${err instanceof Error ? err.message : "request failed"}`);
     }
   };
 
-  const handleResolve = async (incidentId: string) => {
-    try {
-      await apiFetch(`/api/incidents/${incidentId}/resolve`, { method: "POST" });
-      fetchIncidents();
-      setSelectedIncident(null);
-    } catch (error) {
-      console.error("Failed to resolve incident:", error);
-    }
-  };
+  const handleAcknowledge = (incidentId: string) =>
+    runAction("acknowledge", incidentId, `/api/incidents/${incidentId}/acknowledge`);
+
+  const handleResolve = (incidentId: string) =>
+    runAction("resolve", incidentId, `/api/incidents/${incidentId}/resolve`);
 
   const filteredIncidents = incidents.filter(inc => {
     if (filter === "active") return inc.status !== "resolved";
@@ -621,6 +899,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
             <RefreshCw size={16} />
           </button>
           <button
+            onClick={() => setDeclaring(true)}
             className="px-4 py-2 rounded-lg font-medium flex items-center gap-2"
             style={{ backgroundColor: "var(--bad)", color: "white" }}
           >
@@ -630,7 +909,30 @@ export function Incidents({ onBack }: { onBack: () => void }) {
         </div>
       </header>
 
+      {declaring && (
+        <DeclareIncidentModal onClose={() => setDeclaring(false)} onCreated={fetchIncidents} />
+      )}
+
       <main className="max-w-7xl mx-auto px-4 py-6">
+        {/* Outside the detail/list branch: an acknowledge that fails also closes
+            the detail view, so a banner nested inside it would unmount with the
+            very message the operator needs to read. */}
+        {error && (
+          <div
+            className="mb-6 rounded-xl px-4 py-3 flex items-start justify-between gap-4"
+            style={{ backgroundColor: "var(--bad-bg, rgba(239,68,68,0.1))", border: "1px solid var(--bad)" }}
+          >
+            <span className="text-sm" style={{ color: "var(--bad)" }}>{error}</span>
+            <button
+              onClick={() => setError(null)}
+              className="text-sm underline shrink-0"
+              style={{ color: "var(--bad)" }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {selectedIncident ? (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
             <IncidentDetail

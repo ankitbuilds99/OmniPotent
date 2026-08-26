@@ -761,7 +761,7 @@ class EscalationService:
     async def acknowledge_alert(
         self,
         alert_id: UUID,
-        user_id: UUID,
+        user_id: UUID | None,
     ) -> OncallAlert:
         """Acknowledge an alert."""
         result = await self.db.execute(
@@ -801,7 +801,7 @@ class EscalationService:
     async def resolve_alert(
         self,
         alert_id: UUID,
-        user_id: UUID,
+        user_id: UUID | None,
         resolution_notes: str | None = None,
     ) -> OncallAlert:
         """Resolve an alert."""
@@ -821,9 +821,15 @@ class EscalationService:
         alert.resolved_by = user_id
 
         if resolution_notes:
-            if alert.custom_fields is None:
-                alert.custom_fields = {}
-            alert.custom_fields["resolution_notes"] = resolution_notes
+            # Rebound, not mutated in place: `custom_fields` is a plain JSON
+            # column with no mutation tracking, so assigning into the existing
+            # dict left the attribute clean and the commit wrote nothing. The
+            # note the responder typed to explain what they did was discarded
+            # every time, silently.
+            alert.custom_fields = {
+                **(alert.custom_fields or {}),
+                "resolution_notes": resolution_notes,
+            }
 
         await self.db.commit()
         await self.db.refresh(alert)

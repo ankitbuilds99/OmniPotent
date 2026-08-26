@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
-import { apiFetch } from "../lib/apiClient";
+import { apiFetch, describeFailure } from "../lib/apiClient";
 
 type Tab = "overview" | "alerts" | "runbooks" | "metrics";
 
@@ -455,6 +455,7 @@ export function Dashboard({
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(new Date());
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -505,64 +506,52 @@ export function Dashboard({
     healthyServices: serviceSet.size,
   };
 
-  const handleAcknowledgeAlert = async (alertId: string) => {
+  // Every button on this page used to be `if (res.ok) { fetchData(); }` with no
+  // else branch, so a rejected request looked exactly like a successful one that
+  // happened to change nothing: the row stayed where it was and the operator was
+  // left to guess whether the click had registered. Acknowledge and Resolve were
+  // the worst of them — both sent no `user_id` against a backend that required
+  // one, so *every* click was a 422 and no alert on this dashboard could ever be
+  // acknowledged. A failed action has to say so, because the operator's next move
+  // (retry, or go and stop the page another way) depends on knowing.
+  const runAction = async (label: string, path: string, init: RequestInit) => {
+    setActionError(null);
     try {
-      const res = await apiFetch(`/oncall/alerts/${alertId}/acknowledge`, { method: "POST" });
-      if (res.ok) {
-        fetchData();
+      const res = await apiFetch(path, init);
+      if (!res.ok) {
+        throw new Error(await describeFailure(res));
       }
+      await fetchData();
     } catch (error) {
-      console.error("Failed to acknowledge alert:", error);
+      console.error(`Failed to ${label}:`, error);
+      setActionError(
+        `Could not ${label}: ${error instanceof Error ? error.message : "request failed"}`
+      );
     }
   };
 
-  const handleResolveAlert = async (alertId: string) => {
-    try {
-      const res = await apiFetch(`/oncall/alerts/${alertId}/resolve`, { method: "POST" });
-      if (res.ok) {
-        fetchData();
-      }
-    } catch (error) {
-      console.error("Failed to resolve alert:", error);
-    }
-  };
+  const handleAcknowledgeAlert = (alertId: string) =>
+    runAction("acknowledge alert", `/oncall/alerts/${alertId}/acknowledge`, { method: "POST" });
 
-  const handleExecuteRunbook = async (runbookId: string) => {
-    try {
-      const res = await apiFetch(`/api/runbooks/${runbookId}/execute`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (res.ok) {
-        fetchData();
-      }
-    } catch (error) {
-      console.error("Failed to execute runbook:", error);
-    }
-  };
+  const handleResolveAlert = (alertId: string) =>
+    runAction("resolve alert", `/oncall/alerts/${alertId}/resolve`, { method: "POST" });
 
-  const handleApproveExecution = async (executionId: string) => {
-    try {
-      const res = await apiFetch(`/api/runbooks/executions/${executionId}/approve`, { method: "POST" });
-      if (res.ok) {
-        fetchData();
-      }
-    } catch (error) {
-      console.error("Failed to approve execution:", error);
-    }
-  };
+  const handleExecuteRunbook = (runbookId: string) =>
+    runAction("execute runbook", `/api/runbooks/${runbookId}/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
 
-  const handleRejectExecution = async (executionId: string) => {
-    try {
-      const res = await apiFetch(`/api/runbooks/executions/${executionId}/reject`, { method: "POST" });
-      if (res.ok) {
-        fetchData();
-      }
-    } catch (error) {
-      console.error("Failed to reject execution:", error);
-    }
-  };
+  const handleApproveExecution = (executionId: string) =>
+    runAction("approve execution", `/api/runbooks/executions/${executionId}/approve`, {
+      method: "POST",
+    });
+
+  const handleRejectExecution = (executionId: string) =>
+    runAction("reject execution", `/api/runbooks/executions/${executionId}/reject`, {
+      method: "POST",
+    });
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
     { id: "overview", label: "Overview", icon: "dashboard" },
@@ -596,6 +585,21 @@ export function Dashboard({
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Above the tabs, not inside one: the action that failed may have been
+            started from a tab the operator has since switched away from. */}
+        {actionError && (
+          <div className="mb-6 rounded-lg border border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/30 p-3 text-sm text-red-700 dark:text-red-300 flex items-start gap-2">
+            <Icon name="warning" size={16} />
+            <span className="flex-1">{actionError}</span>
+            <button
+              onClick={() => setActionError(null)}
+              className="text-red-700 dark:text-red-300 hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Quick Navigation */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           {onIncidents && (

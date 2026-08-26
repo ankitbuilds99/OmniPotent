@@ -959,30 +959,72 @@ async def create_alert(
     return alert
 
 
+async def _acting_member(db: Any, user_id: UUID | None) -> UUID | None:
+    """Which `members` row to attribute an acknowledge/resolve to.
+
+    `user_id` was a required query parameter and nothing in the UI sent one, so
+    every Acknowledge and Resolve click on the dashboard was a 422 the page
+    swallowed — `if (res.ok)` with no else branch. The sibling incident routes
+    were fixed this way already (`_acting_user` in app/incidents/router.py);
+    these two were missed.
+
+    Falls back to the principal the request authenticated as, looked up by email
+    in this org. `acknowledged_by`/`resolved_by` are foreign keys into `members`,
+    so a synthetic id would be a constraint violation on Postgres — where no row
+    matches, the columns stay NULL and the acknowledgement still happens. Losing
+    the attribution is much better than refusing the click: the point of
+    acknowledging is to stop the escalation paging people.
+    """
+    if user_id is not None:
+        return user_id
+
+    from sqlalchemy import select
+
+    from app.database.models import Member
+    from app.tenant_context import get_actor
+
+    actor = get_actor()
+    if not actor or actor == "-":
+        return None
+    row = await db.execute(
+        select(Member.id).where(Member.org_id == _org_uuid(), Member.email == actor)
+    )
+    return row.scalar_one_or_none()
+
+
 @router.post("/alerts/{alert_id}/acknowledge")
 async def acknowledge_alert(
     alert_id: UUID,
-    user_id: UUID,
+    user_id: UUID | None = None,
     db=Depends(get_async_session),
 ):
     """Acknowledge an alert."""
     await _owned_alert(db, alert_id)
     service = await get_escalation_service(db)
-    alert = await service.acknowledge_alert(alert_id, user_id)
+    try:
+        alert = await service.acknowledge_alert(alert_id, await _acting_member(db, user_id))
+    except ValueError as exc:
+        # The service raises for "already acknowledged" and "already resolved".
+        # Unhandled, that was a 500 on a button whose worst case is that
+        # somebody else got there first.
+        raise HTTPException(409, str(exc)) from None
     return {"id": alert.id, "status": alert.status}
 
 
 @router.post("/alerts/{alert_id}/resolve")
 async def resolve_alert(
     alert_id: UUID,
-    user_id: UUID,
+    user_id: UUID | None = None,
     notes: str | None = None,
     db=Depends(get_async_session),
 ):
     """Resolve an alert."""
     await _owned_alert(db, alert_id)
     service = await get_escalation_service(db)
-    alert = await service.resolve_alert(alert_id, user_id, notes)
+    try:
+        alert = await service.resolve_alert(alert_id, await _acting_member(db, user_id), notes)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
     return {"id": alert.id, "status": alert.status}
 
 

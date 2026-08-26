@@ -382,6 +382,16 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"content" | "timeline" | "actions">("content");
 
+  /** A server document into page state. `editing` is presentation-only and is
+   *  not part of the API shape, so it is added here rather than expected back. */
+  const applyDocument = useCallback((doc: PostmortemData) => {
+    setPostmortem({
+      ...doc,
+      action_items: doc.action_items ?? [],
+      sections: (doc.sections ?? []).map((s: PostmortemSection) => ({ ...s, editing: false })),
+    });
+  }, []);
+
   const fetchPostmortem = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -403,6 +413,21 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
         return;
       }
 
+      // Read the stored document first. This page used to POST unconditionally,
+      // which re-ran the model on every visit — a fresh draft each time, and any
+      // edit an operator had made was overwritten by a document that had never
+      // seen it. 404 here means nobody has written one yet, so generate.
+      const stored = await apiFetch(`/api/incidents/${incident.id}/postmortem`);
+      if (stored.ok) {
+        applyDocument(await stored.json());
+        return;
+      }
+      if (stored.status !== 404) {
+        setPostmortem(null);
+        setError(await errorDetail(stored));
+        return;
+      }
+
       // The server assembles the document: real timeline and durations off the
       // incident record, prose written by the configured model from those facts.
       const res = await apiFetch(`/api/incidents/${incident.id}/postmortem`, {
@@ -417,19 +442,14 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
         setError(await errorDetail(res));
         return;
       }
-      const doc = await res.json();
-      setPostmortem({
-        ...doc,
-        action_items: doc.action_items ?? [],
-        sections: (doc.sections ?? []).map((s: PostmortemSection) => ({ ...s, editing: false })),
-      });
+      applyDocument(await res.json());
     } catch (err) {
       setPostmortem(null);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyDocument]);
 
   useEffect(() => {
     fetchPostmortem();
@@ -445,24 +465,71 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const saveSection = (sectionId: string, content: string) => {
+  // Both of these used to be `setPostmortem(...)` and nothing more. The Save
+  // button on a section and the status dropdown on an action item wrote to
+  // component state, so the rewrite of a root cause — the one part of the
+  // document a human actually authored — and every action item marked done were
+  // discarded by the next reload. They now PATCH the stored document, and the
+  // server's copy is what re-renders.
+  const saveSection = async (sectionId: string, content: string) => {
     if (!postmortem) return;
+    const previous = postmortem;
+    // Optimistic: the editor closes immediately, and a failure restores it with
+    // the operator's text intact rather than silently dropping what they wrote.
     setPostmortem({
       ...postmortem,
       sections: postmortem.sections.map(s =>
         s.id === sectionId ? { ...s, content, editing: false, source: "edited" } : s
       ),
     });
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/incidents/${postmortem.incident_id}/postmortem/sections/${sectionId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        }
+      );
+      if (!res.ok) throw new Error(await errorDetail(res));
+      applyDocument(await res.json());
+    } catch (err) {
+      setPostmortem({
+        ...previous,
+        sections: previous.sections.map(s =>
+          s.id === sectionId ? { ...s, content, editing: true } : s
+        ),
+      });
+      setError(`Could not save this section: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
-  const updateActionItem = (itemId: string, status: ActionItem["status"]) => {
+  const updateActionItem = async (itemId: string, status: ActionItem["status"]) => {
     if (!postmortem) return;
+    const previous = postmortem;
     setPostmortem({
       ...postmortem,
       action_items: postmortem.action_items.map(item =>
         item.id === itemId ? { ...item, status } : item
       ),
     });
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/incidents/${postmortem.incident_id}/postmortem/action-items/${itemId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        }
+      );
+      if (!res.ok) throw new Error(await errorDetail(res));
+      applyDocument(await res.json());
+    } catch (err) {
+      setPostmortem(previous);
+      setError(`Could not update this action item: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   /** Re-run the model for one section. This used to be a 2000ms sleep. */
@@ -649,6 +716,8 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
                           <button
                             onClick={() => toggleEdit(section.id)}
                             className="p-1.5 text-gray-400 hover:text-blue-600 rounded"
+                            title={section.editing ? "Stop editing" : "Edit"}
+                            aria-label={`${section.editing ? "Stop editing" : "Edit"} ${section.title}`}
                           >
                             <Icon name="edit-2" size={14} />
                           </button>

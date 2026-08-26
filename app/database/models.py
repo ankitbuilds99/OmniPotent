@@ -404,6 +404,57 @@ class IncidentInvestigation(Base):
     )
 
 
+class Postmortem(Base):
+    """The postmortem document for one incident.
+
+    The page that edits these had no persistence behind it at all: Save on a
+    section and the status dropdown on an action item both wrote to React state
+    and stopped there, so a reload discarded every edit and re-ran the model
+    from scratch. A postmortem is the one artifact of an incident that outlives
+    it — it gets reviewed, assigned and referenced weeks later — so losing the
+    human's rewrite of the root cause is losing the only part of the document
+    that was not machine-generated.
+
+    `sections` and `action_items` are JSON for the same reason the incident
+    timeline is: they are read and written whole, and never queried across
+    postmortems. One row per incident.
+    """
+
+    __tablename__ = "postmortems"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("incidents.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    authors: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    reviewers: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    sections: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    action_items: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    timeline: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    doc_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+    __table_args__ = (
+        Index("ix_postmortems_org", "org_id"),
+    )
+
+
 class UsageRecord(Base):
     """Per-tenant usage metering for billing."""
 

@@ -185,7 +185,7 @@ def test_regenerating_one_section_asks_for_only_that_section(client, stub_llm):
     assert [s["id"] for s in body["sections"]] == ["root_cause"]
     assert body["sections"][0]["content"] == "A leaked transaction held every connection."
     # A partial regeneration must not re-issue the action items.
-    assert "action_items" not in body
+    assert body["action_items"] == []
     assert len(stub_llm.calls) == 1
 
 

@@ -88,6 +88,11 @@ function installFetch(overrides: Record<string, () => Response> = {}) {
     const key = `${method} ${url}`
     if (overrides[key]) return overrides[key]()
     if (key === 'GET /api/incidents') return json([INCIDENT])
+    // The default: nothing stored yet, so the page generates. Tests that care
+    // about the stored path override this key.
+    if (key === `GET /api/incidents/${INCIDENT.id}/postmortem`) {
+      return json({ detail: 'No postmortem has been generated for this incident yet.' }, 404)
+    }
     if (key === `POST /api/incidents/${INCIDENT.id}/postmortem`) return json(DOCUMENT)
     return json({ detail: `no route for ${key}` }, 405)
   })
@@ -212,5 +217,95 @@ describe('Postmortem', () => {
     expect(await screen.findByText('Alert on pool saturation')).toBeInTheDocument()
     expect(screen.getByText('Not set')).toBeInTheDocument()
     expect(screen.queryByText('Review and update monitoring alerts')).not.toBeInTheDocument()
+  })
+
+  // The page used to POST unconditionally on every visit, so it re-ran the
+  // model each time and the fresh draft overwrote whatever had been edited.
+  it('reads the stored document instead of regenerating when one exists', async () => {
+    installFetch({
+      [`GET /api/incidents/${INCIDENT.id}/postmortem`]: () =>
+        json({
+          ...DOCUMENT,
+          sections: [
+            DOCUMENT.sections[0],
+            { ...DOCUMENT.sections[1], content: "The operator's own analysis.", source: 'edited' },
+          ],
+        }),
+    })
+    render(<Postmortem onBack={() => {}} />)
+
+    expect(await screen.findByText("The operator's own analysis.")).toBeInTheDocument()
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(0)
+  })
+
+  // Save was `setPostmortem(...)` and nothing else — the edit lived in component
+  // state until the next reload discarded it.
+  it('saving a section PATCHes it to the server', async () => {
+    installFetch({
+      [`PATCH /api/incidents/${INCIDENT.id}/postmortem/sections/root_cause`]: () =>
+        json({
+          ...DOCUMENT,
+          sections: [
+            DOCUMENT.sections[0],
+            { ...DOCUMENT.sections[1], content: 'A migration held an exclusive lock.', source: 'edited' },
+          ],
+        }),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('A leaked transaction exhausted the connection pool.')
+
+    fireEvent.click(screen.getByLabelText('Edit Root Cause Analysis'))
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'A migration held an exclusive lock.' },
+    })
+    fireEvent.click(screen.getByText('Save'))
+
+    expect(await screen.findByText('A migration held an exclusive lock.')).toBeInTheDocument()
+    const patch = calls.find(c => c.method === 'PATCH')
+    expect(patch?.url).toBe(`/api/incidents/${INCIDENT.id}/postmortem/sections/root_cause`)
+    expect(patch?.body).toEqual({ content: 'A migration held an exclusive lock.' })
+  })
+
+  it('a failed save says so and hands the text back rather than dropping it', async () => {
+    installFetch({
+      [`PATCH /api/incidents/${INCIDENT.id}/postmortem/sections/root_cause`]: () =>
+        json({ detail: 'This postmortem has no root_cause section.' }, 404),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('A leaked transaction exhausted the connection pool.')
+
+    fireEvent.click(screen.getByLabelText('Edit Root Cause Analysis'))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Rewritten.' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/no root_cause section/)
+    // Back in the editor, with what they typed still in it.
+    expect(await screen.findByRole('textbox')).toHaveValue('Rewritten.')
+  })
+
+  // Same defect on the other control: the status dropdown never left the browser.
+  it('changing an action item status PATCHes it to the server', async () => {
+    installFetch({
+      [`PATCH /api/incidents/${INCIDENT.id}/postmortem/action-items/a1`]: () =>
+        json({
+          ...DOCUMENT,
+          action_items: [{ ...DOCUMENT.action_items[0], status: 'completed' }],
+        }),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+
+    fireEvent.click(screen.getByText('Actions'))
+    await screen.findByText('Alert on pool saturation')
+    fireEvent.change(screen.getByDisplayValue('Open'), { target: { value: 'completed' } })
+
+    const patch = await vi.waitFor(() => {
+      const found = calls.find(c => c.method === 'PATCH')
+      expect(found).toBeDefined()
+      return found!
+    })
+    expect(patch.url).toBe(`/api/incidents/${INCIDENT.id}/postmortem/action-items/a1`)
+    expect(patch.body).toEqual({ status: 'completed' })
   })
 })
