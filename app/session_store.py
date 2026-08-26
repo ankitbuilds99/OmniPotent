@@ -14,13 +14,29 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.config import get_settings
 from app.redis_pool import RedisPoolType, get_redis
 
 log = logging.getLogger("omnipotent.session_store")
 
-SESSION_TTL = 86400
+# Redis expiry (seconds) for session and investigation keys. 24h is the fallback,
+# not a rule: a session must survive a rolling deploy and a long incident, but
+# holding it forever leaks state for every user who never logs out.
+SESSION_TTL_DEFAULT = 86_400
 SESSION_PREFIX = "session:"
 INVESTIGATION_PREFIX = "investigation:"
+
+
+def _session_ttl() -> int:
+    """TTL to stamp on session/investigation keys.
+
+    Read per call (get_settings is cached) instead of frozen at import time, so
+    an operator override applies without a code change. getattr keeps this
+    working while app/config.py has no copilot_session_ttl field yet — the
+    fallback is the historical 24h, so behaviour is unchanged until it does.
+    """
+    ttl = getattr(get_settings(), "copilot_session_ttl", SESSION_TTL_DEFAULT)
+    return int(ttl) if ttl else SESSION_TTL_DEFAULT
 
 
 @dataclass
@@ -82,12 +98,13 @@ class DistributedSessionStore:
         """Create a new session in Redis."""
         redis = await self._get_redis()
         key = f"{SESSION_PREFIX}{session_data.session_id}"
+        ttl = _session_ttl()  # one value for both keys, so they expire together
 
-        await redis.setex(key, SESSION_TTL, session_data.to_json())
+        await redis.setex(key, ttl, session_data.to_json())
 
         user_key = f"user_sessions:{session_data.user_id}"
         await redis.sadd(user_key, session_data.session_id)
-        await redis.expire(user_key, SESSION_TTL)
+        await redis.expire(user_key, ttl)
 
         self._local_cache[session_data.session_id] = session_data
         self._cache_ttl[session_data.session_id] = time.time() + self._cache_duration
@@ -135,7 +152,7 @@ class DistributedSessionStore:
 
         redis = await self._get_redis()
         key = f"{SESSION_PREFIX}{session_id}"
-        await redis.setex(key, SESSION_TTL, session.to_json())
+        await redis.setex(key, _session_ttl(), session.to_json())
 
         self._local_cache[session_id] = session
         self._cache_ttl[session_id] = time.time() + self._cache_duration
@@ -166,11 +183,12 @@ class DistributedSessionStore:
         key = f"{INVESTIGATION_PREFIX}{state.investigation_id}"
 
         state.updated_at = time.time()
-        await redis.setex(key, SESSION_TTL, state.to_json())
+        ttl = _session_ttl()
+        await redis.setex(key, ttl, state.to_json())
 
         session_key = f"session_investigations:{state.session_id}"
         await redis.sadd(session_key, state.investigation_id)
-        await redis.expire(session_key, SESSION_TTL)
+        await redis.expire(session_key, ttl)
 
     async def get_investigation(self, investigation_id: str) -> InvestigationState | None:
         """Retrieve investigation state."""

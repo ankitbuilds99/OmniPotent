@@ -137,8 +137,8 @@ class TestTeamInvitation:
         # `utcnow()`: these timestamps round trip through a
         # `DateTime(timezone=True)` column, and a naive-vs-aware subtraction is
         # a TypeError rather than a failed assertion.
-        expected = datetime.now(timezone.utc) + timedelta(days=7)
         assert invite.expires_at.tzinfo is not None
+        expected = datetime.now(timezone.utc) + timedelta(days=7)
         delta = abs((invite.expires_at - expected).total_seconds())
         assert delta < 60  # Within 1 minute
 

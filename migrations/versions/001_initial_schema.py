@@ -18,10 +18,16 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-# Not `sqlalchemy.dialects.postgresql` directly: SQLite is the default database
-# URL, and JSONB has no SQLite compiler, so every scripted `alembic upgrade head`
-# died here with `CompileError: ... can't render element of type JSONB` before
-# creating a single table. These are the same portable types the ORM models use.
+# Not `sqlalchemy.dialects.postgresql` directly. JSONB stays JSONB on PostgreSQL,
+# so the emitted PostgreSQL DDL is unchanged and a database that already ran this
+# revision is unaffected — but a bare postgresql.JSONB() cannot be COMPILED
+# outside PostgreSQL, and alembic.ini defaults sqlalchemy.url to SQLite. Every
+# scripted `alembic upgrade head` therefore died at this revision, before
+# creating a single table, with:
+#   CompileError (in table 'organizations', column 'settings'): ...
+#   can't render element of type JSONB
+# These are the same portable types the ORM models use, which is also what keeps
+# `alembic check` (see .github/workflows/database-migrations.yml) quiet.
 from app.database.types import JSONB, UUID
 
 revision: str = "001_initial"

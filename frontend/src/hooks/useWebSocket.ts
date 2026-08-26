@@ -11,16 +11,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "../types";
 
+// The token rides in the WebSocket subprotocol and is read per connection, so a
+// sign-in takes effect without a reload (see lib/authToken).
 import { wsProtocols } from "../lib/authToken";
 
-import { wsUrl as apiWsUrl } from "../lib/apiClient";
-
-// Convert the shared API base to a WebSocket origin. This used to default to
-// "http://localhost:8000", so a production browser opened its socket against the
-// user's own machine; apiClient's wsUrl() falls back to the page origin instead.
-function getWsUrl(): string {
-  return apiWsUrl("");
-}
+// The http->ws conversion lives in lib/apiClient, alongside the base URL every
+// other client call uses. The local copy resolved the base with
+// `?? "http://localhost:8000"`, which kept the Dockerfile's deliberately empty
+// VITE_API_URL and made `new URL("")` throw at module load — taking this whole
+// hook down in every production image — and, when it did not throw, pointed a
+// production browser's socket at the user's own machine.
+import { wsUrl } from "../lib/apiClient";
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
 
@@ -141,14 +142,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const params = new URLSearchParams();
     if (sessionId) params.set("session_id", sessionId);
     const queryString = params.toString();
-    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`;
+    const url = wsUrl(`/ws/chat/${threadId}${queryString ? `?${queryString}` : ""}`);
 
     // Use subprotocol for auth token (not logged in access logs)
     // Format: ["copilot-v1", "auth-<token>"] or just ["copilot-v1"] if no token
     const protocols = wsProtocols();
 
     try {
-      const ws = new WebSocket(wsUrl, protocols);
+      const ws = new WebSocket(url, protocols);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -329,13 +330,13 @@ export async function probeWebSocket(threadId: string): Promise<boolean> {
   if (!isWebSocketSupported()) return false;
 
   return new Promise((resolve) => {
-    const wsUrl = `${getWsUrl()}/ws/chat/${threadId}`;
+    const url = wsUrl(`/ws/chat/${threadId}`);
 
     // Use subprotocol for auth token (secure - not in URL/logs)
     const protocols = wsProtocols();
 
     try {
-      const ws = new WebSocket(wsUrl, protocols);
+      const ws = new WebSocket(url, protocols);
       const timeout = setTimeout(() => {
         ws.close();
         resolve(false);

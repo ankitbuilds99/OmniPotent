@@ -21,14 +21,16 @@ resources:
 
 # Production-specific patches
 patches:
-  # Higher replicas for production
+  # Replicas PINNED TO 1 — TEMPORARY; in-memory authoritative state. See
+  # deploy/helm/copilot/values.yaml for the store list and revert condition.
+  # RESTORE 3 WHEN those stores are externalised.
   - target:
       kind: Deployment
       name: omnipotent-api
     patch: |-
       - op: replace
         path: /spec/replicas
-        value: 3
+        value: 1
 
   # Production resource limits
   - target:
@@ -48,17 +50,20 @@ patches:
         path: /spec/template/spec/containers/0/resources/limits/memory
         value: "4Gi"
 
-  # Production HPA settings
+  # Production HPA settings — PINNED TO 1/1, TEMPORARY. This patch would otherwise
+  # override the pin in ../../hpa.yaml. Authoritative business state lives in
+  # module-level Python dicts; see deploy/helm/copilot/values.yaml for the store
+  # list and revert condition. RESTORE 3/20 WHEN those stores are externalised.
   - target:
       kind: HorizontalPodAutoscaler
       name: omnipotent-api
     patch: |-
       - op: replace
         path: /spec/minReplicas
-        value: 3
+        value: 1
       - op: replace
         path: /spec/maxReplicas
-        value: 20
+        value: 1
 
   # Stricter pod anti-affinity for production
   - target:

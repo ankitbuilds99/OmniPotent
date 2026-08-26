@@ -33,6 +33,30 @@ log = logging.getLogger("omnipotent.database")
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+# The engine `init_db()` last created the schema against — not a bare bool.
+# "The schema exists" is only ever true *of a particular database*, and the
+# engine is what names one. A plain flag outlived the engine it described: any
+# caller that repointed the database by assigning `_engine = None` (which is how
+# most test fixtures swap in a throwaway SQLite file) left the flag set, so
+# `ensure_schema()` returned immediately for a database it had never touched and
+# the first query failed with "no such table".
+_schema_ready_for: AsyncEngine | None = None
+
+# Serializes the first-caller schema creation. Keyed by the running loop rather
+# than held as one module global: an asyncio.Lock binds to the loop that first
+# awaits it and raises on every other one, and pytest-asyncio gives each test its
+# own loop. Entries are dropped in close_db(), which every teardown path calls.
+_schema_locks: dict[int, asyncio.Lock] = {}
+
+
+def _schema_lock() -> asyncio.Lock:
+    """The schema lock belonging to the currently running event loop."""
+    key = id(asyncio.get_running_loop())
+    lock = _schema_locks.get(key)
+    if lock is None:
+        lock = _schema_locks[key] = asyncio.Lock()
+    return lock
+
 
 @dataclass
 class DatabaseHealth:
@@ -52,13 +76,20 @@ def _get_database_url() -> str:
     url = s.copilot_database_url
 
     if not url:
-        url = "sqlite+aiosqlite:///data/copilot.db"
+        # No URL configured -> SQLite inside the one state directory every
+        # subsystem shares (COPILOT_STATE_DIR), not a CWD-relative "data/" that
+        # moves with however the process was launched. state_path() raises if the
+        # directory can't be created: an unwritable state dir is a deployment
+        # error, and silently relocating the database to /tmp used to discard
+        # every row on the next restart with nothing but a log line to show.
+        db_path = s.state_path("copilot.db")
+        url = f"sqlite+aiosqlite:///{db_path}"
 
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-    elif url.startswith("sqlite://"):
+    elif url.startswith("sqlite://") and not url.startswith("sqlite+"):
         url = url.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
     return url
@@ -205,19 +236,62 @@ async def init_db() -> None:
         log.info("PostgreSQL database ready (use Alembic for migrations)")
 
 
+async def ensure_schema() -> None:
+    """Run :func:`init_db` at most once per engine.
+
+    The API lifespan calls this before serving, so it is normally a no-op by the
+    time a request arrives. It exists because callers that touch the ORM outside
+    a request — tests, a worker, a script — otherwise hit tables that were never
+    created: `init_db()` had no caller at all before this, so on the default
+    (SQLite) configuration the entire ORM layer was unreachable.
+
+    Locked, per event loop. `create_all(checkfirst=True)` is idempotent only
+    against a *completed* creation: it issues a SELECT and then a CREATE, so two
+    coroutines reaching a fresh database together both see no tables and both
+    try to create them, and the loser raises "table ... already exists". The API
+    lifespan makes that unreachable through a request, but anything that touches
+    the ORM outside one — a worker, a script, a background task racing a poll —
+    hits it on the first two concurrent calls. The lock is per-loop because an
+    asyncio.Lock binds to the loop that first awaits it and raises on every
+    other one (pytest-asyncio gives each test its own loop).
+    """
+    global _schema_ready_for
+
+    # Compared against the live engine rather than a flag, so repointing the
+    # database invalidates "ready" on its own — the caller does not have to
+    # remember to say so.
+    engine = get_engine()
+    if _schema_ready_for is engine:
+        return
+    async with _schema_lock():
+        # Re-checked inside the lock: the coroutine that waited here while
+        # another one created the schema must not create it a second time.
+        if _schema_ready_for is engine:
+            return
+        await init_db()
+        _schema_ready_for = engine
+
+
 async def close_db() -> None:
     """Close database connections gracefully.
 
     Called during application shutdown. Disposes the engine and clears
     the connection pool.
     """
-    global _engine, _session_factory
+    global _engine, _session_factory, _schema_ready_for
 
     if _engine is not None:
         await _engine.dispose()
         log.info("Database engine disposed")
         _engine = None
         _session_factory = None
+    # Dropped rather than left to compare unequal, so a disposed engine is not
+    # kept alive by this reference alone.
+    _schema_ready_for = None
+    # Locks belong to loops that are being torn down with the engine; keeping
+    # them would grow the dict once per test and hand a stale loop's lock to a
+    # new loop that happened to reuse the same id.
+    _schema_locks.clear()
 
 
 async def check_db_health() -> DatabaseHealth:

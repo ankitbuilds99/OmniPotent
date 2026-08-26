@@ -121,3 +121,17 @@ data/
 tmp/
 temp/
 *.tmp
+
+# Claude Code local settings (may contain machine-specific paths/credentials)
+.claude/settings.local.json*
+
+# Local runtime state. COPILOT_STATE_DIR defaults to <repo>/data, so simply
+# starting the app writes a SQLite database here — customers, trials, usage
+# events, graph checkpoints and the vector store. It is per-developer data, not
+# source, and can contain real customer emails once anyone points the app at
+# anything. Deployments set COPILOT_STATE_DIR to a mounted volume instead.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

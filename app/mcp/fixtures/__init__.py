@@ -52,6 +52,50 @@ def get_fixture(server: str, key: str) -> Any:
 
 
 # --------------------------------------------------------------------------- #
+# Labelling offline data
+# --------------------------------------------------------------------------- #
+# Key added to every fixture-derived record. Underscore-prefixed so it reads as
+# metadata and sorts away from the real fields.
+DEMO_KEY = "_simulated"
+DEMO_NOTICE_KEY = "_notice"
+
+
+def demo_notice(server: str = "") -> str:
+    """The human-readable warning attached to fixture data."""
+    where = f" — no live {server} credentials are configured" if server else ""
+    return (
+        f"SIMULATED demo fixture from scenario '{get_scenario()}'{where}. "
+        "This did NOT come from a live system; do not present it as observed fact."
+    )
+
+
+def mark_demo(payload: Any, server: str = "") -> Any:
+    """Tag fixture-derived data so a consumer can tell it from live data.
+
+    Every MCP server falls back to these fixtures when its credentials are
+    absent. That fallback is deliberate and documented — it is what makes the
+    agent runnable with no external accounts — but the fixture responses were
+    shaped exactly like live ones, with no marker anywhere. An agent reading
+    them had no way to know its root-cause analysis was built on invented pods,
+    invented incidents, and invented error rates, and neither did the operator
+    reading the resulting report.
+
+    Marking costs one key per record and removes the ambiguity entirely.
+
+    Dicts and lists are copied rather than mutated: get_fixture() hands out
+    references into the module-level scenario tables, so mutating in place would
+    permanently contaminate the fixtures for every later call.
+    """
+    if isinstance(payload, dict):
+        return {**payload, DEMO_KEY: True, DEMO_NOTICE_KEY: demo_notice(server)}
+    if isinstance(payload, list):
+        # Lists of scalars (e.g. list_services -> list[str]) have nowhere to put
+        # a marker; leave them alone rather than changing their element type.
+        return [mark_demo(item, server) if isinstance(item, dict) else item for item in payload]
+    return payload
+
+
+# --------------------------------------------------------------------------- #
 # Scenario 1: checkout-discount (default - the existing demo)
 # Bad discount code deploy causes CrashLoopBackOff and 5xx errors
 # Root cause: Negative discount percentage causes division-by-zero

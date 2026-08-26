@@ -26,7 +26,7 @@ from app.status_page.notifications import (
     get_status_notifier,
     send_verification_email,
 )
-from app.status_page.store import get_status_store
+from app.status_page.store import get_live_status_store, get_status_store
 from app.url_guard import BlockedURL, assert_public_url
 
 router = APIRouter(prefix="/api/status", tags=["Status Page"])
@@ -193,6 +193,21 @@ async def get_status_summary() -> StatusSummaryResponse:
     store = get_status_store()
     summary = await store.get_status_summary()
     return StatusSummaryResponse(**summary)
+
+
+@router.post("/refresh", response_model=dict)
+async def refresh_status() -> dict:
+    """Manually trigger a health check refresh.
+
+    Forces an immediate sync of component status from real health checks,
+    rather than waiting for the next poll.
+    """
+    live_store = get_live_status_store()
+    if live_store is None:
+        raise HTTPException(400, "Live status store not initialized")
+
+    await live_store.refresh()
+    return {"status": "refreshed", "message": "Health checks synced successfully"}
 
 
 @router.get("/components", response_model=list[ComponentResponse])

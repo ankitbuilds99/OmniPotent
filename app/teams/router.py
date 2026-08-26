@@ -163,6 +163,9 @@ async def create_team(
             slug=request.slug,
         )
     except SlugTaken as exc:
+        # Only raised for a slug the caller chose. One the store generates is
+        # disambiguated with a counted suffix instead, since nobody is holding a
+        # link to it yet.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return TeamResponse(

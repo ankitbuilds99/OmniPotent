@@ -1,6 +1,18 @@
 """API Router for DAG Coordinator.
 
 Exposes REST API for task graph management and execution.
+
+Executions live in Postgres (`app/coordinator/store.py`), not in a module-level
+dict. The dict this replaced was written only after `executor.execute()`
+returned, so `GET /executions/{id}` answered 404 for the whole run — the exact
+window a caller polls — and only started answering once the answer was stale.
+Here a row is written before the DAG starts and updated when it ends, so a poll
+mid-run sees the real state.
+
+The executor, resource pool and replanner behind those routes are per-org
+(`app/tenancy/scoping.py`) rather than one process-wide singleton: a shared
+ResourcePool let one tenant's parallel DAGs starve everyone else's, and a shared
+handler registry gave every tenant the same executor instance.
 """
 
 from __future__ import annotations
@@ -13,6 +25,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import get_settings
+from app.coordinator import store
 from app.coordinator.dag_executor import (
     DAGExecution,
     DAGExecutor,
@@ -29,6 +42,7 @@ from app.coordinator.handlers import (
 from app.coordinator.replanner import DynamicReplanner
 from app.coordinator.resource_pool import ResourcePool
 from app.tenancy.scoping import scoped
+from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.coordinator.api")
 
@@ -36,12 +50,13 @@ router = APIRouter(prefix="/coordinator", tags=["coordinator"])
 
 
 class _CoordinatorState:
-    """One org's DAG executor, resource pool, replanner and execution history.
+    """One org's DAG executor, resource pool and replanner.
 
-    Shared across the process these were a cross-tenant channel in both
-    directions: executions carry investigation output (log lines, metric values,
-    service names) that `GET /executions` handed to anyone, and a single
-    ResourcePool meant one tenant's parallel DAGs starved everyone else's.
+    Shared across the process these were a cross-tenant channel: a single
+    ResourcePool meant one tenant's parallel DAGs starved everyone else's, and
+    one executor meant one handler registry for every tenant. Execution records
+    are not held here at all — they live in `app/coordinator/store.py`, keyed on
+    (id, org_id), so they survive a restart and a poll mid-run.
     """
 
     def __init__(self) -> None:
@@ -71,14 +86,76 @@ class _CoordinatorState:
             self.executor.register_handler(name, handler)
 
         self.replanner = DynamicReplanner(llm_client=None, knowledge_graph=None)
-        self.active_executions: dict[str, DAGExecution] = {}
 
 
 _state = scoped(_CoordinatorState)
 
 
-def _active_executions() -> dict[str, DAGExecution]:
-    return _state.get().active_executions
+async def _record_started(
+    org_id: str,
+    execution_id: str,
+    dag: TaskDAG,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """Write the RUNNING placeholder row for a run that is about to begin.
+
+    Called from `_start`, inside the request, so the row exists the moment the
+    route answers with the id; also called at the top of `_run_and_record` so a
+    caller that queues the task directly still gets it. `save_execution` is an
+    upsert, so the second write is the same row.
+    """
+    await store.save_execution(
+        org_id,
+        DAGExecution(
+            id=execution_id,
+            dag_id=dag.id,
+            state=ExecutionState.RUNNING,
+            initial_context=dict(context or {}),
+            accumulated_context=dict(context or {}),
+            execution_levels=dag.get_execution_levels(),
+        ),
+    )
+
+
+async def _run_and_record(
+    executor: DAGExecutor,
+    dag: TaskDAG,
+    org_id: str,
+    execution_id: str,
+    context: dict[str, Any] | None = None,
+    resume_from: str | None = None,
+) -> None:
+    """Run a DAG, recording its state before it starts and after it ends.
+
+    The pre-run row is what makes polling work: previously nothing was written
+    until `execute()` returned, so a DAG parked on a human approval — precisely
+    when you need to find it — was invisible for as long as it was blocked.
+
+    The `except` is not swallowing a bug: `execute()` re-raises after marking its
+    own execution object FAILED, and this is a background task with no caller to
+    receive the exception, so the failure has to be written down here or it is
+    lost entirely — which is how `resume_from` against a missing checkpoint
+    looked like a DAG that started and then never did anything at all.
+    """
+    await _record_started(org_id, execution_id, dag, context)
+
+    try:
+        execution = await executor.execute(
+            dag,
+            context=context,
+            execution_id=execution_id,
+            resume_from=resume_from,
+        )
+    except Exception as exc:
+        # Outcome and reason only: the object `execute()` built is not returned
+        # on the raising path, so there are no observed task results to store.
+        # The message goes onto the record as well as into the log — a log line
+        # on one pod is not something the caller polling this run can read.
+        log.exception("DAG execution %s failed", execution_id)
+        await store.mark_failed(org_id, execution_id, str(exc))
+        return
+
+    await store.save_execution(org_id, execution)
 
 
 async def get_executor() -> DAGExecutor:
@@ -215,52 +292,33 @@ async def create_dag(
     }
 
 
-def _start(
+async def _start(
     background_tasks: BackgroundTasks,
     executor: DAGExecutor,
     dag: TaskDAG,
     context: dict[str, Any],
     resume_from: str | None = None,
 ) -> str:
-    """Register an execution, queue it, and return its id.
+    """Register an execution, queue the run, and return the id.
 
-    The id is minted here and the placeholder is in the registry *before* the
-    run starts. Both routes used to do `execution = await executor.execute(...)`
-    and only then register it, so nothing was listable until it had already
-    finished — and a DAG parked on a human approval, which is precisely when you
-    need to find it, was invisible for as long as it was blocked. The routes
-    also returned no id at all, so there was nothing to poll with either.
+    Both routes used to do `execution = await executor.execute(...)` and only
+    then record it, and neither returned an id at all, so there was nothing to
+    poll with. The row is written *here*, in the request, rather than by the
+    background task: a queued task does not start until the response has been
+    sent, so recording it there left a window in which the route had handed out
+    an id that `GET /executions/{id}` answered 404 for.
+
+    `storage_org_id()` is resolved here for the same reason — a FastAPI
+    BackgroundTask can run after the middleware has reset the tenant contextvar,
+    which would file the execution under the wrong org.
     """
-    executions = _active_executions()
+    org_id = storage_org_id()
     execution_id = f"exec_{uuid.uuid4().hex[:8]}"
-    executions[execution_id] = DAGExecution(
-        id=execution_id,
-        dag_id=dag.id,
-        initial_context=dict(context),
-        accumulated_context=dict(context),
-        execution_levels=dag.get_execution_levels(),
+    await _record_started(org_id, execution_id, dag, context)
+
+    background_tasks.add_task(
+        _run_and_record, executor, dag, org_id, execution_id, context, resume_from
     )
-
-    async def run() -> None:
-        try:
-            execution = await executor.execute(
-                dag,
-                context=context,
-                execution_id=execution_id,
-                resume_from=resume_from,
-            )
-            executions[execution.id] = execution
-        except Exception as exc:
-            # A background failure with nowhere to surface is how `resume_from`
-            # against a missing checkpoint looked like a DAG that started and
-            # then never did anything at all.
-            log.exception("DAG execution %s failed to run", execution_id)
-            failed = executions.get(execution_id)
-            if failed is not None:
-                failed.state = ExecutionState.FAILED
-                failed.error = str(exc)
-
-    background_tasks.add_task(run)
     return execution_id
 
 
@@ -287,13 +345,15 @@ async def execute_dag(
             ),
         )
 
-    execution_id = _start(
+    execution_id = await _start(
         background_tasks, executor, dag, execute_input.context, execute_input.resume_from
     )
 
     return {
         "status": "started",
         "dag_id": dag_id,
+        # Returned so the caller can poll /executions/{id}. The previous version
+        # withheld it, leaving the listing endpoint as the only way to find a run.
         "execution_id": execution_id,
         "message": "DAG execution started in background",
     }
@@ -312,7 +372,7 @@ async def start_investigation(
         severity=input.severity,
     )
 
-    execution_id = _start(background_tasks, executor, dag, input.context)
+    execution_id = await _start(background_tasks, executor, dag, input.context)
 
     return {
         "status": "started",
@@ -329,27 +389,36 @@ async def get_execution(
     execution_id: str,
 ) -> dict[str, Any]:
     """Get execution status."""
-    execution = _active_executions().get(execution_id)
+    # Scoped by org: execution ids are short random hex, and an unscoped lookup
+    # would let one tenant read another's DAG results by guessing or replaying one.
+    execution = await store.load_execution(storage_org_id(), execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
 
     return execution.to_dict()
 
 
+@router.delete("/executions/{execution_id}")
+async def delete_execution(execution_id: str) -> dict[str, Any]:
+    """Delete a stored execution record.
+
+    Executions are durable now, so there has to be a way to remove one; the
+    dict version was cleared by every restart.
+    """
+    deleted = await store.delete_execution(storage_org_id(), execution_id)
+    return {"deleted": deleted}
+
+
 @router.get("/executions")
-async def list_executions() -> dict[str, Any]:
-    """List all executions."""
+async def list_executions(limit: int = 100) -> dict[str, Any]:
+    """List this organization's executions, most recent first."""
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+
+    executions = await store.list_executions(storage_org_id(), limit=limit)
     return {
-        "executions": [
-            {
-                "id": exec_id,
-                "dag_id": execution.dag_id,
-                "state": execution.state.value,
-                "current_level": execution.current_level,
-            }
-            for exec_id, execution in _active_executions().items()
-        ],
-        "count": len(_active_executions()),
+        "executions": executions,
+        "count": len(executions),
     }
 
 
@@ -376,6 +445,12 @@ async def approve_task(
     matched on task id alone, so approving `restart_service` in the DAG you were
     looking at also approved it in every other run of that DAG that happened to
     be parked on the same task.
+
+    Acts on a live asyncio future inside the executor, so it only reaches a run
+    started by *this* process. Approval cannot be delivered by writing a row —
+    releasing a task waiting on another replica needs a control channel — which
+    is why the executor's pending-approval state stays on the single-replica
+    pin list even now that execution records are durable.
     """
     success = await executor.approve_task(execution_id, task_id, approval.approved)
 

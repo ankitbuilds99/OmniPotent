@@ -297,7 +297,10 @@ def test_channels_for_event_respects_both_switches(client):
             ],
         },
     )
-    with TestClient(api.app):
-        routed = asyncio.run(channels_for_event("incident_created"))
+    # Read directly rather than under a second `TestClient(api.app)`: the fixture
+    # already holds one lifespan open, and re-entering it now tears down the
+    # status-page health-check poller across event loops. See the note at the
+    # foot of tests/test_governance_notifications_coverage.py.
+    routed = asyncio.run(channels_for_event("incident_created"))
     assert "email" in routed
     assert "slack" not in routed

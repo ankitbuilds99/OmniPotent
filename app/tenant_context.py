@@ -76,6 +76,26 @@ def integration_secret(name: str, fallback: str = "") -> str:
     return fallback
 
 
+# Owner recorded on stored rows when no tenant is resolved. Distinct from
+# tenant_id()'s "-": that is a log placeholder meaning "unknown", while this is a
+# real key that single-tenant deployments read back by.
+DEFAULT_STORAGE_ORG = "default"
+
+
+def storage_org_id() -> str:
+    """The org id to file persisted rows under.
+
+    Unlike the accessors that gate tenant *data* access, this never returns None
+    and never raises: single-tenant and offline-demo deployments still write
+    investigation history, planning graphs and DAG executions, and those rows
+    need an owner. Resolve it inside the request — a FastAPI BackgroundTask may
+    run after the middleware has reset the contextvar, so background work must
+    capture the value rather than call this later.
+    """
+    cfg = current_tenant.get()
+    return cfg.org_id if cfg else DEFAULT_STORAGE_ORG
+
+
 def set_actor(actor: str) -> contextvars.Token:
     return actor_var.set(actor or "-")
 

@@ -69,8 +69,13 @@ def _list(client: TestClient, key: str, query: str = "") -> list[dict]:
     return response.json()["investigations"]
 
 
-def _record(key: str, thread_id: str, query: str, tokens: int = 100) -> None:
-    """Record history under `key`'s org, the way a finished investigation does."""
+def _record(key: str, thread_id: str, query: str) -> None:
+    """Record history under `key`'s org, the way a finished investigation does.
+
+    Narrative columns only. `tokens_used` is written by the dashboard's
+    `record_investigation`, which upserts onto this same row on every completion
+    path; see tests/test_dashboard_api.py for the accumulation across turns.
+    """
 
     async def run() -> None:
         resolved = await tenant_auth.resolve(key)
@@ -82,7 +87,6 @@ def _record(key: str, thread_id: str, query: str, tokens: int = 100) -> None:
                 query,
                 status="completed",
                 summary="root cause",
-                tokens_used=tokens,
             )
         finally:
             tenant_context.reset_tenant(token)
@@ -102,7 +106,6 @@ def test_history_lists_what_was_recorded(history):
     assert listed[0]["thread_id"] == "thread-1"
     assert listed[0]["query"] == "why is checkout slow?"
     assert listed[0]["status"] == "completed"
-    assert listed[0]["tokens_used"] == 100
     assert listed[0]["completed_at"]
 
 
@@ -125,10 +128,12 @@ def test_repeat_turns_update_one_row(history):
     _record(key, "thread-1", "second turn")
 
     rows = _list(client, key)
+    # One row per (org_id, thread_id), not one per turn — a long conversation is
+    # a single investigation on the history page.
     assert len(rows) == 1
-    # Tokens accumulate across the investigation rather than being overwritten
-    # by whichever turn happened to finish last.
-    assert rows[0]["tokens_used"] == 200
+    # The question that opened the investigation, not whichever turn finished
+    # last — that is what the history page lists it under.
+    assert rows[0]["query"] == "first turn"
 
 
 def test_status_filter(history):

@@ -3,12 +3,14 @@
 Tracks the full customer journey from trial to paid conversion,
 with usage metering and engagement analytics.
 
-Three things were wrong with the version this replaces, and all three were
+Four things were wrong with the version this replaces, and all four were
 reachable from the API:
 
-* It was four module-level dicts. Every customer, trial and metered usage event
-  was lost on restart, on deploy, and between worker processes — while the
-  endpoints kept returning 200.
+* It was four module-level dicts — ``_customer_store``, ``_email_index``,
+  ``_trial_store``, ``_usage_store``. Every customer, trial and metered usage
+  event was lost on restart, on deploy, and between worker processes (two
+  uvicorn workers answered from two different CRMs) — while the endpoints kept
+  returning 200. These are the numbers invoices are computed from.
 * Those dicts were global, so on a multi-tenant deployment every tenant's
   `GET /customers/dashboard` returned every other tenant's customers, contacts,
   health scores and MRR. Rows carry `org_id` now and every statement filters on
@@ -19,12 +21,28 @@ reachable from the API:
   MRR. The amount now comes from the pricing catalog for the plan being
   converted to; only Enterprise, which has no list price, takes a contracted
   figure from the caller.
+* Usage counters were read-modify-written in Python, so two concurrent
+  investigations could each read the same total and one increment vanished.
+  They are incremented in SQL (``col = col + n``) instead.
+
+Persistence
+-----------
+Every function here is a coroutine backed by Postgres (or SQLite in
+single-node/dev setups) through :mod:`app.database`. Nothing here caches: each
+call reads the database, because two processes disagreeing about a quota is the
+bug being fixed.
+
+The dataclasses below are read models, not ORM rows: callers get a detached
+snapshot with the same fields and ``to_dict()`` shape as before, so mutating one
+does not write anything back. Writes go through the functions.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -32,7 +50,11 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database.engine import ensure_schema, get_session
+from app.database.growth_models import CustomerDB, CustomerUsageRecordDB, TrialDB
 from app.database.orgs import ensure_org_row, org_uuid
 
 log = logging.getLogger("omnipotent.customers")
@@ -221,6 +243,25 @@ class Customer:
         return f"{masked}@{domain}"
 
 
+# --------------------------------------------------------------------------- #
+# Persistence plumbing
+# --------------------------------------------------------------------------- #
+
+
+@asynccontextmanager
+async def _session() -> AsyncGenerator[AsyncSession, None]:
+    """A session with the schema guaranteed to exist.
+
+    ``ensure_schema()`` is a no-op after the first call (and after the API
+    lifespan, which runs it at startup). It is here so that a caller outside a
+    request — a test, a worker, a script — isn't the one that discovers the
+    tables were never created.
+    """
+    await ensure_schema()
+    async with get_session() as session:
+        yield session
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -235,30 +276,52 @@ def _utc(value: datetime | None) -> Any:
 
     SQLite, the default database, has no timezone type, so a
     `DateTime(timezone=True)` column round trips naive. Everything written here
-    is UTC; without this, `Trial.is_active` compares naive against aware and
-    raises TypeError.
+    is UTC, so re-attaching it is exact — and necessary, because
+    `Trial.is_active` compares against an aware `now()` and would raise
+    TypeError on a naive value. Postgres TIMESTAMPTZ already returns aware
+    values, which this leaves untouched.
     """
     if value is None or value.tzinfo is not None:
         return value
     return value.replace(tzinfo=timezone.utc)
 
 
-def _enum(cls: Any, value: str, fallback: Any) -> Any:
-    """Read a stored enum value back, tolerating one written by an older build."""
+def _enum(cls: Any, value: str, fallback: Any, *, row: str, field: str) -> Any:
+    """Read a stored enum value back, tolerating one written by an older build.
+
+    Loud on purpose. Substituting the fallback rewrites what a customer *is* on
+    every read — the tier is what a conversion prices off — so the row and the
+    value that could not be decoded are named at error level and the stored
+    value is left alone for whoever comes to reconcile it.
+
+    Raising instead was considered and rejected: `_to_customer` runs over every
+    row of the dashboard and the recent-customers list, so one undecodable tier
+    would 500 the whole back-office rather than mislabel one line of it. The
+    `tier` column still defaults to "free", a name this enum dropped, so a row
+    written by anything that does not set the tier explicitly lands here.
+    """
     try:
         return cls(value)
     except ValueError:
+        log.error(
+            "Row %s has unreadable %s %r; reading it as %s (stored value left as is)",
+            row,
+            field,
+            value,
+            fallback.value,
+        )
         return fallback
 
 
 def _to_customer(row: Any) -> Customer:
+    """Map a stored row to the detached read model callers expect."""
     return Customer(
         id=row.id,
         email=row.email,
         company=row.company,
         created_at=_utc(row.created_at),
-        status=_enum(CustomerStatus, row.status, CustomerStatus.TRIAL),
-        tier=_enum(CustomerTier, row.tier, CustomerTier.STARTER),
+        status=_enum(CustomerStatus, row.status, CustomerStatus.TRIAL, row=row.id, field="status"),
+        tier=_enum(CustomerTier, row.tier, CustomerTier.STARTER, row=row.id, field="tier"),
         name=row.name,
         role=row.role,
         team_size=row.team_size,
@@ -287,7 +350,10 @@ def _to_trial(row: Any) -> Trial:
         customer_id=row.customer_id,
         started_at=_utc(row.started_at),
         expires_at=_utc(row.expires_at),
-        status=_enum(TrialStatus, row.status, TrialStatus.ACTIVE),
+        # ACTIVE, not EXPIRED, is the fallback: `is_active` still gates on
+        # `expires_at`, so an undecodable status cannot extend a trial past its
+        # end date, and cutting a paying trial off is the worse mistake.
+        status=_enum(TrialStatus, row.status, TrialStatus.ACTIVE, row=row.id, field="status"),
         investigations_allowed=row.investigations_allowed,
         investigations_used=row.investigations_used,
         tokens_allowed=row.tokens_allowed,
@@ -299,8 +365,7 @@ def _to_trial(row: Any) -> Trial:
 
 
 async def _customer_row(session: Any, org: UUID, customer_id: str = "", email: str = "") -> Any:
-    from app.database.growth_models import CustomerDB
-
+    """The one customer row `org` owns, by id or email. None if neither is given."""
     stmt = select(CustomerDB).where(CustomerDB.org_id == org)
     if customer_id:
         stmt = stmt.where(CustomerDB.id == customer_id)
@@ -309,6 +374,11 @@ async def _customer_row(session: Any, org: UUID, customer_id: str = "", email: s
     else:
         return None
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+# --------------------------------------------------------------------------- #
+# Customers
+# --------------------------------------------------------------------------- #
 
 
 async def create_customer(
@@ -326,15 +396,12 @@ async def create_customer(
     Returns:
         Tuple of (customer, message).
     """
-    from app.database.engine import get_session
-    from app.database.growth_models import CustomerDB
-
     email = email.strip().lower()
 
     if not email or "@" not in email:
         return None, "Valid email required"
 
-    async with get_session() as session:
+    async with _session() as session:
         org = await ensure_org_row(session)
 
         existing = await _customer_row(session, org, email=email)
@@ -358,10 +425,36 @@ async def create_customer(
             meta={},
         )
         session.add(row)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Another process inserted the same (org, email) between the SELECT
+            # above and this INSERT. The unique constraint is what makes "one
+            # customer per email per org" true across replicas; the pre-check is
+            # only an optimisation. Return theirs, exactly as it would have.
+            await session.rollback()
+            existing = await _customer_row(session, org, email=email)
+            if existing is None:
+                raise
+            return _to_customer(existing), "Customer already exists"
 
         log.info("Customer created: company=%s tier=%s", company, row.tier)
         return _to_customer(row), "Customer created successfully"
+
+
+async def get_customer(customer_id: str = "", email: str = "") -> Customer | None:
+    """Get customer by ID or email, within the calling org."""
+    if not customer_id and not email:
+        return None
+
+    async with _session() as session:
+        row = await _customer_row(session, org_uuid(), customer_id=customer_id, email=email)
+        return _to_customer(row) if row is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# Trials
+# --------------------------------------------------------------------------- #
 
 
 async def create_trial(
@@ -375,10 +468,7 @@ async def create_trial(
     Returns:
         Tuple of (trial, message).
     """
-    from app.database.engine import get_session
-    from app.database.growth_models import TrialDB
-
-    async with get_session() as session:
+    async with _session() as session:
         org = org_uuid()
         customer = await _customer_row(session, org, customer_id=customer_id)
         if customer is None:
@@ -386,7 +476,11 @@ async def create_trial(
 
         if customer.trial_id:
             existing = (
-                await session.execute(select(TrialDB).where(TrialDB.id == customer.trial_id))
+                await session.execute(
+                    select(TrialDB).where(
+                        TrialDB.id == customer.trial_id, TrialDB.org_id == org
+                    )
+                )
             ).scalar_one_or_none()
             if existing is not None and _to_trial(existing).is_active:
                 return _to_trial(existing), "Trial already active"
@@ -411,27 +505,133 @@ async def create_trial(
         return _to_trial(trial), "Trial started successfully"
 
 
-async def get_customer(customer_id: str = "", email: str = "") -> Customer | None:
-    """Get customer by ID or email, within the calling org."""
-    from app.database.engine import get_session
-
-    async with get_session() as session:
-        row = await _customer_row(session, org_uuid(), customer_id=customer_id, email=email)
-        return _to_customer(row) if row else None
-
-
 async def get_trial(trial_id: str) -> Trial | None:
     """Get trial by ID, within the calling org."""
-    from app.database.engine import get_session
-    from app.database.growth_models import TrialDB
-
-    async with get_session() as session:
+    async with _session() as session:
         row = (
             await session.execute(
                 select(TrialDB).where(TrialDB.id == trial_id, TrialDB.org_id == org_uuid())
             )
         ).scalar_one_or_none()
-        return _to_trial(row) if row else None
+        return _to_trial(row) if row is not None else None
+
+
+async def get_active_trials() -> list[Trial]:
+    """Get all active trials for the calling org, expiring any that are due.
+
+    Expiry used to happen as a side effect of somebody calling this function, so
+    a trial nobody listed stayed `active` forever — and, in a dict, the
+    transition happened once per process and died with it, so the trial could
+    resurrect as ACTIVE on the next restart. It is a single UPDATE now, which
+    also means the status in the table is right for anyone reading it directly.
+    """
+    org = org_uuid()
+    async with _session() as session:
+        await session.execute(
+            update(TrialDB)
+            .where(
+                TrialDB.org_id == org,
+                TrialDB.status == TrialStatus.ACTIVE.value,
+                TrialDB.expires_at <= _now(),
+            )
+            .values(status=TrialStatus.EXPIRED.value)
+        )
+        await session.commit()
+
+        rows = (
+            await session.execute(
+                select(TrialDB)
+                .where(TrialDB.org_id == org, TrialDB.status == TrialStatus.ACTIVE.value)
+                .order_by(TrialDB.expires_at)
+            )
+        ).scalars().all()
+        return [_to_trial(r) for r in rows]
+
+
+def listed_mrr_cents(tier: CustomerTier, annual: bool = False) -> int | None:
+    """The catalog's monthly price for a tier, or None when it has no list price.
+
+    Enterprise is quoted per contract and Starter is free, so both return None
+    and the caller has to decide what that means rather than being handed a
+    number the price list does not support.
+    """
+    from app.billing.plans import PRICING_PLANS
+
+    plan = PRICING_PLANS.get(tier.value)
+    if plan is None:
+        return None
+    cents = plan.annual_price_cents // 12 if annual else plan.monthly_price_cents
+    return cents or None
+
+
+async def convert_trial(
+    customer_id: str,
+    tier: CustomerTier = CustomerTier.TEAM,
+    annual: bool = False,
+    stripe_customer_id: str = "",
+    contracted_mrr_cents: int | None = None,
+) -> tuple[bool, str]:
+    """Convert a trial customer to paid.
+
+    The MRR written here is the catalog price for `tier`, not a number from the
+    request body: the previous version stored whatever `mrr_cents` the caller
+    sent, so `POST /customers/convert` could set the dashboard's revenue total
+    to anything. `contracted_mrr_cents` is accepted only for Enterprise, which
+    is quoted per deal and therefore has no list price to read.
+    """
+    listed = listed_mrr_cents(tier, annual)
+    if listed is None:
+        if tier is not CustomerTier.ENTERPRISE:
+            return False, f"The {tier.value} plan has no recurring price to convert to."
+        if contracted_mrr_cents is None or contracted_mrr_cents < 0:
+            return (
+                False,
+                "Enterprise is quoted per contract: pass contracted_mrr_cents.",
+            )
+        mrr_cents = contracted_mrr_cents
+    else:
+        mrr_cents = listed
+
+    async with _session() as session:
+        org = org_uuid()
+        customer = await _customer_row(session, org, customer_id=customer_id)
+        if customer is None:
+            return False, "Customer not found"
+
+        if customer.trial_id:
+            trial = (
+                await session.execute(
+                    select(TrialDB).where(
+                        TrialDB.id == customer.trial_id, TrialDB.org_id == org
+                    )
+                )
+            ).scalar_one_or_none()
+            if trial is not None:
+                trial.status = TrialStatus.CONVERTED.value
+                trial.converted_at = _now()
+
+        customer.status = CustomerStatus.ACTIVE.value
+        customer.tier = tier.value
+        customer.mrr_cents = mrr_cents
+        customer.stripe_customer_id = stripe_customer_id
+        # Reassigned rather than appended to: a JSON column is only marked dirty
+        # on assignment, so `customer.tags.append(...)` would be silently dropped.
+        customer.tags = [*(customer.tags or []), "converted", f"tier:{tier.value}"]
+        customer.health_score = _health_score(customer)
+        await session.commit()
+
+        log.info(
+            "Trial converted: customer=%s tier=%s mrr=$%.2f",
+            customer.company,
+            tier.value,
+            mrr_cents / 100,
+        )
+        return True, "Trial converted successfully"
+
+
+# --------------------------------------------------------------------------- #
+# Usage
+# --------------------------------------------------------------------------- #
 
 
 async def record_usage(
@@ -442,17 +642,21 @@ async def record_usage(
     duration_seconds: float = 0.0,
     **metadata: Any,
 ) -> bool:
-    """Record customer usage event."""
-    from app.database.engine import get_session
-    from app.database.growth_models import CustomerUsageRecordDB, TrialDB
+    """Record customer usage event.
 
-    async with get_session() as session:
+    Counters are incremented in SQL (``col = col + n``) rather than read-modify-
+    written in Python: these are the numbers a customer is billed from and a
+    concurrent investigation on another replica must not overwrite them.
+    """
+    recorded_at = _now()
+    investigations_delta = 1 if event_type == "investigation" else 0
+
+    async with _session() as session:
         org = org_uuid()
         customer = await _customer_row(session, org, customer_id=customer_id)
         if customer is None:
             return False
 
-        recorded_at = _now()
         session.add(
             CustomerUsageRecordDB(
                 org_id=org,
@@ -466,24 +670,40 @@ async def record_usage(
             )
         )
 
-        customer.last_active_at = recorded_at
-        if event_type == "investigation":
-            customer.total_investigations += 1
-        if tokens_used > 0:
-            customer.total_tokens_used += tokens_used
+        await session.execute(
+            update(CustomerDB)
+            .where(CustomerDB.id == customer_id, CustomerDB.org_id == org)
+            .values(
+                total_investigations=CustomerDB.total_investigations + investigations_delta,
+                total_tokens_used=CustomerDB.total_tokens_used + tokens_used,
+                last_active_at=recorded_at,
+            )
+        )
 
         if customer.trial_id:
             trial = (
-                await session.execute(select(TrialDB).where(TrialDB.id == customer.trial_id))
+                await session.execute(
+                    select(TrialDB).where(
+                        TrialDB.id == customer.trial_id, TrialDB.org_id == org
+                    )
+                )
             ).scalar_one_or_none()
             if trial is not None and _to_trial(trial).is_active:
-                if event_type == "investigation":
-                    trial.investigations_used += 1
-                trial.tokens_used += tokens_used
+                await session.execute(
+                    update(TrialDB)
+                    .where(TrialDB.id == trial.id, TrialDB.org_id == org)
+                    .values(
+                        investigations_used=TrialDB.investigations_used + investigations_delta,
+                        tokens_used=TrialDB.tokens_used + tokens_used,
+                    )
+                )
 
+        # Re-read so the health score is computed from the post-increment values.
+        await session.refresh(customer)
         customer.health_score = _health_score(customer)
         await session.commit()
-        return True
+
+    return True
 
 
 def _health_score(customer: Any) -> float:
@@ -526,127 +746,55 @@ def _health_score(customer: Any) -> float:
     return max(0.0, min(100.0, score))
 
 
-def listed_mrr_cents(tier: CustomerTier, annual: bool = False) -> int | None:
-    """The catalog's monthly price for a tier, or None when it has no list price.
+async def get_customer_usage(customer_id: str, limit: int = 100) -> list[UsageRecord]:
+    """Most recent usage events for a customer, newest first, within the org.
 
-    Enterprise is quoted per contract and Starter is free, so both return None
-    and the caller has to decide what that means rather than being handed a
-    number the price list does not support.
+    The per-event log behind the aggregate counters on the customer row — the
+    detail an invoice dispute is settled with.
     """
-    from app.billing.plans import PRICING_PLANS
-
-    plan = PRICING_PLANS.get(tier.value)
-    if plan is None:
-        return None
-    cents = plan.annual_price_cents // 12 if annual else plan.monthly_price_cents
-    return cents or None
-
-
-async def convert_trial(
-    customer_id: str,
-    tier: CustomerTier = CustomerTier.TEAM,
-    annual: bool = False,
-    stripe_customer_id: str = "",
-    contracted_mrr_cents: int | None = None,
-) -> tuple[bool, str]:
-    """Convert a trial customer to paid.
-
-    The MRR written here is the catalog price for `tier`, not a number from the
-    request body: the previous version stored whatever `mrr_cents` the caller
-    sent, so `POST /customers/convert` could set the dashboard's revenue total
-    to anything. `contracted_mrr_cents` is accepted only for Enterprise, which
-    is quoted per deal and therefore has no list price to read.
-    """
-    from app.database.engine import get_session
-    from app.database.growth_models import TrialDB
-
-    listed = listed_mrr_cents(tier, annual)
-    if listed is None:
-        if tier is not CustomerTier.ENTERPRISE:
-            return False, f"The {tier.value} plan has no recurring price to convert to."
-        if contracted_mrr_cents is None or contracted_mrr_cents < 0:
-            return (
-                False,
-                "Enterprise is quoted per contract: pass contracted_mrr_cents.",
-            )
-        mrr_cents = contracted_mrr_cents
-    else:
-        mrr_cents = listed
-
-    async with get_session() as session:
-        org = org_uuid()
-        customer = await _customer_row(session, org, customer_id=customer_id)
-        if customer is None:
-            return False, "Customer not found"
-
-        if customer.trial_id:
-            trial = (
-                await session.execute(select(TrialDB).where(TrialDB.id == customer.trial_id))
-            ).scalar_one_or_none()
-            if trial is not None:
-                trial.status = TrialStatus.CONVERTED.value
-                trial.converted_at = _now()
-
-        customer.status = CustomerStatus.ACTIVE.value
-        customer.tier = tier.value
-        customer.mrr_cents = mrr_cents
-        customer.stripe_customer_id = stripe_customer_id
-        customer.tags = [*(customer.tags or []), "converted", f"tier:{tier.value}"]
-        customer.health_score = _health_score(customer)
-        await session.commit()
-
-        log.info(
-            "Trial converted: customer=%s tier=%s mrr=$%.2f",
-            customer.company,
-            tier.value,
-            mrr_cents / 100,
-        )
-        return True, "Trial converted successfully"
-
-
-async def get_active_trials() -> list[Trial]:
-    """Get all active trials for the calling org, expiring any that are due.
-
-    Expiry used to happen as a side effect of somebody calling this function, so
-    a trial nobody listed stayed `active` forever. It is a single UPDATE now,
-    which also means the status in the table is right for anyone reading it
-    directly.
-    """
-    from app.database.engine import get_session
-    from app.database.growth_models import TrialDB
-
-    org = org_uuid()
-    async with get_session() as session:
-        await session.execute(
-            update(TrialDB)
-            .where(
-                TrialDB.org_id == org,
-                TrialDB.status == TrialStatus.ACTIVE.value,
-                TrialDB.expires_at <= _now(),
-            )
-            .values(status=TrialStatus.EXPIRED.value)
-        )
-        await session.commit()
-
+    async with _session() as session:
         rows = (
             await session.execute(
-                select(TrialDB)
-                .where(TrialDB.org_id == org, TrialDB.status == TrialStatus.ACTIVE.value)
-                .order_by(TrialDB.expires_at)
+                select(CustomerUsageRecordDB)
+                .where(
+                    CustomerUsageRecordDB.org_id == org_uuid(),
+                    CustomerUsageRecordDB.customer_id == customer_id,
+                )
+                .order_by(
+                    CustomerUsageRecordDB.recorded_at.desc(),
+                    CustomerUsageRecordDB.id.desc(),
+                )
+                .limit(limit)
             )
         ).scalars().all()
-        return [_to_trial(r) for r in rows]
+        return [
+            UsageRecord(
+                timestamp=_utc(r.recorded_at),
+                event_type=r.event_type,
+                investigation_id=r.investigation_id,
+                tokens_used=r.tokens_used,
+                duration_seconds=r.duration_seconds,
+                metadata=dict(r.meta or {}),
+            )
+            for r in rows
+        ]
+
+
+# --------------------------------------------------------------------------- #
+# Aggregates
+# --------------------------------------------------------------------------- #
 
 
 async def get_customer_stats() -> dict[str, Any]:
-    """Get customer statistics for dashboard, scoped to the calling org."""
-    from app.database.engine import get_session
-    from app.database.growth_models import CustomerDB, TrialDB
+    """Get customer statistics for dashboard, scoped to the calling org.
 
+    Aggregated in SQL rather than by loading every customer into memory — this
+    is on the dashboard's hot path and the table only grows.
+    """
     org = org_uuid()
     active_trials = await get_active_trials()
 
-    async with get_session() as session:
+    async with _session() as session:
         totals = (
             await session.execute(
                 select(
@@ -758,14 +906,11 @@ class CustomerManager:
         return result
 
     async def get_dashboard(self) -> dict[str, Any]:
-        """Get customer dashboard data."""
-        from app.database.engine import get_session
-        from app.database.growth_models import CustomerDB
-
+        """Get customer dashboard data, scoped to the calling org."""
         stats = await get_customer_stats()
         trials = await get_active_trials()
 
-        async with get_session() as session:
+        async with _session() as session:
             recent = (
                 await session.execute(
                     select(CustomerDB)
@@ -783,11 +928,11 @@ class CustomerManager:
 
 
 async def clear_customers() -> None:
-    """Clear all customer data (for testing)."""
-    from app.database.engine import get_session
-    from app.database.growth_models import CustomerDB, CustomerUsageRecordDB, TrialDB
-
-    async with get_session() as session:
+    """Delete all customer data (for testing)."""
+    async with _session() as session:
+        # Explicit child-first deletes: ON DELETE CASCADE is declared, but SQLite
+        # does not enforce foreign keys unless PRAGMA foreign_keys is on, so a
+        # customers-only wipe would leave orphaned trials and usage rows behind.
         await session.execute(delete(CustomerUsageRecordDB))
         await session.execute(delete(TrialDB))
         await session.execute(delete(CustomerDB))

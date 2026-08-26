@@ -2986,6 +2986,8 @@ billing = [
 dev = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "apscheduler" },
+    { name = "dramatiq", extra = ["redis"] },
     { name = "fakeredis" },
     { name = "mypy" },
     { name = "pytest" },
@@ -3088,6 +3090,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.26.0,<2.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
     { name = "neo4j", marker = "extra == 'knowledge-graph'", specifier = ">=5.0.0" },
+    { name = "omnipotent", extras = ["tasks"], marker = "extra == 'dev'" },
     { name = "openai", marker = "extra == 'vectors'", specifier = ">=1.0.0" },
     { name = "openai", marker = "extra == 'vectors-faiss'", specifier = ">=1.0.0" },
     { name = "pyasn1", specifier = ">=0.6.4" },

@@ -95,7 +95,24 @@ class TenantStore:
                 "Postgres tenant store isn't implemented yet — set COPILOT_TENANT_DB "
                 "to a SQLite path, or add an asyncpg-backed TenantStore for production."
             )
-        self.db_path = db_path
+        self.db_path = self._ensure_db_path(db_path)
+
+    def _ensure_db_path(self, db_path: str) -> str:
+        """Resolve the DB file under the shared state directory and make sure the
+        directory exists.
+
+        A bare name goes to COPILOT_STATE_DIR; an explicit path ("./x.sqlite",
+        "/var/lib/...", a tmp_path in tests) is honoured as written. Failure to
+        create the directory propagates: the previous silent fall back to /tmp
+        moved every org, member and API key onto a filesystem that is wiped on
+        restart, with no log line to say so.
+        """
+        from app.config import get_settings
+
+        # An empty value is not "unset": it resolves to the state directory
+        # itself, which SQLite cannot open. Fall back to the default filename.
+        name = db_path.strip() or "copilot_tenants.sqlite"
+        return str(get_settings().state_path(name))
 
     async def setup(self) -> None:
         import aiosqlite

@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from app import audit, governance
+from app import audit, config as cfg, governance
+from app.database.engine import close_db
 from app.tenancy.store import TenantStore
 
 
@@ -54,11 +55,16 @@ def test_gdpr_delete_org_erases_everything(tmp_path):
     asyncio.run(scenario())
 
 
-def test_export_audit_writes_jsonl_and_reports_chain(tmp_path):
-    audit.clear()
+async def test_export_audit_writes_jsonl_and_reports_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    await close_db()
+    await audit.clear()
     audit.record("approval.decided", approved=True)
     audit.record("config.model_changed", provider="anthropic")
-    events = audit.recent(limit=10)[::-1]  # oldest→newest for chain verify
+    # Oldest->newest: the chain is verified in the order it was hashed, and
+    # `recent` returns newest first.
+    events = (await audit.recent(limit=10))[::-1]
     out = governance.export_audit(events, str(tmp_path / "audit_export.jsonl"))
     assert out["exported"] == 2
     assert out["chain_ok"] is True

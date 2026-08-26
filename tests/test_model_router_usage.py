@@ -134,7 +134,7 @@ class TestTheGraphRecordsItsOwnSpend:
 
         usage = _run(lambda: usage_store.monthly_usage(), ORG_A)
         assert usage["total_requests"] == 1
-        assert usage["total_cost"] == pytest.approx(0.02)  # $2.50/$10 per MTok
+        assert usage["total_cost"] == pytest.approx(0.0125)  # $2.50/$10 per MTok
         assert usage["by_model"]["gpt-4o"]["requests"] == 1
 
     def test_a_flush_attributes_spend_to_the_org_that_made_the_call(self, db):
@@ -421,7 +421,7 @@ class TestAnInvestigationsSpendIsBilled:
         api._SESSIONS.clear()
 
         assert usage["total_requests"] == 1, usage
-        assert usage["total_cost"] == pytest.approx(0.02)
+        assert usage["total_cost"] == pytest.approx(0.0125)  # $2.50/$10 per MTok
         assert usage["by_model"]["gpt-4o"]["requests"] == 1
         assert stats["cost_analytics"]["total_tokens"] == 2_000
         assert usage_ledger.pending_count() == 0  # flushed, not left on the queue

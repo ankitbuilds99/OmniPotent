@@ -48,6 +48,17 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {SENTRY_API_TOKEN}"}
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live sentry read.
+
+    The write tools already say "(simulated)"; the read tools returned fixtures
+    shaped exactly like real API responses, so an investigation built on invented
+    data looked identical to one built on a live system.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "sentry")
+
+
 # --- Offline fixtures (multi-scenario support) ----------------------------- #
 def _get_issues() -> list:
     from app.mcp.fixtures import get_fixture
@@ -73,7 +84,7 @@ def list_issues(query: str = "is:unresolved", limit: int | str = 10) -> list[dic
         items = _get_issues()
         if "level:error" in query:
             items = [i for i in items if i.get("level") == "error"]
-        return items[:limit]
+        return _demo(items[:limit])
 
     import httpx
 
@@ -104,8 +115,10 @@ def get_issue(issue_id: str) -> dict:
     if OFFLINE:
         issues = _get_issues()
         found = next((i for i in issues if i.get("id") == issue_id), None)
-        return found or {"error": f"unknown issue '{issue_id}' (offline demo has "
-                         f"{[i.get('id') for i in issues]})"}
+        if not found:
+            return {"error": f"unknown issue '{issue_id}' (offline demo has "
+                             f"{[i.get('id') for i in issues]})"}
+        return _demo(found)
 
     import httpx
 
@@ -131,7 +144,7 @@ def get_latest_event(issue_id: str) -> dict:
         if issue_id not in ("", event.get("issue_id", "")):
             return {"error": f"no offline event for issue '{issue_id}' "
                     f"(demo has {event.get('issue_id')})"}
-        return dict(event)
+        return _demo(dict(event))
 
     import httpx
 

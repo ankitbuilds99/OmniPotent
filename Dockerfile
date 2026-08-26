@@ -25,14 +25,17 @@ WORKDIR /app
 
 # Install deps first for better layer caching. Editable install keeps the package
 # rooted at /app so config.ROOT resolves sample_repo/ and frontend/dist/ correctly.
-# postgres  -> Postgres checkpoint + asyncpg driver for production.
+# postgres   -> Postgres checkpoint + asyncpg driver for production.
 # migrations -> alembic, which deploy/kubernetes/base/migration-job.yaml runs from
 #               THIS image (`alembic upgrade head`); without the extra and the two
 #               COPYs below that Job dies with "alembic: not found".
+# tasks      -> dramatiq + apscheduler, because the worker runs from this same
+#               image with a different command — without it the worker container
+#               dies on import.
 COPY pyproject.toml README.md alembic.ini ./
 COPY app ./app
 COPY migrations ./migrations
-RUN pip install --no-cache-dir -e ".[postgres,migrations]"
+RUN pip install --no-cache-dir -e ".[postgres,migrations,tasks]"
 
 # Sample fixtures so the container is runnable out of the box.
 COPY sample_repo ./sample_repo
@@ -40,15 +43,22 @@ COPY sample_repo ./sample_repo
 # The built SPA — app/api/main.py mounts it at / when this dir exists.
 COPY --from=frontend /web/dist ./frontend/dist
 
-# Run as an unprivileged user. /data holds the SQLite checkpoint DB (a volume in
-# compose); it must be writable by that user, so chown it in the image.
+# Run as an unprivileged user. /app/data is THE state directory: SQLite DBs,
+# graph checkpoints, vectors. It is the volume mount point in compose/k8s (both
+# must agree with COPILOT_STATE_DIR below), so it must be writable by that user.
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data \
-    && chown -R appuser:appuser /app /data
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
 USER appuser
 
-# Default to SQLite for local dev; Render sets COPILOT_CHECKPOINT_DB to Postgres URL
-ENV COPILOT_CHECKPOINT_DB=/data/copilot_checkpoints.sqlite
+# Pin local state to the mounted volume instead of letting it fall out of the
+# CWD: the image filesystem is ephemeral (and read-only under the k8s
+# securityContext), so anything written elsewhere is lost on the next restart.
+ENV COPILOT_STATE_DIR=/app/data
+# Explicit paths for the two SQLite stores whose defaults are CWD-relative.
+# Render overrides COPILOT_CHECKPOINT_DB with a Postgres URL (see render.yaml).
+ENV COPILOT_CHECKPOINT_DB=/app/data/copilot_checkpoints.sqlite
+ENV COPILOT_TENANT_DB=/app/data/copilot_tenants.sqlite
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

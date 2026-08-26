@@ -10,13 +10,20 @@ from uuid import UUID
 from app.billing.models import (
     BillingCycle,
     MetricType,
+    Subscription,
+    SubscriptionStatus,
 )
 from app.billing.plans import PlanManager
 from app.billing.feature_gate import FeatureGateService
 from app.billing.usage_tracker import UsageTracker, UsageReporter
 from app.billing.stripe_integration import StripeBillingService
+from app.config import get_settings
 
 log = logging.getLogger("omnipotent.billing.api")
+
+# Marker for values produced without a payment processor, so a simulated
+# subscription can never be read as a paid one.
+SIMULATED_SUFFIX = " (simulated)"
 
 
 class BillingUnavailableError(RuntimeError):
@@ -284,13 +291,43 @@ class BillingAPI:
         if not self._stripe:
             # Fail closed. This previously activated the requested paid plan in the
             # store and returned a fake session id, i.e. any caller could grant
-            # themselves the most expensive plan without paying.
-            log.error(
-                "Refusing checkout for plan %s: Stripe is not configured", plan_name
+            # themselves the most expensive plan without paying. The simulated
+            # path survives only behind an explicit COPILOT_DEMO_MODE=true, and
+            # everything it hands back is labelled as simulated.
+            if not get_settings().copilot_demo_mode:
+                log.error(
+                    "Checkout requested for plan %s but Stripe is not configured "
+                    "(set STRIPE_API_KEY); refusing to activate a paid subscription "
+                    "that was never paid for",
+                    plan_name,
+                )
+                raise BillingUnavailableError(
+                    "Payments are not available: billing is not configured on this deployment."
+                )
+
+            log.warning(
+                "COPILOT_DEMO_MODE=true - activating a SIMULATED subscription to plan %s "
+                "without any payment",
+                plan_name,
             )
-            raise BillingUnavailableError(
-                "Payments are not available: billing is not configured on this deployment."
-            )
+            plan = self._plan_manager.get_plan(plan_name)
+            if plan:
+                cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
+                sub = Subscription(
+                    org_id=org_id,
+                    plan_id=plan.plan_id,
+                    status=SubscriptionStatus.ACTIVE,
+                    billing_cycle=cycle,
+                )
+                await self._store.save_subscription(sub)
+            # Redirect to success URL or a demo confirmation page
+            redirect_url = success_url or "/?upgrade=success"
+            return {
+                "checkout_url": redirect_url,
+                "session_id": f"demo_session_{org_id}_{plan_name}",
+                "plan_name": plan_name + SIMULATED_SUFFIX,
+                "simulated": True,
+            }
 
         cycle = BillingCycle.ANNUAL if billing_cycle == "annual" else BillingCycle.MONTHLY
 
@@ -321,12 +358,22 @@ class BillingAPI:
             # wired to it ("Billing Portal", "Manage via Stripe", "View all in
             # Stripe", "Add new card") reloaded the page the user was already on.
             # No error, no message: the customer clicks, nothing happens, and
-            # there is no way to tell it apart from a slow page.
-            log.error("Refusing portal session: Stripe is not configured")
-            raise BillingUnavailableError(
-                "The billing portal is not available: billing is not configured "
-                "on this deployment."
-            )
+            # there is no way to tell it apart from a slow page. Behind an
+            # explicit COPILOT_DEMO_MODE=true that redirect is still available,
+            # flagged as simulated so nothing reads it as a real portal.
+            if not get_settings().copilot_demo_mode:
+                log.error(
+                    "Billing portal requested but Stripe is not configured "
+                    "(set STRIPE_API_KEY); refusing to return a portal URL that "
+                    "manages nothing"
+                )
+                raise BillingUnavailableError(
+                    "The billing portal is not available: billing is not configured "
+                    "on this deployment."
+                )
+
+            log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED billing portal URL")
+            return {"portal_url": return_url or "/?portal=demo", "simulated": True}
 
         result = await self._stripe.create_portal_session(org_id, return_url)
         return {"portal_url": result.portal_url}

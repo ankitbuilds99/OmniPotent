@@ -17,6 +17,26 @@ from typing import Any, Callable, Awaitable
 log = logging.getLogger("omnipotent.planning.task_graph")
 
 
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse an ISO timestamp written by `to_dict`, tolerating None and junk.
+
+    A graph stored by an older version, or hand-edited in the database, must not
+    take the whole listing endpoint down with a ValueError. UTC is assumed when
+    the stored string carries no offset, which is what `to_dict` writes for the
+    naive case.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        log.warning("unparseable timestamp %r in stored task graph", value)
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 class TaskStatus(str, Enum):
     """Status of a task."""
     PENDING = "pending"
@@ -107,6 +127,39 @@ class TaskNode:
             "progress": self.progress,
             "metadata": self.metadata,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskNode:
+        """Rebuild a node from :meth:`to_dict`.
+
+        Everything round-trips except ``_handler``, which is a live callable and
+        cannot be stored. That is not a loss on the API path — a task added
+        through the router never carries one; it names an ``executor`` string
+        that the execution engine resolves against its registered tools at run
+        time.
+        """
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            description=data.get("description", ""),
+            task_type=TaskType(data.get("task_type", TaskType.CUSTOM.value)),
+            status=TaskStatus(data.get("status", TaskStatus.PENDING.value)),
+            priority=TaskPriority(data.get("priority", TaskPriority.MEDIUM.value)),
+            dependencies=list(data.get("dependencies") or []),
+            dependents=list(data.get("dependents") or []),
+            inputs=dict(data.get("inputs") or {}),
+            outputs=dict(data.get("outputs") or {}),
+            executor=data.get("executor", ""),
+            timeout_seconds=data.get("timeout_seconds", 300),
+            retries=data.get("retries", 0),
+            max_retries=data.get("max_retries", 3),
+            created_at=_parse_dt(data.get("created_at")) or datetime.now(timezone.utc),
+            started_at=_parse_dt(data.get("started_at")),
+            completed_at=_parse_dt(data.get("completed_at")),
+            error=data.get("error", ""),
+            progress=data.get("progress", 0.0),
+            metadata=dict(data.get("metadata") or {}),
+        )
 
     @property
     def duration_seconds(self) -> float | None:
@@ -627,6 +680,35 @@ class TaskGraph:
             },
             "progress": self.get_progress(),
         }
+
+    def serialize(self) -> dict[str, Any]:
+        """Full state, for storing the graph and getting the same one back.
+
+        Distinct from :meth:`to_dict`, which is the *API response* shape: that
+        one carries a derived `progress` block for the client and omits the
+        checkpoint history. Round-tripping through it would silently discard
+        every checkpoint the caller had taken. Keeping the two separate means the
+        response shape can change without changing what is in the database.
+        """
+        return {
+            "id": self.id,
+            "tasks": {task_id: task.to_dict() for task_id, task in self.nodes.items()},
+            "checkpoints": self._checkpoints,
+        }
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> TaskGraph:
+        """Rebuild a graph from :meth:`serialize`.
+
+        Execution callbacks are not restored: they are live callables registered
+        by whichever process was running the graph, and a different process has
+        no way to reconstruct them.
+        """
+        graph = cls(data["id"])
+        for task_id, task_data in (data.get("tasks") or {}).items():
+            graph.nodes[task_id] = TaskNode.from_dict(task_data)
+        graph._checkpoints = list(data.get("checkpoints") or [])
+        return graph
 
     def visualize_dag(self) -> str:
         """Generate ASCII visualization of the DAG."""

@@ -10,8 +10,15 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: omnipotent
-  minReplicas: 3
-  maxReplicas: 20
+  # PINNED TO 1/1 — TEMPORARY. Neutered rather than deleted so the metrics and
+  # behaviour tuning below survive for when scaling is safe again. Authoritative
+  # business state (customers, trials, billing usage records, investigation
+  # history, runbook executions) lives in module-level Python dicts with no
+  # persistence — see the comment block in deploy/helm/copilot/values.yaml. Every
+  # scale-up serves from empty stores; every scale-down destroys usage records.
+  # RESTORE 3/20 WHEN: app/customers is Postgres-backed and the rest are in Redis.
+  minReplicas: 1
+  maxReplicas: 1
   metrics:
     # Scale on CPU utilization
     - type: Resource

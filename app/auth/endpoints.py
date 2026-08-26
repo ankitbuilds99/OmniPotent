@@ -33,7 +33,7 @@ from app.auth.oauth import (
     find_account_by_provider,
     find_account_by_email,
     get_user_accounts,
-    touch_account_login,
+    touch_last_login,
 )
 from app.config import get_settings
 
@@ -182,7 +182,7 @@ async def oauth_login(
     if redirect_uri:
         callback_url += f"?redirect_uri={quote(redirect_uri, safe='')}"
 
-    auth_url = get_authorization_url(provider, callback_url)
+    auth_url = await get_authorization_url(provider, callback_url)
     if not auth_url:
         raise HTTPException(500, "Failed to generate authorization URL")
 
@@ -226,9 +226,9 @@ async def oauth_callback(
     # the browser: `?link=true` on it (the previous design) is attacker-settable
     # and, being merely inert, meant "Link another provider" quietly created a
     # second unrelated account and swapped the session over to it.
-    link_user_id = peek_oauth_link_user(state)
+    link_user_id = await peek_oauth_link_user(state)
 
-    verified_provider = verify_oauth_state(state)
+    verified_provider = await verify_oauth_state(state)
     if not verified_provider:
         raise HTTPException(400, "Invalid or expired state parameter")
 
@@ -260,13 +260,23 @@ async def oauth_callback(
             raise HTTPException(
                 409, "That account is already linked to a different user."
             )
+        linked = await link_oauth_account(link_user_id, oauth_user)
+        # `link_oauth_account` keeps the user id an identity is already bound
+        # to, so a claim that landed between the check above and this write
+        # comes back as somebody else's id. Refuse rather than hand the session
+        # over to whoever that is.
+        if linked.user_id != link_user_id:
+            raise HTTPException(
+                409, "That account is already linked to a different user."
+            )
         user_id = link_user_id
-        await link_oauth_account(user_id, oauth_user)
     else:
         existing = await find_account_by_provider(provider, oauth_user.provider_id)
         if existing:
             user_id = existing.user_id
-            await touch_account_login(provider, oauth_user.provider_id)
+            # Not `existing.last_login = ...`: the account is now a detached copy
+            # of a row, so assigning to it would update nothing.
+            await touch_last_login(existing.id)
         else:
             email_account = await find_account_by_email(oauth_user.email)
             if email_account:
@@ -274,7 +284,11 @@ async def oauth_callback(
             else:
                 user_id = f"user_{secrets.token_hex(8)}"
 
-            await link_oauth_account(user_id, oauth_user)
+            # Takes the user id already on the identity if one was linked
+            # concurrently, so a first-ever login racing with itself resolves to
+            # one user rather than to whichever request committed last.
+            linked = await link_oauth_account(user_id, oauth_user)
+            user_id = linked.user_id
 
     org_id, role = await _get_or_create_org_for_user(user_id, oauth_user.email)
 
@@ -471,10 +485,10 @@ async def link_provider(
     base_url = str(request.base_url).rstrip("/")
     callback_url = f"{base_url}/auth/{provider}/callback"
 
-    # The link intent travels in the signed/served-side state, not on the
-    # callback URL: the browser hands the callback URL back to us, so a marker
-    # there proves nothing about who started the flow.
-    auth_url = get_authorization_url(
+    # The link intent travels in the server-issued state, not on the callback
+    # URL: the browser hands the callback URL back to us, so a marker there
+    # proves nothing about who started the flow.
+    auth_url = await get_authorization_url(
         provider, callback_url, link_user_id=str(payload["sub"])
     )
     if not auth_url:

@@ -3,16 +3,26 @@
 Tracks signups, manages tiers, and provides analytics for
 understanding conversion funnel and user acquisition.
 
-This was three module-level dicts — `_waitlist_store`, `_email_index` and a
-`_position_counter` integer. Everything a visitor was told when they signed up
-(their position, their referral code) was true only until the process recycled,
-and a second uvicorn worker answered from a second, empty waitlist: two people
-could be handed position #1, and one of them would find themselves off the list
-entirely after the next deploy. It is the `waitlist_entries` table now, and
-`position` is allocated under a unique constraint so a concurrent signup cannot
-duplicate one.
+State lives in the database (`app/waitlist/store.py`), not in this module. It
+used to live in three module-level globals — `_waitlist_store`, `_email_index`
+and a `_position_counter` integer — which meant every restart, deploy and
+scale-down threw away the leads, and a second uvicorn worker answered from a
+second, empty waitlist: everything a visitor was told on signup (their position,
+their referral code) was true only until the process recycled, and two people
+could be handed position #1. `_position_counter` restarted at 0 so the next
+signup was handed a position an earlier one already held. Positions are now
+allocated from `MAX(position) + 1` under a unique constraint, so a concurrent
+signup cannot duplicate one. Every function here is therefore async; there is no
+in-process copy of the waitlist to read.
 
 The list is global, not per-org: someone joining a waitlist has no account yet.
+
+Merge note: two independent ports of this module to a table landed at once. The
+`waitlist_signups` table behind `store.py` is the one in use — it is the only
+one that resolves a referral *code*, which is what the public signup API
+actually sends. `WaitlistEntryDB` / `waitlist_entries` in
+`app/database/growth_models.py` was the other port's table and no longer has a
+reader.
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import logging
 import re
 import secrets
@@ -28,10 +39,13 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
+from app.database.models import WaitlistSignup
+from app.waitlist import store
 
 log = logging.getLogger("omnipotent.waitlist")
+
+# Referrals needed before a standard signup is bumped up the queue.
+REFERRALS_FOR_PRIORITY = 3
 
 
 class WaitlistTier(str, Enum):
@@ -121,12 +135,6 @@ class WaitlistEntry:
         return f"{masked_local}@{domain}"
 
 
-# How many times to re-pick a position when a concurrent signup takes the one we
-# were about to claim. Each retry re-reads MAX(position), so this only has to
-# outlast a burst, not a sustained race.
-_POSITION_ATTEMPTS = 5
-
-
 def _generate_id() -> str:
     """Generate unique waitlist entry ID."""
     return f"wl_{secrets.token_hex(8)}"
@@ -149,34 +157,33 @@ def _hash_ip(ip: str) -> str:
     return hashlib.sha256(ip.encode()).hexdigest()[:16]
 
 
-def _utc(value: datetime | None) -> Any:
-    """Read a timestamp back as UTC-aware.
+def _to_entry(row: WaitlistSignup) -> WaitlistEntry:
+    """Build the domain object from a stored row.
 
-    SQLite has no timezone type, so a `DateTime(timezone=True)` column round
-    trips to a naive datetime; everything written here is UTC. Without this the
-    "signups today" comparison in `get_waitlist_stats` raises TypeError on the
-    default database.
+    Tier and source are read back defensively: they are plain strings in the
+    table, and a row written by an older build (or by hand) must not take down
+    a listing because its tier no longer names a member of the enum.
     """
-    if value is None or value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=timezone.utc)
-
-
-def _enum(cls: Any, value: str, fallback: Any) -> Any:
-    """Read a stored enum value back, tolerating one written by an older build."""
     try:
-        return cls(value)
+        tier = WaitlistTier(row.tier)
     except ValueError:
-        return fallback
+        log.warning("Waitlist row %s has unknown tier %r; reading as standard",
+                    row.id, row.tier)
+        tier = WaitlistTier.STANDARD
+    try:
+        source = SignupSource(row.source)
+    except ValueError:
+        log.warning("Waitlist row %s has unknown source %r; reading as other",
+                    row.id, row.source)
+        source = SignupSource.OTHER
 
-
-def _to_entry(row: Any) -> WaitlistEntry:
+    created_at = store.utc(row.created_at)
     return WaitlistEntry(
         id=row.id,
         email=row.email,
-        created_at=_utc(row.created_at),
-        tier=_enum(WaitlistTier, row.tier, WaitlistTier.STANDARD),
-        source=_enum(SignupSource, row.source, SignupSource.OTHER),
+        created_at=created_at or datetime.now(timezone.utc),
+        tier=tier,
+        source=source,
         company=row.company,
         role=row.role,
         team_size=row.team_size,
@@ -185,8 +192,8 @@ def _to_entry(row: Any) -> WaitlistEntry:
         referred_by=row.referred_by,
         referral_count=row.referral_count,
         position=row.position,
-        invited_at=_utc(row.invited_at),
-        converted_at=_utc(row.converted_at),
+        invited_at=store.utc(row.invited_at),
+        converted_at=store.utc(row.converted_at),
         utm_source=row.utm_source,
         utm_medium=row.utm_medium,
         utm_campaign=row.utm_campaign,
@@ -197,25 +204,53 @@ def _to_entry(row: Any) -> WaitlistEntry:
     )
 
 
-async def _row_for_email(session: Any, email: str) -> Any:
-    from app.database.growth_models import WaitlistEntryDB
+async def _resolve_referrer(referred_by: str) -> WaitlistSignup | None:
+    """Find the signup that referred someone, by referral code or by email.
 
-    return (
-        await session.execute(
-            select(WaitlistEntryDB).where(WaitlistEntryDB.email == email)
-        )
-    ).scalar_one_or_none()
+    The signup API sends a referral *code* (`REF1A2B3C4D`); the admin paths and
+    the tests send an email. Both are accepted, code first, because the code is
+    the thing that actually travels in a share link.
+    """
+    value = referred_by.strip()
+    if not value:
+        return None
 
-
-async def _credit_referrer(session: Any, referred_by: str) -> None:
-    """Give the referrer their +1, and the tier bump it may have earned."""
-    referrer = await _row_for_email(session, referred_by.strip().lower())
+    referrer = await store.get_by_referral_code(value.upper())
     if referrer is None:
-        return
-    referrer.referral_count += 1
-    if referrer.referral_count >= 3 and referrer.tier == WaitlistTier.STANDARD.value:
-        referrer.tier = WaitlistTier.PRIORITY.value
-        referrer.tags = [*(referrer.tags or []), "referral_upgrade"]
+        referrer = await store.get_by_email(value.lower())
+    return referrer
+
+
+async def _credit_referrer(referrer: WaitlistSignup) -> bool:
+    """Record one more referral, promoting the referrer once they hit the bar.
+
+    Returns whether the credit actually landed, and the caller has to look: this
+    runs in its own transaction, after the signup row is already committed, so it
+    can fail on its own and leave a signup attributed to a referrer who was never
+    paid for it. `store.update` reports a vanished row by returning None, which
+    discarded is indistinguishable from success — and an uncredited referral is a
+    promise the landing page already made, invisible in `referral_rate` because
+    that counts the signup's `referred_by`, not the referrer's counter.
+    """
+    expected = referrer.referral_count + 1
+    changes: dict[str, Any] = {"referral_count": expected}
+
+    if expected >= REFERRALS_FOR_PRIORITY and referrer.tier == WaitlistTier.STANDARD.value:
+        changes["tier"] = WaitlistTier.PRIORITY.value
+        # Reassigned, not appended to: a JSON column is only marked dirty on
+        # assignment, so an in-place append would be dropped on commit.
+        changes["tags"] = [*(referrer.tags or []), "referral_upgrade"]
+
+    updated = await store.update(referrer.email, **changes)
+    if updated is None or updated.referral_count != expected:
+        log.error(
+            "Referral credit did not land for %s: referral_count is %s, expected %d",
+            _to_entry(referrer)._mask_email(),
+            updated.referral_count if updated is not None else "(row gone)",
+            expected,
+        )
+        return False
+    return True
 
 
 async def add_to_waitlist(
@@ -237,9 +272,6 @@ async def add_to_waitlist(
     Returns:
         Tuple of (entry, message). Entry is None if failed.
     """
-    from app.database.engine import get_session
-    from app.database.growth_models import WaitlistEntryDB
-
     email = email.strip().lower()
 
     if not email:
@@ -248,72 +280,74 @@ async def add_to_waitlist(
     if not _validate_email(email):
         return None, "Invalid email format"
 
-    for _ in range(_POSITION_ATTEMPTS):
-        async with get_session() as session:
-            existing = await _row_for_email(session, email)
-            if existing is not None:
-                return _to_entry(existing), "Already on waitlist"
+    existing = await store.get_by_email(email)
+    if existing is not None:
+        return _to_entry(existing), "Already on waitlist"
 
-            # The counter this replaces restarted at 0 with the process, so the
-            # first signup after a deploy was told it was #1 behind however many
-            # thousand people were already on the list.
-            next_position = (
-                await session.execute(select(func.max(WaitlistEntryDB.position)))
-            ).scalar() or 0
+    # Resolved before the insert so that only a referral that actually points at
+    # a real signup is recorded. An unresolvable value is dropped rather than
+    # stored, which keeps `referral_rate` equal to the referrals that were
+    # genuinely credited instead of counting attribution that never landed.
+    referrer = await _resolve_referrer(referred_by)
+    if referred_by and referrer is None:
+        log.info("Waitlist signup cited an unknown referrer; recording no referral")
 
-            row = WaitlistEntryDB(
-                id=_generate_id(),
-                email=email,
-                position=next_position + 1,
-                tier=WaitlistTier.STANDARD.value,
-                source=source.value,
-                company=company,
-                role=role,
-                team_size=team_size,
-                use_case=use_case,
-                referral_code=_generate_referral_code(email),
-                referred_by=referred_by.strip().lower(),
-                utm_source=utm_source,
-                utm_medium=utm_medium,
-                utm_campaign=utm_campaign,
-                ip_hash=_hash_ip(ip_address) if ip_address else "",
-                user_agent=user_agent[:200] if user_agent else "",
-                tags=[],
-            )
-            session.add(row)
-            if referred_by:
-                await _credit_referrer(session, referred_by)
+    row, failure = await store.insert(
+        id=_generate_id(),
+        email=email,
+        created_at=datetime.now(timezone.utc),
+        tier=WaitlistTier.STANDARD.value,
+        source=source.value,
+        company=company,
+        role=role,
+        team_size=team_size,
+        use_case=use_case,
+        referral_code=_generate_referral_code(email),
+        referred_by=referrer.email if referrer else "",
+        referral_count=0,
+        utm_source=utm_source,
+        utm_medium=utm_medium,
+        utm_campaign=utm_campaign,
+        ip_hash=_hash_ip(ip_address) if ip_address else "",
+        user_agent=user_agent[:200] if user_agent else "",
+        notes="",
+        tags=[],
+    )
 
-            try:
-                await session.commit()
-            except IntegrityError:
-                # Either the email or the position was taken between the read
-                # and the write. Both are settled by looping: the email lookup
-                # at the top returns the winner's entry, and MAX(position) is
-                # re-read.
-                await session.rollback()
-                continue
+    if row is None:
+        if failure == "duplicate_email":
+            # Lost a race with a concurrent signup for the same address; the
+            # other one won and this is the same answer that caller would have
+            # got a moment earlier.
+            duplicate = await store.get_by_email(email)
+            if duplicate is not None:
+                return _to_entry(duplicate), "Already on waitlist"
+        return None, "Could not join waitlist, please try again"
 
-            entry = _to_entry(row)
-            log.info(
-                "Waitlist signup: position=%d source=%s company=%s",
-                entry.position,
-                source.value,
-                company or "(none)",
-            )
-            return entry, "Successfully joined waitlist"
+    # The insert above committed on its own, so this is a second transaction: a
+    # crash in between leaves a signup whose referrer was never credited. There
+    # is no way to close that window from here — `store.insert` owns its session
+    # — so the outcome is carried into the signup log line instead, which is
+    # what an operator reconciling the two counters has to work from.
+    referral = "none"
+    if referrer is not None:
+        referral = "credited" if await _credit_referrer(referrer) else "UNCREDITED"
 
-    log.warning("waitlist signup gave up after %d position collisions", _POSITION_ATTEMPTS)
-    return None, "Could not join the waitlist right now — please try again."
+    log.info(
+        "Waitlist signup: position=%d source=%s company=%s referral=%s",
+        row.position,
+        source.value,
+        company or "(none)",
+        referral,
+    )
+
+    return _to_entry(row), "Successfully joined waitlist"
 
 
 async def get_waitlist_entry(email: str) -> WaitlistEntry | None:
     """Get waitlist entry by email."""
-    from app.database.engine import get_session
-
-    async with get_session() as session:
-        row = await _row_for_email(session, email.strip().lower())
-        return _to_entry(row) if row else None
+    row = await store.get_by_email(email.strip().lower())
+    return _to_entry(row) if row else None
 
 
 async def get_waitlist_entries(
@@ -322,22 +356,18 @@ async def get_waitlist_entries(
     limit: int = 100,
     offset: int = 0,
 ) -> list[WaitlistEntry]:
-    """Get waitlist entries with optional filtering."""
-    from app.database.engine import get_session
-    from app.database.growth_models import WaitlistEntryDB
+    """Get waitlist entries with optional filtering.
 
-    stmt = select(WaitlistEntryDB)
-    if tier:
-        stmt = stmt.where(WaitlistEntryDB.tier == tier.value)
-    if source:
-        stmt = stmt.where(WaitlistEntryDB.source == source.value)
-    # Ordering, limit and offset are the database's job now; the dict version
-    # loaded every row into memory to sort and slice it.
-    stmt = stmt.order_by(WaitlistEntryDB.position).offset(offset).limit(limit)
-
-    async with get_session() as session:
-        rows = (await session.execute(stmt)).scalars().all()
-        return [_to_entry(r) for r in rows]
+    Filtering, ordering, limit and offset are the database's job; the dict this
+    replaced loaded every row into memory to sort and slice it.
+    """
+    rows = await store.list_entries(
+        tier=tier.value if tier else None,
+        source=source.value if source else None,
+        limit=limit,
+        offset=offset,
+    )
+    return [_to_entry(row) for row in rows]
 
 
 async def promote_to_early_access(
@@ -345,97 +375,50 @@ async def promote_to_early_access(
     tier: WaitlistTier = WaitlistTier.EARLY_ACCESS,
 ) -> tuple[bool, str]:
     """Promote a waitlist entry to early access."""
-    from app.database.engine import get_session
+    row = await store.get_by_email(email.strip().lower())
+    if not row:
+        return False, "Email not found in waitlist"
 
-    async with get_session() as session:
-        row = await _row_for_email(session, email.strip().lower())
-        if row is None:
-            return False, "Email not found in waitlist"
-        if row.tier == WaitlistTier.FOUNDING_CUSTOMER.value:
-            return False, "Already a founding customer"
+    if row.tier == WaitlistTier.FOUNDING_CUSTOMER.value:
+        return False, "Already a founding customer"
 
-        row.tier = tier.value
-        row.invited_at = datetime.now(timezone.utc)
-        row.tags = [*(row.tags or []), f"promoted_to_{tier.value}"]
-        await session.commit()
+    updated = await store.update(
+        row.email,
+        tier=tier.value,
+        invited_at=datetime.now(timezone.utc),
+        tags=[*(row.tags or []), f"promoted_to_{tier.value}"],
+    )
+    if updated is None:
+        return False, "Email not found in waitlist"
 
-        log.info("Promoted %s to %s", _to_entry(row)._mask_email(), tier.value)
-        return True, f"Promoted to {tier.value}"
+    log.info("Promoted %s to %s", _to_entry(updated)._mask_email(), tier.value)
+
+    return True, f"Promoted to {tier.value}"
 
 
 async def mark_converted(email: str) -> tuple[bool, str]:
     """Mark a waitlist entry as converted (became customer)."""
-    from app.database.engine import get_session
+    row = await store.get_by_email(email.strip().lower())
+    if not row:
+        return False, "Email not found in waitlist"
 
-    async with get_session() as session:
-        row = await _row_for_email(session, email.strip().lower())
-        if row is None:
-            return False, "Email not found in waitlist"
+    updated = await store.update(
+        row.email,
+        converted_at=datetime.now(timezone.utc),
+        tier=WaitlistTier.FOUNDING_CUSTOMER.value,
+        tags=[*(row.tags or []), "converted"],
+    )
+    if updated is None:
+        return False, "Email not found in waitlist"
 
-        row.converted_at = datetime.now(timezone.utc)
-        row.tier = WaitlistTier.FOUNDING_CUSTOMER.value
-        row.tags = [*(row.tags or []), "converted"]
-        await session.commit()
+    log.info("Conversion: %s", _to_entry(updated)._mask_email())
 
-        log.info("Conversion: %s", _to_entry(row)._mask_email())
-        return True, "Marked as converted"
+    return True, "Marked as converted"
 
 
 async def get_waitlist_stats() -> dict[str, Any]:
     """Get waitlist statistics for dashboard."""
-    entries = await get_waitlist_entries(limit=100_000)
-
-    if not entries:
-        return {
-            "total_signups": 0,
-            "by_tier": {},
-            "by_source": {},
-            "conversion_rate": 0.0,
-            "referral_rate": 0.0,
-            "signups_today": 0,
-            "signups_this_week": 0,
-        }
-
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    by_tier: dict[str, int] = {}
-    by_source: dict[str, int] = {}
-    converted = 0
-    referred = 0
-    signups_today = 0
-    signups_this_week = 0
-
-    for entry in entries:
-        by_tier[entry.tier.value] = by_tier.get(entry.tier.value, 0) + 1
-        by_source[entry.source.value] = by_source.get(entry.source.value, 0) + 1
-
-        if entry.converted_at:
-            converted += 1
-
-        if entry.referred_by:
-            referred += 1
-
-        if entry.created_at >= today_start:
-            signups_today += 1
-
-        days_diff = (now - entry.created_at).days
-        if days_diff <= 7:
-            signups_this_week += 1
-
-    total = len(entries)
-
-    return {
-        "total_signups": total,
-        "by_tier": by_tier,
-        "by_source": by_source,
-        "conversion_rate": converted / total,
-        "referral_rate": referred / total,
-        "conversions": converted,
-        "signups_today": signups_today,
-        "signups_this_week": signups_this_week,
-        "avg_position": sum(e.position for e in entries) / total,
-    }
+    return await store.stats()
 
 
 async def export_waitlist(format: str = "csv") -> str:
@@ -450,7 +433,6 @@ async def export_waitlist(format: str = "csv") -> str:
     entries = await get_waitlist_entries(limit=10000)
 
     if format == "json":
-        import json
         return json.dumps([e.to_dict() for e in entries], indent=2)
 
     output = io.StringIO()
@@ -508,25 +490,18 @@ class WaitlistManager:
 
     async def get_position(self, email: str) -> dict[str, Any]:
         """Get waitlist position for an email."""
-        from app.database.engine import get_session
-        from app.database.growth_models import WaitlistEntryDB
+        entry = await get_waitlist_entry(email)
 
-        async with get_session() as session:
-            row = await _row_for_email(session, email.strip().lower())
-            if row is None:
-                return {
-                    "found": False,
-                    "error": "Email not found in waitlist",
-                }
-            entry = _to_entry(row)
-            total = (
-                await session.execute(select(func.count()).select_from(WaitlistEntryDB))
-            ).scalar() or 0
+        if not entry:
+            return {
+                "found": False,
+                "error": "Email not found in waitlist",
+            }
 
         return {
             "found": True,
             "position": entry.position,
-            "total": total,
+            "total": await store.count(),
             "tier": entry.tier.value,
             "referral_code": entry.referral_code,
             "referral_count": entry.referral_count,
@@ -540,9 +515,4 @@ class WaitlistManager:
 
 async def clear_waitlist() -> None:
     """Clear all waitlist data (for testing)."""
-    from app.database.engine import get_session
-    from app.database.growth_models import WaitlistEntryDB
-
-    async with get_session() as session:
-        await session.execute(delete(WaitlistEntryDB))
-        await session.commit()
+    await store.clear()

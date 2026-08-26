@@ -33,7 +33,6 @@ from app.auth.endpoints import (
 from app.auth.oauth import (
     OAuthAccount,
     OAuthUser,
-    _OAUTH_STATES,
     create_session_token,
     decode_session_token,
     find_account_by_email,
@@ -44,6 +43,8 @@ from app.auth.oauth import (
     revoke_session,
     verify_session_token,
 )
+from app import config as cfg
+from app.database.engine import close_db
 
 
 TEST_SIGNING_KEY = "test-signing-key-32-bytes-minimum-length"
@@ -72,27 +73,42 @@ def _auth_settings(monkeypatch):
     get_settings.cache_clear()
 
 
-@pytest.fixture
-def oauth_db(tmp_path, monkeypatch):
-    """A throwaway database for the tests that touch `oauth_accounts`.
+@pytest.fixture(autouse=True)
+def db(tmp_path, monkeypatch):
+    """A database per test, under tmp_path.
 
-    Provider links and session revocations are rows now, not module dicts, so
-    these tests need somewhere to put them. A per-test SQLite file also restores
-    what `_clear_oauth_state()` used to give this module: isolation between
-    tests, since the rows no longer vanish when the dict is cleared.
+    Replaces the three-dict clear these tests used to do between cases: linked
+    accounts, pending login states and revoked sessions are rows now
+    (migrations 008_oauth / 014_auth), so isolating a test means giving it its
+    own database file. Autouse because *every* oauth helper touches the
+    database now — issuing a state does, not just linking an account.
+
+    `close_db()` on both sides resets the engine, the session factory and the
+    "schema already created" flag, so the next test's file really is created
+    rather than assumed.
     """
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/auth.db")
+    cfg.get_settings.cache_clear()
     get_settings.cache_clear()
-    db_engine._engine = None
-    db_engine._session_factory = None
+    asyncio.run(close_db())
+    yield
+    asyncio.run(close_db())
+    cfg.get_settings.cache_clear()
+    get_settings.cache_clear()
 
+
+@pytest.fixture
+def oauth_db(db):
+    """Kept as a name for the tests that ask for the database explicitly.
+
+    The per-test database is autouse now (see `db`), so this only documents at
+    the call site that the test stores something; it also creates the schema up
+    front, which the tests that read a row back without going through
+    `app.auth.oauth` rely on.
+    """
     asyncio.run(db_engine.init_db())
     yield
-
-    asyncio.run(db_engine.close_db())
-    get_settings.cache_clear()
-    db_engine._engine = None
-    db_engine._session_factory = None
 
 
 def _run(coro):
@@ -100,9 +116,70 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _clear_oauth_state():
-    """Clear pending OAuth states between tests."""
-    _OAUTH_STATES.clear()
+async def _state_row(state: str):
+    """The stored row for a state, or None once it has been consumed."""
+    from sqlalchemy import select
+
+    from app.database.engine import ensure_schema, get_session
+    from app.database.models import OAuthStateRecord
+
+    await ensure_schema()
+    async with get_session() as session:
+        return (
+            await session.execute(
+                select(OAuthStateRecord).where(OAuthStateRecord.state == state)
+            )
+        ).scalar_one_or_none()
+
+
+async def _backdate_state(state: str, *, minutes: int) -> None:
+    """Age a state past its TTL by writing the column directly.
+
+    Goes around `generate_oauth_state` on purpose: the point is to check what
+    `verify_oauth_state` does with a row that is already too old, which no
+    sequence of public calls can produce without waiting.
+    """
+    from sqlalchemy import update
+
+    from app.database.engine import ensure_schema, get_session
+    from app.database.models import OAuthStateRecord
+
+    await ensure_schema()
+    async with get_session() as session:
+        await session.execute(
+            update(OAuthStateRecord)
+            .where(OAuthStateRecord.state == state)
+            .values(created_at=datetime.now(timezone.utc) - timedelta(minutes=minutes))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+
+
+async def _backdate_last_login(account_id: str, *, days: int) -> None:
+    """Age an account's last_login so a refresh of it is observable.
+
+    `account_id` is the natural key `"{provider}:{provider_id}"` the public API
+    speaks; the table's own primary key is a surrogate uuid.
+    """
+    from sqlalchemy import update
+
+    from app.database.auth_models import OAuthAccountDB
+    from app.database.engine import ensure_schema, get_session
+
+    provider, _, provider_id = account_id.partition(":")
+
+    await ensure_schema()
+    async with get_session() as session:
+        await session.execute(
+            update(OAuthAccountDB)
+            .where(
+                OAuthAccountDB.provider == provider,
+                OAuthAccountDB.provider_id == provider_id,
+            )
+            .values(last_login=datetime.now(timezone.utc) - timedelta(days=days))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
 
 
 # -----------------------------------------------------------------------------
@@ -452,29 +529,28 @@ class TestExtractToken:
 class TestOAuthStateFunctions:
     """Tests for OAuth state generation and verification."""
 
-    def setup_method(self):
-        """Clear state before each test."""
-        _clear_oauth_state()
-
-    def test_generate_oauth_state_creates_token(self):
+    async def test_generate_oauth_state_creates_token(self):
         """generate_oauth_state creates a secure state token."""
-        state = generate_oauth_state("google")
+        state = await generate_oauth_state("google")
 
         assert state is not None
         assert len(state) > 20  # URL-safe base64 encoded
-        assert state in _OAUTH_STATES
+        assert await _state_row(state) is not None
 
-    def test_generate_oauth_state_stores_provider(self):
+    async def test_generate_oauth_state_stores_provider(self):
         """generate_oauth_state stores provider with state."""
-        state = generate_oauth_state("github")
+        state = await generate_oauth_state("github")
 
-        provider, timestamp, link_user_id = _OAUTH_STATES[state]
-        assert provider == "github"
-        assert isinstance(timestamp, datetime)
+        row = await _state_row(state)
+        assert row is not None
+        assert row.provider == "github"
+        assert isinstance(row.created_at, datetime)
         # Empty unless the state was minted by "link another provider".
-        assert link_user_id == ""
+        from app.auth.oauth import peek_oauth_link_user
 
-    def test_generate_oauth_state_carries_link_intent(self):
+        assert await peek_oauth_link_user(state) == ""
+
+    async def test_generate_oauth_state_carries_link_intent(self):
         """A link flow's target user rides on the state, not on the callback URL.
 
         `/auth/{provider}/link` used to append `?link=true` to the redirect_uri it
@@ -483,50 +559,74 @@ class TestOAuthStateFunctions:
         session onto it. The user id travels with the state now, where the caller
         cannot forge it.
         """
-        state = generate_oauth_state("github", link_user_id="user_42")
+        state = await generate_oauth_state("github", link_user_id="user_42")
 
         from app.auth.oauth import peek_oauth_link_user, verify_oauth_state
 
-        assert peek_oauth_link_user(state) == "user_42"
+        assert await peek_oauth_link_user(state) == "user_42"
         # peek does not consume: the callback reads the intent, then verifies.
-        assert verify_oauth_state(state) == "github"
-        assert peek_oauth_link_user(state) == ""
+        assert await verify_oauth_state(state) == "github"
+        assert await peek_oauth_link_user(state) == ""
 
-    def test_verify_oauth_state_valid(self):
+    async def test_a_forged_link_intent_is_not_honoured(self):
+        """Appending someone else's user id to a state buys nothing.
+
+        The intent now travels *in* the state string, so the check that it was
+        really issued by us is that the whole string matches a stored row. A
+        made-up one matches nothing, and the callback goes on to fail
+        verification like any other unknown state.
+        """
+        from app.auth.oauth import peek_oauth_link_user, verify_oauth_state
+
+        issued = await generate_oauth_state("github")
+
+        assert await peek_oauth_link_user(f"{issued}~user_victim") == ""
+        assert await peek_oauth_link_user("made-up-state~user_victim") == ""
+        assert await verify_oauth_state(f"{issued}~user_victim") is None
+
+    async def test_verify_oauth_state_valid(self):
         """verify_oauth_state returns provider for valid state."""
-        state = generate_oauth_state("google")
+        state = await generate_oauth_state("google")
 
         from app.auth.oauth import verify_oauth_state
 
-        provider = verify_oauth_state(state)
+        provider = await verify_oauth_state(state)
 
         assert provider == "google"
-        assert state not in _OAUTH_STATES  # State is consumed
+        assert await _state_row(state) is None  # State is consumed
 
-    def test_verify_oauth_state_invalid(self):
+    async def test_verify_oauth_state_invalid(self):
         """verify_oauth_state returns None for invalid state."""
         from app.auth.oauth import verify_oauth_state
 
-        result = verify_oauth_state("invalid_state_token")
+        result = await verify_oauth_state("invalid_state_token")
 
         assert result is None
 
-    def test_verify_oauth_state_expired(self):
+    async def test_verify_oauth_state_expired(self):
         """verify_oauth_state returns None for expired state."""
         from app.auth.oauth import verify_oauth_state
 
-        state = generate_oauth_state("google")
-        # Manually expire the state
-        provider, _, link_user_id = _OAUTH_STATES[state]
-        _OAUTH_STATES[state] = (
-            provider,
-            datetime.now(timezone.utc) - timedelta(minutes=20),
-            link_user_id,
-        )
+        state = await generate_oauth_state("google")
+        await _backdate_state(state, minutes=20)
 
-        result = verify_oauth_state(state)
+        result = await verify_oauth_state(state)
 
         assert result is None
+
+    async def test_verify_oauth_state_consumes_exactly_once(self):
+        """A replayed callback cannot reuse a state another request consumed.
+
+        The dict version popped, which was already single-use within one pod.
+        Across pods there was no shared record at all, so this is the property
+        the table has to keep now that there is one.
+        """
+        from app.auth.oauth import verify_oauth_state
+
+        state = await generate_oauth_state("google")
+
+        assert await verify_oauth_state(state) == "google"
+        assert await verify_oauth_state(state) is None
 
 
 class TestSessionTokenFunctions:
@@ -656,7 +756,7 @@ class TestSessionRevocation:
 class TestOAuthAccountFunctions:
     """Tests for OAuth account management functions."""
 
-    def test_link_oauth_account_creates_account(self, oauth_db):
+    async def test_link_oauth_account_creates_account(self):
         """link_oauth_account creates and stores an account."""
         oauth_user = OAuthUser(
             provider="google",
@@ -666,7 +766,7 @@ class TestOAuthAccountFunctions:
             avatar_url="https://example.com/alice.png",
         )
 
-        account = _run(link_oauth_account("user_alice", oauth_user))
+        account = await link_oauth_account("user_alice", oauth_user)
 
         assert account.user_id == "user_alice"
         assert account.provider == "google"
@@ -674,13 +774,8 @@ class TestOAuthAccountFunctions:
         assert account.email == "alice@example.com"
         assert account.name == "Alice Smith"
 
-    def test_link_oauth_account_survives_a_restart(self, oauth_db):
-        """The link is a row, so a fresh engine still finds it.
-
-        `_OAUTH_ACCOUNTS` was a module dict: every provider link was lost on
-        restart, `/auth/me` reported `providers: []` for someone who had just
-        signed in, and their next login minted a different local user id.
-        """
+    async def test_link_oauth_account_adds_to_user_accounts(self):
+        """link_oauth_account associates account with user."""
         oauth_user = OAuthUser(
             provider="github",
             provider_id="github_67890",
@@ -688,34 +783,83 @@ class TestOAuthAccountFunctions:
             name="Bob Jones",
         )
 
-        _run(link_oauth_account("user_bob", oauth_user))
+        await link_oauth_account("user_bob", oauth_user)
+
+        # Asserted through the query that replaced the _USER_ACCOUNTS index
+        # rather than against the index itself, which no longer exists.
+        accounts = await get_user_accounts("user_bob")
+        assert [a.id for a in accounts] == ["github:github_67890"]
+
+    async def test_link_oauth_account_survives_a_restart(self):
+        """The link is a row, so a fresh engine still finds it.
+
+        `_OAUTH_ACCOUNTS` was a module dict: every provider link was lost on
+        restart, `/auth/me` reported `providers: []` for someone who had just
+        signed in, and their next login minted a different local user id.
+        """
+        await link_oauth_account(
+            "user_restart",
+            OAuthUser(
+                provider="github",
+                provider_id="github_restart",
+                email="restart@example.com",
+                name="Restart",
+            ),
+        )
 
         # Drop the engine the way a process restart would.
-        _run(db_engine.close_db())
+        await db_engine.close_db()
 
-        accounts = _run(get_user_accounts("user_bob"))
-        assert [(a.provider, a.provider_id) for a in accounts] == [("github", "github_67890")]
+        accounts = await get_user_accounts("user_restart")
+        assert [(a.provider, a.provider_id) for a in accounts] == [
+            ("github", "github_restart")
+        ]
 
-    def test_relinking_keeps_the_original_local_user(self, oauth_db):
-        """A provider identity stays bound to the user it first created.
+    async def test_relinking_keeps_the_user_id_already_on_the_identity(self):
+        """A second link of the same identity does not repoint it.
 
-        Re-pointing it would be an account takeover: anyone who can present the
-        same provider id could attach it to a local user of their choosing.
+        The callback mints a fresh `user_id` before it links, so two first-ever
+        logins racing each other both arrive here with different ids. Last write
+        wins would hand the account to whichever committed second and strand
+        whatever the first had already been given.
         """
         oauth_user = OAuthUser(
             provider="google",
-            provider_id="g_stable",
-            email="stable@example.com",
-            name="Stable",
+            provider_id="g_race",
+            email="race@example.com",
+            name="Race",
         )
-        _run(link_oauth_account("user_first", oauth_user))
 
-        again = _run(link_oauth_account("user_second", oauth_user))
+        first = await link_oauth_account("user_first", oauth_user)
+        second = await link_oauth_account("user_second", oauth_user)
 
-        assert again.user_id == "user_first"
-        assert _run(get_user_accounts("user_second")) == []
+        assert first.user_id == "user_first"
+        assert second.user_id == "user_first"
+        assert await get_user_accounts("user_second") == []
 
-    def test_find_account_by_provider_found(self, oauth_db):
+    async def test_relinking_refreshes_the_profile(self):
+        """Re-linking picks up a changed display name or avatar."""
+        await link_oauth_account(
+            "user_p",
+            OAuthUser(provider="google", provider_id="g_p", email="p@example.com", name="Old"),
+        )
+        await link_oauth_account(
+            "user_p",
+            OAuthUser(
+                provider="google",
+                provider_id="g_p",
+                email="p@example.com",
+                name="New",
+                avatar_url="https://example.com/new.png",
+            ),
+        )
+
+        account = await find_account_by_provider("google", "g_p")
+        assert account is not None
+        assert account.name == "New"
+        assert account.avatar_url == "https://example.com/new.png"
+
+    async def test_find_account_by_provider_found(self):
         """find_account_by_provider returns matching account."""
         oauth_user = OAuthUser(
             provider="google",
@@ -723,20 +867,20 @@ class TestOAuthAccountFunctions:
             email="test@example.com",
             name="Test User",
         )
-        _run(link_oauth_account("user_test", oauth_user))
+        await link_oauth_account("user_test", oauth_user)
 
-        account = _run(find_account_by_provider("google", "google_111"))
+        account = await find_account_by_provider("google", "google_111")
 
         assert account is not None
         assert account.email == "test@example.com"
 
-    def test_find_account_by_provider_not_found(self, oauth_db):
+    async def test_find_account_by_provider_not_found(self):
         """find_account_by_provider returns None for non-existent account."""
-        account = _run(find_account_by_provider("google", "nonexistent"))
+        account = await find_account_by_provider("google", "nonexistent")
 
         assert account is None
 
-    def test_find_account_by_email_found(self, oauth_db):
+    async def test_find_account_by_email_found(self):
         """find_account_by_email returns matching account."""
         oauth_user = OAuthUser(
             provider="github",
@@ -744,14 +888,14 @@ class TestOAuthAccountFunctions:
             email="unique@example.com",
             name="Unique User",
         )
-        _run(link_oauth_account("user_unique", oauth_user))
+        await link_oauth_account("user_unique", oauth_user)
 
-        account = _run(find_account_by_email("unique@example.com"))
+        account = await find_account_by_email("unique@example.com")
 
         assert account is not None
         assert account.provider == "github"
 
-    def test_find_account_by_email_case_insensitive(self, oauth_db):
+    async def test_find_account_by_email_case_insensitive(self):
         """find_account_by_email is case-insensitive."""
         oauth_user = OAuthUser(
             provider="google",
@@ -759,19 +903,45 @@ class TestOAuthAccountFunctions:
             email="CaSeSeNsItIvE@Example.COM",
             name="Case Test",
         )
-        _run(link_oauth_account("user_case", oauth_user))
+        await link_oauth_account("user_case", oauth_user)
 
-        account = _run(find_account_by_email("casesensitive@example.com"))
+        account = await find_account_by_email("casesensitive@example.com")
 
         assert account is not None
+        # Folded on the way in, so the stored value is directly indexable
+        # instead of needing a scan that lower-cases every row.
+        assert account.email == "casesensitive@example.com"
 
-    def test_find_account_by_email_not_found(self, oauth_db):
+    async def test_find_account_by_email_not_found(self):
         """find_account_by_email returns None for non-existent email."""
-        account = _run(find_account_by_email("notfound@example.com"))
+        account = await find_account_by_email("notfound@example.com")
 
         assert account is None
 
-    def test_get_user_accounts_returns_all(self, oauth_db):
+    async def test_find_account_by_email_is_stable_across_calls(self):
+        """With several identities on one address, the same one comes back.
+
+        It decides which existing user id a newly-seen provider gets folded
+        into, so an unordered query would silently make that a coin flip.
+        """
+        for i, provider in enumerate(("google", "github")):
+            await link_oauth_account(
+                f"user_{provider}",
+                OAuthUser(
+                    provider=provider,
+                    provider_id=f"id_{i}",
+                    email="shared@example.com",
+                    name="Shared",
+                ),
+            )
+
+        first = await find_account_by_email("shared@example.com")
+        assert first is not None
+        for _ in range(5):
+            again = await find_account_by_email("shared@example.com")
+            assert again is not None and again.id == first.id
+
+    async def test_get_user_accounts_returns_all(self):
         """get_user_accounts returns all linked accounts for user."""
         oauth_google = OAuthUser(
             provider="google",
@@ -785,21 +955,44 @@ class TestOAuthAccountFunctions:
             email="multi@example.com",
             name="Multi User",
         )
-        _run(link_oauth_account("user_multi", oauth_google))
-        _run(link_oauth_account("user_multi", oauth_github))
+        await link_oauth_account("user_multi", oauth_google)
+        await link_oauth_account("user_multi", oauth_github)
 
-        accounts = _run(get_user_accounts("user_multi"))
+        accounts = await get_user_accounts("user_multi")
 
         assert len(accounts) == 2
         providers = [a.provider for a in accounts]
         assert "google" in providers
         assert "github" in providers
 
-    def test_get_user_accounts_empty(self, oauth_db):
+    async def test_get_user_accounts_empty(self):
         """get_user_accounts returns empty list for unknown user."""
-        accounts = _run(get_user_accounts("nonexistent_user"))
+        accounts = await get_user_accounts("nonexistent_user")
 
         assert accounts == []
+
+    async def test_touch_last_login_persists(self):
+        """last_login is written back, not assigned to a detached copy.
+
+        The callback used to do `existing.last_login = now` on the object the
+        lookup returned. That object is a copy of a row now, so the assignment
+        would update nothing and every account would report the timestamp of
+        its first sign-in forever.
+        """
+        from app.auth.oauth import touch_last_login
+
+        await link_oauth_account(
+            "user_t",
+            OAuthUser(provider="google", provider_id="g_t", email="t@example.com", name="T"),
+        )
+        await _backdate_last_login("google:g_t", days=3)
+
+        stale = await find_account_by_provider("google", "g_t")
+        await touch_last_login("google:g_t")
+        fresh = await find_account_by_provider("google", "g_t")
+
+        assert stale is not None and fresh is not None
+        assert fresh.last_login > stale.last_login
 
 
 # -----------------------------------------------------------------------------
@@ -1059,10 +1252,6 @@ class TestOAuthLoginEndpoint:
 
 class TestOAuthCallbackEndpoint:
     """Tests for GET /auth/{provider}/callback endpoint."""
-
-    def setup_method(self):
-        """Clear state before each test."""
-        _clear_oauth_state()
 
     def test_callback_handles_oauth_error(self):
         """oauth_callback handles OAuth provider error."""
@@ -1328,7 +1517,7 @@ class TestOAuthCallbackEndpoint:
                  patch("app.auth.endpoints.exchange_code_for_token") as mock_exchange, \
                  patch("app.auth.endpoints.get_user_info") as mock_userinfo, \
                  patch("app.auth.endpoints.find_account_by_provider") as mock_find_provider, \
-                 patch("app.auth.endpoints.touch_account_login") as mock_touch, \
+                 patch("app.auth.endpoints.touch_last_login") as mock_touch, \
                  patch("app.auth.endpoints.create_session_token") as mock_create_token, \
                  patch("app.auth.endpoints.get_settings") as mock_settings:
                 mock_verify.return_value = "google"
@@ -1401,10 +1590,6 @@ class TestLogoutEndpoint:
 
 class TestGetCurrentUserEndpoint:
     """Tests for GET /auth/me endpoint."""
-
-    def setup_method(self):
-        """Clear state before each test."""
-        _clear_oauth_state()
 
     def test_get_current_user_no_token(self):
         """get_current_user raises 401 when no token present."""
@@ -1648,40 +1833,29 @@ class TestLinkProviderEndpoint:
 class TestSecurityValidations:
     """Tests for security-related validations."""
 
-    def test_csrf_state_protection(self):
+    async def test_csrf_state_protection(self):
         """OAuth state provides CSRF protection."""
-        _clear_oauth_state()
-
         from app.auth.oauth import generate_oauth_state, verify_oauth_state
 
         # Generate state for google
-        state = generate_oauth_state("google")
+        state = await generate_oauth_state("google")
 
         # Attacker can't reuse state for different provider
-        result = verify_oauth_state(state)
+        result = await verify_oauth_state(state)
         assert result == "google"
 
         # State can only be used once
-        result2 = verify_oauth_state(state)
+        result2 = await verify_oauth_state(state)
         assert result2 is None
 
-    def test_state_expiration(self):
+    async def test_state_expiration(self):
         """OAuth state expires after timeout."""
-        _clear_oauth_state()
-
         from app.auth.oauth import verify_oauth_state
 
-        state = generate_oauth_state("google")
+        state = await generate_oauth_state("google")
+        await _backdate_state(state, minutes=20)
 
-        # Manually expire the state
-        provider, _, link_user_id = _OAUTH_STATES[state]
-        _OAUTH_STATES[state] = (
-            provider,
-            datetime.now(timezone.utc) - timedelta(minutes=20),
-            link_user_id,
-        )
-
-        result = verify_oauth_state(state)
+        result = await verify_oauth_state(state)
         assert result is None
 
     def test_session_token_expiration(self):

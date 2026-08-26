@@ -2,13 +2,17 @@
 
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 
+// The credential is read per call (see lib/authToken), so signing in takes effect
+// without a reload — ./config's authHeaders is fixed at build time and cannot.
 import { authHeaders } from "./lib/authToken";
 import { API_BASE, wsUrl } from "./lib/apiClient";
 
-// One shared base with apiClient. It used to default to "http://localhost:8000",
-// which points a production browser at the user's own machine whenever
-// VITE_API_URL is unset — the setup both the Vite dev proxy and the
-// single-origin production deploy assume. "" means same-origin.
+// One shared base with apiClient, resolved once so every module agrees on the
+// base URL and on what "unset" means (blank env vars included — `??` used to let
+// "" through). It used to default to "http://localhost:8000", which points a
+// production browser at the user's own machine whenever VITE_API_URL is unset —
+// the setup both the Vite dev proxy and the single-origin production deploy
+// assume. "" means same-origin.
 const BASE_URL = API_BASE;
 
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -141,6 +145,37 @@ export function getConfig(): Promise<AppConfig> {
 /** Current identity for the UI (real org/role in multi-tenant mode). */
 export function getMe(): Promise<Me> {
   return get<Me>("/me");
+}
+
+/** One entry of the server-side model catalog (`app/model_catalog.py`). */
+export interface CatalogModel {
+  id: string;
+  provider: string;
+  display_name: string;
+  max_context: number | null;
+  max_output: number | null;
+  /** USD per 1M tokens. `null` means the price is unverified — show nothing, never a guess. */
+  input_per_1m: number | null;
+  output_per_1m: number | null;
+  cached_input_per_1m: number | null;
+  has_pricing: boolean;
+  capabilities: string[];
+  supports_thinking: boolean;
+  supports_temperature: boolean;
+  status: "current" | "legacy" | "retired";
+}
+
+/** Payload of `GET /api/models`. */
+export interface ModelCatalog {
+  pricing_last_verified: string;
+  pricing_unit: string;
+  defaults: Record<string, { main: string; fast: string }>;
+  models: CatalogModel[];
+}
+
+/** The models the backend will actually accept, with their real prices. */
+export function getModelCatalog(): Promise<ModelCatalog> {
+  return get<ModelCatalog>("/api/models");
 }
 
 /** Switch LLM provider/model/key at runtime. */

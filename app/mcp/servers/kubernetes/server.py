@@ -62,6 +62,17 @@ def _get_rollout_history() -> list:
     return get_fixture("kubernetes", "rollout_history") or []
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live cluster read.
+
+    The write tools below already say "(simulated)"; the read tools returned
+    fixtures shaped exactly like real API responses, so an investigation built
+    on invented pods looked identical to one built on a real cluster.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "kubernetes")
+
+
 def _client():
     """Build (CoreV1Api, AppsV1Api) from the configured kubeconfig (live mode)."""
     from kubernetes import client, config  # lazy: optional dependency
@@ -83,7 +94,7 @@ def list_pods(namespace: str = "", status: str | None = None) -> list[dict]:
     """
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        return [p for p in _get_pods() if not status or str(p["status"]).lower() == status.lower()]
+        return _demo([p for p in _get_pods() if not status or str(p["status"]).lower() == status.lower()])
     core, _ = _client()
     out = []
     for p in core.list_namespaced_pod(ns).items:
@@ -112,10 +123,10 @@ def describe_pod(name: str, namespace: str = "") -> dict:
             return {"error": f"pod '{name}' not found (offline demo)",
                     "available": [p["name"] for p in _get_pods()]}
         events = [e for e in _get_events() if name in e["object"]]
-        return {**pod, "events": events,
-                "containers": [{"name": "checkout", "state": pod["status"],
-                                "last_exit_code": 1 if pod["restarts"] else 0,
-                                "reason": pod["reason"]}]}
+        return _demo({**pod, "events": events,
+                      "containers": [{"name": "checkout", "state": pod["status"],
+                                      "last_exit_code": 1 if pod["restarts"] else 0,
+                                      "reason": pod["reason"]}]})
     core, _ = _client()
     p = core.read_namespaced_pod(name, ns)
     containers = [{
@@ -133,7 +144,7 @@ def get_events(namespace: str = "", only_warnings: bool = False) -> list[dict]:
     image pull errors, and rollout activity. Set only_warnings to focus on problems."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        return [e for e in _get_events() if not only_warnings or e["type"] == "Warning"]
+        return _demo([e for e in _get_events() if not only_warnings or e["type"] == "Warning"])
     core, _ = _client()
     out = []
     for e in core.list_namespaced_event(ns).items:
@@ -153,7 +164,7 @@ def get_deployment_status(name: str, namespace: str = "") -> dict:
     if OFFLINE:
         if name != _get_deployment()["name"]:
             return {"error": f"deployment '{name}' not found (offline demo has '{_get_deployment()['name']}')"}
-        return dict(_get_deployment())
+        return _demo(dict(_get_deployment()))
     _, apps = _client()
     d = apps.read_namespaced_deployment(name, ns)
     s = d.status
@@ -174,7 +185,7 @@ def rollout_history(deployment: str, namespace: str = "") -> list[dict]:
     if OFFLINE:
         if deployment != _get_deployment()["name"]:
             return [{"error": f"deployment '{deployment}' not found (offline demo)"}]
-        return list(_get_rollout_history())
+        return _demo(list(_get_rollout_history()))
     # Live revision history lives on the deployment's ReplicaSets; summarize them.
     _, apps = _client()
     ns = namespace or KUBE_NAMESPACE

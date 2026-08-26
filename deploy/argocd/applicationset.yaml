@@ -17,15 +17,20 @@ spec:
           # Environment generator
           - list:
               elements:
+                # replicaCount/autoscaling PINNED TO 1 — TEMPORARY. Authoritative
+                # business state (customers, trials, billing usage records) lives
+                # in module-level Python dicts; see deploy/helm/copilot/values.yaml
+                # for the full list and the revert condition.
+                # RESTORE staging 2 (2-5) / production 3 (3-20) WHEN externalised.
                 - env: staging
                   cluster: https://staging.k8s.example.com
                   namespace: omnipotent-staging
                   targetRevision: main
                   imageTag: latest
-                  replicaCount: "2"
-                  autoscaling: "true"
-                  minReplicas: "2"
-                  maxReplicas: "5"
+                  replicaCount: "1"
+                  autoscaling: "false"
+                  minReplicas: "1"
+                  maxReplicas: "1"
                   cpuRequest: "500m"
                   memoryRequest: "512Mi"
                   cpuLimit: "2000m"
@@ -35,10 +40,10 @@ spec:
                   namespace: omnipotent-production
                   targetRevision: HEAD
                   imageTag: v1.0.0
-                  replicaCount: "3"
-                  autoscaling: "true"
-                  minReplicas: "3"
-                  maxReplicas: "20"
+                  replicaCount: "1"
+                  autoscaling: "false"
+                  minReplicas: "1"
+                  maxReplicas: "1"
                   cpuRequest: "1000m"
                   memoryRequest: "1Gi"
                   cpuLimit: "4000m"
@@ -47,11 +52,14 @@ spec:
           #
           # Only `api` exists. A `worker` element used to be listed here pointing
           # at a values-worker.yaml that was never written, which made ArgoCD fail
-          # the whole Application. Deploying the Dramatiq worker
-          # (`python -m app.tasks.worker`) needs two things that do not exist yet:
-          # a worker Deployment template in the chart, and the `tasks` extra in
-          # the runtime image (the Dockerfile installs `.[postgres,migrations]`,
-          # so `import dramatiq` fails). Add both before re-adding the component.
+          # the whole Application. The runtime image now carries the `tasks` extra
+          # (the Dockerfile installs `.[postgres,migrations,tasks]`, so the
+          # Dramatiq worker can start from it — docker-compose runs it that way),
+          # but deploy/helm/devops-copilot — the chart this generator deploys —
+          # still has no worker Deployment template and no values-worker.yaml.
+          # (deploy/helm/copilot has templates/worker-deployment.yaml; this
+          # generator does not point at that chart.) Add the template and the
+          # values file before re-adding the component.
           - list:
               elements:
                 - component: api

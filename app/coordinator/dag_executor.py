@@ -25,6 +25,39 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger("omnipotent.coordinator.dag_executor")
 
 
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse an ISO timestamp written by `serialize`, tolerating None and junk.
+
+    A stored execution written by an older version must not take the listing
+    endpoint down with a ValueError. UTC is assumed when no offset is stored.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        log.warning("unparseable timestamp %r in stored DAG execution", value)
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _json_safe(value: Any) -> Any:
+    """Coerce a task output to something a JSON column can hold.
+
+    `TaskExecution.output` is typed `Any` and comes from a handler, so it is not
+    guaranteed serialisable. Storing a repr of the odd exotic value keeps the
+    rest of the execution readable; raising here would lose the whole record over
+    one field nothing indexes.
+    """
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return {"unserialisable": repr(value)[:500]}
+    return value
+
+
 class ExecutionState(str, Enum):
     PENDING = "pending"
     READY = "ready"
@@ -164,6 +197,43 @@ class TaskExecution:
             "simulated": self.simulated,
         }
 
+    def serialize(self) -> dict[str, Any]:
+        """Full state, for storage. `to_dict` is the API response shape and is
+        deliberately lossy — it omits outputs, tracebacks and resource usage."""
+        return {
+            "task_id": self.task_id,
+            "state": self.state.value,
+            "queued_at": self.queued_at.isoformat() if self.queued_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "attempt": self.attempt,
+            "max_attempts": self.max_attempts,
+            "output": _json_safe(self.output),
+            "error": self.error,
+            "error_traceback": self.error_traceback,
+            "chosen_branch": self.chosen_branch,
+            "duration_ms": self.duration_ms,
+            "resource_usage": self.resource_usage,
+        }
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> TaskExecution:
+        return cls(
+            task_id=data["task_id"],
+            state=ExecutionState(data.get("state", ExecutionState.PENDING.value)),
+            queued_at=_parse_dt(data.get("queued_at")),
+            started_at=_parse_dt(data.get("started_at")),
+            completed_at=_parse_dt(data.get("completed_at")),
+            attempt=data.get("attempt", 0),
+            max_attempts=data.get("max_attempts", 1),
+            output=data.get("output"),
+            error=data.get("error"),
+            error_traceback=data.get("error_traceback"),
+            chosen_branch=data.get("chosen_branch"),
+            duration_ms=data.get("duration_ms"),
+            resource_usage=data.get("resource_usage"),
+        )
+
 
 @dataclass
 class DAGExecution:
@@ -211,6 +281,52 @@ class DAGExecution:
             ),
             "checkpoint_id": self.checkpoint_id,
         }
+
+    def serialize(self) -> dict[str, Any]:
+        """Full state, for storage — including the accumulated context and level
+        plan that `to_dict` omits and that a resume would need."""
+        return {
+            "id": self.id,
+            "dag_id": self.dag_id,
+            "state": self.state.value,
+            # Carried through storage as well as `to_dict`: a run that died
+            # before any task started has nothing else to explain itself with,
+            # and dropping it here made the reason survive only until the
+            # process that logged it went away.
+            "error": self.error,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "task_executions": {
+                tid: te.serialize() for tid, te in self.task_executions.items()
+            },
+            "execution_levels": self.execution_levels,
+            "current_level": self.current_level,
+            "initial_context": _json_safe(self.initial_context),
+            "accumulated_context": _json_safe(self.accumulated_context),
+            "checkpoint_id": self.checkpoint_id,
+            "resumed_from": self.resumed_from,
+        }
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> DAGExecution:
+        return cls(
+            id=data["id"],
+            dag_id=data["dag_id"],
+            state=ExecutionState(data.get("state", ExecutionState.PENDING.value)),
+            error=data.get("error"),
+            started_at=_parse_dt(data.get("started_at")),
+            completed_at=_parse_dt(data.get("completed_at")),
+            task_executions={
+                tid: TaskExecution.deserialize(te)
+                for tid, te in (data.get("task_executions") or {}).items()
+            },
+            execution_levels=[list(level) for level in data.get("execution_levels") or []],
+            current_level=data.get("current_level", 0),
+            initial_context=dict(data.get("initial_context") or {}),
+            accumulated_context=dict(data.get("accumulated_context") or {}),
+            checkpoint_id=data.get("checkpoint_id"),
+            resumed_from=data.get("resumed_from"),
+        )
 
 
 class TaskDAG:

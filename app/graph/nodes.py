@@ -380,6 +380,32 @@ _SEVERITIES = {"SEV1", "SEV2", "SEV3", "SEV4", "INFO"}
 _CONFIDENCE = {"high", "medium", "low"}
 _VERDICTS = {"validated", "invalidated", "inconclusive"}
 
+# Character budgets for the free-text report fields. They protect the downstream
+# consumers of the report — the Slack message (blocks cap at 3000 chars), the PR
+# body, and the checkpointed state that is re-sent to the model on every later
+# turn — from one runaway model reply. They are NOT a judgement about how long a
+# root cause should be, which is why an over-budget value is marked rather than
+# quietly clipped.
+_MAX_SUMMARY_CHARS = 1500
+_MAX_CAUSE_CHARS = 400
+_TRUNCATION_MARKER = "… (truncated)"
+
+
+def _clip(text: str, limit: int, field: str) -> str:
+    """Truncate to `limit` chars, appending an explicit marker when it had to cut.
+
+    A silently clipped RCA reads as a finished sentence that happens to be wrong;
+    the marker tells the reader (human or downstream model) that the thought is
+    unfinished. Result length never exceeds `limit`.
+    """
+    if len(text) <= limit:
+        return text
+    log.debug(
+        "Truncating report field %s: %d chars over the %d-char budget",
+        field, len(text) - limit, limit,
+    )
+    return text[: limit - len(_TRUNCATION_MARKER)].rstrip() + _TRUNCATION_MARKER
+
 
 def _evidence_digest(state: AgentState, max_items: int = 24, max_chars: int = 600) -> str:
     """Compact record of what the tools actually returned, so the reporter grounds
@@ -437,7 +463,7 @@ def _normalize_report(data: dict, fallback_summary: str) -> dict:
             hconf = str(h.get("confidence", "")).strip().lower()
             hypotheses.append(
                 {
-                    "cause": cause[:400],
+                    "cause": _clip(cause, _MAX_CAUSE_CHARS, "hypothesis.cause"),
                     "verdict": verdict if verdict in _VERDICTS else "inconclusive",
                     "confidence": hconf if hconf in _CONFIDENCE else "low",
                     "evidence": _coerce_str_list(h.get("evidence"), limit=8),
@@ -449,10 +475,10 @@ def _normalize_report(data: dict, fallback_summary: str) -> dict:
     summary = data.get("summary")
     summary = summary.strip() if isinstance(summary, str) and summary.strip() else fallback_summary.strip()
     return {
-        "summary": summary[:1500] or "(no summary produced)",
+        "summary": _clip(summary, _MAX_SUMMARY_CHARS, "summary") or "(no summary produced)",
         "severity": severity,
         "confidence": confidence,
-        "root_cause": root_cause[:400] if root_cause else None,
+        "root_cause": _clip(root_cause, _MAX_CAUSE_CHARS, "root_cause") if root_cause else None,
         "affected_services": _coerce_str_list(data.get("affected_services"), limit=12, max_chars=80),
         "hypotheses": hypotheses,
         "evidence": _coerce_str_list(data.get("evidence"), limit=20),
@@ -464,7 +490,8 @@ def _parse_report(text: str, fallback_summary: str) -> dict:
     """Extract the JSON object from a model reply and normalize it. On any failure,
     return a minimal valid report built from the final answer text."""
     fallback: dict = {
-        "summary": fallback_summary.strip()[:1500] or "(no summary produced)",
+        "summary": _clip(fallback_summary.strip(), _MAX_SUMMARY_CHARS, "summary")
+        or "(no summary produced)",
         "severity": "SEV3",
         "confidence": "low",
         "root_cause": None,

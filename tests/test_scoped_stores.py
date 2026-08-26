@@ -6,18 +6,24 @@ task graphs is that they hold different instances. These tests pin that: same
 org ⇒ same instance, different org ⇒ different instance, no tenant ⇒ the shared
 single-tenant bucket.
 
-Incidents, runbooks, teams, the knowledge base and the status page are not here
-any more — they moved to tables, where isolation is an org_id filter rather than
-an instance. See tests/test_incidents_store.py, tests/test_runbooks_store.py,
-tests/test_teams_store.py, tests/test_knowledge_base_store.py and
-tests/test_status_page_store.py.
+Incidents, runbooks, teams, the knowledge base, the status page and — as of the
+merge with main — planning graphs are not here any more. They moved to tables,
+where isolation is an org_id filter rather than an instance. See
+tests/test_incidents_store.py, tests/test_runbooks_store.py,
+tests/test_teams_store.py, tests/test_knowledge_base_store.py,
+tests/test_status_page_store.py and tests/test_planning_persistence.py.
+
+The planning router's engine and decomposer did not move: the engine holds a
+tenant's live execution results and builds its tools from that tenant's
+integrations, so separate instances are still the only thing keeping one org out
+of another's. They are what this file now watches.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from app.planning.api_router import _graphs
+from app.planning.api_router import _decomposers, _engines
 from app.tenancy.scoping import ScopedRegistry, scoped
 from app.tenant_context import TenantConfig, reset_tenant, set_tenant
 
@@ -112,7 +118,8 @@ def test_scoped_registers_for_reset():
 @pytest.mark.parametrize(
     "get_store",
     [
-        pytest.param(_graphs, id="planning_graphs"),
+        pytest.param(_engines.get, id="planning_engines"),
+        pytest.param(_decomposers.get, id="planning_decomposers"),
     ],
 )
 def test_feature_stores_are_per_org(get_store, as_org):

@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Project root = two levels up from this file (app/config.py -> app -> root)
@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Fields with a validation_alias below are still constructible by their
+        # Python name (Settings(copilot_database_url=...)), which tests rely on.
+        populate_by_name=True,
     )
 
     # --- LLM ---
@@ -129,6 +132,10 @@ class Settings(BaseSettings):
     gitlab_webhook_secret: str = ""
     # Microsoft Teams incoming webhook URL for notifications.
     teams_webhook_url: str = ""
+    # Target for the generic WEBHOOK notification channel. NotificationPreferences
+    # has no per-user webhook URL, so this channel is deployment-level only. Empty
+    # means the channel reports delivery failure rather than silently succeeding.
+    copilot_notification_webhook_url: str = ""
     # Jira Cloud/Server integration for issue management.
     jira_base_url: str = ""  # e.g., https://yourcompany.atlassian.net
     jira_email: str = ""     # Jira account email
@@ -164,6 +171,24 @@ class Settings(BaseSettings):
     # their endpoints are external. Name hosts here only for an on-prem install
     # whose subscribers genuinely are on the internal network.
     copilot_webhook_allowed_hosts: str = ""
+
+    # --- Demo mode ---
+    # Several subsystems (runbook execution, remediation handlers, the Slack
+    # command handlers, the incident store, billing) have a code path that
+    # fabricates a plausible result when their real backend isn't configured.
+    # That path is OFF by default: unconfigured subsystems fail closed rather
+    # than report success for work they never did. Set this to true only for
+    # demos and local walkthroughs — every fabricated payload is then labelled
+    # "(simulated)" so it can never be mistaken for a real result. Refused
+    # outright when COPILOT_ENV=production.
+    copilot_demo_mode: bool = False
+
+    # --- Local state ---
+    # Writable directory for state this process owns: SQLite databases, graph
+    # checkpoints, the vector store. Empty = <project root>/data. In a container
+    # point this at a mounted volume; the image filesystem is usually read-only
+    # and is always ephemeral, so anything written elsewhere is lost on restart.
+    copilot_state_dir: str = ""
 
     # --- URLs (configurable for different environments) ---
     # Frontend URL for redirects (Stripe, OAuth, etc.)
@@ -203,19 +228,54 @@ class Settings(BaseSettings):
     # and reads env rather than this model, so app/mcp/client.py forwards this
     # value to it as HTTP_TIMEOUT_GITHUB.
     http_timeout_github: float = 15.0
+    # Timeout for one component health check. app/health.py also derives the
+    # AGGREGATE check_all deadline from it, so raising this raises both — a fixed
+    # aggregate would otherwise silently cap any value above it.
+    http_timeout_health: float = 5.0
+    # Timeout for MCP server calls. Like HTTP_TIMEOUT_GITHUB this has to cross a
+    # process boundary to matter: app/mcp/client.py forwards it into the stdio
+    # server's env as HTTP_TIMEOUT_MCP, which app/mcp/servers/github/server.py
+    # (_mcp_timeout) reads. Unforwarded it was inert whatever the operator set.
+    http_timeout_mcp: float = 20.0
+
+    # --- Redis Connection Pool ---
+    # These are PER-WORKLOAD baselines, not process-wide totals. app/redis_pool.py
+    # runs four pools (cache, session, pubsub, queue) and scales this baseline by a
+    # per-workload factor, so the process can open roughly 3.8x this value in
+    # total (session doubles it; pubsub and queue take fractions). Size against
+    # your Redis `maxclients` accordingly: 50 here means ~190 connections per
+    # replica, and replicaCount multiplies that again.
+    redis_min_connections: int = 5
+    redis_max_connections: int = 50
+    redis_connection_timeout: float = 2.0
+    redis_socket_timeout: float = 1.0
+
+    # --- Safety gate ---
+    # The single bar for "confident enough to change production" (0.0 - 1.0).
+    # Read by the remediation decision gate (app/coordinator/handlers/
+    # remediation.py) and the verification consistency checker, which each used to
+    # carry their own literal 0.8 and could therefore drift apart.
+    safety_confidence_threshold: float = 0.80
     #
     # Deliberately absent (deleted rather than left as decoration): a knob in
     # this file that no code reads is indistinguishable, from the operator's
     # side, from one that is silently ignored — Settings is extra="ignore", so
-    # setting it produces no error and no effect. Removed here because nothing
-    # in app/ consumed them: HTTP_TIMEOUT_HEALTH / HTTP_TIMEOUT_MCP (the MCP
-    # servers are stdio subprocesses, not HTTP clients), the REDIS_*
-    # connection-pool quartet (app/redis_pool.py tunes per workload in
-    # POOL_CONFIGS), SAFETY_* gate thresholds, COST_* thresholds, ANOMALY_*
-    # thresholds (app/event_intelligence/noise_reduction.py carries its own
-    # NoiseReductionConfig), the CACHE_SIMILARITY_*/CACHE_MAX_ENTRIES_* sextet,
-    # LOG_SIMILARITY_THRESHOLD and SIMILAR_INCIDENT_THRESHOLD. Re-add one only
-    # together with the line that reads it.
+    # setting it produces no error and no effect. Removed because nothing in the
+    # tree consumes them:
+    #   SAFETY_ACTION_THRESHOLDS / SAFETY_MAX_BLAST_RADIUS /
+    #     SAFETY_PROTECTED_SERVICES — parsed only by the get_* helpers that also
+    #     lived here and had no callers (see the note at the end of this class);
+    #   COST_UNDERUTILIZED/IDLE/ANOMALY/BUDGET_ALERT_THRESHOLD — their only
+    #     reader was app/cost_optimization/analyzer.py, deleted in this branch;
+    #   ANOMALY_Z/TREND/PATTERN_THRESHOLD — app/monitoring/ambient.py, likewise
+    #     deleted (app/event_intelligence/noise_reduction.py carries its own
+    #     NoiseReductionConfig and never read these);
+    #   the CACHE_SIMILARITY_*/CACHE_MAX_ENTRIES_* sextet —
+    #     app/llm_advanced/semantic_cache.py, deleted;
+    #   LOG_SIMILARITY_THRESHOLD — app/log_intelligence/clustering.py, deleted;
+    #   SIMILAR_INCIDENT_THRESHOLD — app/similar_search/*, deleted.
+    # Re-add one only together with the line that reads it (and if one of those
+    # modules comes back, its setting comes back with it).
 
     # --- Observability ---
     langchain_tracing_v2: bool = False
@@ -304,7 +364,12 @@ class Settings(BaseSettings):
     copilot_checkpoint_db: str = "./copilot_checkpoints.sqlite"
     # Redis URL for the SHARED (cross-replica) rate limiter and cache. Empty =
     # per-process in-memory (single-instance only). e.g. redis://host:6379/0
-    copilot_redis_url: str = ""
+    # Also accepts the bare REDIS_URL that managed platforms (Render, Heroku,
+    # Helm, docker-compose) inject by convention — see copilot_database_url.
+    copilot_redis_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("COPILOT_REDIS_URL", "REDIS_URL"),
+    )
     # Response cache backend: "memory" (default), "redis", or "none" (disabled).
     # Redis uses COPILOT_REDIS_URL; falls back to memory if unavailable.
     copilot_cache_backend: str = "memory"
@@ -454,8 +519,15 @@ class Settings(BaseSettings):
 
     # --- Database (production persistence) ---
     # Database URL: postgresql://user:pass@host:5432/db or sqlite:///path.db
-    # Empty = SQLite at data/copilot.db (dev default).
-    copilot_database_url: str = ""
+    # Empty = SQLite under COPILOT_STATE_DIR (dev default).
+    # Managed platforms inject a bare DATABASE_URL (Render, Heroku, Helm charts,
+    # docker-compose all do), so accept that name too — otherwise a correctly
+    # provisioned Postgres is silently ignored and the app falls back to SQLite
+    # on an ephemeral container filesystem.
+    copilot_database_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("COPILOT_DATABASE_URL", "DATABASE_URL"),
+    )
     # Connection pool settings (PostgreSQL only).
     copilot_db_pool_size: int = 10
     copilot_db_pool_overflow: int = 20
@@ -538,17 +610,23 @@ class Settings(BaseSettings):
                 "COPILOT_API_TOKEN must be set when COPILOT_ENV=production "
                 "(refusing to start an unauthenticated, internet-exposed API)."
             )
-        # Multi-tenant stores per-tenant credentials encrypted at rest; in
-        # production refuse to boot with an ephemeral vault key (it would lose
-        # every tenant's secrets on restart and weaken isolation).
-        if (
-            self.copilot_multi_tenant
-            and self.copilot_env == "production"
-            and not self.copilot_secret_key.strip()
-        ):
+        # The secret key is not multi-tenant-only: it also signs the OAuth/session
+        # JWTs (app/auth/oauth.py). Without it those fall back to a well-known
+        # constant, so anyone can mint a valid token. Require it for every
+        # production deployment, not just multi-tenant ones.
+        if self.copilot_env == "production" and not self.copilot_secret_key.strip():
             raise ValueError(
-                "COPILOT_SECRET_KEY must be set when COPILOT_MULTI_TENANT=true in "
-                "production (per-tenant secrets are encrypted with it)."
+                "COPILOT_SECRET_KEY must be set when COPILOT_ENV=production "
+                "(it signs session tokens and encrypts stored secrets; without it "
+                "tokens would be signed with a publicly known key)."
+            )
+        # Demo mode fabricates successful results for subsystems that have no
+        # real backend. That is never acceptable in production.
+        if self.copilot_demo_mode and self.copilot_env == "production":
+            raise ValueError(
+                "COPILOT_DEMO_MODE must be false when COPILOT_ENV=production "
+                "(it makes remediation and runbook steps report success without "
+                "doing anything)."
             )
         return self
 
@@ -658,6 +736,33 @@ class Settings(BaseSettings):
         return Path(base).expanduser().resolve() if base else ROOT.resolve()
 
     @property
+    def state_dir(self) -> Path:
+        """Directory this process writes local state into (see copilot_state_dir).
+
+        Resolution only — use ensure_state_dir()/state_path() before opening a
+        file, so the directory exists.
+        """
+        base = self.copilot_state_dir.strip()
+        return (Path(base).expanduser() if base else (ROOT / "data")).resolve()
+
+    def ensure_state_dir(self) -> Path:
+        """state_dir, created if missing. Raises if it cannot be created — a
+        read-only state directory is a deployment error, not something to paper
+        over by silently relocating data to /tmp where it is lost on restart."""
+        path = self.state_dir
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def state_path(self, name: str) -> Path:
+        """Resolve `name` under state_dir. Absolute paths and paths the operator
+        wrote explicitly (./foo, ../foo) are honoured as-is."""
+        candidate = Path(name).expanduser()
+        if candidate.is_absolute() or name.startswith((".", "/", "~")):
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            return candidate.resolve()
+        return self.ensure_state_dir() / name
+
+    @property
     def offline_mode(self) -> bool:
         """True when no GitHub token is set — the GitHub MCP server runs against
         local demo fixtures instead of the real API."""
@@ -665,9 +770,13 @@ class Settings(BaseSettings):
 
     # get_action_confidence_thresholds / get_max_blast_radius /
     # get_protected_services / get_canary_steps lived here and had no callers —
-    # they parsed SAFETY_* and DEPLOYMENT_* settings that were themselves read by
-    # nothing, so the safety gate they appeared to configure did not exist. They
-    # are removed along with those fields.
+    # they parsed SAFETY_ACTION_THRESHOLDS / SAFETY_MAX_BLAST_RADIUS /
+    # SAFETY_PROTECTED_SERVICES / DEPLOYMENT_CANARY_STEPS, settings that were
+    # themselves read by nothing, so the per-action safety gate and the canary
+    # rollout they appeared to configure did not exist. They are removed along
+    # with those fields. (SAFETY_CONFIDENCE_THRESHOLD is a different thing and
+    # survives: it is read directly by the remediation decision gate and the
+    # verification consistency checker.)
 
 
 @lru_cache

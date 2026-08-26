@@ -40,12 +40,18 @@ app:
     RATE_LIMIT_MULTIPLIER: "2"
     OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
     OTEL_SERVICE_NAME: omnipotent-api-staging
+    # Every local store (SQLite, checkpoints, vectors) writes here; must be a
+    # writable mount, since the container root filesystem is read-only.
+    COPILOT_STATE_DIR: /app/data
 
+  # Keys copied out of the omnipotent-secrets Secret as env vars — they must
+  # exist under these names in it. COPILOT_-prefixed: the bare DATABASE_URL /
+  # REDIS_URL work for the app, but alembic reads only COPILOT_DATABASE_URL.
   secrets:
     - name: omnipotent-secrets
       keys:
-        - DATABASE_URL
-        - REDIS_URL
+        - COPILOT_DATABASE_URL
+        - COPILOT_REDIS_URL
         - JWT_SECRET
         - OPENAI_API_KEY
 
@@ -182,11 +188,25 @@ networkPolicy:
               - 172.16.0.0/12
               - 192.168.0.0/16
 
+# Extra volumes. readOnlyRootFilesystem is on below, so the state directory the
+# app writes to (COPILOT_STATE_DIR, set in app.env) needs a writable mount.
+extraVolumes:
+  - name: tmp
+    emptyDir: {}
+  - name: data
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+  - name: data
+    mountPath: /app/data
+
 # Pod security
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
+  runAsUser: 10001
+  fsGroup: 10001
 
 securityContext:
   allowPrivilegeEscalation: false

@@ -3,22 +3,24 @@ name: Database Migrations
 on:
   push:
     branches: [main]
-    # Revisions live in migrations/versions/, and the metadata autogenerate
-    # compares against is app/database/models.py + app/oncall/models.py (both
-    # imported by migrations/env.py). There is no alembic/ or app/db/ directory.
     paths:
+      # `alembic/` and `app/db/` do not exist in this repo: alembic.ini sets
+      # `script_location = migrations`, and the models autogenerate compares
+      # against are app/database/ plus app/oncall/models.py (both imported by
+      # migrations/env.py). Both old entries were dead, so the one change this
+      # workflow exists to guard -- editing a model without writing a migration
+      # -- never triggered it.
       - 'migrations/**'
       - 'alembic.ini'
-      - 'app/database/models.py'
-      - 'app/database/types.py'
+      - 'app/database/**'
       - 'app/oncall/models.py'
   pull_request:
     branches: [main]
     paths:
+      # Same list as the push trigger above; keep them in step.
       - 'migrations/**'
       - 'alembic.ini'
-      - 'app/database/models.py'
-      - 'app/database/types.py'
+      - 'app/database/**'
       - 'app/oncall/models.py'
   workflow_dispatch:
     inputs:
@@ -94,7 +96,7 @@ jobs:
 
       - name: Validate migration syntax
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           echo "Checking migration files syntax..."
           uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; ScriptDirectory.from_config(Config('alembic.ini'))"
@@ -103,7 +105,7 @@ jobs:
       - name: Check for pending migrations
         id: check-pending
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           # Apply all migrations to fresh database
           uv run alembic upgrade head
@@ -127,7 +129,7 @@ jobs:
 
       - name: Test migration reversibility
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           echo "Testing migration up/down cycle..."
 
@@ -147,15 +149,20 @@ jobs:
 
       - name: Verify model-migration consistency
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
+          COPILOT_DATABASE_URL: postgresql://test:test@localhost:5432/omnipotent_test
         run: |
           echo "Checking for unmigrated model changes..."
 
           # `alembic check` diffs the ORM metadata against the migrated database
           # and exits non-zero when a revision is missing. It replaces a
-          # hand-rolled `revision --autogenerate` + glob, which globbed
-          # alembic/versions/ (a directory that does not exist) and so silently
-          # passed while leaving the generated file behind in migrations/versions/.
+          # hand-rolled `revision --autogenerate` + glob of alembic/versions/ --
+          # a directory alembic.ini never pointed at (`script_location =
+          # migrations`), so `ls -t` always came back empty, the `if` never ran
+          # and this step reported success having inspected nothing, leaving the
+          # generated file behind in migrations/versions/. `check` writes no
+          # file, so there is nothing to clean up and nothing to mistake a real
+          # migration for. Drift now FAILS the job rather than emitting a
+          # ::warning:: nobody reads.
           if ! uv run alembic check; then
             echo "::error::Model changes have no corresponding migration."
             echo "Run: uv run alembic revision --autogenerate -m '<description>'"
@@ -284,7 +291,7 @@ jobs:
         id: current-state
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
@@ -293,7 +300,7 @@ jobs:
       - name: Run migrations
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           ACTION="${{ github.event.inputs.action || 'upgrade' }}"
           TARGET="${{ github.event.inputs.target || 'head' }}"
@@ -321,7 +328,7 @@ jobs:
       - name: Verify migration state
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           NEW_STATE=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "Migration state after: $NEW_STATE"
@@ -399,7 +406,7 @@ jobs:
       - name: Get current migration state
         id: current-state
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         run: |
           CURRENT=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
@@ -407,7 +414,7 @@ jobs:
 
       - name: Run migrations with timeout
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         timeout-minutes: 30
         run: |
           ACTION="${{ github.event.inputs.action }}"
@@ -435,7 +442,7 @@ jobs:
 
       - name: Verify migration state
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         run: |
           NEW_STATE=$(uv run alembic current 2>/dev/null | head -1 || echo "none")
           echo "Migration state after: $NEW_STATE"

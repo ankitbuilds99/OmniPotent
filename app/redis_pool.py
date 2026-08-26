@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Set
@@ -31,6 +32,11 @@ class RedisPoolType(Enum):
 class PoolConfig:
     """Pool configuration by workload type."""
 
+    # Advisory only, and deliberately not passed to the pool: redis-py's
+    # ConnectionPool is lazy and has no minimum/pre-warm concept, so there is
+    # nothing to hand it. Kept because it is what REDIS_MIN_CONNECTIONS means to
+    # an operator sizing their Redis (and it is reported by describe_pools), but
+    # do not read it expecting connections to exist.
     min_connections: int
     max_connections: int
     connection_timeout: float
@@ -39,40 +45,121 @@ class PoolConfig:
     health_check_interval: float
 
 
-POOL_CONFIGS: dict[RedisPoolType, PoolConfig] = {
-    RedisPoolType.CACHE: PoolConfig(
-        min_connections=5,
-        max_connections=50,
-        connection_timeout=1.0,
-        socket_timeout=0.5,
+@dataclass(frozen=True)
+class WorkloadProfile:
+    """How one workload deviates from the operator's Redis baseline.
+
+    The baseline lives in settings (REDIS_MIN_CONNECTIONS, REDIS_MAX_CONNECTIONS,
+    REDIS_CONNECTION_TIMEOUT, REDIS_SOCKET_TIMEOUT). Sizes and timeouts are stored
+    here as *factors* of that baseline so that an operator who moves the baseline
+    (bigger instance, slower network) moves every workload with it instead of
+    having to discover four more numbers buried in this module.
+    """
+
+    min_conn_factor: float
+    max_conn_factor: float
+    connect_timeout_factor: float
+    retry_on_timeout: bool
+    health_check_interval: float
+    # Multiplier on the baseline socket timeout for request/response workloads.
+    socket_timeout_factor: float = 1.0
+    # Absolute socket timeout in seconds for the two BLOCKING workloads, where the
+    # request-path baseline is meaningless: a subscriber must never time out
+    # (0.0 = block forever) and a queue consumer blocks for a whole poll interval.
+    socket_timeout_s: float | None = None
+
+
+WORKLOAD_PROFILES: dict[RedisPoolType, WorkloadProfile] = {
+    # Cache reads are on the request path and have a cheap fallback (recompute),
+    # so they fail fast — half the baseline — and never retry.
+    RedisPoolType.CACHE: WorkloadProfile(
+        min_conn_factor=1.0,
+        max_conn_factor=1.0,
+        connect_timeout_factor=0.5,
+        socket_timeout_factor=0.5,
         retry_on_timeout=False,
         health_check_interval=30.0,
     ),
-    RedisPoolType.SESSION: PoolConfig(
-        min_connections=10,
-        max_connections=100,
-        connection_timeout=2.0,
-        socket_timeout=1.0,
+    # Sessions are read on every authenticated request: double the connections,
+    # baseline timeouts, retry rather than log a user out on a blip.
+    RedisPoolType.SESSION: WorkloadProfile(
+        min_conn_factor=2.0,
+        max_conn_factor=2.0,
+        connect_timeout_factor=1.0,
+        socket_timeout_factor=1.0,
         retry_on_timeout=True,
         health_check_interval=15.0,
     ),
-    RedisPoolType.PUBSUB: PoolConfig(
-        min_connections=2,
-        max_connections=10,
-        connection_timeout=5.0,
-        socket_timeout=0.0,
+    RedisPoolType.PUBSUB: WorkloadProfile(
+        min_conn_factor=0.4,
+        max_conn_factor=0.2,
+        connect_timeout_factor=2.5,
+        socket_timeout_s=0.0,
         retry_on_timeout=True,
         health_check_interval=60.0,
     ),
-    RedisPoolType.QUEUE: PoolConfig(
-        min_connections=5,
-        max_connections=30,
-        connection_timeout=2.0,
-        socket_timeout=30.0,
+    RedisPoolType.QUEUE: WorkloadProfile(
+        min_conn_factor=1.0,
+        max_conn_factor=0.6,
+        connect_timeout_factor=1.0,
+        socket_timeout_s=30.0,
         retry_on_timeout=True,
         health_check_interval=30.0,
     ),
 }
+
+
+def pool_config(pool_type: RedisPoolType) -> PoolConfig:
+    """Resolve the effective pool config for a workload from current settings.
+
+    Called per pool creation rather than computed at import: an import-time read
+    would freeze whatever the environment happened to be when this module was
+    first imported, which silently ignores operator config loaded later (and
+    breaks tests that patch it).
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    profile = WORKLOAD_PROFILES[pool_type]
+
+    socket_timeout = (
+        profile.socket_timeout_s
+        if profile.socket_timeout_s is not None
+        else s.redis_socket_timeout * profile.socket_timeout_factor
+    )
+
+    return PoolConfig(
+        # At least one connection: a factor that rounds to 0 would make the pool
+        # unusable rather than small.
+        min_connections=max(1, round(s.redis_min_connections * profile.min_conn_factor)),
+        max_connections=max(1, round(s.redis_max_connections * profile.max_conn_factor)),
+        connection_timeout=s.redis_connection_timeout * profile.connect_timeout_factor,
+        socket_timeout=socket_timeout,
+        retry_on_timeout=profile.retry_on_timeout,
+        health_check_interval=profile.health_check_interval,
+    )
+
+
+class _PoolConfigView(Mapping):
+    """Mapping view kept for the historical ``POOL_CONFIGS[pool_type]`` API.
+
+    Each lookup re-resolves from settings, so callers see the operator's current
+    values rather than a snapshot taken at import time.
+    """
+
+    def __getitem__(self, key: RedisPoolType) -> PoolConfig:
+        if key not in WORKLOAD_PROFILES:
+            raise KeyError(key)
+        return pool_config(key)
+
+    def __iter__(self):
+        return iter(WORKLOAD_PROFILES)
+
+    def __len__(self) -> int:
+        return len(WORKLOAD_PROFILES)
+
+
+POOL_CONFIGS: Mapping[RedisPoolType, PoolConfig] = _PoolConfigView()
 
 
 class RedisPoolManager:
@@ -95,7 +182,7 @@ class RedisPoolManager:
 
     async def _create_pool(self, pool_type: RedisPoolType) -> Any:
         """Create a new connection pool with workload-specific tuning."""
-        config = POOL_CONFIGS[pool_type]
+        config = pool_config(pool_type)
 
         if self._cluster_mode:
             return await self._create_cluster_pool(config)

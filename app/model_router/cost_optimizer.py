@@ -11,7 +11,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from collections import defaultdict
 
+from app import model_catalog
+
 log = logging.getLogger("omnipotent.model_router.cost")
+
+# Models we've already reported as unpriced, so a hot request path can't flood the
+# log with the same line.
+_UNPRICED_WARNED: set[str] = set()
 
 
 @dataclass
@@ -20,7 +26,10 @@ class ModelCost:
     model_id: str
     input_cost_per_1k: float  # $ per 1000 input tokens
     output_cost_per_1k: float  # $ per 1000 output tokens
-    cached_input_cost_per_1k: float = 0.0  # $ per 1000 cached input tokens
+    # $ per 1000 cached input tokens. None = we have no verified cache-read rate;
+    # 0.0 would say cached input is free, which is a made-up price like any other.
+    # See estimate_cost() for what an unknown rate is charged at.
+    cached_input_cost_per_1k: float | None = None
     batch_discount: float = 0.5  # Multiplier for batch requests
 
     @property
@@ -100,6 +109,107 @@ class UsageRecord:
     request_type: str = "inference"
 
 
+# The models this optimizer prices out of the box. Only the IDs live here — every
+# rate comes from app.model_catalog, because this table used to carry gpt-4o at its
+# retired $5/$15 launch price and Haiku 3.5 at $1/$5 instead of $0.80/$4. The
+# `-latest` spellings are kept because callers and the /model-router API already
+# send those strings; the catalog resolves them to the canonical entry.
+#
+# The second and third groups are the ids that were missing entirely. The table
+# shipped with only `-latest` aliases while the rest of the app passes dated ids
+# and the `app.llm._DEFAULTS` provider defaults to the SDK, so every real call
+# missed the table. Before `_cost_for` that meant every real call was priced at
+# exactly $0.00; after it, the cheap fast model (plan/reflect/report/verify) was
+# billed at the fallback Opus-3 rate, ~15x its real price. Both are wrong, and
+# both are fixed by naming the ids here so the catalog prices them properly.
+_DEFAULT_COST_MODEL_IDS = (
+    # `-latest` spellings the /model-router API already receives.
+    "claude-3-5-sonnet-latest",
+    "claude-3-5-haiku-latest",
+    "claude-3-opus-latest",
+    "gpt-4o",
+    "gpt-4o-mini",
+    # Dated ids the rest of the app passes to the SDK. The catalog resolves a
+    # dated snapshot suffix to its canonical entry, so these inherit real rates.
+    "claude-opus-4-20250514",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229",
+    "claude-3-haiku-20240307",
+    # The ids `app.llm._DEFAULTS` actually resolves to. COPILOT_MODEL /
+    # COPILOT_FAST_MODEL default to "", so *these* are what every real request
+    # runs on. tests/test_model_router_pricing.py is the drift guard: adding a
+    # provider default without a price fails there.
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "deepseek-chat",
+)
+
+# There is deliberately no local override table here. One used to carry
+# `claude-opus-4-8` and `claude-haiku-4-20250514` at hand-written rates, which
+# gave one deployment two answers for the same id: the observability path read
+# the catalog and reported "unpriced", the budget path read this file and
+# reported dollars. A rate belongs in app/model_catalog.py, where verifying it
+# is a recorded act (`PRICING_LAST_VERIFIED`), or nowhere — an id the catalog
+# does not price is billed at `_cost_for`'s most-expensive-known fallback and
+# warned about, which is a visible gap rather than a confident wrong number.
+
+
+def _catalog_costs() -> dict[str, ModelCost]:
+    """Build the per-1k default cost table from the per-1M catalog.
+
+    The public shape (per-1k floats on ModelCost) is unchanged — only where the
+    numbers come from. A model the catalog has no verified price for is left out
+    entirely rather than given a placeholder rate, so it can never contribute a
+    made-up figure to a budget check.
+    """
+    costs: dict[str, ModelCost] = {}
+    for model_id in _DEFAULT_COST_MODEL_IDS:
+        info = model_catalog.resolve(model_id)
+        if info is None or not info.has_pricing:
+            log.warning(
+                "model %r has no verified price in the model catalog; "
+                "omitting it from the default cost table",
+                model_id,
+            )
+            continue
+        costs[model_id] = ModelCost(
+            model_id=model_id,
+            input_cost_per_1k=info.input_per_1k,  # type: ignore[arg-type]
+            output_cost_per_1k=info.output_per_1k,  # type: ignore[arg-type]
+            # Passed through as None when the catalog has no cache-read rate:
+            # `or 0.0` quietly priced cached input at free for gemini-1.5-pro,
+            # gemini-1.5-flash and claude-3-haiku.
+            cached_input_cost_per_1k=info.cached_input_per_1k,
+        )
+    return costs
+
+
+def _warn_unpriced(model_id: str, action: str) -> None:
+    """Say once, loudly, that we do not know this model's price.
+
+    `_cost_for` charges the most expensive rate it knows rather than $0.00, so
+    this is a "the number is a guess, and a high one" warning — not a "the
+    number is zero" one. Deduplicated because it sits on a hot request path.
+    """
+    if model_id in _UNPRICED_WARNED:
+        return
+    _UNPRICED_WARNED.add(model_id)
+    log.warning(
+        "no cost entry for model %r; %s charges it at the most expensive known "
+        "rate. Add the model to app/model_catalog.py or register it with "
+        "add_model_cost().",
+        model_id,
+        action,
+    )
+
+
 class CostOptimizer:
     """Optimizes model selection for cost efficiency.
 
@@ -110,135 +220,9 @@ class CostOptimizer:
     - Batch optimization recommendations
     """
 
-    # Current model costs (as of implementation date)
-    DEFAULT_COSTS = {
-        "claude-3-5-sonnet-latest": ModelCost(
-            model_id="claude-3-5-sonnet-latest",
-            input_cost_per_1k=0.003,
-            output_cost_per_1k=0.015,
-            cached_input_cost_per_1k=0.0003,
-        ),
-        "claude-3-5-haiku-latest": ModelCost(
-            model_id="claude-3-5-haiku-latest",
-            input_cost_per_1k=0.001,
-            output_cost_per_1k=0.005,
-            cached_input_cost_per_1k=0.0001,
-        ),
-        "claude-3-opus-latest": ModelCost(
-            model_id="claude-3-opus-latest",
-            input_cost_per_1k=0.015,
-            output_cost_per_1k=0.075,
-            cached_input_cost_per_1k=0.0015,
-        ),
-        "gpt-4o": ModelCost(
-            model_id="gpt-4o",
-            input_cost_per_1k=0.005,
-            output_cost_per_1k=0.015,
-        ),
-        "gpt-4o-mini": ModelCost(
-            model_id="gpt-4o-mini",
-            input_cost_per_1k=0.00015,
-            output_cost_per_1k=0.0006,
-        ),
-        # The dated ids the rest of the app actually passes to the SDK. The
-        # table above held only `-latest` aliases, so every real call missed
-        # it and was priced at exactly $0.00 — see `_cost_for`.
-        "claude-opus-4-20250514": ModelCost(
-            model_id="claude-opus-4-20250514",
-            input_cost_per_1k=0.015,
-            output_cost_per_1k=0.075,
-            cached_input_cost_per_1k=0.0015,
-        ),
-        "claude-sonnet-4-20250514": ModelCost(
-            model_id="claude-sonnet-4-20250514",
-            input_cost_per_1k=0.003,
-            output_cost_per_1k=0.015,
-            cached_input_cost_per_1k=0.0003,
-        ),
-        "claude-haiku-4-20250514": ModelCost(
-            model_id="claude-haiku-4-20250514",
-            input_cost_per_1k=0.001,
-            output_cost_per_1k=0.005,
-            cached_input_cost_per_1k=0.0001,
-        ),
-        "claude-3-5-sonnet-20241022": ModelCost(
-            model_id="claude-3-5-sonnet-20241022",
-            input_cost_per_1k=0.003,
-            output_cost_per_1k=0.015,
-            cached_input_cost_per_1k=0.0003,
-        ),
-        "claude-3-5-sonnet-20240620": ModelCost(
-            model_id="claude-3-5-sonnet-20240620",
-            input_cost_per_1k=0.003,
-            output_cost_per_1k=0.015,
-            cached_input_cost_per_1k=0.0003,
-        ),
-        "claude-3-5-haiku-20241022": ModelCost(
-            model_id="claude-3-5-haiku-20241022",
-            input_cost_per_1k=0.001,
-            output_cost_per_1k=0.005,
-            cached_input_cost_per_1k=0.0001,
-        ),
-        "claude-3-opus-20240229": ModelCost(
-            model_id="claude-3-opus-20240229",
-            input_cost_per_1k=0.015,
-            output_cost_per_1k=0.075,
-            cached_input_cost_per_1k=0.0015,
-        ),
-        "claude-3-haiku-20240307": ModelCost(
-            model_id="claude-3-haiku-20240307",
-            input_cost_per_1k=0.00025,
-            output_cost_per_1k=0.00125,
-            cached_input_cost_per_1k=0.00003,
-        ),
-        # --- the ids `app.llm._DEFAULTS` actually resolves to ----------------
-        # COPILOT_MODEL/COPILOT_FAST_MODEL default to "", so *these* are what
-        # every real request runs on. None of them were in the table, so all
-        # of them fell through to `_cost_for`'s most-expensive-known fallback:
-        # the cheap fast model (plan/reflect/report/verify) was billed at the
-        # Opus-3 rate, ~15x its real price. Prices are per 1k tokens, from each
-        # provider's published list price.
-        "claude-opus-4-8": ModelCost(          # $5 / $25 per MTok
-            model_id="claude-opus-4-8",
-            input_cost_per_1k=0.005,
-            output_cost_per_1k=0.025,
-            cached_input_cost_per_1k=0.0005,   # cache read = 0.1x input
-        ),
-        "claude-haiku-4-5": ModelCost(         # $1 / $5 per MTok
-            model_id="claude-haiku-4-5",
-            input_cost_per_1k=0.001,
-            output_cost_per_1k=0.005,
-            cached_input_cost_per_1k=0.0001,
-        ),
-        "gemini-1.5-pro": ModelCost(           # $1.25 / $5 per MTok
-            model_id="gemini-1.5-pro",
-            input_cost_per_1k=0.00125,
-            output_cost_per_1k=0.005,
-            cached_input_cost_per_1k=0.0003125,
-        ),
-        "gemini-1.5-flash": ModelCost(         # $0.075 / $0.30 per MTok
-            model_id="gemini-1.5-flash",
-            input_cost_per_1k=0.000075,
-            output_cost_per_1k=0.0003,
-            cached_input_cost_per_1k=0.00001875,
-        ),
-        "llama-3.3-70b-versatile": ModelCost(  # Groq: $0.59 / $0.79 per MTok
-            model_id="llama-3.3-70b-versatile",
-            input_cost_per_1k=0.00059,
-            output_cost_per_1k=0.00079,
-        ),
-        "llama-3.1-8b-instant": ModelCost(     # Groq: $0.05 / $0.08 per MTok
-            model_id="llama-3.1-8b-instant",
-            input_cost_per_1k=0.00005,
-            output_cost_per_1k=0.00008,
-        ),
-        "deepseek-chat": ModelCost(            # $0.27 / $1.10 per MTok
-            model_id="deepseek-chat",
-            input_cost_per_1k=0.00027,
-            output_cost_per_1k=0.0011,
-            cached_input_cost_per_1k=0.00007,
-        ),
-    }
+    # Rates sourced from app.model_catalog — see _catalog_costs(). Nothing is
+    # priced here that the catalog does not price there.
+    DEFAULT_COSTS = _catalog_costs()
 
     # What an unknown model is priced at. Deliberately the most expensive
     # entry in the table rather than zero: this number is what `check_budget`
@@ -266,7 +250,7 @@ class CostOptimizer:
         """Get cost structure for a model, if it is one we have a price for."""
         return self.model_costs.get(model_id)
 
-    def _cost_for(self, model_id: str) -> ModelCost:
+    def _cost_for(self, model_id: str, action: str = "pricing") -> ModelCost:
         """A price for `model_id`, guessing high rather than free.
 
         A miss used to be worth $0.00: `estimate_cost` returned a zero
@@ -279,19 +263,25 @@ class CostOptimizer:
         number looks like an answer.
 
         An unknown model is priced at the most expensive one we know, and
-        logged so the table can be corrected.
+        logged (once per model id) so the table can be corrected.
         """
         cost_info = self.model_costs.get(model_id)
         if cost_info is not None:
             return cost_info
 
+        if not self.model_costs:
+            # Nothing to guess from. Raising beats inventing a rate: a caller
+            # that constructed this with an empty table has a configuration
+            # bug, and $0.00 is the answer this whole method exists to avoid.
+            raise ValueError(
+                f"no price for model {model_id!r} and the cost table is empty; "
+                "register a ModelCost with add_model_cost()"
+            )
+
         fallback = self.model_costs.get(self._FALLBACK_COST_KEY) or max(
             self.model_costs.values(), key=lambda c: c.avg_cost_per_1k
         )
-        log.warning(
-            "no price for model; charging at the most expensive known rate",
-            extra={"unpriced_model": model_id, "priced_as": fallback.model_id},
-        )
+        _warn_unpriced(model_id, action)
         return ModelCost(
             model_id=model_id,
             input_cost_per_1k=fallback.input_cost_per_1k,
@@ -324,7 +314,9 @@ class CostOptimizer:
         Returns:
             CostEstimate with cost breakdown
         """
-        cost_info = self._cost_for(model_id)
+        # `_cost_for`, not `.get()`: an unpriced model is charged at the dearest
+        # known rate and warned about once, never returned as a $0.00 estimate.
+        cost_info = self._cost_for(model_id, "estimate_cost()")
 
         if output_tokens is None:
             output_tokens = input_tokens * 3
@@ -334,8 +326,17 @@ class CostOptimizer:
         output_cost = (output_tokens / 1000) * cost_info.output_cost_per_1k
         standard_cost = input_cost + output_cost
 
-        # With caching
-        cached_input_cost = (input_tokens / 1000) * cost_info.cached_input_cost_per_1k
+        # With caching. An unknown cache-read rate bills at the full input rate,
+        # the same rule model_catalog.estimate_cost_usd applies: "we have not
+        # verified a discount" must not be reported as "the discount is 100%",
+        # which is what a 0.0 rate said for every model the catalog leaves
+        # cached_input_per_1m unset on.
+        cached_rate = (
+            cost_info.input_cost_per_1k
+            if cost_info.cached_input_cost_per_1k is None
+            else cost_info.cached_input_cost_per_1k
+        )
+        cached_input_cost = (input_tokens / 1000) * cached_rate
         with_caching = cached_input_cost + output_cost
 
         # With batching
@@ -350,14 +351,20 @@ class CostOptimizer:
             with_batching=with_batching,
         )
 
-    def price(self, model_id: str, input_tokens: int, output_tokens: int) -> float:
+    def price(
+        self,
+        model_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        action: str = "price()",
+    ) -> float:
         """What a call that has already happened cost, in dollars.
 
         Public because the ledger writers (`usage_ledger`, the API's
         record-usage endpoint) need the price without also filing the call in
         this object's in-process history.
         """
-        cost_info = self._cost_for(model_id)
+        cost_info = self._cost_for(model_id, action)
         return (
             (input_tokens / 1000) * cost_info.input_cost_per_1k
             + (output_tokens / 1000) * cost_info.output_cost_per_1k
@@ -372,7 +379,7 @@ class CostOptimizer:
         request_type: str = "inference",
     ) -> UsageRecord:
         """Record model usage."""
-        cost = self.price(model_id, input_tokens, output_tokens)
+        cost = self.price(model_id, input_tokens, output_tokens, "record_usage()")
 
         record = UsageRecord(
             model_id=model_id,

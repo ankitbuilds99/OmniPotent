@@ -24,6 +24,7 @@ from app.auth.oauth import (
     find_account_by_provider,
     find_account_by_email,
     get_user_accounts,
+    touch_last_login,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "find_account_by_provider",
     "find_account_by_email",
     "get_user_accounts",
+    "touch_last_login",
 ]

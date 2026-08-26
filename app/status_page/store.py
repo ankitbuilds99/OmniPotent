@@ -27,10 +27,19 @@ Two things the dicts got wrong came along for the ride and are fixed here:
   — which an in-progress window can never satisfy, since it started in the
   past. The moment maintenance began it disappeared from the status page that
   announced it.
+
+The other thing the page never did was *measure* anything: a component's status
+was whatever an admin had last typed in. `StatusStore.refresh()` and the polling
+loop at the bottom of this file run the real health checks (`app/health.py` and
+the MCP monitor) and write the result through `_set_status`, so an outage is
+recorded as a status transition and shows up in the uptime figures. Anything the
+checks cannot classify - and any component discovered before it has been checked
+- is DEGRADED, never OPERATIONAL: unknown health must not be published as fine.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import uuid
@@ -1322,6 +1331,15 @@ class StatusStore:
             "updated_at": _now().isoformat(),
         }
 
+    # --- Live health checks ---
+
+    async def refresh(self) -> None:
+        """Re-run the real health checks and write what they found.
+
+        Called on startup, from the polling loop, and by POST /status/refresh.
+        """
+        await _sync_from_health_checks()
+
 
 # Stateless — the org comes from the request context inside each call — so one
 # instance serves every request. The dicts it replaced needed one object per org
@@ -1333,3 +1351,256 @@ _store = StatusStore()
 def get_status_store() -> StatusStore:
     """The status store for the org on the current request."""
     return _store
+
+
+# --- Live health check integration -------------------------------------------
+#
+# Components the health checks can actually report on. `api` and `database` are
+# already in DEFAULT_COMPONENTS and keep their seeded display order; `redis` and
+# `llm` are created here the first time a sync sees them.
+_HEALTH_COMPONENTS: tuple[tuple[str, str, str, str, int], ...] = (
+    ("api", "API", "Core REST API endpoints", "Core", 1),
+    ("database", "Database", "Primary database cluster", "Infrastructure", 3),
+    ("redis", "Redis", "Cache and session storage", "Infrastructure", 6),
+    ("llm", "LLM Provider", "AI model API connectivity", "Infrastructure", 7),
+)
+
+# How often the loop re-runs the checks. Neither side of the merge had a setting
+# for this; it stays the interval the polling was written with.
+_POLL_INTERVAL_SECONDS = 30.0
+
+_polling_task: asyncio.Task[None] | None = None
+
+
+def _map_health_status(status: Any) -> ComponentStatus:
+    """HealthStatus -> ComponentStatus, defaulting to DEGRADED.
+
+    A status this mapping does not recognise is not "operational". Publishing
+    green for health nobody established is the failure the fail-closed default
+    exists to prevent.
+    """
+    from app.health import HealthStatus
+
+    return {
+        HealthStatus.HEALTHY: ComponentStatus.OPERATIONAL,
+        HealthStatus.DEGRADED: ComponentStatus.DEGRADED,
+        HealthStatus.UNHEALTHY: ComponentStatus.MAJOR_OUTAGE,
+    }.get(status, ComponentStatus.DEGRADED)
+
+
+def _map_mcp_status(status: Any) -> ComponentStatus:
+    """MCPServerStatus -> ComponentStatus, defaulting to DEGRADED."""
+    from app.mcp.health import MCPServerStatus
+
+    return {
+        MCPServerStatus.HEALTHY: ComponentStatus.OPERATIONAL,
+        MCPServerStatus.DEGRADED: ComponentStatus.DEGRADED,
+        MCPServerStatus.UNHEALTHY: ComponentStatus.MAJOR_OUTAGE,
+        MCPServerStatus.UNKNOWN: ComponentStatus.DEGRADED,
+        MCPServerStatus.STOPPED: ComponentStatus.MAJOR_OUTAGE,
+    }.get(status, ComponentStatus.DEGRADED)
+
+
+async def _collect_health_statuses() -> dict[str, ComponentStatus]:
+    """Component id -> status, from the app's own health checks."""
+    from app.health import get_health_checker, setup_health_checks
+
+    setup_health_checks()
+    checker = get_health_checker()
+    statuses: dict[str, ComponentStatus] = {}
+
+    try:
+        system_health = await checker.check_all()
+        for comp_name, health in system_health.components.items():
+            statuses[comp_name.lower().replace(" ", "_")] = _map_health_status(health.status)
+    except Exception:  # noqa: BLE001
+        # The checks failing says nothing reassuring about the things they
+        # check, so those components go to outage rather than staying green.
+        log.exception("status page: health checks failed")
+        for comp_id in ("database", "redis", "llm"):
+            statuses[comp_id] = ComponentStatus.MAJOR_OUTAGE
+
+    try:
+        alive, _ = await checker.liveness()
+        statuses["api"] = (
+            ComponentStatus.OPERATIONAL if alive else ComponentStatus.MAJOR_OUTAGE
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("status page: API liveness check failed")
+        statuses["api"] = ComponentStatus.MAJOR_OUTAGE
+
+    return statuses
+
+
+async def _collect_mcp_statuses() -> dict[str, tuple[str, ComponentStatus]]:
+    """Component id -> (server name, status) for every registered MCP server."""
+    from app.mcp.health import get_health_monitor
+
+    servers: dict[str, tuple[str, ComponentStatus]] = {}
+    try:
+        summary = await get_health_monitor().check_all()
+    except Exception:  # noqa: BLE001
+        # Nothing is written for MCP in this case: the components keep whatever
+        # they were last measured at rather than being invented as healthy.
+        log.exception("status page: MCP health check failed")
+        return servers
+
+    for server_health in summary.servers:
+        servers[f"mcp_{server_health.name}"] = (
+            server_health.name,
+            _map_mcp_status(server_health.status),
+        )
+    return servers
+
+
+async def _sync_from_health_checks() -> None:
+    """Run the checks and store the result as real status transitions."""
+    from app.database.engine import get_session
+    from app.database.models import StatusComponent
+
+    # Run the checks before opening a session: check_all() reaches the database,
+    # Redis and the LLM provider over the network, and holding a connection for
+    # the length of all that is how the pool runs dry.
+    component_statuses = await _collect_health_statuses()
+    mcp_statuses = await _collect_mcp_statuses()
+    now = _now()
+
+    async with get_session() as session:
+        # The polling loop runs outside any request, so there is no tenant on
+        # the context and this resolves to the deployment's own org. That is the
+        # right owner: whether the database is reachable is a fact about the
+        # deployment, not about a tenant.
+        org = await _ensure_seeded(session)
+        existing = set(
+            (
+                await session.execute(
+                    select(StatusComponent.component_id).where(
+                        StatusComponent.org_id == org
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        discovered: list[tuple[str, str, str, str, int]] = [
+            spec for spec in _HEALTH_COMPONENTS if spec[0] not in existing
+        ]
+        mcp_order = 100 + sum(1 for comp_id in existing if comp_id.startswith("mcp_"))
+        for comp_id, (server_name, _status) in sorted(mcp_statuses.items()):
+            if comp_id in existing:
+                continue
+            discovered.append(
+                (
+                    comp_id,
+                    f"MCP: {server_name.replace('_', ' ').title()}",
+                    f"MCP server for {server_name}",
+                    "MCP Servers",
+                    mcp_order,
+                )
+            )
+            mcp_order += 1
+
+        for comp_id, name, description, group, order in discovered:
+            # DEGRADED, not OPERATIONAL: this component has never been measured
+            # at the point the row is written, and the status it is created with
+            # is what the page shows if the check below cannot classify it.
+            session.add(
+                StatusComponent(
+                    id=uuid.uuid4(),
+                    org_id=org,
+                    component_id=comp_id,
+                    name=name,
+                    description=description,
+                    status=ComponentStatus.DEGRADED.value,
+                    group_name=group,
+                    display_order=order,
+                    created_at=now,
+                    updated_at=now,
+                    status_since=now,
+                )
+            )
+        if discovered:
+            await session.commit()
+
+        # `_set_status` and not a direct write, so every change closes the
+        # interval the component spent in its previous status. Uptime on this
+        # page is now driven by the health checks instead of being a constant.
+        by_status: dict[ComponentStatus, list[str]] = {}
+        for comp_id, (_server_name, status) in mcp_statuses.items():
+            component_statuses[comp_id] = status
+        for comp_id, status in component_statuses.items():
+            by_status.setdefault(status, []).append(comp_id)
+        for status, comp_ids in by_status.items():
+            # Ids the checks reported that this org has no component for are
+            # skipped inside _set_status.
+            await _set_status(session, org, sorted(comp_ids), status, now)
+        await session.commit()
+
+    # Not `"created"` in the extras: that is a LogRecord attribute, and logging
+    # raises KeyError rather than shadowing it.
+    log.info(
+        "status page synced from health checks",
+        extra={
+            "components_checked": len(component_statuses),
+            "components_created": len(discovered),
+        },
+    )
+
+
+def get_live_status_store() -> StatusStore | None:
+    """The store the health check sync writes through, if it is available.
+
+    Optional because POST /api/status/refresh reads `None` as "live status is
+    not wired up" and answers 400 rather than pretending it refreshed.
+    """
+    return _store
+
+
+async def _poll_health_checks(interval_seconds: float) -> None:
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await _sync_from_health_checks()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # One bad poll must not end the loop: the page would then freeze on
+            # the last status it managed to write, with nothing saying so.
+            log.exception("status page: health check poll failed")
+
+
+async def start_live_status_polling(
+    poll_interval_seconds: float = _POLL_INTERVAL_SECONDS,
+) -> None:
+    """Start polling the real health checks (called during app startup)."""
+    global _polling_task
+
+    if _polling_task is not None and not _polling_task.done():
+        return
+    try:
+        await _sync_from_health_checks()
+    except Exception:  # noqa: BLE001
+        # A first sync that fails (no database yet, for one) must not take
+        # startup down with it; the loop will try again.
+        log.exception("status page: initial health check sync failed")
+    _polling_task = asyncio.create_task(_poll_health_checks(poll_interval_seconds))
+    log.info(
+        "status page polling health checks",
+        extra={"interval_seconds": poll_interval_seconds},
+    )
+
+
+async def stop_live_status_polling() -> None:
+    """Stop the polling loop (called during app shutdown)."""
+    global _polling_task
+
+    task, _polling_task = _polling_task, None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    log.info("status page stopped polling health checks")

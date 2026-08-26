@@ -6,9 +6,10 @@ Provides:
 - Usage metering
 - Conversion funnel analytics
 
-Every function here is a coroutine and every row is scoped to the calling org:
-this is the `customers` / `trials` / `customer_usage_records` tables, not the
-module dicts it used to be.
+Every function here is a coroutine and reads/writes the database — this is the
+`customers` / `trials` / `customer_usage_records` tables, not the module dicts
+it used to be, and every row is scoped to the calling org. See
+:mod:`app.customers.manager` for why this state cannot live in the process.
 """
 
 from app.customers.manager import (
@@ -24,6 +25,7 @@ from app.customers.manager import (
     get_customer,
     get_trial,
     get_customer_stats,
+    get_customer_usage,
     listed_mrr_cents,
     record_usage,
     convert_trial,
@@ -43,6 +45,7 @@ __all__ = [
     "get_customer",
     "get_trial",
     "get_customer_stats",
+    "get_customer_usage",
     "listed_mrr_cents",
     "record_usage",
     "convert_trial",

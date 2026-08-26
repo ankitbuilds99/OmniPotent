@@ -18,6 +18,7 @@ from typing import Any, Callable, Awaitable
 from pathlib import Path
 import uuid
 
+from app.config import get_settings
 from app.planning.task_graph import (
     TaskGraph,
     TaskNode,
@@ -364,6 +365,19 @@ class ExecutionEngine:
             else:
                 task.outputs = await self._execute_default_handler(ctx, task, inputs)
 
+            # The default handler's tools fail closed: they return an error payload
+            # instead of raising, so nothing above this point would notice. Without
+            # this check a plan whose every tool refused still reported
+            # status="completed", failed_tasks=0, errors=[] — the caller had no way
+            # to tell "did the work" from "did nothing". Raise so the task takes the
+            # normal failure path below, including retries.
+            if isinstance(task.outputs, dict) and task.outputs.get("status") == "failed":
+                failed = task.outputs.get("failed_tools") or []
+                raise RuntimeError(
+                    f"no tool executed for task {task.id}: "
+                    f"{', '.join(failed) if failed else 'handler reported failure'}"
+                )
+
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now(timezone.utc)
             task.progress = 1.0
@@ -443,14 +457,32 @@ class ExecutionEngine:
             for r in results.values()
         )
 
+        # Tools that fail closed (see create_default_tools) hand back an error
+        # payload rather than raising, so surface that here: a task whose every
+        # tool refused to run was not "executed".
+        failed_tools = [
+            name
+            for name, result in results.items()
+            if isinstance(result, dict) and result.get("error")
+        ]
+
+        if failed_tools and len(failed_tools) == len(results):
+            # Every tool that ran handed back an error, so the task did not
+            # happen. `_execute_task` turns this into a real failure (with
+            # retries) rather than a green task with an error buried in it.
+            status = "failed"
+        else:
+            # Not a failure, but not "executed" either: a task whose tools all
+            # reported themselves unconfigured did nothing at all, and used to
+            # serialize exactly like one that queried Loki and came back clean.
+            status = "executed" if did_something else "no_op"
+
         return {
-            "status": "executed" if did_something else "no_op",
+            "status": status,
             "task_type": task.task_type.value,
             "tool_results": results,
+            "failed_tools": failed_tools,
             "inputs_received": list(inputs.keys()),
-            # A task that ran no tool, or only tools that reported themselves
-            # unconfigured, did nothing at all. It used to serialize exactly like
-            # one that queried Loki and came back clean.
             "simulated": not did_something,
             "simulated_tools": sorted(
                 name for name, r in results.items()
@@ -530,6 +562,17 @@ class ExecutionEngine:
                 log.error("Progress callback error: %s", e)
 
 
+def _demo_mode() -> bool:
+    """Whether this deployment is explicitly running as a demo.
+
+    A placeholder result may stand in for a backend only when COPILOT_DEMO_MODE
+    says so, and it is labelled `simulated` when it does. Read through
+    `get_settings()` rather than the environment so the demo switch is the same
+    one the rest of the app reads.
+    """
+    return get_settings().copilot_demo_mode
+
+
 def _unconfigured(tool: str, setting: str) -> dict[str, Any]:
     """What a tool returns when it has no backend to talk to.
 
@@ -539,7 +582,13 @@ def _unconfigured(tool: str, setting: str) -> dict[str, Any]:
     a pipeline it never ran. A graph of them came back `completed` with every
     task green and empty findings, which reads as a clean bill of health rather
     than as nothing having been checked.
+
+    Deliberately carries no "error" key: the task did not fail, it did not run.
+    `_execute_default_handler` reports it as `no_op` and flags the task
+    `simulated`; a tool that genuinely errored does set "error" and is escalated
+    to a task failure from there.
     """
+    log.warning("Planning tool '%s' not executed: %s is not configured", tool, setting)
     return {
         "status": "not_configured",
         "simulated": True,
@@ -601,6 +650,10 @@ def create_default_tools(
     `traces`, `ci_cd` — the tool reports that it is unconfigured instead of
     inventing a result. Pass a real handler to `ExecutionEngine.register_tool()`
     to replace any of them.
+
+    The old constant-success placeholders survive only behind COPILOT_DEMO_MODE,
+    where a walkable graph is the point; they are labelled `simulated: True` so
+    nothing downstream reads them as work that happened.
     """
     from app.coordinator.dag_executor import TaskNode as CoordTaskNode
     from app.coordinator.handlers.investigation import LogsHandler, MetricsHandler
@@ -622,6 +675,15 @@ def create_default_tools(
     async def logs_tool(inputs: dict[str, Any]) -> dict[str, Any]:
         """Query the configured log backend for the task's services."""
         if logs_handler is None:
+            if _demo_mode():
+                log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED logs result")
+                return {
+                    "status": "analyzed",
+                    "simulated": True,
+                    "log_entries": 0,
+                    "patterns_found": [],
+                    "time_range": "last_1h",
+                }
             return _unconfigured("logs", "LOKI_URL or ELASTICSEARCH_URL")
 
         args = _investigation_inputs(inputs)
@@ -640,6 +702,15 @@ def create_default_tools(
     async def metrics_tool(inputs: dict[str, Any]) -> dict[str, Any]:
         """Query Prometheus for the task's services."""
         if metrics_handler is None:
+            if _demo_mode():
+                log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED metrics result")
+                return {
+                    "status": "analyzed",
+                    "simulated": True,
+                    "metrics_checked": [],
+                    "anomalies": [],
+                    "time_range": "last_1h",
+                }
             return _unconfigured("metrics", "PROMETHEUS_URL")
 
         args = _investigation_inputs(inputs)
@@ -657,10 +728,27 @@ def create_default_tools(
 
     async def traces_tool(inputs: dict[str, Any]) -> dict[str, Any]:
         """No in-process trace client exists; the traces MCP server is a subprocess."""
+        if _demo_mode():
+            log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED traces result")
+            return {
+                "status": "analyzed",
+                "simulated": True,
+                "traces_sampled": 0,
+                "slow_spans": [],
+                "error_spans": [],
+            }
         return _unconfigured("traces", "TRACES_API_URL (and register a `traces` tool)")
 
     async def ci_cd_tool(inputs: dict[str, Any]) -> dict[str, Any]:
         """No in-process pipeline runner exists."""
+        if _demo_mode():
+            log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED CI/CD result")
+            return {
+                "status": "executed",
+                "simulated": True,
+                "pipeline": "default",
+                "result": "success (simulated)",
+            }
         return _unconfigured(
             "ci_cd",
             "a `ci_cd` handler via ExecutionEngine.register_tool()",
@@ -669,6 +757,14 @@ def create_default_tools(
     async def notification_tool(inputs: dict[str, Any]) -> dict[str, Any]:
         """Post the task's message to Slack."""
         if not (slack_token and slack_channel):
+            if _demo_mode():
+                log.warning("COPILOT_DEMO_MODE=true - no notification was actually sent")
+                return {
+                    "status": "sent",
+                    "simulated": True,
+                    "channels": ["slack"],
+                    "recipients": [],
+                }
             return _unconfigured("notification", "SLACK_BOT_TOKEN and SLACK_CHANNEL")
 
         from app.integrations.slack import post_message

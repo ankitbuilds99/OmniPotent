@@ -186,8 +186,11 @@ def test_approval_gate_pauses_resumes_and_completes(client):
 
     started = client.post(f"/api/runbooks/{rb_id}/execute", json={"service": "api"})
     execution_id = started.json()["id"]
-    # requires_approval: nothing runs until a human says so.
-    assert started.json()["status"] == "pending"
+    # requires_approval: nothing runs until a human says so, and the record says
+    # a human is the blocker and which step they are blocking — "pending" reads
+    # mid-incident as "queued, it will start on its own".
+    assert started.json()["status"] == "waiting_approval"
+    assert started.json()["waiting_on"] == "before"
     assert _execution(client, execution_id)["steps"] == []
 
     first = client.post(f"/api/runbooks/executions/{execution_id}/approve")
@@ -343,7 +346,15 @@ def test_http_steps_do_not_invent_a_200(monkeypatch):
     assert "no 'url' parameter" in missing_error
 
 
-def test_wait_reports_the_time_it_actually_slept():
+def test_a_wait_that_does_not_fit_its_timeout_fails_instead_of_being_shortened():
+    """A capped wait is not a wait.
+
+    This branch used to clamp the sleep to the step timeout and return success,
+    noting the shortfall in the output. But a wait exists so the step after it
+    observes a settled system, and nothing downstream reads that prose — the
+    next step just runs against a cluster that is still rolling and reports what
+    it finds. Failing is the honest answer.
+    """
     ok, output, error = _run(
         RunbookStep(
             id="w",
@@ -355,10 +366,23 @@ def test_wait_reports_the_time_it_actually_slept():
             timeout_seconds=0,
         )
     )
-    # Clamped to the step timeout — and says so instead of claiming 30 seconds.
-    assert (ok, error) == (True, "")
-    assert "Waited 0 seconds" in output
-    assert "30 were requested" in output
+    assert (ok, output) == (False, "")
+    assert "wait of 30s exceeds the step timeout of 0s" in error
+
+    # A wait that does fit is performed and reported as what it was.
+    fits_ok, fits_output, fits_error = _run(
+        RunbookStep(
+            id="w",
+            name="w",
+            description="",
+            step_type=StepType.WAIT,
+            action="sleep",
+            params={"seconds": 0},
+            timeout_seconds=30,
+        )
+    )
+    assert (fits_ok, fits_error) == (True, "")
+    assert fits_output == "Waited 0 seconds"
 
 
 def test_an_unsupported_step_type_is_not_a_success():

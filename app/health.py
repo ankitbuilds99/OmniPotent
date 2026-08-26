@@ -112,9 +112,17 @@ class HealthChecker:
                 message=f"Unknown component: {name}",
             )
 
+        # Per-check deadline is operator-tunable (HTTP_TIMEOUT_HEALTH): a probe
+        # against a cold managed Postgres legitimately needs longer than one
+        # against a local Redis. Read per call, not at import, so the value a
+        # test or a reloaded process sets is the one that applies.
+        from app.config import get_settings
+
+        timeout = get_settings().http_timeout_health
+
         start = time.monotonic()
         try:
-            result = await asyncio.wait_for(check(), timeout=5.0)
+            result = await asyncio.wait_for(check(), timeout=timeout)
             result.latency_ms = (time.monotonic() - start) * 1000
             self._last_results[name] = result
             return result
@@ -123,7 +131,7 @@ class HealthChecker:
                 name=name,
                 status=HealthStatus.UNHEALTHY,
                 latency_ms=(time.monotonic() - start) * 1000,
-                message="Health check timed out",
+                message=f"Health check timed out after {timeout:g}s",
             )
         except Exception as e:
             log.warning("Health check failed for %s: %s", name, e)
@@ -134,13 +142,26 @@ class HealthChecker:
                 message=str(e),
             )
 
-    async def check_all(self, timeout: float = 10.0) -> SystemHealth:
-        """Run all health checks and aggregate status."""
+    async def check_all(self, timeout: float | None = None) -> SystemHealth:
+        """Run all health checks and aggregate status.
+
+        The aggregate deadline defaults to twice the per-check one
+        (HTTP_TIMEOUT_HEALTH) rather than a fixed 10s. The checks run
+        concurrently, so one per-check deadline plus headroom is all that is
+        needed — and, more to the point, a fixed 10s silently capped the knob:
+        raising HTTP_TIMEOUT_HEALTH above 10 moved the per-check deadline but
+        this outer one still cut the probe off first.
+        """
+        if timeout is None:
+            from app.config import get_settings
+
+            timeout = get_settings().http_timeout_health * 2
         uptime = time.monotonic() - self._start_time
 
         if not self._checks:
+            log.warning("No health checks registered - returning degraded status")
             return SystemHealth(
-                status=HealthStatus.HEALTHY,
+                status=HealthStatus.DEGRADED,
                 version=self._version,
                 uptime_seconds=uptime,
             )
@@ -275,8 +296,8 @@ async def check_redis() -> ComponentHealth:
         if not url:
             return ComponentHealth(
                 name="redis",
-                status=HealthStatus.HEALTHY,
-                message="Not configured (using in-memory)",
+                status=HealthStatus.DEGRADED,
+                message="Not configured (using in-memory fallback)",
             )
 
         import redis.asyncio as redis
@@ -295,15 +316,15 @@ async def check_redis() -> ComponentHealth:
     except Exception as e:
         return ComponentHealth(
             name="redis",
-            status=HealthStatus.DEGRADED,
-            message=str(e),
+            status=HealthStatus.UNHEALTHY,
+            message=f"Connection failed: {e}",
         )
 
 
 async def check_llm() -> ComponentHealth:
     """Health check for LLM API connectivity."""
     try:
-        from app.llm import active_api_key
+        from app.llm import active_api_key, get_llm
         from app.config import get_settings
 
         s = get_settings()
@@ -312,8 +333,8 @@ async def check_llm() -> ComponentHealth:
         if s.copilot_multi_tenant:
             return ComponentHealth(
                 name="llm",
-                status=HealthStatus.HEALTHY,
-                message="Multi-tenant mode (per-tenant keys)",
+                status=HealthStatus.DEGRADED,
+                message="Multi-tenant mode (health varies by tenant)",
             )
 
         if not has_key:
@@ -323,11 +344,23 @@ async def check_llm() -> ComponentHealth:
                 message="No API key configured",
             )
 
-        return ComponentHealth(
-            name="llm",
-            status=HealthStatus.HEALTHY,
-            message=f"Provider: {s.copilot_provider}",
-        )
+        start = time.monotonic()
+        try:
+            llm = get_llm(fast=True)
+            await llm.ainvoke("ping")
+            latency = (time.monotonic() - start) * 1000
+            return ComponentHealth(
+                name="llm",
+                status=HealthStatus.HEALTHY,
+                latency_ms=latency,
+                message=f"Provider: {s.copilot_provider} (connected)",
+            )
+        except Exception as api_err:
+            return ComponentHealth(
+                name="llm",
+                status=HealthStatus.DEGRADED,
+                message=f"Provider: {s.copilot_provider} (API error: {api_err})",
+            )
     except Exception as e:
         return ComponentHealth(
             name="llm",

@@ -116,7 +116,8 @@ dev = [
     "ruff>=0.7.0",
     "mypy>=1.11.0",
     # CI installs only this extra (`uv sync --extra dev`) and then runs the whole
-    # suite; tests/test_alembic_migrations.py imports alembic at module scope and
+    # suite, so anything with tests has to be reachable from here.
+    # tests/test_alembic_migrations.py imports alembic at module scope and
     # migrates a temporary aiosqlite database, so both belong here as well as in
     # the `migrations` extra.
     "alembic>=1.13.0",
@@ -126,6 +127,9 @@ dev = [
     # verification calibration). Without it those paths are only ever exercised
     # with redis_client=None, i.e. never.
     "fakeredis>=2.23.0",
+    # The task queue is shipped (the worker runs from the app image) and
+    # tests/test_tasks_deployed.py imports it.
+    "omnipotent[tasks]",
 ]
 test = [
     "pytest>=8.3.0",
@@ -166,6 +170,14 @@ markers = [
 [tool.coverage.run]
 source = ["app"]
 branch = true
+# Record paths relative to the repo root rather than absolute. The PR coverage
+# comment (py-cov-action/python-coverage-comment-action) runs in a container
+# where the checkout is mounted somewhere else, so absolute runner paths baked
+# into .coverage do not resolve there and `coverage json` aborts with
+# "No source for code: .../app/__init__.py". That step is gated on
+# `github.event_name == 'pull_request'`, so push and schedule runs skipped it
+# and stayed green — every pull_request run of the workflow has failed here.
+relative_files = true
 omit = [
     "app/__main__.py",
     "*/tests/*",

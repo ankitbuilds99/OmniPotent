@@ -119,16 +119,49 @@ class TestPricing:
         """
         optimizer = CostOptimizer()
 
+        # `claude-haiku-4-20250514` used to be on this list. It is a fabricated
+        # id — there is no Claude Haiku 4 — so the catalog refuses to resolve it
+        # and it belongs with the unpriced ids below, not here.
         for model_id in (
             "claude-opus-4-20250514",
             "claude-sonnet-4-20250514",
-            "claude-haiku-4-20250514",
             "claude-3-5-sonnet-20241022",
             "claude-3-haiku-20240307",
         ):
             assert optimizer.get_model_cost(model_id) is not None, model_id
             estimate = optimizer.estimate_cost(model_id, input_tokens=10_000)
             assert estimate.estimated_cost > 0, model_id
+
+    def test_a_model_id_that_never_existed_is_not_priced(self):
+        """One id, one answer, across every path in the deployment.
+
+        A local override table here priced `claude-haiku-4-20250514` while
+        app/model_catalog.py resolved it to None, so the budget path quoted
+        dollars for an id the observability path reported as unpriced. Pricing a
+        model that does not exist is fiction; the fallback in `_cost_for` still
+        keeps the call from being billed at $0.00.
+        """
+        optimizer = CostOptimizer()
+
+        assert optimizer.get_model_cost("claude-haiku-4-20250514") is None
+
+    def test_an_unverified_cache_read_rate_is_not_charged_as_free(self):
+        """The catalog leaves cached_input_per_1m unset for these three.
+
+        Mapping that None to 0.0 made `with_caching` report the input side of a
+        cached call as costing nothing — a discount we never verified, quoted as
+        total. Unknown bills at the full input rate instead, so the number is at
+        worst pessimistic rather than fictional.
+        """
+        optimizer = CostOptimizer()
+
+        for model_id in ("gemini-1.5-pro", "gemini-1.5-flash", "claude-3-haiku-20240307"):
+            cost = optimizer.get_model_cost(model_id)
+            assert cost is not None and cost.cached_input_cost_per_1k is None, model_id
+            estimate = optimizer.estimate_cost(model_id, 10_000, 10_000, use_cache=True)
+            assert estimate.with_caching == pytest.approx(
+                estimate.estimated_cost
+            ), model_id
 
     def test_an_unpriced_model_is_not_free(self):
         """A miss used to cost $0.00, which reads as an answer rather than a gap."""

@@ -9,6 +9,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+# Invitations are valid for a week from the moment they are created. Kept here
+# rather than inlined in the default so the store can re-derive it when it
+# writes a row, and so a test can name the same number the product does.
+INVITATION_TTL = timedelta(days=7)
+
 
 def _now() -> datetime:
     """UTC, timezone-aware.
@@ -69,9 +74,7 @@ class TeamInvitation(BaseModel):
     invited_by: str
     status: InvitationStatus = InvitationStatus.PENDING
     created_at: datetime = Field(default_factory=_now)
-    expires_at: datetime = Field(
-        default_factory=lambda: _now() + timedelta(days=7)
-    )
+    expires_at: datetime = Field(default_factory=lambda: _now() + INVITATION_TTL)
     accepted_at: datetime | None = None
 
 

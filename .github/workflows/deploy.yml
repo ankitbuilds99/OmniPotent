@@ -479,7 +479,7 @@ jobs:
       - name: Run migrations
         if: steps.check-db.outputs.has_db == 'true'
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          COPILOT_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           uv sync --extra migrations
           uv run alembic upgrade head

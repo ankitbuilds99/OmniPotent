@@ -19,11 +19,15 @@ import type {
   MetricType,
 } from '../types/billing';
 
+// The credential is read per call (see lib/authToken) so a sign-in takes effect
+// without a reload; ../config's authHeaders is fixed at build time and cannot.
 import { authHeaders } from '../lib/authToken';
 import { API_BASE, describeFailure } from '../lib/apiClient';
 
-// Same-origin by default, matching apiClient. Defaulting to localhost:8000 sent
-// every Billing call from a production browser to the user's own machine.
+// Resolved once in apiClient, so every caller agrees: a blank VITE_API_URL (what
+// the Dockerfile sets) means "same origin", which the old `??` fallback silently
+// got wrong. Defaulting to localhost:8000 sent every Billing call from a
+// production browser to the user's own machine.
 const BASE_URL = API_BASE;
 
 // The thrown message goes straight into the page's error banner, so it has to

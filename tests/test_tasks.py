@@ -639,10 +639,12 @@ class TestAlertEvaluation:
     """Tests for alert evaluation task."""
 
     def test_process_alert_evaluation(self, stub_broker):
-        """Should evaluate alerts for services."""
+        """Should evaluate alerts for services this process has metrics for."""
         from app.tasks.tasks import process_alert_evaluation
 
         mock_engine = MagicMock()
+        mock_engine.has_metrics.return_value = True
+        mock_engine.known_services.return_value = ["service1", "service2"]
         mock_engine.evaluate_all.return_value = []
 
         with patch("app.alerting.get_engine", return_value=mock_engine):
@@ -658,6 +660,8 @@ class TestAlertEvaluation:
         from app.tasks.tasks import process_alert_evaluation
 
         mock_engine = MagicMock()
+        mock_engine.has_metrics.return_value = True
+        mock_engine.known_services.return_value = ["service1"]
         mock_engine.evaluate_all.return_value = [
             MagicMock(), MagicMock(), MagicMock()  # 3 alerts fired
         ]
@@ -666,6 +670,25 @@ class TestAlertEvaluation:
             result = process_alert_evaluation.fn(["service1"])
 
             assert result["alerts_fired"] == 3
+
+    def test_process_alert_evaluation_declines_without_metrics(self, stub_broker):
+        """Should decline in a process holding no metrics rather than report zero.
+
+        The alert engine is a per-process singleton fed through the API; a worker's
+        engine is empty. "Evaluated 2 services, 0 alerts" from there is an all-clear
+        nobody checked. See tests/test_tasks_deployed.py for the full picture.
+        """
+        from app.tasks.tasks import process_alert_evaluation
+
+        mock_engine = MagicMock()
+        mock_engine.has_metrics.return_value = False
+
+        with patch("app.alerting.get_engine", return_value=mock_engine):
+            result = process_alert_evaluation.fn(["service1", "service2"])
+
+            assert result["status"] == "no_metrics"
+            assert result["services_evaluated"] == 0
+            mock_engine.evaluate_all.assert_not_called()
 
     def test_process_alert_evaluation_with_timestamp(self, stub_broker):
         """Should use provided timestamp."""
@@ -769,21 +792,27 @@ class TestSessionCleanup:
     """Tests for session cleanup task."""
 
     def test_cleanup_expired_sessions_default(self, stub_broker):
-        """Should cleanup sessions with default age."""
+        """Should decline: sessions live in the API process, not the worker.
+
+        These two tests used to assert `status == "completed"`, which is what the
+        actor returned while doing nothing at all — in a dashboard that reads as
+        "cleanup ran, nothing was due" rather than "cleanup is not wired".
+        """
         from app.tasks.tasks import cleanup_expired_sessions
 
         result = cleanup_expired_sessions.fn()
 
-        assert result["status"] == "completed"
+        assert result["status"] == "not_applicable"
         assert result["cleaned"] == 0
+        assert "no shared store" in result["reason"]
 
     def test_cleanup_expired_sessions_custom_age(self, stub_broker):
-        """Should cleanup sessions with custom age."""
+        """Should decline regardless of the age requested."""
         from app.tasks.tasks import cleanup_expired_sessions
 
         result = cleanup_expired_sessions.fn(max_age_hours=48)
 
-        assert result["status"] == "completed"
+        assert result["status"] == "not_applicable"
 
 
 
@@ -858,54 +887,58 @@ class TestSchedulerConfiguration:
         reason="apscheduler not installed (optional `tasks` extra)",
     )
 
-    def test_run_scheduler_adds_jobs(self):
-        """Should add periodic jobs to scheduler."""
+    def test_run_scheduler_declines_when_there_are_no_jobs(self):
+        """Should refuse to start rather than idle.
+
+        This used to assert two jobs were registered. Both were removed because
+        neither could do its work from a scheduler process: session cleanup cannot
+        reach the API's in-memory sessions, and alert evaluation was being handed an
+        empty service list (`evaluate_all([])` loops over services inside its rule
+        loop, so it evaluated nothing on every tick). A pod holding an empty job
+        table looks healthy forever, which is a worse signal than one that exits.
+        """
         from app.tasks import worker
 
-        mock_scheduler = MagicMock()
+        assert worker.SCHEDULED_JOBS == []
 
+        mock_scheduler = MagicMock()
         with patch("apscheduler.schedulers.blocking.BlockingScheduler",
                    return_value=mock_scheduler):
-            with patch("signal.signal"):
-                # Make start() exit immediately
-                mock_scheduler.start.side_effect = KeyboardInterrupt()
+            assert worker.run_scheduler() is False
 
-                try:
-                    worker.run_scheduler()
-                except KeyboardInterrupt:
-                    pass
+        mock_scheduler.add_job.assert_not_called()
+        mock_scheduler.start.assert_not_called()
 
-                # Verify jobs were added
-                assert mock_scheduler.add_job.call_count == 2
+    def test_run_scheduler_registers_jobs_and_signal_handlers_when_it_has_work(self):
+        """The scheduling machinery still works — it just has nothing to schedule.
 
-                # Check job IDs
-                job_ids = [
-                    call.kwargs.get("id")
-                    for call in mock_scheduler.add_job.call_args_list
-                ]
-                assert "alert_evaluation" in job_ids
-                assert "session_cleanup" in job_ids
-
-    def test_scheduler_signal_handling(self):
-        """Should register signal handlers."""
+        Covered with an injected job so the seam stays tested and the first real
+        periodic job does not land on untested code.
+        """
         from app.tasks import worker
 
+        job = worker.ScheduledJob(
+            id="example", name="Example job", interval_seconds=60, send=lambda: None
+        )
+
         mock_scheduler = MagicMock()
+        mock_scheduler.start.side_effect = KeyboardInterrupt()
 
-        with patch("apscheduler.schedulers.blocking.BlockingScheduler",
-                   return_value=mock_scheduler):
-            with patch("signal.signal") as mock_signal:
-                mock_scheduler.start.side_effect = KeyboardInterrupt()
+        with patch.object(worker, "SCHEDULED_JOBS", [job]):
+            with patch("apscheduler.schedulers.blocking.BlockingScheduler",
+                       return_value=mock_scheduler):
+                with patch("signal.signal") as mock_signal:
+                    try:
+                        worker.run_scheduler()
+                    except KeyboardInterrupt:
+                        pass
 
-                try:
-                    worker.run_scheduler()
-                except KeyboardInterrupt:
-                    pass
+                    assert mock_scheduler.add_job.call_count == 1
+                    assert mock_scheduler.add_job.call_args.kwargs["id"] == "example"
 
-                # Verify SIGINT and SIGTERM handlers registered
-                signal_calls = [call[0][0] for call in mock_signal.call_args_list]
-                assert signal.SIGINT in signal_calls
-                assert signal.SIGTERM in signal_calls
+                    signal_calls = [c[0][0] for c in mock_signal.call_args_list]
+                    assert signal.SIGINT in signal_calls
+                    assert signal.SIGTERM in signal_calls
 
 
 # ============================================================================

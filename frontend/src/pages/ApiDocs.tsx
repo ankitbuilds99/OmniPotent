@@ -17,15 +17,12 @@ import {
   Activity,
   ArrowLeft
 } from 'lucide-react'
-
-import { API_BASE } from '../lib/apiClient'
-
-// The base this page documents and links to. apiClient's API_BASE is "" when
-// VITE_API_URL is unset (same-origin); resolve that to the page's own origin so
-// the copyable curl examples are real URLs instead of pointing at the reader's
-// own localhost:8000, which was the old default.
-const API_BASE_URL =
-  API_BASE || (typeof window !== 'undefined' ? window.location.origin : '')
+// Shown to the user as "your API base URL" and pasted into copyable curl
+// examples, so it has to be an absolute URL and the same value the rest of the
+// app actually calls. ../config resolves it once: the page's own origin in a
+// deployed build rather than the reader's own localhost:8000, which was the old
+// hardcoded default.
+import { API_BASE_URL } from '../config'
 
 interface EndpointGroup {
   name: string

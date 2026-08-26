@@ -9,9 +9,11 @@ two properties have to hold on a multi-tenant deployment:
     `/audit/verify` used to run over the process-wide buffer, so its `count` was
     the whole fleet's activity and a broken link could name another tenant's event.
 
-The hash chain links every entry in the process, so the *verification walk* still
-has to cover all of them — only the report is scoped. That is what the unit tests
-at the bottom pin.
+Each entry's hash folds in the entry before it, whoever recorded it, so the
+*verification walk* still has to cover every entry in the list handed to it —
+only the report is scoped. That is what the unit tests at the bottom pin, against
+`verify_chain`, which is a pure function over a list of entries now that the
+trail lives in a table rather than a process-local buffer.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from fastapi.testclient import TestClient
 import app.api.main as api
 import app.config as cfg
 from app import audit, runtime, tenant_context
+from app.audit_legacy import chain_hash  # not re-exported through app.audit
 from app.database import engine as db_engine
 from app.tenancy import auth as tenant_auth
 from app.tenancy import models as tenancy_models
@@ -39,9 +42,21 @@ def _reset() -> None:
     api._RL.clear()
     api._reset_limiter()
     runtime.reset()
-    db_engine._engine = None
-    db_engine._session_factory = None
-    audit.clear()
+    asyncio.run(_reset_audit_and_db())
+
+
+async def _reset_audit_and_db() -> None:
+    """Drop the audit trail, then the engine that holds it.
+
+    `clear()` is a coroutine now that the trail is a table. The bare, unawaited
+    call this replaces reset nothing at all, so every test in this file ran
+    against whatever the previous one left behind. `close_db()` rather than
+    nulling the module globals: it also clears the "schema already created" flag,
+    which would otherwise stay true while the URL is repointed at the next test's
+    empty database.
+    """
+    await audit.clear()
+    await db_engine.close_db()
 
 
 async def _provision(store) -> dict[str, str]:
@@ -129,8 +144,12 @@ def test_verify_counts_only_the_callers_own_events(mt):
     a = c.get("/audit/verify", headers=_auth(mt["a_admin"]))
     b = c.get("/audit/verify", headers=_auth(mt["b_admin"]))
     assert a.status_code == 200 and b.status_code == 200
-    assert a.json() == {"valid": True, "count": 1}, a.text
-    assert b.json() == {"valid": True, "count": 2}, b.text
+    # The verdict names the chain it is about, and that is the caller's own org
+    # — it discloses nothing they did not authenticate as, and it stops a verdict
+    # pasted into an incident channel from being read as the wrong tenant's.
+    # Asserted by exact equality so `org_id` is also pinned to *their* org.
+    assert a.json() == {"valid": True, "count": 1, "org_id": mt["org_a"]}, a.text
+    assert b.json() == {"valid": True, "count": 2, "org_id": mt["org_b"]}, b.text
 
 
 def test_audit_read_is_scoped_to_the_caller(mt):
@@ -144,58 +163,66 @@ def test_audit_read_is_scoped_to_the_caller(mt):
 
 
 # --- the chain maths, unit level ------------------------------------------- #
+#
+# Straight against `verify_chain`, over lists built here. Recording through the
+# store and reaching in to tamper would test the store's insert path as much as
+# the scoped walk, and the walk is the piece that decides what one tenant is
+# told about another's entries.
+
+
+def _chained(*entries: dict) -> list[dict]:
+    """Hash-chain entries the way `app.audit.store.append` does on insert."""
+    out: list[dict] = []
+    prev = ""
+    for entry in entries:
+        linked = {"ts": "2026-01-01T00:00:00Z", "actor": "-", **entry, "prev_hash": prev}
+        linked["hash"] = chain_hash(linked, prev)
+        out.append(linked)
+        prev = linked["hash"]
+    return out
 
 
 def test_scoped_verify_still_validates_across_the_whole_chain():
     """Filtering first would report a false 'tampered' — entries interleave."""
-    audit.clear()
-    token = tenant_context.set_tenant(tenant_context.TenantConfig(org_id="A"))
-    audit.record("a.one")
-    tenant_context.reset_tenant(token)
-    token = tenant_context.set_tenant(tenant_context.TenantConfig(org_id="B"))
-    audit.record("b.one")
-    tenant_context.reset_tenant(token)
-    token = tenant_context.set_tenant(tenant_context.TenantConfig(org_id="A"))
-    audit.record("a.two")
-    tenant_context.reset_tenant(token)
+    events = _chained(
+        {"event": "a.one", "org_id": "A"},
+        {"event": "b.one", "org_id": "B"},
+        {"event": "a.two", "org_id": "A"},
+    )
 
-    assert audit.verify_chain(org_id="A") == {"valid": True, "count": 2}
-    assert audit.verify_chain(org_id="B") == {"valid": True, "count": 1}
-    assert audit.verify_chain() == {"valid": True, "count": 3}
-    audit.clear()
+    assert audit.verify_chain(events, org_id="A") == {"valid": True, "count": 2}
+    assert audit.verify_chain(events, org_id="B") == {"valid": True, "count": 1}
+    assert audit.verify_chain(events) == {"valid": True, "count": 3}
 
 
 def test_tampering_with_another_orgs_entry_does_not_name_it():
-    audit.clear()
-    token = tenant_context.set_tenant(tenant_context.TenantConfig(org_id="A"))
-    audit.record("a.one")
-    tenant_context.reset_tenant(token)
-    token = tenant_context.set_tenant(tenant_context.TenantConfig(org_id="B"))
-    audit.record("b.secret_event")
-    tenant_context.reset_tenant(token)
+    events = _chained(
+        {"event": "a.one", "org_id": "A"},
+        {"event": "b.secret_event", "org_id": "B"},
+    )
+    events[1]["stolen"] = True  # tamper with B's entry
 
-    list(audit._BUFFER)[1]["stolen"] = True  # tamper with B's entry
-
-    seen_by_a = audit.verify_chain(org_id="A")
-    assert seen_by_a["valid"] is False
+    seen_by_a = audit.verify_chain(events, org_id="A")
+    assert seen_by_a["valid"] is False  # A is still told the chain is broken
     assert seen_by_a["event"] is None  # B's event name is not leaked to A
     assert seen_by_a["broken_at"] is None
 
-    seen_by_b = audit.verify_chain(org_id="B")
+    seen_by_b = audit.verify_chain(events, org_id="B")
     assert seen_by_b["valid"] is False
     assert seen_by_b["event"] == "b.secret_event"
-    audit.clear()
+    assert seen_by_b["broken_at"] == 0
 
 
 def test_unscoped_verify_keeps_its_contract():
-    audit.clear()
-    audit.record("a")
-    audit.record("b", x=1)
-    audit.record("c")
-    list(audit._BUFFER)[1]["x"] = 999
-    res = audit.verify_chain()
+    events = _chained(
+        {"event": "a", "org_id": "A"},
+        {"event": "b", "org_id": "A", "x": 1},
+        {"event": "c", "org_id": "A"},
+    )
+    events[1]["x"] = 999
+
+    res = audit.verify_chain(events)
     assert res["valid"] is False
     assert res["broken_at"] == 1
     assert res["event"] == "b"
     assert res["count"] == 3
-    audit.clear()

@@ -9,6 +9,14 @@ It is now the `incidents` / `incident_investigations` tables. The org filter is
 `org_uuid()` on every read and every write, so isolation no longer depends on
 which in-process instance the caller happened to get, and the seeded demo
 incidents are gone: a new org starts with an empty list.
+
+origin/main went at the same fabricated incidents from the other end: it kept
+them in memory but put them behind `copilot_demo_mode` (off by default) and
+appended " (simulated)" to every seeded field an operator could read. Deleting
+the fixtures gets the whole of that -- there is nothing left to label, and no
+setting can turn three invented incidents back on -- so neither the demo-mode
+gate nor the suffix is carried over here. `COPILOT_DEMO_MODE` still gates the
+simulated behaviour it guards elsewhere (billing, remediation, planning).
 """
 
 from __future__ import annotations

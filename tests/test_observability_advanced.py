@@ -520,8 +520,8 @@ class TestCostEstimation:
         """Test Anthropic Haiku cost calculation."""
         from app.observability.metrics import _estimate_llm_cost
 
-        cost = _estimate_llm_cost("anthropic", "claude-haiku-4", 1_000_000, 1_000_000)
-        expected = 0.25 + 1.25
+        cost = _estimate_llm_cost("anthropic", "claude-haiku-4-5", 1_000_000, 1_000_000)
+        expected = 1.0 + 5.0
         assert cost == pytest.approx(expected, abs=0.01)
 
     def test_openai_gpt4o_cost(self):
@@ -532,13 +532,108 @@ class TestCostEstimation:
         expected = 2.5 + 5.0
         assert cost == pytest.approx(expected, abs=0.01)
 
-    def test_unknown_model_default_cost(self):
-        """Test unknown model uses default pricing."""
+    def test_unknown_model_reports_no_cost_rather_than_a_guess(self):
+        """An unrecognised model must yield None, not an invented rate.
+
+        The table this replaced fell back to a hardcoded $1/$3 for anything it
+        didn't match, so a typo'd or newly released model silently produced a
+        confident, wrong dollar figure on the cost dashboard. None makes the
+        caller skip the metric instead (see record_llm_call).
+        """
         from app.observability.metrics import _estimate_llm_cost
 
-        cost = _estimate_llm_cost("unknown", "mystery-model", 1_000_000, 1_000_000)
-        expected = 1.0 + 3.0
-        assert cost == pytest.approx(expected, abs=0.01)
+        assert _estimate_llm_cost("unknown", "mystery-model", 1_000_000, 1_000_000) is None
+        # There is no Claude Haiku 4 — this fabricated ID was referenced in four
+        # places and used to price against the real Haiku row.
+        assert _estimate_llm_cost("anthropic", "claude-haiku-4", 1_000, 1_000) is None
+
+    def test_longer_model_id_is_not_priced_as_its_shorter_sibling(self):
+        """``claude-opus-4-8`` must not be billed at the ``claude-opus-4`` rate.
+
+        The old table matched with ``m in model``, so the substring ``claude-opus-4``
+        hit first and the newer model's spend was reported at the older, dearer
+        rate. It now resolves to its own catalog row and is priced from that row
+        — $5/$25, not the $15/$75 of the model whose name it merely contains.
+        """
+        from app.observability.metrics import _estimate_llm_cost
+
+        assert _estimate_llm_cost("anthropic", "claude-opus-4", 1_000_000, 0) == pytest.approx(
+            15.0, abs=0.01
+        )
+        assert _estimate_llm_cost(
+            "anthropic", "claude-opus-4-8", 1_000_000, 0
+        ) == pytest.approx(5.0, abs=0.01)
+
+    def test_dated_snapshot_prices_as_its_base_model(self):
+        """Providers return dated IDs; those must still price correctly."""
+        from app.observability.metrics import _estimate_llm_cost
+
+        assert _estimate_llm_cost(
+            "anthropic", "claude-sonnet-4-20250514", 1_000_000, 500_000
+        ) == pytest.approx(3.0 + 7.5, abs=0.01)
+
+    def test_a_point_release_is_not_priced_as_the_release_before_it(self):
+        """``claude-opus-4-5`` must not inherit ``claude-opus-4``'s rate.
+
+        The catalog's prefix fallback exists for dated snapshots, but a bare
+        ``-`` boundary can't tell ``-20250514`` from ``-5``, so an uncatalogued
+        version bump was priced at its predecessor's rate — the same threefold
+        over-report as the substring bug, reached a different way. Only the
+        model whose price we actually verified may report a number.
+        """
+        from app.observability.metrics import _estimate_llm_cost
+
+        for unpriced in ("claude-opus-4-5", "claude-opus-4-7", "claude-sonnet-4-5"):
+            assert _estimate_llm_cost("anthropic", unpriced, 1_000_000, 0) is None
+
+    def test_an_unpriced_call_is_counted_rather_than_merely_skipped(self):
+        """A skipped cost metric and a free call look identical on a dashboard.
+
+        `copilot_llm_cost_dollars` is deliberately not emitted for a model with
+        no verified price, which is right — but an absent series graphs as zero,
+        and the warning explaining why is in the logs, where nobody reading a
+        cost graph is looking. The gap has to be visible in the same system as
+        the number it undercuts.
+        """
+        from app.model_catalog import MODELS
+        from app.observability.metrics import get_metrics_registry, record_llm_call
+
+        registry = get_metrics_registry()
+        registry.reset()
+
+        # Asked of the catalog rather than named, because the model that is
+        # unpriced changes as rates get verified: this test used to hardcode the
+        # default Anthropic model, which has since been priced.
+        unpriced = next(
+            m.id for m in MODELS if m.provider == "anthropic" and m.input_per_1m is None
+        )
+        record_llm_call(
+            provider="anthropic",
+            model=unpriced,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            latency_seconds=1.0,
+        )
+        output = registry.render_prometheus()
+        assert (
+            f'copilot_llm_calls_unpriced_total{{model="{unpriced}",'
+            'provider="anthropic"} 1.0' in output
+        )
+        assert "copilot_llm_cost_dollars{" not in output
+
+        # A priced model must not touch the gap counter — otherwise an alert on
+        # it fires constantly and stops meaning anything.
+        registry.reset()
+        record_llm_call(
+            provider="anthropic",
+            model="claude-sonnet-4",
+            input_tokens=1_000_000,
+            output_tokens=0,
+            latency_seconds=1.0,
+        )
+        output = registry.render_prometheus()
+        assert "copilot_llm_cost_dollars{" in output
+        assert "copilot_llm_calls_unpriced_total{" not in output
 
 
 class TestObservabilityModuleExports:

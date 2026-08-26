@@ -42,6 +42,7 @@ import app.api.main as api
 import app.config as cfg
 from app import tenant_context
 from app.coordinator import api_router as coord_api
+from app.coordinator import store as coord_store
 from app.coordinator.dag_executor import (
     DAGExecution,
     DAGExecutor,
@@ -72,6 +73,26 @@ def client(tmp_path, monkeypatch):
     cfg.get_settings.cache_clear()
     db_engine._engine = None
     db_engine._session_factory = None
+    tenant_context.current_tenant.set(None)
+
+
+@pytest.fixture
+def coordinator_db(tmp_path, monkeypatch):
+    """A private database for the tests that drive the coordinator store direct.
+
+    Executions are rows now, not a module dict, so these tests need somewhere to
+    put them — and somewhere that is not shared with the next test.
+    """
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/coord.db")
+    cfg.get_settings.cache_clear()
+    db_engine._engine = None
+    db_engine._session_factory = None
+    tenant_context.current_tenant.set(None)
+    yield
+    # Disposed rather than dropped on the floor: aiosqlite connections are bound
+    # to the loop that opened them.
+    asyncio.run(db_engine.close_db())
+    cfg.get_settings.cache_clear()
     tenant_context.current_tenant.set(None)
 
 
@@ -190,21 +211,42 @@ def _dag(*tasks: TaskNode) -> TaskDAG:
     return dag
 
 
-def test_an_execution_is_listable_before_it_has_finished():
+def test_an_execution_is_listable_before_it_has_finished(coordinator_db):
+    """The row exists the moment `_start` returns, not when the task runs.
+
+    Executions moved from a module dict into `app/coordinator/store.py`, so this
+    reads the store; the invariant is unchanged and stricter than it was —
+    writing the row from inside the queued task would still leave the caller
+    holding an id nothing answers to.
+    """
     executor = DAGExecutor(handlers={})
     dag = _dag(TaskNode(id="one", name="One", handler="collect_logs"))
     background = _HeldBackground()
 
-    execution_id = coord_api._start(background, executor, dag, {"incident_id": "inc-1"})
+    async def scenario():
+        execution_id = await coord_api._start(
+            background, executor, dag, {"incident_id": "inc-1"}
+        )
+        org_id = tenant_context.storage_org_id()
+        return (
+            execution_id,
+            await coord_store.load_execution(org_id, execution_id),
+            await coord_store.list_executions(org_id),
+        )
+
+    execution_id, stored, listed = asyncio.run(scenario())
 
     assert background.queued, "nothing was queued"
-    registry = coord_api._active_executions()
-    assert execution_id in registry, "the run was invisible until it finished"
-    assert registry[execution_id].dag_id == "dag_test"
-    assert registry[execution_id].initial_context == {"incident_id": "inc-1"}
+    assert stored is not None, "the run was invisible until it finished"
+    assert stored.dag_id == "dag_test"
+    assert stored.state == ExecutionState.RUNNING
+    assert stored.initial_context == {"incident_id": "inc-1"}
+    assert [row["id"] for row in listed] == [execution_id]
 
 
-def test_a_background_failure_lands_on_the_execution_instead_of_vanishing():
+def test_a_background_failure_lands_on_the_execution_instead_of_vanishing(
+    coordinator_db,
+):
     async def explode(dag, context=None, execution_id=None, resume_from=None):
         raise RuntimeError("checkpoint exec_missing not found")
 
@@ -212,11 +254,19 @@ def test_a_background_failure_lands_on_the_execution_instead_of_vanishing():
     executor.execute = explode  # type: ignore[method-assign]
     background = _HeldBackground()
 
-    execution_id = coord_api._start(background, executor, _dag(), {})
-    func, args, kwargs = background.queued[0]
-    asyncio.run(func(*args, **kwargs))
+    async def scenario():
+        # One loop for both halves: aiosqlite connections are bound to the loop
+        # that opened them, so the queued task has to run on the same one.
+        execution_id = await coord_api._start(background, executor, _dag(), {})
+        func, args, kwargs = background.queued[0]
+        await func(*args, **kwargs)
+        return await coord_store.load_execution(
+            tenant_context.storage_org_id(), execution_id
+        )
 
-    failed = coord_api._active_executions()[execution_id]
+    failed = asyncio.run(scenario())
+
+    assert failed is not None
     assert failed.state == ExecutionState.FAILED
     assert "checkpoint exec_missing not found" in (failed.error or "")
     assert "checkpoint exec_missing not found" in failed.to_dict()["error"]

@@ -22,26 +22,27 @@ import logging
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 
-from app import replay, runtime
+from app import model_catalog, replay, runtime
 from app.config import get_settings
 
 log = logging.getLogger("omnipotent.llm")
 
-# Per-provider default models: (main, fast).
+# Per-provider default models: {"main": ..., "fast": ...}. Sourced from the model
+# catalog so the factory can't drift from the IDs the routers and pricing use.
 # Every id here must also have a price in
 # app/model_router/cost_optimizer.py:CostOptimizer.DEFAULT_COSTS — otherwise the
 # cost tracker bills real traffic at its most-expensive-known fallback rate.
 # tests/test_model_router_pricing.py enforces that.
-_DEFAULTS = {
-    "anthropic": {"main": "claude-opus-4-8", "fast": "claude-haiku-4-5"},
-    "openai": {"main": "gpt-4o", "fast": "gpt-4o-mini"},
-    "gemini": {"main": "gemini-1.5-pro", "fast": "gemini-1.5-flash"},
-    "groq": {"main": "llama-3.3-70b-versatile", "fast": "llama-3.1-8b-instant"},
-    "deepseek": {"main": "deepseek-chat", "fast": "deepseek-chat"},
-}
+_DEFAULTS = model_catalog.DEFAULT_MODELS
 
 # DeepSeek speaks the OpenAI wire protocol — reuse ChatOpenAI against this base URL.
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+# Extended thinking and the final answer share ONE max_tokens budget, so the main
+# reasoning model needs a floor well above a plain answer's length — below ~8k a
+# long reasoning pass starves the answer. This only ever raises the operator's
+# `llm_max_tokens`; it never lowers it.
+_THINKING_MAX_TOKENS_FLOOR = 8192
 
 
 def _resolve_model(fast: bool) -> str:
@@ -181,15 +182,24 @@ def _build(provider: str, model: str, key: str, fast: bool) -> BaseChatModel:
             "max_tokens": max_tokens,
             "timeout": timeout,
         }
-        if not fast:
-            # Adaptive thinking on the MAIN reasoning model only — Claude decides
-            # when and how much to reason (and interleaves it between tool calls).
-            # Kept off the cheap fast plan/reflect model to hold latency + cost
-            # down. The agent binds tools with tool_choice="auto" (graph/nodes.py),
-            # which thinking requires — forced tool use + thinking is a 400.
+        # Adaptive thinking on the MAIN reasoning model only — Claude decides when
+        # and how much to reason (and interleaves it between tool calls). Kept off
+        # the cheap fast plan/reflect model to hold latency + cost down. The agent
+        # binds tools with tool_choice="auto" (graph/nodes.py), which thinking
+        # requires — forced tool use + thinking is a 400.
+        # Gated on the catalog because models WITHOUT extended thinking (Haiku 4.5,
+        # the Claude 3.x family) also 400 on the parameter. An id the catalog does
+        # not recognise is treated as unsupported: a typo or an uncatalogued model
+        # then degrades to a normal call instead of failing every request.
+        info = model_catalog.resolve(model)
+        if not fast and info is not None and info.supports_thinking:
             params["thinking"] = {"type": "adaptive"}
-            # Thinking + answer share the budget, so give the main model headroom.
-            params["max_tokens"] = 8192
+            # Raise `llm_max_tokens` to the thinking floor instead of overwriting
+            # it, so an operator who deliberately asked for MORE still gets it —
+            # the old hardcoded 8192 silently clamped them down. Cap at what the
+            # model can actually emit, otherwise the raise is itself a 400.
+            budget = max(max_tokens, _THINKING_MAX_TOKENS_FLOOR)
+            params["max_tokens"] = min(budget, info.max_output)
         return ChatAnthropic(**params)
 
     if provider == "groq":

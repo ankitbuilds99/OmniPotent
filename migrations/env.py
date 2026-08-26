@@ -9,6 +9,7 @@ Supports both sync (CLI) and async (runtime) migrations with:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from logging.config import fileConfig
 
@@ -39,17 +40,43 @@ if config.config_file_name is not None:
     # `alembic` CLI and very visible anywhere env.py is imported in-process.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
+log = logging.getLogger("alembic.env")
+
 target_metadata = Base.metadata
 
 
+def _redact(url: str) -> str:
+    """Drop any `user:password@` from a URL so the rest can be logged."""
+    scheme, _, rest = url.partition("://")
+    if not rest:
+        return url
+    _, at, hostpart = rest.rpartition("@")
+    return f"{scheme}://{hostpart}" if at else url
+
+
 def get_url() -> str:
-    """Get database URL from environment or config."""
-    # DATABASE_URL is what Render, Heroku and docker-compose inject; falling
-    # back to it stops `alembic upgrade` from silently migrating the local
-    # SQLite file while the app talks to Postgres.
-    url = os.environ.get("COPILOT_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    """Resolve the database URL, honouring the same names the app honours.
+
+    `app/config.py` accepts `COPILOT_DATABASE_URL` *or* a bare `DATABASE_URL`,
+    because every managed platform injects the latter (Render, Heroku, Helm,
+    docker-compose). Alembic read only the first, so on those platforms the app
+    talked to Postgres while migrations went somewhere else entirely -- the very
+    split that comment in `config.py` exists to prevent.
+
+    It is not hypothetical. Every alembic step in
+    `.github/workflows/database-migrations.yml` passes the URL as
+    `DATABASE_URL`, including *Migrate Production*: that job would have pointed
+    at a throwaway SQLite file on the runner rather than at production, and the
+    Slack step would have announced it as a success.
+    """
+    url = os.environ.get("COPILOT_DATABASE_URL", "")
+    source = "COPILOT_DATABASE_URL"
+    if not url:
+        url = os.environ.get("DATABASE_URL", "")
+        source = "DATABASE_URL"
     if not url:
         url = config.get_main_option("sqlalchemy.url", "sqlite:///data/copilot.db")
+        source = "alembic.ini"
 
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -64,9 +91,15 @@ def get_url() -> str:
         # `sqlite:///data/copilot.db` and `data/` is untracked, so on a fresh
         # clone `alembic upgrade head` died before running a single revision.
         # The app's own startup path already does this (app/database/engine.py);
-        # reuse it so the two agree on how a URL maps to a filesystem path.
+        # reuse it so the two agree on how a URL maps to a filesystem path — and
+        # so a directory that genuinely cannot be created raises here rather
+        # than being logged and then failing obscurely one line later.
         _ensure_sqlite_directory(url)
 
+    # Say out loud what is about to be migrated. A migration run against the
+    # wrong database is the failure this module is most able to cause and least
+    # able to undo, so it should never be something you have to infer.
+    log.info("Migrating %s (url from %s)", _redact(url), source)
     return url
 
 

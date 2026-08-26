@@ -20,6 +20,45 @@ from app.coordinator.dag_executor import TaskNode
 
 log = logging.getLogger("omnipotent.coordinator.handlers.remediation")
 
+# Below this, a hypothesis is too weak to keep digging on and goes to a human.
+# Unlike the "act on it" bar (COPILOT_SAFETY_CONFIDENCE_THRESHOLD) this gates no
+# change to production — it only decides investigate-more vs escalate — so it
+# stays a constant rather than becoming another knob to tune.
+_INVESTIGATE_FLOOR = 0.5
+
+# Production wiring (app/coordinator/api_router.py) constructs these handlers
+# with k8s_client=None, and nothing downstream inspects the "simulated" flag —
+# so a fabricated success here is indistinguishable from a real remediation.
+# Unless the operator opted into demo mode, an unconfigured handler reports the
+# failure instead of the outcome it would have liked to produce.
+_NO_K8S = (
+    "kubernetes client not configured (set KUBE_CONFIG_PATH and pass a client to "
+    "create_remediation_handlers); refusing to report success for an action that "
+    "was not performed"
+)
+
+
+def _no_backend(result: dict[str, Any], operation: str, detail: str) -> dict[str, Any]:
+    """Mark ``result`` as not-really-executed and return it.
+
+    Keeps the ``simulated`` marker (the payload never came from a real backend)
+    but only claims success when the operator asked for a simulation.
+    """
+    result["simulated"] = True
+
+    if get_settings().copilot_demo_mode:
+        log.warning(
+            "COPILOT_DEMO_MODE=true - returning a SIMULATED %s result", operation
+        )
+        result["success"] = True
+        result["message"] = f"{operation} (simulated)"
+        return result
+
+    log.warning("%s not performed: %s", operation, detail)
+    result["success"] = False
+    result["error"] = detail
+    return result
+
 
 class ScaleHandler:
     """Handler for Kubernetes scaling operations."""
@@ -56,10 +95,11 @@ class ScaleHandler:
         }
 
         if not self.k8s:
-            log.warning("No Kubernetes client configured, simulating scale")
-            result["success"] = True
-            result["simulated"] = True
-            return result
+            return _no_backend(
+                result,
+                f"Scaled {deployment} to {replicas} replicas",
+                _NO_K8S,
+            )
 
         try:
             current = await self.k8s.read_namespaced_deployment(
@@ -153,10 +193,11 @@ class RestartHandler:
         }
 
         if not self.k8s:
-            log.warning("No Kubernetes client configured, simulating restart")
-            result["success"] = True
-            result["simulated"] = True
-            return result
+            return _no_backend(
+                result,
+                f"Restarted pods for {deployment}",
+                _NO_K8S,
+            )
 
         try:
             if rolling:
@@ -278,10 +319,11 @@ class RollbackHandler:
         }
 
         if not self.k8s:
-            log.warning("No Kubernetes client configured, simulating rollback")
-            result["success"] = True
-            result["simulated"] = True
-            return result
+            return _no_backend(
+                result,
+                f"Rolled back {deployment}",
+                _NO_K8S,
+            )
 
         try:
             if target_revision is None:
@@ -449,10 +491,11 @@ class ConfigUpdateHandler:
         }
 
         if not self.k8s:
-            log.warning("No Kubernetes client configured, simulating config update")
-            result["success"] = True
-            result["simulated"] = True
-            return result
+            return _no_backend(
+                result,
+                f"Updated {config_type} {name}",
+                _NO_K8S,
+            )
 
         try:
             if config_type == "configmap":
@@ -533,6 +576,18 @@ class VerificationHandler:
             "success": False,
         }
 
+        # With neither backend wired up there is nothing to observe, so no
+        # amount of waiting turns into evidence. Say so up front rather than
+        # sleeping a minute and then declaring the remediation verified.
+        if not self.k8s and not self.prometheus_url:
+            return _no_backend(
+                result,
+                f"Verified remediation of {service or deployment}",
+                "no verification backend configured (pass k8s_client and/or "
+                "prometheus_url to create_remediation_handlers); refusing to report "
+                "a remediation as verified when nothing was checked",
+            )
+
         log.info("Waiting %d seconds before verification", wait_seconds)
         await asyncio.sleep(wait_seconds)
 
@@ -547,7 +602,8 @@ class VerificationHandler:
                 elif check == "pods":
                     passed = await self._check_pods_ready(deployment)
                 else:
-                    passed = True
+                    # A check we don't know how to run is not a check we passed.
+                    passed = self._unchecked(check, "unknown check type")
 
                 if passed:
                     result["checks_passed"].append(check)
@@ -562,10 +618,27 @@ class VerificationHandler:
 
         return result
 
+    def _unchecked(self, check: str, missing: str) -> bool:
+        """Outcome for a check whose backend is missing — not a pass.
+
+        These booleans decide whether a remediation is declared verified, so an
+        un-run check has to count against verification; otherwise a half-wired
+        deployment verifies every remediation it never observed.
+        """
+        if get_settings().copilot_demo_mode:
+            log.warning(
+                "COPILOT_DEMO_MODE=true - reporting %s check as passed (simulated)",
+                check,
+            )
+            return True
+
+        log.warning("Verification check '%s' could not run: %s", check, missing)
+        return False
+
     async def _check_health(self, deployment: str) -> bool:
         """Check if deployment is healthy."""
         if not self.k8s:
-            return True
+            return self._unchecked("health", "no kubernetes client configured")
 
         try:
             status = await self.k8s.read_namespaced_deployment_status(
@@ -584,7 +657,7 @@ class VerificationHandler:
     async def _check_error_rate(self, service: str) -> bool:
         """Check if error rate is below threshold."""
         if not self.prometheus_url:
-            return True
+            return self._unchecked("errors", "no prometheus_url configured")
 
         try:
             import httpx
@@ -605,15 +678,20 @@ class VerificationHandler:
                     error_rate = float(result[0]["value"][1])
                     return error_rate < 0.01
 
+            # An empty result set means the 5xx rate query matched no samples,
+            # which for a ratio of counters is genuinely "no errors seen".
             return True
 
-        except Exception:
-            return True
+        except Exception as e:
+            # Prometheus is configured but unreachable: we have no measurement,
+            # so the check cannot pass.
+            log.warning("Error-rate check for %s could not reach Prometheus: %s", service, e)
+            return False
 
     async def _check_latency(self, service: str) -> bool:
         """Check if latency is below threshold."""
         if not self.prometheus_url:
-            return True
+            return self._unchecked("latency", "no prometheus_url configured")
 
         try:
             import httpx
@@ -634,15 +712,18 @@ class VerificationHandler:
                     latency = float(result[0]["value"][1])
                     return latency < 1.0
 
+            # No histogram buckets matched: no traffic to be slow.
             return True
 
-        except Exception:
-            return True
+        except Exception as e:
+            # Same as the error-rate check: unreachable Prometheus is not a pass.
+            log.warning("Latency check for %s could not reach Prometheus: %s", service, e)
+            return False
 
     async def _check_pods_ready(self, deployment: str) -> bool:
         """Check if all pods are ready."""
         if not self.k8s:
-            return True
+            return self._unchecked("pods", "no kubernetes client configured")
 
         try:
             pods = await self.k8s.list_namespaced_pod(
@@ -695,14 +776,25 @@ class DecisionGateHandler:
         top_hypothesis = hypotheses_list[0] if hypotheses_list else {}
         confidence = top_hypothesis.get("confidence", 0)
 
-        if confidence >= 0.8:
+        # The bar for acting on a hypothesis is the same one the safety gates use
+        # (COPILOT_SAFETY_CONFIDENCE_THRESHOLD). It was a literal 0.8 here, so
+        # raising the safety threshold tightened the gates but left this router
+        # still branching to "fix" at 0.8 — the two disagreed about what counts
+        # as confident enough to change production.
+        fix_bar = get_settings().safety_confidence_threshold
+        # Never above the fix bar: if an operator lowers the safety threshold
+        # below this floor, "investigate more" would be unreachable and every
+        # hypothesis above it would route straight to a fix.
+        investigate_bar = min(_INVESTIGATE_FLOOR, fix_bar)
+
+        if confidence >= fix_bar:
             return {
                 "_branch": "fix",
                 "decision": "fix",
                 "hypothesis": top_hypothesis,
                 "reason": f"High confidence hypothesis ({confidence:.0%})",
             }
-        elif confidence >= 0.5:
+        elif confidence >= investigate_bar:
             return {
                 "_branch": "investigate_more",
                 "decision": "investigate_more",

@@ -6,6 +6,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+from app import config as cfg
 from app.billing.models import (
     PricingPlan,
     Subscription,
@@ -19,11 +20,22 @@ from app.billing.api import (
     PlanResponse,
     SubscriptionResponse,
     UsageResponse,
+    SIMULATED_SUFFIX,
     BillingAPI,
     BillingUnavailableError,
 )
 from app.billing.store import InMemoryBillingStore, FakeStripeClient
 from app.billing.stripe_integration import StripeBillingService
+
+
+@pytest.fixture
+def demo_mode(monkeypatch):
+    """Opt into the simulated-billing path that is off by default."""
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+    cfg.get_settings.cache_clear()
+    yield
+    monkeypatch.delenv("COPILOT_DEMO_MODE", raising=False)
+    cfg.get_settings.cache_clear()
 
 
 class TestPlanResponse:
@@ -382,12 +394,50 @@ class TestBillingAPI:
 
         It previously activated the requested paid plan and returned a fake session
         id, so any caller could grant themselves the most expensive plan for free.
+        `BillingUnavailableError` is what `app/api/billing_router.py` turns into
+        the 503 the caller sees.
         """
         with pytest.raises(BillingUnavailableError):
             await api_no_stripe.create_checkout(org_id, "team")
 
         # The failed checkout must not have granted a subscription.
         assert await store.get_subscription(org_id) is None
+
+    @pytest.mark.asyncio
+    async def test_checkout_endpoint_reports_503_when_stripe_is_missing(
+        self, api_no_stripe: BillingAPI, org_id, monkeypatch
+    ):
+        """The refusal has to reach the browser as a 503, not a bare 500.
+
+        `BillingUnavailableError` is a domain exception; only the route maps it
+        onto a status code. Asserting on the exception alone leaves that mapping
+        untested, and an unmapped exception is an opaque "unexpected error" on the
+        one screen where the operator most needs to know billing is unconfigured.
+        """
+        from fastapi import HTTPException
+
+        from app.api import billing_router
+
+        monkeypatch.setattr(billing_router, "_get_billing_api", lambda: api_no_stripe)
+        monkeypatch.setattr(billing_router, "_current_org_id", lambda: org_id)
+
+        with pytest.raises(HTTPException) as exc:
+            await billing_router.create_checkout(
+                billing_router.CheckoutRequest(plan_name="team")
+            )
+
+        assert exc.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_create_checkout_no_stripe_demo_mode(
+        self, api_no_stripe: BillingAPI, org_id, demo_mode
+    ):
+        """COPILOT_DEMO_MODE=true restores the simulated checkout, clearly labelled."""
+        result = await api_no_stripe.create_checkout(org_id, "team")
+
+        assert "demo_session" in result["session_id"]
+        assert result["simulated"] is True
+        assert result["plan_name"] == "team" + SIMULATED_SUFFIX
 
     # Create portal tests
 
@@ -402,6 +452,16 @@ class TestBillingAPI:
         """
         with pytest.raises(BillingUnavailableError):
             await api_no_stripe.create_portal(org_id)
+
+    @pytest.mark.asyncio
+    async def test_create_portal_no_stripe_demo_mode(
+        self, api_no_stripe: BillingAPI, org_id, demo_mode
+    ):
+        """COPILOT_DEMO_MODE=true restores the simulated portal, clearly labelled."""
+        result = await api_no_stripe.create_portal(org_id)
+
+        assert "portal_url" in result
+        assert result["simulated"] is True
 
     # Change plan tests
 

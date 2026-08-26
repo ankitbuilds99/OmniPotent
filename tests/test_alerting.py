@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock
 
 from app.alerting.rules import (
@@ -231,7 +231,38 @@ class TestAlertEngine:
         assert alert is None
 
     def test_evaluate_absence(self):
-        """Should trigger on metric absence."""
+        """Should trigger when a metric that was arriving stops."""
+        engine = AlertEngine()
+        rule = AlertRule(
+            id="absence",
+            name="Absence",
+            description="Metric absence detection",
+            service="api",
+            metric="heartbeat",
+            condition=AlertCondition.ABSENCE,
+            threshold=0,
+        )
+        engine.add_rule(rule)
+        # Outside get_metric_value's 60s window but inside the 1h history retention:
+        # the engine has seen this metric and is no longer receiving it.
+        engine.record_metric(
+            "api", "heartbeat", 1.0, timestamp=datetime.now() - timedelta(minutes=5)
+        )
+
+        alert = engine.evaluate_rule(rule, "api")
+
+        assert alert is not None
+        assert "No metrics" in alert.message
+
+    def test_evaluate_absence_ignores_a_metric_never_observed(self):
+        """Should NOT trigger for a metric the engine has never received.
+
+        This test used to assert the opposite. "Never sent" is not "stopped
+        sending", and conflating them made the shipped `metrics-absence` default
+        rule — `heartbeat` on service `*`, which nothing in the codebase records —
+        page Slack and PagerDuty at high severity for every service on its first
+        evaluation.
+        """
         engine = AlertEngine()
         rule = AlertRule(
             id="absence",
@@ -244,10 +275,7 @@ class TestAlertEngine:
         )
         engine.add_rule(rule)
 
-        alert = engine.evaluate_rule(rule, "api")
-
-        assert alert is not None
-        assert "No metrics" in alert.message
+        assert engine.evaluate_rule(rule, "api") is None
 
     def test_evaluate_all(self):
         """Should evaluate all rules for services."""

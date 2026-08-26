@@ -1,15 +1,19 @@
-"""The waitlist survives a restart, and anonymous visitors can join it.
+"""The waitlist survives a restart, and referrals actually land.
 
 `app/waitlist/manager.py` was three module-level dicts plus a `_position_counter`
 integer that reset to 0 with the process. Everything a visitor was told on
 signup — their position, their referral code — held only until the next deploy,
 and a second uvicorn worker answered from a second, empty waitlist. On top of
 that, `POST /waitlist` sat behind the global `require_auth`, so the only people
-who could join the waitlist were people who already had an API key.
+who could join the waitlist were people who already had an API key, and it
+passed a referral *code* to a lookup keyed by *email*, so no referral made
+through the public API was ever credited.
 
-These tests assert both halves: the rows are in `waitlist_entries` and read back
-through a fresh call after the store is re-created, and the join/position
-endpoints answer without a credential while the roll-up does not.
+These tests assert the module against a real database: the rows are in
+`waitlist_signups` (`app/waitlist/store.py`) and read back through a fresh call
+after the engine is re-created, positions keep counting up across that restart,
+and a referral resolves whether it arrives as a code or as an email. Who may
+reach the HTTP routes is covered in `tests/test_growth_api_auth.py`.
 """
 
 from __future__ import annotations
@@ -35,10 +39,20 @@ from app.waitlist import (
 
 @pytest.fixture
 async def db(tmp_path, monkeypatch):
+    """A database per test, under tmp_path.
+
+    The engine is a module global, so it is dropped on the way in as well as
+    out — otherwise a test inherits the previous test's engine, still pointing
+    at *that* test's tmp_path. Dropping it also invalidates the recorded schema
+    (`ensure_schema` tracks the engine it created one for), and the per-loop
+    schema locks go with it: the store calls `ensure_schema()` on every session, and a lock left
+    behind by a torn-down loop must not be handed to this test's loop.
+    """
     monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/app.db")
     cfg.get_settings.cache_clear()
     db_engine._engine = None
     db_engine._session_factory = None
+    db_engine._schema_locks.clear()
     tenant_context.current_tenant.set(None)
 
     await db_engine.init_db()
@@ -145,6 +159,35 @@ class TestWaitlistSignup:
 
         updated_referrer = await get_waitlist_entry(referrer.email)
         assert updated_referrer.referral_count == 1
+
+    async def test_referral_by_code_is_credited(self, db):
+        """`POST /waitlist` sends a referral *code*, not an email.
+
+        It used to be resolved against an index keyed by email, matched
+        nothing, and every referral made through the public API was dropped.
+        """
+        referrer, _ = await add_to_waitlist(email="host@example.com")
+        referred, _ = await add_to_waitlist(
+            email="guest@example.com",
+            referred_by=referrer.referral_code,
+        )
+
+        assert referred.referred_by == referrer.email
+
+        updated_referrer = await get_waitlist_entry(referrer.email)
+        assert updated_referrer.referral_count == 1
+
+    async def test_unknown_referrer_is_not_recorded(self, db):
+        """An unresolvable referral must not inflate the referral rate."""
+        entry, _ = await add_to_waitlist(
+            email="solo@example.com",
+            referred_by="REFNOTREAL",
+        )
+
+        assert entry.referred_by == ""
+
+        stats = await get_waitlist_stats()
+        assert stats["referral_rate"] == 0.0
 
     async def test_referral_upgrade_after_3(self, db):
         referrer, _ = await add_to_waitlist(email="popular@example.com")

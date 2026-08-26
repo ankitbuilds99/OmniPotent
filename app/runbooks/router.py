@@ -1,6 +1,29 @@
 """Runbook API Router.
 
 REST API for runbook management and execution.
+
+Three things about this module changed together, because fixing any one of them
+alone would have left the API still lying about something:
+
+*Storage.* Definitions and executions lived in two module-level dicts, seeded at
+import from DEFAULT_RUNBOOKS. A runbook an operator authored was visible only to
+the replica that served the POST and gone at the next deploy. Both now live in
+the database, scoped per tenant (see `app/runbooks/store.py`). The owning org is
+resolved once per request with `storage_org_id()` and passed to the store
+explicitly, rather than left to the store to read back off the contextvar: the
+background task that runs the steps can outlive the middleware that set it.
+
+*Execution.* `POST /{id}/execute` took a `BackgroundTasks` argument and never
+scheduled anything on it. It wrote a record with status "running" that nothing
+would ever advance, and `approve` flipped a status field to "running" with the
+same effect — no step of any runbook was ever run through this API. Both now go
+through the executor, which is fail-closed: a step whose backend is not
+configured reports failure rather than claiming an action it did not perform.
+
+*Routing.* `GET /executions` was declared after `GET /{runbook_id}`, so FastAPI
+matched it as a runbook id and it answered 404 "Runbook not found" — the
+execution listing had never been reachable. Literal paths now precede the
+parameterised one.
 """
 
 from __future__ import annotations
@@ -8,7 +31,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
 from app import tenant_context
@@ -22,6 +45,7 @@ from app.runbooks.models import (
     StepStatus,
     StepType,
 )
+from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.runbooks.api")
 
@@ -90,6 +114,13 @@ class ExecutionResponse(BaseModel):
     started_at: str
     completed_at: str | None
     steps: list[dict[str, Any]]
+    # Neither of these is a step result, which is why they are separate fields:
+    # `waiting_on` is the step at an approval gate, which has not run, and
+    # `error` is why a run died when no step was there to attribute it to (the
+    # executor raising, or a resume the runbook no longer supports). Reported by
+    # the single-execution read; the listing would need one extra read per row.
+    waiting_on: str | None = None
+    error: str | None = None
 
 
 def _summary(rb: Runbook) -> RunbookResponse:
@@ -120,7 +151,10 @@ def _detail(rb: Runbook) -> RunbookDetailResponse:
     )
 
 
-def _execution(exec_: RunbookExecution) -> ExecutionResponse:
+def _execution(
+    exec_: RunbookExecution, notes: dict[str, str] | None = None
+) -> ExecutionResponse:
+    notes = notes or {}
     return ExecutionResponse(
         id=exec_.id,
         runbook_id=exec_.runbook_id,
@@ -130,6 +164,8 @@ def _execution(exec_: RunbookExecution) -> ExecutionResponse:
         started_at=exec_.started_at.isoformat(),
         completed_at=exec_.completed_at.isoformat() if exec_.completed_at else None,
         steps=[s.to_dict() for s in exec_.steps],
+        waiting_on=notes.get("waiting_on"),
+        error=notes.get("error"),
     )
 
 
@@ -140,7 +176,9 @@ async def list_runbooks(
     enabled: bool | None = None,
 ) -> list[RunbookResponse]:
     """List all runbooks with optional filtering."""
-    runbooks = await store.list_runbooks(service=service, trigger=trigger, enabled=enabled)
+    runbooks = await store.list_runbooks(
+        storage_org_id(), service=service, trigger=trigger, enabled=enabled
+    )
     return [_summary(rb) for rb in runbooks]
 
 
@@ -151,13 +189,44 @@ async def list_runbooks(
 async def list_executions(
     runbook_id: str | None = None,
     status: str | None = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
 ) -> list[ExecutionResponse]:
-    """List runbook executions."""
+    """List runbook executions, newest first."""
     executions = await store.list_executions(
-        runbook_id=runbook_id, status=status, limit=limit
+        storage_org_id(), runbook_id=runbook_id, status=status, limit=limit
     )
     return [_execution(e) for e in executions]
+
+
+async def _require_execution(execution_id: str, org_id: str) -> RunbookExecution:
+    """Load an execution or 404. Scoped: another tenant's id is simply not found."""
+    execution = await store.get_execution(execution_id, org_id=org_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return execution
+
+
+@router.get("/executions/{execution_id}")
+async def get_execution(execution_id: str) -> ExecutionResponse:
+    """Get one execution, including the result of every step that has run.
+
+    The id `POST /{id}/execute` hands back resolves here immediately, so a
+    caller can poll a run that is still going rather than waiting for a terminal
+    status to make the record appear.
+    """
+    org_id = storage_org_id()
+    execution = await _require_execution(execution_id, org_id)
+    return _execution(
+        execution, await store.execution_notes(execution_id, org_id=org_id)
+    )
+
+
+@router.delete("/executions/{execution_id}")
+async def delete_execution(execution_id: str) -> dict[str, Any]:
+    """Delete an execution record."""
+    if not await store.delete_execution(execution_id, org_id=storage_org_id()):
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return {"status": "deleted", "deleted": True}
 
 
 def _schedule(
@@ -165,16 +234,29 @@ def _schedule(
 ) -> None:
     """Queue the run, carrying this request's tenant into the background task.
 
-    A background task inherits the request's context, but re-establishing the
-    tenant explicitly is what keeps the executor's store writes landing in the
-    caller's org rather than the single-tenant fallback if that ever changes.
+    Both halves of the context are captured here rather than re-read inside the
+    task: the org, because the task can run after the middleware has reset the
+    contextvar and the run's rows would then land in the single-tenant bucket;
+    and the tenant config, because the step handlers resolve per-tenant
+    integration credentials from it.
+
+    The run is wrapped so that a crash reaches a terminal state carrying the
+    reason. Without this an executor that raised left the record in `running`
+    for good, and `running` is the one status an operator reads as "it is still
+    working on my incident".
     """
     cfg = tenant_context.get_tenant()
+    org_id = storage_org_id()
 
     async def _run() -> None:
         token = tenant_context.set_tenant(cfg)
         try:
-            await run_execution(execution_id, approved_through=approved_through)
+            await run_execution(
+                execution_id, approved_through=approved_through, org_id=org_id
+            )
+        except Exception as exc:
+            log.exception("Runbook execution %s failed", execution_id)
+            await store.mark_failed(org_id, execution_id, str(exc))
         finally:
             tenant_context.reset_tenant(token)
 
@@ -195,6 +277,7 @@ async def approve_execution(
         execution_id,
         StepStatus.RUNNING,
         expect={StepStatus.PENDING, StepStatus.WAITING_APPROVAL},
+        org_id=storage_org_id(),
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Execution not found")
@@ -219,6 +302,7 @@ async def reject_execution(execution_id: str) -> ExecutionResponse:
         execution_id,
         StepStatus.SKIPPED,
         expect={StepStatus.PENDING, StepStatus.WAITING_APPROVAL},
+        org_id=storage_org_id(),
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Execution not found")
@@ -230,42 +314,75 @@ async def reject_execution(execution_id: str) -> ExecutionResponse:
 @router.get("/{runbook_id}")
 async def get_runbook(runbook_id: str) -> RunbookDetailResponse:
     """Get a specific runbook by ID."""
-    rb = await store.get_runbook(runbook_id)
+    rb = await store.get_runbook(runbook_id, org_id=storage_org_id())
     if not rb:
         raise HTTPException(status_code=404, detail="Runbook not found")
     return _detail(rb)
 
 
+def _parse_mode(raw: str) -> ExecutionMode:
+    """Read an execution mode, naming the value and the alternatives when it is not one.
+
+    `ExecutionMode("automatic")` used to raise ValueError straight out of the
+    route, which FastAPI turned into a 500 that told the caller nothing.
+    """
+    try:
+        return ExecutionMode(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"Unknown execution_mode {raw!r}; expected one of "
+            f"{sorted(m.value for m in ExecutionMode)}"
+        ) from e
+
+
 def _build_steps(raw: list[dict[str, Any]]) -> list[RunbookStep]:
     """Turn the JSON step payload into RunbookStep records.
 
-    Raises ValueError on an unknown step_type / execution mode, which the routes
-    translate into a 400 instead of letting it surface as a 500.
+    Raises ValueError on an unknown step_type, naming the offending step and the
+    valid values, which the routes translate into a 4xx instead of letting it
+    surface as a 500.
     """
-    return [
-        RunbookStep(
-            id=step_data.get("id", f"step-{i}"),
-            name=step_data.get("name", f"Step {i + 1}"),
-            description=step_data.get("description", ""),
-            step_type=StepType(step_data.get("step_type", "command")),
-            action=step_data.get("action", ""),
-            params=step_data.get("params", {}),
-            timeout_seconds=step_data.get("timeout_seconds", 300),
-            continue_on_failure=step_data.get("continue_on_failure", False),
-            requires_approval=step_data.get("requires_approval", False),
+    steps: list[RunbookStep] = []
+    for i, step_data in enumerate(raw):
+        raw_type = step_data.get("step_type", "command")
+        try:
+            step_type = StepType(raw_type)
+        except ValueError as e:
+            raise ValueError(
+                f"Step {i}: unknown step_type {raw_type!r}; expected one of "
+                f"{sorted(t.value for t in StepType)}"
+            ) from e
+        steps.append(
+            RunbookStep(
+                id=step_data.get("id", f"step-{i}"),
+                name=step_data.get("name", f"Step {i + 1}"),
+                description=step_data.get("description", ""),
+                step_type=step_type,
+                action=step_data.get("action", ""),
+                params=step_data.get("params", {}),
+                timeout_seconds=step_data.get("timeout_seconds", 300),
+                continue_on_failure=step_data.get("continue_on_failure", False),
+                requires_approval=step_data.get("requires_approval", False),
+            )
         )
-        for i, step_data in enumerate(raw)
-    ]
+    return steps
 
 
 @router.post("")
 async def create_runbook(req: CreateRunbookRequest) -> RunbookDetailResponse:
-    """Create a new runbook."""
+    """Create a new runbook.
+
+    An unusable enum value is a 422 here — the same code FastAPI's own body
+    validation uses, since that is what this is — carrying a detail that names
+    the value that was rejected. `PUT` below answers 400 for the same mistake;
+    the two codes are pinned by tests written either side of this merge and were
+    left as they were found rather than silently changing one API's contract.
+    """
     try:
         steps = _build_steps(req.steps)
-        mode = ExecutionMode(req.execution_mode)
+        mode = _parse_mode(req.execution_mode)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
     rb = Runbook(
         id=store.new_runbook_id(),
@@ -278,7 +395,7 @@ async def create_runbook(req: CreateRunbookRequest) -> RunbookDetailResponse:
         labels=req.labels,
         enabled=True,
     )
-    await store.create_runbook(rb)
+    await store.create_runbook(rb, org_id=storage_org_id())
     return _detail(rb)
 
 
@@ -291,13 +408,14 @@ async def update_runbook(
     Without it the page issued a PUT that came back 405 and the edit was lost;
     the page reported nothing, so a save silently did nothing.
     """
-    existing = await store.get_runbook(runbook_id)
+    org_id = storage_org_id()
+    existing = await store.get_runbook(runbook_id, org_id=org_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Runbook not found")
 
     try:
         steps = _build_steps(req.steps)
-        mode = ExecutionMode(req.execution_mode)
+        mode = _parse_mode(req.execution_mode)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -312,17 +430,21 @@ async def update_runbook(
         labels=req.labels,
         enabled=req.enabled if req.enabled is not None else existing.enabled,
     )
-    if await store.update_runbook(rb) is None:
+    if await store.update_runbook(rb, org_id=org_id) is None:
         raise HTTPException(status_code=404, detail="Runbook not found")
     return _detail(rb)
 
 
 @router.delete("/{runbook_id}")
-async def delete_runbook(runbook_id: str) -> dict[str, str]:
-    """Delete a runbook."""
-    if not await store.delete_runbook(runbook_id):
+async def delete_runbook(runbook_id: str) -> dict[str, Any]:
+    """Delete a runbook.
+
+    `deleted` reports what actually happened rather than only that the request
+    was accepted; a caller that reads it cannot mistake a no-op for a removal.
+    """
+    if not await store.delete_runbook(runbook_id, org_id=storage_org_id()):
         raise HTTPException(status_code=404, detail="Runbook not found")
-    return {"status": "deleted"}
+    return {"status": "deleted", "deleted": True}
 
 
 @router.post("/{runbook_id}/execute")
@@ -331,8 +453,15 @@ async def execute_runbook(
     req: ExecuteRunbookRequest,
     background_tasks: BackgroundTasks,
 ) -> ExecutionResponse:
-    """Execute a runbook."""
-    rb = await store.get_runbook(runbook_id)
+    """Execute a runbook.
+
+    Returns as soon as the run is recorded and scheduled; poll
+    `GET /runbooks/executions/{id}` for step results. A runbook in
+    REQUIRES_APPROVAL mode is recorded WAITING_APPROVAL, naming its first step,
+    and nothing runs until a human approves it.
+    """
+    org_id = storage_org_id()
+    rb = await store.get_runbook(runbook_id, org_id=org_id)
     if not rb:
         raise HTTPException(status_code=404, detail="Runbook not found")
 
@@ -347,11 +476,14 @@ async def execute_runbook(
             "namespace": req.namespace or "default",
             **req.params,
         },
+        org_id=org_id,
     )
 
-    # A runbook that requires approval stays PENDING until a human approves it;
-    # anything else starts now. Recording the row and returning — which is all
-    # this route used to do — left four declared steps and zero executed ones.
+    # A runbook that requires approval waits for a human before its *first*
+    # step, not merely before the steps that repeat the flag; anything else
+    # starts now. Recording the row and returning — which is all this route used
+    # to do — left four declared steps and zero executed ones.
     if execution.status == StepStatus.RUNNING:
         _schedule(background_tasks, execution.id, approved_through=-1)
-    return _execution(execution)
+        return _execution(execution)
+    return _execution(execution, {"waiting_on": rb.steps[0].id} if rb.steps else None)

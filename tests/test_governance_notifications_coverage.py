@@ -203,8 +203,11 @@ def test_delivery_reports_the_missing_field_rather_than_dropping_the_channel(cli
         },
     )
 
-    with TestClient(api.app):
-        result = asyncio.run(notify("incident_created", "t", "b"))
+    # `notify` is called directly rather than under a second `TestClient(api.app)`:
+    # the `client` fixture already holds one lifespan open, and re-entering the
+    # app's lifespan is not something a deployment does. It is also no longer
+    # harmless — see the note on the status-page poller at the foot of this file.
+    result = asyncio.run(notify("incident_created", "t", "b"))
 
     assert result["status"] == "failed"
     slack = [r for r in result["results"] if r["channel"] == "slack"]
@@ -249,12 +252,11 @@ def test_quiet_hours_suppress_non_critical_but_never_critical(client, collector)
     end = (now + timedelta(minutes=30)).strftime("%H:%M")
     client.put(PREFS, json={"quiet_hours": {"enabled": True, "start": start, "end": end}})
 
-    with TestClient(api.app):
-        quiet = asyncio.run(notify("incident_created", "routine", "body"))
-        assert quiet["status"] == "quiet_hours"
-        assert collector.received == []
+    quiet = asyncio.run(notify("incident_created", "routine", "body"))
+    assert quiet["status"] == "quiet_hours"
+    assert collector.received == []
 
-        loud = asyncio.run(notify("incident_created", "sev1", "body", critical=True))
+    loud = asyncio.run(notify("incident_created", "sev1", "body", critical=True))
 
     assert loud["status"] == "sent"
     assert len(collector.received) == 1
@@ -284,14 +286,13 @@ def test_digest_holds_a_notification_and_the_flush_sends_one_message(client, col
     _route_webhook_only(client, _url(collector), "incident_created")
     client.put(PREFS, json={"digest_mode": "hourly"})
 
-    with TestClient(api.app):
-        first = asyncio.run(notify("incident_created", "one", "first body"))
-        second = asyncio.run(notify("incident_created", "two", "second body"))
-        assert first["status"] == "digest"
-        assert second["status"] == "digest"
-        assert collector.received == [], "held notifications must not be sent yet"
+    first = asyncio.run(notify("incident_created", "one", "first body"))
+    second = asyncio.run(notify("incident_created", "two", "second body"))
+    assert first["status"] == "digest"
+    assert second["status"] == "digest"
+    assert collector.received == [], "held notifications must not be sent yet"
 
-        flushed = asyncio.run(flush_due_digests())
+    flushed = asyncio.run(flush_due_digests())
 
     assert len(collector.received) == 1, "a digest is one message, not one per entry"
     assert sum(r.get("sent", 0) for r in flushed) == 2
@@ -305,8 +306,7 @@ def test_a_critical_notification_is_never_held_for_a_digest(client, collector):
     _route_webhook_only(client, _url(collector), "incident_created")
     client.put(PREFS, json={"digest_mode": "daily"})
 
-    with TestClient(api.app):
-        result = asyncio.run(notify("incident_created", "sev1", "b", critical=True))
+    result = asyncio.run(notify("incident_created", "sev1", "b", critical=True))
 
     assert result["status"] == "sent"
     assert len(collector.received) == 1
@@ -315,8 +315,7 @@ def test_a_critical_notification_is_never_held_for_a_digest(client, collector):
 def test_an_unknown_event_is_refused_rather_than_silently_dropped(client):
     from app.notifications.delivery import notify
 
-    with TestClient(api.app):
-        result = asyncio.run(notify("not_an_event", "t", "b"))
+    result = asyncio.run(notify("not_an_event", "t", "b"))
     assert result["status"] == "unknown_event"
 
 
@@ -556,3 +555,22 @@ def test_an_slo_with_no_data_is_not_reported_as_healthy(client):
 
     assert body["total_count"] == 0
     assert body["status"] == "no_data", "no measurements is its own state, not health"
+
+
+# =========================================================================== #
+# Outstanding: the status-page health-check poller cannot survive a second
+# lifespan.
+#
+# `app.status_page.store` keeps `_polling_task` in a module global.
+# `start_live_status_polling` returns early when it finds one already running,
+# so a second app lifespan starts no task of its own, and the matching
+# `stop_live_status_polling` then cancels and awaits the *first* lifespan's
+# task from the second one's event loop. That raises "attached to a different
+# loop", and on the way out it clears the global — so live status polling is
+# dead for the rest of the process with nothing on the page saying so, which is
+# the exact class of silent-control failure this file exists to pin.
+#
+# The tests above therefore no longer nest a lifespan. The fix belongs in
+# app/status_page/store.py (key the task to its running loop, or make stop a
+# no-op for a task this loop did not start) and is out of scope here.
+# =========================================================================== #

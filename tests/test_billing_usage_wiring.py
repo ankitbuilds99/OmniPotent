@@ -21,6 +21,7 @@ import app.api.main as api
 import app.config as cfg
 from app import runtime, tenant_context
 from app.api import billing_router
+from app.billing import runtime as billing_runtime
 from app.billing.models import MetricType
 from app.database import engine as db_engine
 from app.database.orgs import org_uuid
@@ -36,9 +37,13 @@ def _reset() -> None:
     runtime.reset()
     db_engine._engine = None
     db_engine._session_factory = None
-    billing_router._BILLING_STORE = None
-    billing_router._STRIPE_SERVICE = None
-    billing_router._BILLING_API = None
+    # These live in `app.billing.runtime`, not on the router: the router only
+    # re-exports the getters. Setting them on the router instead would create
+    # three attributes nothing reads and leave the real singletons — and the
+    # engine one of them holds — alive across tests.
+    billing_runtime._BILLING_STORE = None
+    billing_runtime._STRIPE_SERVICE = None
+    billing_runtime._BILLING_API = None
 
 
 @pytest.fixture

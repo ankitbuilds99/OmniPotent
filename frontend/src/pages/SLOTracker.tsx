@@ -5,6 +5,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
+// No local API base any more: apiFetch resolves it the same way for every caller
+// (`|| ""` here vs `??` elsewhere meant two different behaviours for one concept)
+// and attaches the Authorization header these calls were missing.
 import { apiFetch } from "../lib/apiClient";
 
 interface SLOAlert {

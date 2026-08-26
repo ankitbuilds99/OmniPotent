@@ -4,7 +4,8 @@ across resets or into the wrong task; audit lines are tenant-stamped."""
 
 import asyncio
 
-from app import audit
+from app import audit, config as cfg
+from app.database.engine import close_db
 from app.tenant_context import (
     TenantConfig,
     get_tenant,
@@ -59,8 +60,11 @@ def test_run_with_tenant_in_background_task_reestablishes_context():
     asyncio.run(scenario())
 
 
-def test_audit_lines_are_tenant_and_actor_stamped():
-    audit.clear()
+async def test_audit_lines_are_tenant_and_actor_stamped(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    await close_db()
+    await audit.clear()
     audit.record("test.event_no_tenant")
     token = set_tenant(TenantConfig(org_id="acme"))
     set_actor("key:ci")
@@ -69,18 +73,38 @@ def test_audit_lines_are_tenant_and_actor_stamped():
     finally:
         reset_tenant(token)
         set_actor("-")
+    await audit.flush()
 
-    # recent() reads one org's trail, so ask for each explicitly.
-    untenanted = {e["event"]: e for e in audit.recent(org_id="-")}
-    acme = {e["event"]: e for e in audit.recent(org_id="acme")}
+    # recent() reads one org's trail, so ask for each explicitly: the trail is
+    # stored per org now, so a caller only ever sees its own chain -- which is
+    # the isolation this test is about.
+    untenanted = {e["event"]: e for e in await audit.recent(org_id="-")}
+    acme = {e["event"]: e for e in await audit.recent(org_id="acme")}
 
     assert untenanted["test.event_no_tenant"]["org_id"] == "-"
     assert acme["test.event_with_tenant"]["org_id"] == "acme"
     assert acme["test.event_with_tenant"]["actor"] == "key:ci"
 
+    # The same three facts read straight off the stored chains, so the
+    # assertions above cannot be satisfied by a queue that never reached the
+    # database.
+    from app.audit import store
 
-def test_audit_trails_do_not_cross_tenants():
-    audit.clear()
+    stored = {
+        e["event"]: e
+        for org in ("-", "acme")
+        for e in await store.chain(org)
+    }
+    assert stored["test.event_no_tenant"]["org_id"] == "-"
+    assert stored["test.event_with_tenant"]["org_id"] == "acme"
+    assert stored["test.event_with_tenant"]["actor"] == "key:ci"
+
+
+async def test_audit_trails_do_not_cross_tenants(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    await close_db()
+    await audit.clear()
     for org in ("acme", "globex"):
         token = set_tenant(TenantConfig(org_id=org))
         set_actor(f"key:{org}")
@@ -89,12 +113,13 @@ def test_audit_trails_do_not_cross_tenants():
         finally:
             reset_tenant(token)
             set_actor("-")
+    await audit.flush()
 
-    # The buffer is one process-wide deque, so without scoping GET /audit
+    # The trail used to be one process-wide deque, so without scoping GET /audit
     # handed every tenant every other tenant's trail, actor addresses included.
     token = set_tenant(TenantConfig(org_id="acme"))
     try:
-        visible = {e["event"] for e in audit.recent()}
+        visible = {e["event"] for e in await audit.recent()}
     finally:
         reset_tenant(token)
 

@@ -16,10 +16,12 @@ import {
   Eye,
   Edit3,
   AlertCircle,
-  X
+  X,
+  CheckCircle
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
-import { apiFetch } from "../lib/apiClient";
+import { apiFetch } from '../lib/apiClient'
+import { sendInvitationEmail, isEmailServiceConfigured } from '../lib/emailService'
 
 type Role = 'owner' | 'admin' | 'member' | 'viewer'
 
@@ -89,6 +91,7 @@ export function Team({ onBack }: TeamProps) {
   const [busyMember, setBusyMember] = useState<string | null>(null)
   const [currentEmail, setCurrentEmail] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
 
   useEffect(() => {
     loadTeam()
@@ -194,6 +197,7 @@ export function Team({ onBack }: TeamProps) {
 
     setInviting(true)
     setError(null)
+    setSuccess(null)
 
     try {
       const res = await apiFetch(`/api/teams/${team.id}/invitations`, {
@@ -209,6 +213,34 @@ export function Team({ onBack }: TeamProps) {
       setInvitations(prev => [...prev, created])
       setInviteEmail('')
       setShowInviteModal(false)
+
+      // The invitation now exists server-side; the backend records it but does not
+      // mail anyone (app/teams/router.py: "In production: send email notification
+      // here"), so EmailJS delivers it from the browser. The link carries the id the
+      // server issued — a Date.now() id would address an invitation that does not
+      // exist, so the accept route would 404 on every click.
+      const inviteLink = `${window.location.origin}/invite/${created.id}`
+      const emailSent = await sendInvitationEmail({
+        toEmail: created.email,
+        inviterName:
+          (user?.user_metadata?.full_name as string) ||
+          user?.email ||
+          currentEmail ||
+          'Team Admin',
+        inviterEmail: user?.email || currentEmail || '',
+        role: created.role,
+        inviteLink
+      })
+
+      // The record and the email are two separate things that can each fail, and
+      // the invitee only hears about the second one. Say which half happened.
+      if (emailSent) {
+        setSuccess(`Invitation sent to ${created.email}`)
+      } else if (!isEmailServiceConfigured()) {
+        setSuccess(`Invitation created for ${created.email} (email not configured)`)
+      } else {
+        setError('Invitation created but email failed to send')
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to send invitation')
     } finally {
@@ -358,6 +390,23 @@ export function Team({ onBack }: TeamProps) {
               Invite Member
             </button>
           </div>
+
+          {/* Success */}
+          {success && (
+            <div
+              className="rounded-xl p-4 mb-6 flex items-center gap-3"
+              style={{
+                backgroundColor: 'var(--surface)',
+                border: '1px solid var(--good)'
+              }}
+            >
+              <CheckCircle size={20} style={{ color: 'var(--good)' }} />
+              <span style={{ color: 'var(--text)' }}>{success}</span>
+              <button onClick={() => setSuccess(null)} className="ml-auto">
+                <X size={18} style={{ color: 'var(--text-2)' }} />
+              </button>
+            </div>
+          )}
 
           {/* Error */}
           {error && (

@@ -4,25 +4,28 @@ import asyncio
 
 import pytest
 
+from app import config as cfg
+from app.database.engine import close_db
 
-@pytest.fixture
-def oauth_db(tmp_path, monkeypatch):
-    """A throwaway database for the OAuth tests that persist account links."""
-    from app.config import get_settings
-    from app.database import engine as db_engine
 
-    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/auth.db")
-    get_settings.cache_clear()
-    db_engine._engine = None
-    db_engine._session_factory = None
+@pytest.fixture(autouse=True)
+def _oauth_db(tmp_path, monkeypatch):
+    """Give the OAuth tests below their own database.
 
-    asyncio.run(db_engine.init_db())
+    Linked accounts and pending states are rows since migration 008_oauth, and
+    logged-out session ids are rows too, so these no longer read whatever the
+    last test left in a module dict. The engine is a module global, so it is
+    disposed on the way in as well as out -- otherwise a test inherits the
+    previous test's engine, still pointing at *that* test's tmp_path. No
+    explicit `init_db()` here: every ORM caller in `app/auth/oauth.py` goes
+    through a session helper that awaits `ensure_schema()` first.
+    """
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    asyncio.run(close_db())
     yield
-
-    asyncio.run(db_engine.close_db())
-    get_settings.cache_clear()
-    db_engine._engine = None
-    db_engine._session_factory = None
+    asyncio.run(close_db())
+    cfg.get_settings.cache_clear()
 
 
 class TestOAuthModule:
@@ -35,7 +38,7 @@ class TestOAuthModule:
         providers = get_available_providers()
         assert isinstance(providers, list)
 
-    def test_session_token_creation_and_verification(self, monkeypatch, oauth_db):
+    async def test_session_token_creation_and_verification(self, monkeypatch):
         """Test JWT session token creation and verification."""
         from app.auth.oauth import create_session_token, verify_session_token
         from app.config import get_settings
@@ -55,27 +58,29 @@ class TestOAuthModule:
         assert token
         assert isinstance(token, str)
 
-        payload = asyncio.run(verify_session_token(token))
+        # Awaited: verification is a revocation lookup against the database now,
+        # not a pure signature check.
+        payload = await verify_session_token(token)
         assert payload is not None
         assert payload["sub"] == "user_123"
         assert payload["org_id"] == "org_456"
         assert payload["email"] == "test@example.com"
         assert payload["role"] == "admin"
 
-    def test_oauth_state_generation_and_verification(self):
+    async def test_oauth_state_generation_and_verification(self):
         """Test OAuth state parameter handling."""
         from app.auth.oauth import generate_oauth_state, verify_oauth_state
 
-        state = generate_oauth_state("google")
+        state = await generate_oauth_state("google")
         assert state
 
-        verified = verify_oauth_state(state)
+        verified = await verify_oauth_state(state)
         assert verified == "google"
 
-        verified_again = verify_oauth_state(state)
+        verified_again = await verify_oauth_state(state)
         assert verified_again is None
 
-    def test_account_linking(self, oauth_db):
+    async def test_account_linking(self):
         """Test OAuth account linking."""
         from app.auth.oauth import (
             OAuthUser,
@@ -91,15 +96,15 @@ class TestOAuthModule:
             name="Test Developer",
         )
 
-        account = asyncio.run(link_oauth_account("user_test_123", user))
+        account = await link_oauth_account("user_test_123", user)
         assert account.user_id == "user_test_123"
         assert account.provider == "github"
 
-        found = asyncio.run(find_account_by_provider("github", "12345"))
+        found = await find_account_by_provider("github", "12345")
         assert found is not None
         assert found.email == "dev@example.com"
 
-        accounts = asyncio.run(get_user_accounts("user_test_123"))
+        accounts = await get_user_accounts("user_test_123")
         assert len(accounts) >= 1
 
 

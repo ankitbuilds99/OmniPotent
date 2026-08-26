@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.billing import (
-    BillingAPI,
-    DatabaseBillingStore,
-    StripeBillingService,
-)
 from app.billing.api import BillingUnavailableError, UnknownMetricError
 from app.billing.models import MetricType
-from app.billing.stripe_client import make_stripe_client
-from app.config import get_settings
-from app.database.orgs import org_uuid
+# The billing store, Stripe service and BillingAPI live in `app.billing.runtime`
+# so that the features gating on a plan flag (deduplication layers, dependency
+# graph, cost budgets) read the same store these endpoints write to. Two stores
+# would mean a customer who had just upgraded still looked unsubscribed to the
+# gate.
+#
+# They keep their underscore-prefixed names here because `app/billing/feature_gate.py`
+# resolves `_get_store` / `_current_org_id` off this module at call time, which is
+# also how the tests point the gate at a fake store.
+from app.billing.runtime import current_org_id as _current_org_id
+from app.billing.runtime import get_billing_api as _get_billing_api
+from app.billing.runtime import get_billing_store as _get_store  # noqa: F401
+from app.billing.runtime import get_stripe_service as _get_stripe_service  # noqa: F401
 
 log = logging.getLogger("omnipotent.api.billing")
 
@@ -44,66 +48,6 @@ def _bad_request(exc: ValueError) -> HTTPException:
     occurred" and had no way to tell a typo from an outage.
     """
     return HTTPException(status_code=400, detail=str(exc))
-
-
-# Billing service singletons (initialized lazily). The store holds no state of
-# its own — every row it reads and writes is in the `billing_*` tables — so one
-# instance for the process is enough.
-_BILLING_STORE: DatabaseBillingStore | None = None
-_STRIPE_SERVICE: StripeBillingService | None = None
-_BILLING_API: BillingAPI | None = None
-
-
-def _get_store() -> DatabaseBillingStore:
-    global _BILLING_STORE
-    if _BILLING_STORE is None:
-        _BILLING_STORE = DatabaseBillingStore()
-    return _BILLING_STORE
-
-
-def _get_stripe_service() -> StripeBillingService | None:
-    """The live Stripe service, or None when billing is not configured.
-
-    This used to pass the `stripe` module itself as the client. The module has no
-    `create_customer` / `create_checkout_session` / `construct_webhook_event`, so
-    a deployment with the SDK installed got an AttributeError — a 500 — on the
-    first checkout. `StripeSDKClient` is the adapter that actually implements the
-    protocol the service calls.
-    """
-    global _STRIPE_SERVICE
-    s = get_settings()
-    if _STRIPE_SERVICE is None and s.stripe_api_key:
-        client = make_stripe_client(s.stripe_api_key)
-        if client is not None:
-            _STRIPE_SERVICE = StripeBillingService(
-                store=_get_store(),
-                stripe_client=client,
-                webhook_secret=s.stripe_webhook_secret or "",
-                frontend_url=s.frontend_url or "http://localhost:3000",
-            )
-    return _STRIPE_SERVICE
-
-
-def _get_billing_api() -> BillingAPI:
-    global _BILLING_API
-    if _BILLING_API is None:
-        _BILLING_API = BillingAPI(
-            store=_get_store(),
-            stripe_service=_get_stripe_service(),
-        )
-    return _BILLING_API
-
-
-def _current_org_id() -> UUID:
-    """The org that owns this request's billing rows.
-
-    Tenant org ids are opaque strings; this read `UUID(cfg.org_id)` directly and
-    raised ValueError — a 500 on every /billing/* route — for any tenant whose id
-    was not already a UUID. `org_uuid()` is the same derivation the rest of the
-    DB-backed features use, so billing rows land under the same org as the
-    incidents and runbooks beside them.
-    """
-    return org_uuid()
 
 
 async def record_ai_investigation(tokens: int = 0, idem: str = "") -> None:

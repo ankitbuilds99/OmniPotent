@@ -21,9 +21,21 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.database.orgs import ensure_org_row, org_uuid
+from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.investigation_history")
+
+
+def _org_id() -> str:
+    """The tenant key rows are filed under.
+
+    `investigations.org_id` is a plain string, not a UUID FK into
+    `organizations` — see the model docstring. `app/dashboard/metrics.py`
+    aggregates the same table under the id `app.api.main._history_org_id()`
+    hands it, which is this. Deriving a UUID here instead put writes and reads
+    under a key no other consumer of the table uses.
+    """
+    return storage_org_id()
 
 
 def _as_iso(value: datetime | None) -> str | None:
@@ -37,7 +49,6 @@ async def record(
     status: str,
     summary: str | None = None,
     report: dict[str, Any] | None = None,
-    tokens_used: int = 0,
     latency_ms: int | None = None,
 ) -> None:
     """Insert or update this org's row for `thread_id`.
@@ -45,13 +56,20 @@ async def record(
     A thread is one investigation across many turns, so later turns update the
     existing row rather than appending a second one — which is also what the
     unique (org_id, thread_id) index requires.
+
+    Writes the narrative columns only. `tokens_used` is deliberately not one of
+    them: `app.dashboard.metrics.record_investigation` accumulates it onto this
+    same row, and it is the only writer that runs on *every* completion path
+    (the two approve paths have no narrative write at all). While both
+    accumulated, a three-turn conversation reported five turns' worth of tokens.
     """
     from app.database.engine import get_session
     from app.database.models import Investigation
 
+    org = _org_id()
+
     try:
         async with get_session() as session:
-            org = await ensure_org_row(session)
             existing = (
                 await session.execute(
                     select(Investigation).where(
@@ -74,7 +92,6 @@ async def record(
                         query=query,
                         summary=summary,
                         report=report,
-                        tokens_used=tokens_used,
                         latency_ms=latency_ms,
                         completed_at=completed,
                     )
@@ -83,9 +100,6 @@ async def record(
                 existing.status = status
                 existing.summary = summary or existing.summary
                 existing.report = report or existing.report
-                # Cumulative: the column is the cost of the whole investigation,
-                # not of whichever turn happened to finish last.
-                existing.tokens_used = (existing.tokens_used or 0) + tokens_used
                 if latency_ms is not None:
                     existing.latency_ms = latency_ms
                 if completed:
@@ -93,7 +107,15 @@ async def record(
 
             await session.commit()
     except Exception:  # noqa: BLE001 — history must never fail a chat turn
-        log.exception("could not record investigation history for thread %s", thread_id)
+        # Swallowed, but never quietly: a schema or tenant-key mismatch here
+        # empties the history page with no other symptom, so this stays at
+        # error with the traceback and names the org the write was filed under.
+        log.error(
+            "could not record investigation history for thread %s (org=%s)",
+            thread_id,
+            org,
+            exc_info=True,
+        )
 
 
 async def set_feedback(thread_id: str, rating: str, comment: str = "") -> bool:
@@ -106,7 +128,7 @@ async def set_feedback(thread_id: str, rating: str, comment: str = "") -> bool:
             row = (
                 await session.execute(
                     select(Investigation).where(
-                        Investigation.org_id == org_uuid(),
+                        Investigation.org_id == _org_id(),
                         Investigation.thread_id == thread_id,
                     )
                 )
@@ -132,7 +154,7 @@ async def recent(
     async with get_session() as session:
         stmt = (
             select(Investigation)
-            .where(Investigation.org_id == org_uuid())
+            .where(Investigation.org_id == _org_id())
             .order_by(Investigation.created_at.desc())
         )
         if status:

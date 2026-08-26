@@ -9,6 +9,12 @@ agent then reported the remediation as done. Each handler now performs the
 action for real, and when the credential or tooling it needs is absent it fails
 with a message naming exactly what is missing. A step never reports success for
 work that did not happen.
+
+Callers that keep their runbooks and their execution history somewhere other
+than this executor's in-process registry — the API router, the worker — pass the
+definition and the execution id in, and hand over an `on_progress` hook that is
+awaited after every step. A run that only reports its result at the end is
+indistinguishable from a hung one.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import shlex
 import shutil
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -37,6 +43,40 @@ from app.runbooks.models import (
 )
 
 log = logging.getLogger("omnipotent.runbooks")
+
+# Called after every step so a caller can persist partial progress mid-run.
+ProgressHook = Callable[[RunbookExecution], Awaitable[None]]
+
+
+async def _report(hook: ProgressHook | None, execution: RunbookExecution) -> None:
+    """Invoke a progress hook, never letting it take the run down with it.
+
+    The hook is bookkeeping — usually a database write. A step that really ran
+    must not be un-run because recording it failed, so a raising hook is logged
+    and the execution continues; the final state is written again at the end.
+    """
+    if hook is None:
+        return
+    try:
+        await hook(execution)
+    except Exception:
+        log.exception("Runbook progress hook failed for execution %s", execution.id)
+
+
+def _refuse(step_kind: str, missing: str) -> tuple[bool, str, str]:
+    """Fail-closed (success, output, error) triple for a step with no backend.
+
+    Every refusal in this module ends in the same sentence so the phrase an
+    operator greps for after an incident — "did this actually do anything?" —
+    is one phrase and not five. `output` is empty because there is nothing to
+    report: no process was spawned, no cluster contacted, no message posted.
+    """
+    log.warning("Runbook %s step not executed: %s", step_kind, missing)
+    return (
+        False,
+        "",
+        f"{missing}; refusing to report success for an action that was not performed",
+    )
 
 
 class StepNotConfigured(RuntimeError):
@@ -70,14 +110,14 @@ def _kube_clients() -> tuple[Any, Any]:
     if not s.kube_config_path:
         raise StepNotConfigured(
             "Kubernetes steps need a cluster: set KUBE_CONFIG_PATH to a kubeconfig. "
-            "Nothing was changed."
+            "Nothing was changed"
         )
     try:
         from kubernetes import client, config  # lazy: optional dependency
     except ImportError as e:  # pragma: no cover - depends on the install extras
         raise StepNotConfigured(
             "The `kubernetes` client is not installed; install the 'kubernetes' "
-            "extra to run Kubernetes runbook steps. Nothing was changed."
+            "extra to run Kubernetes runbook steps. Nothing was changed"
         ) from e
 
     config.load_kube_config(config_file=s.kube_config_path)
@@ -209,8 +249,29 @@ class RunbookExecutor:
 
         Returns (success, output, error). `error` is never empty on failure —
         it names the config or tooling the step needed and did not have.
+
+        MERGE NOTE: origin/main reached the same fail-closed guarantee from the
+        other direction — it kept every handler a no-op and had them refuse
+        unless COPILOT_DEMO_MODE was set, so that a simulation could never be
+        mistaken for an action. That refusal is subsumed here: the handlers below
+        do the work, and when the backend they need is absent they return the
+        same failure with the missing setting named. What is *not* reinstated is
+        the other half of that switch — demo mode returning "Rolled back api
+        (simulated)" — because the handlers now really do roll a deployment
+        back. Demo mode still has a say, in the only direction that cannot lie:
+        it refuses. A deployment that has declared itself a demo must not patch
+        somebody's cluster because a kubeconfig happened to be readable.
         """
         step = self._substitute_step(step, context)
+
+        # WAIT is exempt: sleeping is inert and it is the one step type whose
+        # output is a true statement in any mode.
+        if get_settings().copilot_demo_mode and step.step_type != StepType.WAIT:
+            return _refuse(
+                step.step_type.value,
+                "COPILOT_DEMO_MODE is on, so this deployment does not act on real "
+                f"systems and the {step.step_type.value} step was not run",
+            )
 
         try:
             if step.step_type == StepType.COMMAND:
@@ -224,14 +285,15 @@ class RunbookExecutor:
             elif step.step_type == StepType.HTTP:
                 return await self._exec_http(step)
             else:
-                return False, "", (
+                return _refuse(
+                    step.step_type.value,
                     f"Step type '{step.step_type.value}' has no executor in this "
-                    f"build; nothing was run."
+                    f"build; nothing was run",
                 )
         except asyncio.TimeoutError:
             return False, "", f"Step timed out after {step.timeout_seconds}s"
         except StepNotConfigured as e:
-            return False, "", str(e)
+            return _refuse(step.step_type.value, str(e))
         except Exception as e:
             return False, "", f"{type(e).__name__}: {e}"
 
@@ -249,22 +311,26 @@ class RunbookExecutor:
 
         allowed = _command_allowlist()
         if not allowed:
-            return False, "", (
+            return _refuse(
+                "command",
                 "Command steps are disabled: set RUNBOOK_COMMAND_ALLOWLIST to the "
                 "binaries this deployment may run (e.g. "
-                "RUNBOOK_COMMAND_ALLOWLIST=kubectl,redis-cli). "
-                f"'{argv[0]}' was not run."
+                "RUNBOOK_COMMAND_ALLOWLIST=kubectl,redis-cli); "
+                f"'{argv[0]}' was not run",
             )
         binary = os.path.basename(argv[0])
         if binary not in allowed:
-            return False, "", (
+            return _refuse(
+                "command",
                 f"'{binary}' is not in RUNBOOK_COMMAND_ALLOWLIST "
-                f"({', '.join(sorted(allowed))}); it was not run."
+                f"({', '.join(sorted(allowed))}); it was not run",
             )
 
         resolved = shutil.which(argv[0])
         if resolved is None:
-            return False, "", f"'{argv[0]}' was not found on PATH; it was not run."
+            return _refuse(
+                "command", f"'{argv[0]}' was not found on PATH; it was not run"
+            )
 
         log.info("Executing command: %s", step.action)
         proc = await asyncio.create_subprocess_exec(
@@ -529,9 +595,10 @@ class RunbookExecutor:
             return False, "", "Slack step has no 'message' parameter; nothing was posted."
 
         if not is_slack_configured():
-            return False, "", (
+            return _refuse(
+                "slack",
                 "Slack is not configured: set SLACK_WEBHOOK_URL, or SLACK_BOT_TOKEN "
-                "plus SLACK_CHANNEL. The message was not posted."
+                "plus SLACK_CHANNEL; the message was not posted",
             )
 
         channel = str(step.params.get("channel", "")).strip() or None
@@ -543,17 +610,28 @@ class RunbookExecutor:
         )
 
     async def _exec_wait(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Wait for the requested duration, bounded by the step timeout."""
+        """Wait for the requested duration, or refuse if it will not fit.
+
+        MERGE NOTE: this branch capped the sleep at `step.timeout_seconds` and
+        returned SUCCESS, recording the shortfall only in the output string.
+        origin/main's fail-closed version is restored instead. A wait exists so
+        the step after it observes a settled system; a wait that silently
+        returns early hands the next step a cluster that is still rolling, and
+        it reports whatever it finds as the truth. A step that cannot do its job
+        has to say so in the field that stops the run, not in prose.
+        """
         seconds = max(0, _as_int(step.params.get("seconds"), 10))
-        slept = min(seconds, max(0, step.timeout_seconds))
-        log.info("Waiting %d seconds", slept)
-        await asyncio.sleep(slept)
-        if slept != seconds:
-            return True, (
-                f"Waited {slept} seconds (capped by the step's "
-                f"{step.timeout_seconds}s timeout; {seconds} were requested)"
-            ), ""
-        return True, f"Waited {slept} seconds", ""
+        budget = max(0, step.timeout_seconds)
+        if seconds > budget:
+            return False, "", (
+                f"wait of {seconds}s exceeds the step timeout of {budget}s; "
+                f"nothing was waited for, because a shortened wait would let the "
+                f"next step check a system that has not settled"
+            )
+
+        log.info("Waiting %d seconds", seconds)
+        await asyncio.sleep(seconds)
+        return True, f"Waited {seconds} seconds", ""
 
     async def _exec_http(self, step: RunbookStep) -> tuple[bool, str, str]:
         """Make the step's HTTP request and report what came back."""
@@ -596,6 +674,9 @@ class RunbookExecutor:
         context: dict[str, Any],
         triggered_by: str = "manual",
         skip_approval: bool = False,
+        runbook: Runbook | None = None,
+        execution_id: str | None = None,
+        on_progress: ProgressHook | None = None,
     ) -> RunbookExecution:
         """Execute a runbook.
 
@@ -604,11 +685,24 @@ class RunbookExecutor:
             context: Variables for substitution (service, namespace, etc.)
             triggered_by: Who/what triggered this execution
             skip_approval: Skip approval gates (for testing)
+            runbook: The definition to run. Supplied by callers that keep their
+                runbooks somewhere other than this executor's registry — the API
+                router and the worker load them per tenant, and looking them up
+                here would mean one org's edit to a shared id changing what
+                another org runs.
+            execution_id: Id to record this run under. Callers that must return
+                the id before the run finishes (the API returns it immediately
+                and the caller polls) generate it up front; otherwise one is
+                minted here.
+            on_progress: Awaited after each step completes and once at the end,
+                so a caller can persist partial progress. A run that only reports
+                its result at the end is indistinguishable from a hung one.
 
         Returns:
             RunbookExecution record
         """
-        runbook = await self.resolve_runbook(runbook_id)
+        if runbook is None:
+            runbook = await self.resolve_runbook(runbook_id)
         if not runbook:
             raise ValueError(f"Runbook '{runbook_id}' not found")
 
@@ -616,12 +710,12 @@ class RunbookExecutor:
             raise ValueError(f"Runbook '{runbook_id}' is disabled")
 
         execution = RunbookExecution(
-            id=str(uuid.uuid4()),
+            id=execution_id or str(uuid.uuid4()),
             runbook_id=runbook.id,
             runbook_name=runbook.name,
             status=StepStatus.RUNNING,
             triggered_by=triggered_by,
-            started_at=datetime.now(),
+            started_at=datetime.now(timezone.utc),
             context=context,
         )
         self._executions[execution.id] = execution
@@ -636,7 +730,7 @@ class RunbookExecutor:
                 step_id=step.id,
                 step_name=step.name,
                 status=StepStatus.PENDING,
-                started_at=datetime.now(),
+                started_at=datetime.now(timezone.utc),
             )
 
             # Whatever the runbook's execution mode. `skip_approval` is the one
@@ -649,12 +743,13 @@ class RunbookExecutor:
                 execution.status = StepStatus.WAITING_APPROVAL
                 self._pending_approvals[execution.id] = (execution, step)
                 log.info("Step %s waiting for approval", step.name)
+                await _report(on_progress, execution)
                 return execution
 
             step_exec.status = StepStatus.RUNNING
             success, output, error = await self.execute_step(step, context)
 
-            step_exec.completed_at = datetime.now()
+            step_exec.completed_at = datetime.now(timezone.utc)
             step_exec.output = output
             step_exec.error = error
 
@@ -668,19 +763,22 @@ class RunbookExecutor:
                 if not step.continue_on_failure:
                     execution.steps.append(step_exec)
                     execution.status = StepStatus.FAILED
-                    execution.completed_at = datetime.now()
+                    execution.completed_at = datetime.now(timezone.utc)
+                    await _report(on_progress, execution)
                     return execution
 
             execution.steps.append(step_exec)
+            await _report(on_progress, execution)
 
         execution.status = StepStatus.SUCCESS
-        execution.completed_at = datetime.now()
+        execution.completed_at = datetime.now(timezone.utc)
         log.info("Runbook execution completed: %s", execution.id)
 
+        await _report(on_progress, execution)
         return execution
 
     async def approve(self, execution_id: str) -> RunbookExecution | None:
-        """Approve and continue a paused execution."""
+        """Approve and continue a paused execution held in this process."""
         if execution_id not in self._pending_approvals:
             return None
 
@@ -693,28 +791,58 @@ class RunbookExecutor:
         log.info("Approval granted for execution %s, continuing from step %s",
                  execution_id, step.name)
 
-        continue_from = None
-        for i, s in enumerate(runbook.steps):
-            if s.id == step.id:
-                continue_from = i
-                break
+        return await self.resume(execution, runbook, step.id)
 
+    async def resume(
+        self,
+        execution: RunbookExecution,
+        runbook: Runbook,
+        from_step_id: str,
+        on_progress: ProgressHook | None = None,
+    ) -> RunbookExecution | None:
+        """Continue a paused execution from `from_step_id` onwards.
+
+        Split out of :meth:`approve` so a caller holding the execution and the
+        runbook can resume without going through `_pending_approvals`. That dict
+        lives in one process, so an approval that landed on a different replica
+        than the one that paused the run could never be actioned — the run simply
+        stayed WAITING_APPROVAL forever. `run_execution` below does the same job
+        for callers that keep the whole record in the database.
+
+        Returns None if `from_step_id` is not a step of this runbook, which means
+        the definition was edited between the pause and the approval; resuming at
+        a guessed offset would run the wrong actions.
+        """
+        continue_from = next(
+            (i for i, s in enumerate(runbook.steps) if s.id == from_step_id), None
+        )
         if continue_from is None:
+            log.warning(
+                "Cannot resume execution %s: step %s is no longer in runbook %s",
+                execution.id, from_step_id, runbook.id,
+            )
             return None
 
+        log.info("Resuming execution %s from step %s", execution.id, from_step_id)
         execution.status = StepStatus.RUNNING
+        # The pause recorded a placeholder StepExecution for the step it stopped
+        # at; drop it so the real result replaces it rather than appearing twice.
+        execution.steps = [
+            s for s in execution.steps if s.status != StepStatus.WAITING_APPROVAL
+        ]
+        await _report(on_progress, execution)
 
         for step in runbook.steps[continue_from:]:
             step_exec = StepExecution(
                 step_id=step.id,
                 step_name=step.name,
                 status=StepStatus.RUNNING,
-                started_at=datetime.now(),
+                started_at=datetime.now(timezone.utc),
             )
 
             success, output, error = await self.execute_step(step, execution.context)
 
-            step_exec.completed_at = datetime.now()
+            step_exec.completed_at = datetime.now(timezone.utc)
             step_exec.output = output
             step_exec.error = error
 
@@ -725,13 +853,16 @@ class RunbookExecutor:
                 if not step.continue_on_failure:
                     execution.steps.append(step_exec)
                     execution.status = StepStatus.FAILED
-                    execution.completed_at = datetime.now()
+                    execution.completed_at = datetime.now(timezone.utc)
+                    await _report(on_progress, execution)
                     return execution
 
             execution.steps.append(step_exec)
+            await _report(on_progress, execution)
 
         execution.status = StepStatus.SUCCESS
-        execution.completed_at = datetime.now()
+        execution.completed_at = datetime.now(timezone.utc)
+        await _report(on_progress, execution)
         return execution
 
     async def reject(self, execution_id: str) -> RunbookExecution | None:
@@ -741,7 +872,7 @@ class RunbookExecutor:
 
         execution, _ = self._pending_approvals.pop(execution_id)
         execution.status = StepStatus.SKIPPED
-        execution.completed_at = datetime.now()
+        execution.completed_at = datetime.now(timezone.utc)
         log.info("Execution %s rejected", execution_id)
         return execution
 
@@ -786,7 +917,9 @@ def get_executor() -> RunbookExecutor:
     return _executor
 
 
-async def run_execution(execution_id: str, approved_through: int = -1) -> None:
+async def run_execution(
+    execution_id: str, approved_through: int = -1, org_id: str | None = None
+) -> None:
     """Drive a stored execution to a terminal state, persisting every step.
 
     The API used to create an execution row and return: four declared steps,
@@ -796,12 +929,18 @@ async def run_execution(execution_id: str, approved_through: int = -1) -> None:
     Resumption is derived from the durable record rather than from process
     memory: the next step to run is `len(execution.steps)`, because a step is
     appended only once it has finished. So a run that paused for approval can be
-    resumed by a different worker, or after a restart.
+    resumed by a different worker, or after a restart. That offset is checked
+    against the step id the run parked on before anything is run — see below.
 
     `approved_through` is the index of the last step a human has already
     approved. Steps after it that carry `requires_approval` park the execution in
     WAITING_APPROVAL instead of running; without it, approving would re-enter the
     same gate forever.
+
+    `org_id` is the owner of the row, captured by the caller. A background task
+    can outlive the middleware that set the tenant contextvar, so the org is
+    passed rather than re-read here; None means "resolve it from the context",
+    which is what an in-request caller wants.
 
     A step's own `requires_approval` is honoured whatever the runbook's
     execution mode is. The gate used to also require
@@ -817,30 +956,59 @@ async def run_execution(execution_id: str, approved_through: int = -1) -> None:
     """
     from app.runbooks import store
 
-    execution = await store.get_execution(execution_id)
+    execution = await store.get_execution(execution_id, org_id=org_id)
     if execution is None:
         log.warning("run_execution: execution %s no longer exists", execution_id)
         return
 
-    runbook = await store.get_runbook(execution.runbook_id)
+    runbook = await store.get_runbook(execution.runbook_id, org_id=org_id)
     if runbook is None:
         log.error(
             "run_execution: runbook %s for execution %s no longer exists",
             execution.runbook_id, execution_id,
         )
-        await store.set_execution_status(execution_id, StepStatus.FAILED)
+        await store.mark_failed(
+            org_id,
+            execution_id,
+            f"runbook {execution.runbook_id!r} no longer exists",
+        )
+        return
+
+    resume_at = len(execution.steps)
+    parked_on = (await store.execution_notes(execution_id, org_id=org_id)).get(
+        "waiting_on"
+    )
+    if parked_on is not None and (
+        resume_at >= len(runbook.steps) or runbook.steps[resume_at].id != parked_on
+    ):
+        # The definition was edited between the pause and the approval. Running
+        # from the recorded offset would run whatever now occupies it — for a
+        # runbook of scale and drain actions, that is how the wrong thing gets
+        # touched — and shortening the runbook past the offset would end the run
+        # as a success having executed none of the steps that were approved.
+        reason = (
+            f"cannot resume: step {parked_on!r} is no longer part of runbook "
+            f"{runbook.id!r}"
+        )
+        log.error("Execution %s: %s", execution_id, reason)
+        await store.mark_failed(org_id, execution_id, reason)
         return
 
     executor = get_executor()
     context = dict(execution.context)
     failed = False
 
-    for index in range(len(execution.steps), len(runbook.steps)):
+    for index in range(resume_at, len(runbook.steps)):
         step = runbook.steps[index]
 
         if step.requires_approval and index > approved_through:
             log.info("Execution %s waiting for approval of step %s", execution_id, step.id)
-            await store.set_execution_status(execution_id, StepStatus.WAITING_APPROVAL)
+            await store.set_execution_status(
+                execution_id,
+                StepStatus.WAITING_APPROVAL,
+                waiting_on=step.id,
+                org_id=org_id,
+            )
             return
 
         started = datetime.now(timezone.utc)
@@ -854,13 +1022,15 @@ async def run_execution(execution_id: str, approved_through: int = -1) -> None:
             output=output,
             error=error,
         )
-        await store.append_step_result(execution_id, record)
+        await store.append_step_result(execution_id, record, org_id=org_id)
 
         if not success:
             failed = True
             log.error("Execution %s step %s failed: %s", execution_id, step.id, error)
             if not step.continue_on_failure:
-                await store.set_execution_status(execution_id, StepStatus.FAILED)
+                await store.set_execution_status(
+                    execution_id, StepStatus.FAILED, org_id=org_id
+                )
                 return
 
     # A tolerated failure is still a failure: reporting "success" for a run that
@@ -868,5 +1038,7 @@ async def run_execution(execution_id: str, approved_through: int = -1) -> None:
     # stop. `continue_on_failure` decides whether later steps run, not how the
     # run is recorded.
     await store.set_execution_status(
-        execution_id, StepStatus.FAILED if failed else StepStatus.SUCCESS
+        execution_id,
+        StepStatus.FAILED if failed else StepStatus.SUCCESS,
+        org_id=org_id,
     )
