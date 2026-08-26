@@ -95,13 +95,41 @@ def client(tmp_path, monkeypatch):
 
 def _routes() -> list[tuple[str, str]]:
     """(method, path) for everything the app serves, minus HEAD/OPTIONS."""
-    pairs = []
-    for route in api.app.routes:
-        if not isinstance(route, APIRoute):
-            continue  # websockets and the SPA static mount are not HTTP verbs
-        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
-            pairs.append((method, route.path))
-    return sorted(pairs)
+    return sorted({pair for route in api.app.routes for pair in _pairs(route)})
+
+
+def _pairs(route: object) -> list[tuple[str, str]]:
+    """The verbs one entry in `app.routes` answers, whatever shape it is.
+
+    FastAPI 0.137 stopped flattening `include_router` into `app.routes` and
+    started leaving one `_IncludedRouter` behind per call — an object that is
+    not an `APIRoute` and carries no `.routes` either. Reading only the top
+    level therefore found the 58 routes declared inline in `app/api/main.py`
+    and none of the ~285 behind the 22 routers, on an app that was serving all
+    of them perfectly well.
+
+    That mattered more than the miscount: `test_no_route_raises` walks this same
+    list, so it kept passing while smoke-testing an eighth of the surface. The
+    count assertion below is what noticed, which is the whole reason it is
+    there.
+
+    Asking the router for its effective candidates works on both shapes and
+    applies the prefix for us — `/api/teams`, not `/teams`.
+    """
+    if isinstance(route, APIRoute):
+        return [(m, route.path) for m in sorted(route.methods - {"HEAD", "OPTIONS"})]
+
+    candidates = getattr(route, "effective_candidates", None)
+    if callable(candidates):
+        return [
+            (method, candidate.path)
+            for candidate in candidates()
+            for method in sorted(
+                (getattr(candidate, "methods", None) or set()) - {"HEAD", "OPTIONS"}
+            )
+        ]
+
+    return []  # websockets and the SPA static mount are not HTTP verbs
 
 
 def _concrete(path: str) -> str:

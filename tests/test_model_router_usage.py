@@ -31,6 +31,7 @@ from app.database import engine as db_engine
 from app.database.orgs import org_uuid_for
 from app.graph.nodes import _log_usage
 from app.model_router import usage_ledger, usage_store
+from app.tenancy import auth as tenant_auth
 from app.tenant_context import TenantConfig
 
 ORG_A = TenantConfig(org_id="org-a")
@@ -39,20 +40,35 @@ ORG_B = TenantConfig(org_id="org-b")
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
-    """A real database, torn down and rebuilt around each test."""
+    """Both databases these tests touch, torn down and rebuilt around each test.
+
+    The ORM one holds the usage ledger. The tenant store is a separate,
+    aiosqlite-backed file, and `quota_gate` reads the month's investigation
+    count out of it — so isolating only the first left `COPILOT_TENANT_DB` on
+    its default, a repo-relative `./copilot_tenants.sqlite`. That passed on any
+    working copy where an earlier run had left the file behind and failed on a
+    fresh checkout with "no such table: usage", which is how CI saw it.
+
+    `setup()` is the schema: in a real deployment the API lifespan calls it, and
+    nothing here runs a lifespan.
+    """
     monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/app.db")
+    monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
     cfg.get_settings.cache_clear()
+    tenant_auth.reset_store_cache()
     db_engine._engine = None
     db_engine._session_factory = None
     tenant_context.current_tenant.set(None)
     usage_ledger.reset()
 
     asyncio.run(db_engine.init_db())
+    asyncio.run(tenant_auth.get_store().setup())
     yield
 
     asyncio.run(db_engine.close_db())
     usage_ledger.reset()
     cfg.get_settings.cache_clear()
+    tenant_auth.reset_store_cache()
     db_engine._engine = None
     db_engine._session_factory = None
     tenant_context.current_tenant.set(None)

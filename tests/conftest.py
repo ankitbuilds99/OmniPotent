@@ -33,7 +33,12 @@ _INTEGRATION = Path(__file__).parent / "integration"
 
 @pytest.fixture(autouse=True)
 def _no_ambient_redis(request, monkeypatch):
-    if _INTEGRATION in Path(str(request.node.fspath)).parents:
+    # `yield` and then return, not a bare `return`: this function contains a
+    # yield, so it is a generator, and a generator that returns without yielding
+    # gives pytest nothing to hand the test — "fixture _no_ambient_redis did not
+    # yield a value", which errored every test under tests/integration.
+    if _INTEGRATION in Path(str(request.node.path)).parents:
+        yield
         return
 
     monkeypatch.delenv("REDIS_URL", raising=False)

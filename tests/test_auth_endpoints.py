@@ -1472,6 +1472,16 @@ class TestOAuthCallbackEndpoint:
                 mock_find_email.return_value = None
                 mock_create_token.return_value = "session_token_abc"
                 mock_settings.return_value.is_production = False
+                # Stated rather than left to the mock. Every unset attribute on
+                # a MagicMock is a truthy MagicMock, so an unstated
+                # `copilot_multi_tenant` reads as *on*, and the callback goes
+                # looking for a membership row in the tenant store — a database
+                # this test never creates and the lifespan (which is what calls
+                # `setup()`) never ran for. It passed anyway on any machine with
+                # a `copilot_tenants.sqlite` left in the repo root by an earlier
+                # run, and failed on every fresh checkout with "no such table:
+                # memberships". Org provisioning has its own test.
+                mock_settings.return_value.copilot_multi_tenant = False
 
                 result = await oauth_callback(
                     provider="google",
@@ -1527,6 +1537,10 @@ class TestOAuthCallbackEndpoint:
                 mock_touch.return_value = None
                 mock_create_token.return_value = "session_token_abc"
                 mock_settings.return_value.is_production = False
+                # See test_callback_success_new_user: unstated on a MagicMock
+                # means truthy, and truthy here sends the callback to a tenant
+                # store no fixture creates.
+                mock_settings.return_value.copilot_multi_tenant = False
 
                 result = await oauth_callback(
                     provider="google",
