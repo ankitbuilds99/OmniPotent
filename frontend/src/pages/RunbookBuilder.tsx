@@ -5,13 +5,37 @@
 import { useState, useCallback, useEffect } from "react";
 import { Icon } from "../components/Icon";
 
-import { apiFetch } from "../lib/apiClient";
+import { apiFetch, describeFailure } from "../lib/apiClient";
 
+/** Mirrors `RunbookStep` in app/runbooks/models.py, field for field.
+ *
+ *  It used to hold only `{id, type, name, config}`, where `config` was the
+ *  backend's `params`. Everything else the server stores -- `action` (the shell
+ *  command the step actually runs), `description`, `requires_approval` (the
+ *  human gate on destructive steps), `timeout_seconds`, `continue_on_failure`,
+ *  `rollback_step` -- was dropped on load. The save payload then wrote those
+ *  same keys back from defaults, so loading a runbook and pressing Save Draft
+ *  without touching anything blanked every command, cleared every approval gate
+ *  and erased every description. The builder auto-loads `runbooks[0]`, so
+ *  merely opening the page and clicking Save was enough to do it.
+ *
+ *  The rule this type now enforces: anything the server round-trips is carried
+ *  here, even if no editor control is bound to it, so a save can never be a
+ *  silent delete. */
 interface RunbookStep {
   id: string;
   type: "command" | "approval" | "condition" | "notification" | "wait" | "script" | "ai_action";
   name: string;
+  description: string;
+  /** The command / API call this step performs. Lives beside `params` on the
+   *  wire; the editor used to read it out of `config.command`, which is why an
+   *  existing step's Command box rendered empty. */
+  action: string;
   config: Record<string, unknown>;
+  timeout_seconds: number;
+  continue_on_failure: boolean;
+  requires_approval: boolean;
+  rollback_step: string | null;
   next?: string;
   onSuccess?: string;
   onFailure?: string;
@@ -28,11 +52,21 @@ interface Runbook {
   id: string;
   name: string;
   description: string;
+  /** Which service the runbook applies to; "*" means any. Dropped on load and
+   *  reset to the "*" default on every save. */
+  service: string;
   trigger: "manual" | "alert" | "schedule" | "webhook";
+  execution_mode: string;
   steps: RunbookStep[];
   variables: Variable[];
-  status: "draft" | "active" | "disabled";
-  execution_count: number;
+  /** Categorisation the server stores. Not editable here, but carried so a save
+   *  does not delete it. */
+  labels: Record<string, string>;
+  enabled: boolean;
+  /** `null` when the executions endpoint could not be read. The header printed a
+   *  hardcoded 0, which is indistinguishable from "has never run" -- exactly the
+   *  thing you check before enabling a runbook that restarts production. */
+  execution_count: number | null;
 }
 
 const STEP_TEMPLATES = [
@@ -101,7 +135,7 @@ function StepCard({
             <span className="font-medium">{step.name}</span>
           </div>
           <div className="text-sm text-gray-500 mt-1">
-            {step.type === "command" && <code className="text-xs">{String(step.config.command || "")}</code>}
+            {step.type === "command" && <code className="text-xs">{step.action}</code>}
             {step.type === "notification" && `Channels: ${(step.config.channels as string[])?.join(", ") || ""}`}
             {step.type === "approval" && `Approvers: ${(step.config.approvers as string[])?.join(", ") || ""}`}
             {step.type === "condition" && <code className="text-xs">{String(step.config.condition || "")}</code>}
@@ -169,28 +203,34 @@ function StepEditor({ step, onChange }: { step: RunbookStep; onChange: (step: Ru
           />
         </div>
 
+        {/* The server stores a description per step and shows it to whoever is
+            asked to approve the run. It had no field here, so loading a runbook
+            and saving it blanked the descriptions the built-ins ship with. */}
+        <div>
+          <label className="block text-sm font-medium mb-1">Description</label>
+          <input
+            type="text"
+            value={step.description}
+            onChange={(e) => onChange({ ...step, description: e.target.value })}
+            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
+            placeholder="What this step does, and why"
+          />
+        </div>
+
         {step.type === "command" && (
-          <>
-            <div>
-              <label className="block text-sm font-medium mb-1">Command</label>
-              <textarea
-                value={String(step.config.command || "")}
-                onChange={(e) => updateConfig("command", e.target.value)}
-                rows={3}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 font-mono text-sm"
-                placeholder="kubectl rollout restart deployment/{{service}}"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
-              <input
-                type="number"
-                value={Number(step.config.timeout_seconds) || 60}
-                onChange={(e) => updateConfig("timeout_seconds", parseInt(e.target.value))}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
-              />
-            </div>
-          </>
+          <div>
+            <label className="block text-sm font-medium mb-1">Command</label>
+            {/* Bound to `action` -- the field the executor actually runs.
+                This read `config.command`, which the server never sends back,
+                so every load showed an empty box and every save wiped it. */}
+            <textarea
+              value={step.action}
+              onChange={(e) => onChange({ ...step, action: e.target.value })}
+              rows={3}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 font-mono text-sm"
+              placeholder="kubectl rollout restart deployment/{{service}}"
+            />
+          </div>
         )}
 
         {step.type === "notification" && (
@@ -319,6 +359,41 @@ function StepEditor({ step, onChange }: { step: RunbookStep; onChange: (step: Ru
             </p>
           </div>
         )}
+
+        {/* Execution controls the server enforces on every step type. None of
+            these were editable -- or even visible -- so the only way to see
+            that a step was gated on human approval was to read the API. Saving
+            from this page silently cleared the gate. */}
+        <div className="pt-4 border-t border-gray-200 dark:border-gray-700 space-y-3">
+          <div>
+            <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
+            <input
+              type="number"
+              min={1}
+              value={step.timeout_seconds}
+              onChange={(e) => onChange({ ...step, timeout_seconds: parseInt(e.target.value) || 1 })}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={step.requires_approval}
+              onChange={(e) => onChange({ ...step, requires_approval: e.target.checked })}
+              className="rounded"
+            />
+            Requires approval before running
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={step.continue_on_failure}
+              onChange={(e) => onChange({ ...step, continue_on_failure: e.target.checked })}
+              className="rounded"
+            />
+            Continue the runbook if this step fails
+          </label>
+        </div>
       </div>
     </div>
   );
@@ -341,7 +416,7 @@ function VariablesEditor({ variables, onChange }: { variables: Variable[]; onCha
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-1">
         <h3 className="font-semibold">Variables</h3>
         <button
           onClick={addVariable}
@@ -350,6 +425,12 @@ function VariablesEditor({ variables, onChange }: { variables: Variable[]; onCha
           + Add
         </button>
       </div>
+      {/* The runbook schema has no variables field, so these are not persisted.
+          Saying so beats accepting them, showing them saved, and losing them on
+          the next load -- which is what this panel did before. */}
+      <p className="text-xs text-gray-500 mb-4">
+        Not saved with the runbook yet — these apply to this editing session only.
+      </p>
 
       <div className="space-y-3">
         {variables.map((variable, i) => (
@@ -442,12 +523,104 @@ function EmptyRunbook(): Runbook {
     id: `rb-${Date.now()}`,
     name: "New Runbook",
     description: "",
+    service: "*",
     trigger: "manual",
+    execution_mode: "requires_approval",
     steps: [],
     variables: [],
-    status: "draft",
+    labels: {},
+    enabled: false,
     execution_count: 0,
   };
+}
+
+const STEP_TYPES = new Set([
+  "command", "approval", "condition", "notification", "wait", "script", "ai_action",
+]);
+
+/** Read a runbook exactly as the server stores it.
+ *
+ *  Paired with `toPayload` below; the two must stay symmetric, because the save
+ *  is a PUT (full replacement), so any field this drops is a field the next save
+ *  deletes. */
+function fromDetail(detail: Record<string, unknown>, executionCount: number | null): Runbook {
+  const rawSteps = Array.isArray(detail.steps) ? (detail.steps as Record<string, unknown>[]) : [];
+  return {
+    id: String(detail.id),
+    name: String(detail.name ?? ""),
+    description: String(detail.description ?? ""),
+    service: String(detail.service ?? "*"),
+    trigger: (detail.trigger as Runbook["trigger"]) || "manual",
+    execution_mode: String(detail.execution_mode ?? "requires_approval"),
+    steps: rawSteps.map((s, i) => {
+      const type = String(s.step_type ?? "command");
+      return {
+        id: String(s.id ?? `step-${i}`),
+        // An unrecognised step_type is kept in `action`/`params` but shown with
+        // the generic command editor rather than crashing the type union.
+        type: (STEP_TYPES.has(type) ? type : "command") as RunbookStep["type"],
+        name: String(s.name ?? `Step ${i + 1}`),
+        description: String(s.description ?? ""),
+        action: String(s.action ?? ""),
+        config: (s.params as Record<string, unknown>) || {},
+        timeout_seconds: Number(s.timeout_seconds) || 300,
+        continue_on_failure: Boolean(s.continue_on_failure),
+        requires_approval: Boolean(s.requires_approval),
+        rollback_step: (s.rollback_step as string | null) ?? null,
+        next: s.next as string | undefined,
+        onSuccess: s.on_success as string | undefined,
+        onFailure: s.on_failure as string | undefined,
+      };
+    }),
+    // The server has no field for these yet, so they are per-session only. The
+    // panel says as much rather than accepting them and dropping them silently.
+    variables: [],
+    labels: (detail.labels as Record<string, string>) || {},
+    enabled: Boolean(detail.enabled),
+    execution_count: executionCount,
+  };
+}
+
+/** The PUT/POST body. Every field `fromDetail` reads is written back. */
+function toPayload(runbook: Runbook) {
+  return {
+    name: runbook.name,
+    description: runbook.description,
+    service: runbook.service,
+    trigger: runbook.trigger,
+    execution_mode: runbook.execution_mode,
+    labels: runbook.labels,
+    enabled: runbook.enabled,
+    steps: runbook.steps.map(s => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      step_type: s.type,
+      action: s.action,
+      params: s.config,
+      timeout_seconds: s.timeout_seconds,
+      continue_on_failure: s.continue_on_failure,
+      requires_approval: s.requires_approval,
+      rollback_step: s.rollback_step,
+    })),
+  };
+}
+
+/** How many times this runbook has run, or `null` if that cannot be read.
+ *
+ *  The header printed a hardcoded 0. Returning 0 on failure here would put the
+ *  same lie back in a different place, so an unreachable or unparseable
+ *  endpoint reports "unavailable" instead. */
+async function countExecutions(runbookId: string): Promise<number | null> {
+  try {
+    const res = await apiFetch(`/api/runbooks/executions`);
+    if (!res.ok) return null;
+    const executions = await res.json();
+    if (!Array.isArray(executions)) return null;
+    return executions.filter((e: { runbook_id?: string }) => e.runbook_id === runbookId).length;
+  } catch {
+    return null;
+  }
 }
 
 export function RunbookBuilder({ onBack }: { onBack: () => void }) {
@@ -462,6 +635,9 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
   const [isNew, setIsNew] = useState(true);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [runResult, setRunResult] = useState<string | null>(null);
 
   const fetchRunbook = useCallback(async () => {
     try {
@@ -474,25 +650,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
           const detailRes = await apiFetch(`/api/runbooks/${runbooks[0].id}`);
           if (detailRes.ok) {
             const detail = await detailRes.json();
-            const loadedRunbook: Runbook = {
-              id: detail.id,
-              name: detail.name,
-              description: detail.description || "",
-              trigger: detail.trigger || "manual",
-              steps: detail.steps?.map((s: Record<string, unknown>, i: number) => ({
-                id: s.id || `step-${i}`,
-                type: s.step_type || "command",
-                name: s.name || `Step ${i + 1}`,
-                config: s.params || {},
-                next: s.next,
-                onSuccess: s.on_success,
-                onFailure: s.on_failure,
-              })) || [],
-              variables: [],
-              status: detail.enabled ? "active" : "draft",
-              execution_count: 0,
-            };
-            setRunbook(loadedRunbook);
+            setRunbook(fromDetail(detail, await countExecutions(detail.id)));
             setIsNew(false); // came from the server, so Save must PUT
           } else {
             setRunbook(EmptyRunbook());
@@ -519,26 +677,14 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
     fetchRunbook();
   }, [fetchRunbook]);
 
-  const saveRunbook = async () => {
-    if (!runbook) return;
+  const saveRunbook = async (overrides: Partial<Runbook> = {}) => {
+    if (!runbook) return false;
 
     setSaving(true);
     setSaveError(null);
     try {
-      const payload = {
-        name: runbook.name,
-        description: runbook.description,
-        trigger: runbook.trigger,
-        execution_mode: "requires_approval",
-        steps: runbook.steps.map(s => ({
-          id: s.id,
-          name: s.name,
-          step_type: s.type,
-          action: s.config.command || "",
-          params: s.config,
-          timeout_seconds: Number(s.config.timeout_seconds) || 300,
-        })),
-      };
+      const next = { ...runbook, ...overrides };
+      const payload = toPayload(next);
 
       const url = isNew ? "/api/runbooks" : `/api/runbooks/${runbook.id}`;
       const method = isNew ? "POST" : "PUT";
@@ -561,21 +707,68 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
         }
         setSaveError(`Save failed: ${detail}`);
         setSavedAt(null);
-        return;
+        return false;
       }
 
       const saved = await res.json();
-      setRunbook({ ...runbook, id: saved.id });
+      setRunbook({ ...next, id: saved.id });
       setIsNew(false); // it exists on the server now; further saves are PUTs
       setSavedAt(new Date().toLocaleTimeString());
+      return true;
     } catch (error) {
       console.error("Failed to save runbook:", error);
       setSaveError(
         `Save failed: ${error instanceof Error ? error.message : "network error"}`
       );
       setSavedAt(null);
+      return false;
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Publish is "save, and turn it on". It had no handler at all, so a runbook
+  // could be built here and never enabled from here.
+  const publishRunbook = async () => {
+    const ok = await saveRunbook({ enabled: true });
+    if (ok) setRunError(null);
+  };
+
+  // Test Run executes the saved definition. It had no handler either. The save
+  // comes first on purpose: running the version on screen means running what
+  // the server has, and unsaved edits are not that.
+  const testRun = async () => {
+    if (!runbook) return;
+    setRunError(null);
+    setRunResult(null);
+    if (!(await saveRunbook())) return;
+
+    setRunning(true);
+    try {
+      const res = await apiFetch(`/api/runbooks/${runbook.id}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: runbook.service === "*" ? null : runbook.service }),
+      });
+      if (!res.ok) {
+        setRunError(`Test run failed: ${await describeFailure(res)}`);
+        return;
+      }
+      const execution = await res.json();
+      setRunResult(
+        execution.status === "waiting_approval"
+          ? "Started — waiting for approval"
+          : `Started — ${execution.status}`
+      );
+      setRunbook(rb =>
+        rb ? { ...rb, execution_count: rb.execution_count === null ? null : rb.execution_count + 1 } : rb
+      );
+    } catch (error) {
+      setRunError(
+        `Test run failed: ${error instanceof Error ? error.message : "network error"}`
+      );
+    } finally {
+      setRunning(false);
     }
   };
 
@@ -587,7 +780,15 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
       id: `step-${Date.now()}`,
       type: type as RunbookStep["type"],
       name: `New ${type} step`,
+      description: "",
+      action: "",
       config: {},
+      timeout_seconds: 300,
+      continue_on_failure: false,
+      // A new step is gated by default. The safe default for something that may
+      // run a shell command is to ask first.
+      requires_approval: type === "command" || type === "script",
+      rollback_step: null,
     };
     setRunbook({ ...runbook, steps: [...runbook.steps, newStep] });
     setSelectedStepIndex(runbook.steps.length);
@@ -658,43 +859,73 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
                   className="text-xl font-semibold bg-transparent border-none focus:outline-none focus:ring-2 focus:ring-blue-500 rounded px-1"
                 />
                 <div className="flex items-center gap-2 text-sm text-gray-500">
-                  <span className={`px-2 py-0.5 rounded text-xs ${
-                    runbook.status === "active" ? "bg-green-100 text-green-700" :
-                    runbook.status === "draft" ? "bg-gray-100 text-gray-700" :
-                    "bg-red-100 text-red-700"
-                  }`}>
-                    {runbook.status}
+                  {/* `status` was a client-only string the server never stored,
+                      so it always read "draft" no matter what was published.
+                      `enabled` is the flag the trigger dispatcher checks. */}
+                  <span
+                    className={`px-2 py-0.5 rounded text-xs ${
+                      runbook.enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-700"
+                    }`}
+                    title={
+                      runbook.enabled
+                        ? "Enabled: this runbook can be triggered."
+                        : "Disabled: saved, but triggers will not fire it. Use Publish to enable."
+                    }
+                  >
+                    {runbook.enabled ? "enabled" : "draft"}
                   </span>
-                  <span>{runbook.execution_count} executions</span>
+                  <span>
+                    {runbook.execution_count === null
+                      ? "execution count unavailable"
+                      : `${runbook.execution_count} executions`}
+                  </span>
                 </div>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700">
-                Test Run
+              <button
+                onClick={testRun}
+                disabled={saving || running}
+                className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+              >
+                {running ? "Running..." : "Test Run"}
               </button>
               <button
-                onClick={saveRunbook}
-                disabled={saving}
-                className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700"
+                onClick={() => saveRunbook()}
+                disabled={saving || running}
+                className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
               >
                 {saving ? "Saving..." : "Save Draft"}
               </button>
-              {saveError && (
-                <span role="alert" className="text-sm text-red-600 dark:text-red-400">
-                  {saveError}
-                </span>
-              )}
-              {!saveError && savedAt && (
-                <span className="text-sm text-green-600 dark:text-green-400">
-                  Saved {savedAt}
-                </span>
-              )}
-              <button className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
+              <button
+                onClick={publishRunbook}
+                disabled={saving || running}
+                className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+              >
                 Publish
               </button>
             </div>
           </div>
+          {(saveError || runError || savedAt || runResult) && (
+            <div className="pb-3 flex flex-wrap items-center gap-3 text-sm">
+              {saveError && (
+                <span role="alert" className="text-red-600 dark:text-red-400">
+                  {saveError}
+                </span>
+              )}
+              {!saveError && savedAt && (
+                <span className="text-green-600 dark:text-green-400">Saved {savedAt}</span>
+              )}
+              {runError && (
+                <span role="alert" className="text-red-600 dark:text-red-400">
+                  {runError}
+                </span>
+              )}
+              {!runError && runResult && (
+                <span className="text-blue-600 dark:text-blue-400">{runResult}</span>
+              )}
+            </div>
+          )}
         </div>
       </header>
 

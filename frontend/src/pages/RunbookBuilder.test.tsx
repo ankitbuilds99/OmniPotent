@@ -16,13 +16,32 @@ interface Call {
 
 let calls: Call[] = []
 
+// Shaped like a real GET /api/runbooks/{id}: every field the PUT body carries
+// is present here, so a test that saves without editing can assert the two
+// match.
 const DETAIL = {
   id: 'restart-service',
   name: 'Restart service',
   description: 'restart it',
+  service: 'checkout',
   trigger: 'manual',
+  execution_mode: 'requires_approval',
   enabled: true,
-  steps: [{ id: 's1', name: 'Restart', step_type: 'command', params: {} }],
+  labels: { severity: 'high' },
+  steps: [
+    {
+      id: 's1',
+      name: 'Restart',
+      description: 'Roll the deployment',
+      step_type: 'command',
+      action: 'kubectl rollout restart deployment/checkout',
+      params: { namespace: 'prod' },
+      timeout_seconds: 120,
+      continue_on_failure: false,
+      requires_approval: true,
+      rollback_step: 's0',
+    },
+  ],
 }
 
 function json(body: unknown, status = 200): Response {
@@ -40,6 +59,7 @@ function installFetch(overrides: Record<string, () => Response> = {}) {
     const key = `${method} ${url}`
     if (overrides[key]) return overrides[key]()
     if (key === 'GET /api/runbooks') return json([{ id: 'restart-service' }])
+    if (key === 'GET /api/runbooks/executions') return json([])
     if (key === 'GET /api/runbooks/restart-service') return json(DETAIL)
     return json({ detail: `no route for ${key}` }, 405)
   })
@@ -128,5 +148,172 @@ describe('RunbookBuilder save', () => {
     const alert = await screen.findByRole('alert')
     expect(alert.textContent).toContain('Save failed')
     expect(screen.queryByText(/^Saved /)).not.toBeInTheDocument()
+  })
+})
+
+// The save is a PUT -- full replacement. The loader only kept `{id, type, name,
+// params}` and the payload builder wrote the rest from defaults, so opening the
+// builder (which auto-loads runbooks[0]) and pressing Save Draft without typing
+// anything blanked every command, cleared every approval gate, and erased the
+// descriptions and labels. These pin the round trip.
+describe('RunbookBuilder round trip', () => {
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  async function loadAndSave() {
+    installFetch({ 'PUT /api/runbooks/restart-service': () => json(DETAIL) })
+    render(<RunbookBuilder onBack={() => {}} />)
+    await screen.findByText('Save Draft')
+    fireEvent.click(screen.getByText('Save Draft'))
+    await waitFor(() => expect(calls.some(c => c.method === 'PUT')).toBe(true))
+    return calls.find(c => c.method === 'PUT')!.body as Record<string, unknown>
+  }
+
+  it('saves back every runbook field it loaded', async () => {
+    const body = await loadAndSave()
+
+    expect(body.name).toBe('Restart service')
+    expect(body.description).toBe('restart it')
+    expect(body.service).toBe('checkout')
+    expect(body.execution_mode).toBe('requires_approval')
+    expect(body.labels).toEqual({ severity: 'high' })
+    expect(body.enabled).toBe(true)
+  })
+
+  it('does not blank the command or drop the approval gate on an untouched save', async () => {
+    const body = await loadAndSave()
+    const step = (body.steps as Record<string, unknown>[])[0]
+
+    expect(step.action).toBe('kubectl rollout restart deployment/checkout')
+    expect(step.requires_approval).toBe(true)
+    expect(step.description).toBe('Roll the deployment')
+    expect(step.timeout_seconds).toBe(120)
+    expect(step.params).toEqual({ namespace: 'prod' })
+    expect(step.rollback_step).toBe('s0')
+  })
+
+  it('shows the loaded command and approval gate in the editor', async () => {
+    installFetch()
+    render(<RunbookBuilder onBack={() => {}} />)
+
+    fireEvent.click(await screen.findByText('Restart'))
+
+    // The Command box read `config.command`, a key the server never sends, so it
+    // rendered empty for every existing step.
+    const command = await screen.findByDisplayValue('kubectl rollout restart deployment/checkout')
+    expect(command.tagName).toBe('TEXTAREA')
+    expect(screen.getByDisplayValue('Roll the deployment')).toBeInTheDocument()
+
+    const gate = screen.getByLabelText('Requires approval before running') as HTMLInputElement
+    expect(gate.checked).toBe(true)
+  })
+
+  it('sends an edited command as `action`, the field the executor runs', async () => {
+    installFetch({ 'PUT /api/runbooks/restart-service': () => json(DETAIL) })
+    render(<RunbookBuilder onBack={() => {}} />)
+    fireEvent.click(await screen.findByText('Restart'))
+
+    fireEvent.change(await screen.findByDisplayValue('kubectl rollout restart deployment/checkout'), {
+      target: { value: 'kubectl delete pod -l app=checkout' },
+    })
+    fireEvent.click(screen.getByText('Save Draft'))
+
+    await waitFor(() => expect(calls.some(c => c.method === 'PUT')).toBe(true))
+    const body = calls.find(c => c.method === 'PUT')!.body as Record<string, unknown>
+    expect((body.steps as Record<string, unknown>[])[0].action).toBe('kubectl delete pod -l app=checkout')
+  })
+})
+
+// Test Run and Publish were <button>s with no onClick: they highlighted on
+// hover, did nothing on click, and gave no feedback either way.
+describe('RunbookBuilder actions', () => {
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('Publish saves the runbook with enabled set', async () => {
+    installFetch({
+      'GET /api/runbooks/restart-service': () => json({ ...DETAIL, enabled: false }),
+      'PUT /api/runbooks/restart-service': () => json(DETAIL),
+    })
+    render(<RunbookBuilder onBack={() => {}} />)
+    expect(await screen.findByText('draft')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Publish'))
+
+    await waitFor(() => expect(calls.some(c => c.method === 'PUT')).toBe(true))
+    const body = calls.find(c => c.method === 'PUT')!.body as Record<string, unknown>
+    expect(body.enabled).toBe(true)
+    expect(await screen.findByText('enabled')).toBeInTheDocument()
+  })
+
+  it('Test Run saves first, then executes, and reports the outcome', async () => {
+    installFetch({
+      'PUT /api/runbooks/restart-service': () => json(DETAIL),
+      'POST /api/runbooks/restart-service/execute': () =>
+        json({ id: 'exec-1', status: 'waiting_approval' }),
+    })
+    render(<RunbookBuilder onBack={() => {}} />)
+    await screen.findByText('Test Run')
+
+    fireEvent.click(screen.getByText('Test Run'))
+
+    await waitFor(() =>
+      expect(calls.some(c => c.url === '/api/runbooks/restart-service/execute')).toBe(true)
+    )
+    // Running the version on screen means saving it first.
+    const order = calls.filter(c => c.method !== 'GET').map(c => c.method)
+    expect(order[0]).toBe('PUT')
+    expect(await screen.findByText(/waiting for approval/i)).toBeInTheDocument()
+  })
+
+  it('surfaces a failed test run instead of staying silent', async () => {
+    installFetch({
+      'PUT /api/runbooks/restart-service': () => json(DETAIL),
+      'POST /api/runbooks/restart-service/execute': () =>
+        json({ detail: 'executor unavailable' }, 503),
+    })
+    render(<RunbookBuilder onBack={() => {}} />)
+    await screen.findByText('Test Run')
+
+    fireEvent.click(screen.getByText('Test Run'))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Test run failed')
+  })
+
+  it('counts real executions rather than printing a hardcoded 0', async () => {
+    installFetch({
+      'GET /api/runbooks/executions': () =>
+        json([
+          { id: 'e1', runbook_id: 'restart-service' },
+          { id: 'e2', runbook_id: 'restart-service' },
+          { id: 'e3', runbook_id: 'some-other-runbook' },
+        ]),
+    })
+    render(<RunbookBuilder onBack={() => {}} />)
+
+    expect(await screen.findByText('2 executions')).toBeInTheDocument()
+  })
+
+  it('says the execution count is unavailable when it cannot be read', async () => {
+    installFetch({
+      'GET /api/runbooks/executions': () => json({ detail: 'nope' }, 500),
+    })
+    render(<RunbookBuilder onBack={() => {}} />)
+
+    expect(await screen.findByText('execution count unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('0 executions')).not.toBeInTheDocument()
   })
 })
