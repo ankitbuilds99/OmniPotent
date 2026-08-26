@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
 from sqlalchemy import delete, desc, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.engine import ensure_schema, get_session
@@ -60,6 +60,35 @@ def _backoff_delay(attempt: int) -> float:
     """
     ceiling = min(_BACKOFF_BASE_SECONDS * (2**attempt), _BACKOFF_CAP_SECONDS)
     return random.uniform(0, ceiling)
+
+
+# The second way a writer loses to a concurrent one. SQLite serialises writers
+# behind a single database-wide write lock, and a writer that cannot take it
+# before the busy timeout expires gets OperationalError("database is locked");
+# Postgres reports the same situation as a deadlock or a serialization failure.
+# It is exactly the event the retry loop below exists for -- transient, and
+# resolved by backing off and re-reading the head -- but only IntegrityError was
+# ever caught, so this escaped `append()` uncaught, took the unwritten remainder
+# of the batch with it, and bypassed the `ContendedAppend` requeue path that is
+# the whole guarantee of this module. Six concurrent writers reproduced it in
+# about a quarter of runs.
+_TRANSIENT_CONTENTION = (
+    "database is locked",
+    "database table is locked",
+    "deadlock detected",
+    "could not serialize access",
+)
+
+
+def _lost_a_race(exc: OperationalError) -> bool:
+    """True for a transient loss to another writer, false for a broken database.
+
+    Matched rather than blanket-retried on purpose: OperationalError also covers
+    "no such table" and a dropped connection, and retrying those 25 times with
+    backoff would turn an instant, legible failure into a slow one.
+    """
+    message = str(getattr(exc, "orig", None) or exc).lower()
+    return any(marker in message for marker in _TRANSIENT_CONTENTION)
 
 
 class ContendedAppend(RuntimeError):
@@ -196,10 +225,13 @@ async def append(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 body["hash"] = digest
                 written.append(body)
                 break
-            except IntegrityError:
+            except (IntegrityError, OperationalError) as exc:
                 # Somebody else took this position between the read and the
-                # write. Back off, then re-read the head and chain onto
-                # whatever landed.
+                # write, or held the write lock past our busy timeout. Either
+                # way this writer lost a race: back off, then re-read the head
+                # and chain onto whatever landed.
+                if isinstance(exc, OperationalError) and not _lost_a_race(exc):
+                    raise
                 await asyncio.sleep(_backoff_delay(attempt))
                 continue
         else:
