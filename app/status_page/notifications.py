@@ -31,6 +31,7 @@ from app.status_page.models import (
     Subscriber,
     SubscriptionType,
 )
+from app.url_guard import is_public_url
 
 log = logging.getLogger("omnipotent.status_page.notifications")
 
@@ -312,6 +313,16 @@ class StatusNotifier:
 
     async def _send_webhook(self, url: str, payload: NotificationPayload) -> bool:
         """Send a webhook notification with retry."""
+        # Re-checked here and not only where the subscription was accepted: a
+        # name that resolved to a public address then can resolve to 127.0.0.1
+        # now, and rows predating the check at subscribe time were never
+        # validated at all.
+        if not await is_public_url(url):
+            log.warning(
+                "webhook target refused", extra={"url": url[:50]}
+            )
+            return False
+
         data = payload.to_dict()
         body = json.dumps(data, default=str)
 

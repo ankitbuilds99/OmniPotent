@@ -90,13 +90,27 @@ class EventSpec:
     description: str
     #: Channels this event routes to for an org that has never edited its rules.
     default_channels: tuple[str, ...]
+    #: Set when nothing in this build can raise the event, and why. The API sends
+    #: it on so the page can say so next to the row. A routing matrix that offers
+    #: a switch for something that can never fire is the same untruth as a Save
+    #: button that saves nothing, just harder to notice — the org only finds out
+    #: by not being told about the thing it asked to be told about.
+    unproduced: str = ""
 
 
 EVENTS: tuple[EventSpec, ...] = (
     EventSpec("incident_created", "New incident created", ("email", "slack", "push")),
     EventSpec("incident_resolved", "Incident resolved", ("email", "slack")),
-    EventSpec("deployment_started", "Deployment started", ("slack",)),
-    EventSpec("deployment_failed", "Deployment failed", ("email", "slack", "push")),
+    EventSpec(
+        "deployment_started", "Deployment started", ("slack",),
+        unproduced="This build has no deployments feature to raise it. Deploy "
+                   "timings are read from Argo CD for incident correlation only.",
+    ),
+    EventSpec(
+        "deployment_failed", "Deployment failed", ("email", "slack", "push"),
+        unproduced="This build has no deployments feature to raise it. Deploy "
+                   "timings are read from Argo CD for incident correlation only.",
+    ),
     EventSpec("alert_triggered", "Alert triggered", ("slack", "push")),
     EventSpec("oncall_changed", "On-call rotation changed", ("email", "slack")),
     EventSpec("ai_action_pending", "AI action pending approval", ("slack", "push")),
@@ -133,7 +147,17 @@ def _is_configured(
     stored there is no value to check, and answering "configured" for an org that
     has never touched the page would be the hardcoded `configured: true` the old
     component shipped, wearing a server response as a disguise.
+
+    A channel this build cannot deliver on is never configured, whatever is
+    stored for it. Push is the one: it needs a registered device and there is no
+    endpoint for a browser to register one, so `send_push_notification` has
+    nothing to send to. Saying "configured" would be the same untruth by a
+    different route.
     """
+    from app.notifications.delivery import UNAVAILABLE
+
+    if spec.id in UNAVAILABLE:
+        return False
     if not saved:
         return False
     for f in spec.fields:
@@ -158,7 +182,12 @@ def channel_payload(
     Secret values are reported as "set" / "" and never echoed back: the browser
     posted them once, and a GET that returned them would hand every viewer of
     the page the org's PagerDuty routing key.
+
+    `unavailable` carries the reason a channel cannot deliver in this build, so
+    the page can say so rather than offering a switch that does nothing.
     """
+    from app.notifications.delivery import UNAVAILABLE
+
     return {
         "id": spec.id,
         "name": spec.name,
@@ -166,6 +195,7 @@ def channel_payload(
         "icon": spec.icon,
         "enabled": enabled,
         "configured": _is_configured(spec, config, secrets, saved=saved),
+        "unavailable": UNAVAILABLE.get(spec.id, ""),
         "fields": [
             {
                 "key": f.key,
@@ -245,6 +275,7 @@ async def get_preferences() -> dict[str, Any]:
             {
                 "event": event.id,
                 "description": event.description,
+                "unproduced": event.unproduced,
                 "channels": {
                     # A save carries only the channels the page actually
                     # changed, so a channel with no row for this event keeps the
@@ -381,16 +412,36 @@ async def save_preferences(
     return await get_preferences()
 
 
-async def channels_for_event(event: str) -> list[str]:
-    """The channels this org has both enabled and routed `event` to.
+def routed_channels(event: str, prefs: dict[str, Any]) -> list[str]:
+    """The channels `event` reaches, given an already-loaded preferences document.
 
-    This is the read the dispatcher wants: a channel switched off at the top of
-    the page must not receive anything, however the per-event matrix is set.
+    Enabled *and* routed: a channel switched off at the top of the page must not
+    receive anything however the per-event matrix is set.
+
+    Deliberately not filtered by `configured`. A channel someone enabled and
+    routed but never gave credentials to is a target, and it fails at send time
+    with the field it is missing ("no webhook configured") — which is what an
+    operator needs in order to fix it. Dropping it here instead would turn that
+    into an event with no channels at all, indistinguishable from one nobody
+    routed, and the mistake would stay invisible for exactly as long as nothing
+    important happened.
+
+    Takes the document rather than loading it so the delivery path can resolve
+    channels and read settings from one snapshot.
     """
-    prefs = await get_preferences()
-    enabled = {c["id"] for c in prefs["channels"] if c["enabled"]}
+    by_id = {c["id"]: c for c in prefs["channels"]}
     for rule in prefs["rules"]:
         if rule["event"] != event:
             continue
-        return [cid for cid, on in rule["channels"].items() if on and cid in enabled]
+        return [
+            cid
+            for cid, on in rule["channels"].items()
+            if on and by_id.get(cid, {}).get("enabled")
+        ]
     return []
+
+
+async def channels_for_event(event: str) -> list[str]:
+    """`routed_channels` for this org. The read `app/notifications/delivery.py`
+    makes before it sends anything."""
+    return routed_channels(event, await get_preferences())

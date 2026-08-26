@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.billing.feature_gate import require_feature
+from app.notifications.delivery import notify
 from app.incidents.models import (
     Incident,
     IncidentSeverity,
@@ -99,8 +100,20 @@ async def get_incident(incident_id: UUID) -> IncidentDetailResponse:
 
 
 @router.post("", response_model=IncidentResponse)
-async def create_incident(request: CreateIncidentRequest) -> IncidentResponse:
-    """Create a new incident."""
+async def create_incident(
+    request: CreateIncidentRequest, background: BackgroundTasks
+) -> IncidentResponse:
+    """Create a new incident.
+
+    Notifies whatever channels the org has routed `incident_created` to. That
+    routing had no consumer at all until app/notifications/delivery.py: the
+    Notification Preferences page stored every switch and credential faithfully
+    and nothing ever read them, so creating an incident sent nothing anywhere.
+
+    After the response, not before it: delivery talks to Slack, PagerDuty and
+    whatever else over the network, and the operator filing an incident should
+    not wait on any of it.
+    """
     store = get_incident_store()
     incident = await store.create_incident(
         title=request.title,
@@ -112,7 +125,21 @@ async def create_incident(request: CreateIncidentRequest) -> IncidentResponse:
         customer_impact=request.customer_impact,
     )
     log.info("Created incident %s: %s", incident.id, incident.title)
+    background.add_task(_announce_created, incident)
     return _to_response(incident)
+
+
+async def _announce_created(incident: Incident) -> None:
+    await notify(
+        "incident_created",
+        f"[{incident.severity.upper()}] {incident.title}",
+        (incident.description or "").strip()
+        or f"A {incident.severity} incident was opened on {incident.service}.",
+        critical=incident.severity == IncidentSeverity.CRITICAL,
+        data={"incident_id": str(incident.id), "service": incident.service,
+              "severity": incident.severity},
+        dedupe_key=f"incident:{incident.id}",
+    )
 
 
 @router.patch("/{incident_id}", response_model=IncidentResponse)
@@ -148,16 +175,31 @@ async def acknowledge_incident(
 @router.post("/{incident_id}/resolve")
 async def resolve_incident(
     incident_id: UUID,
+    background: BackgroundTasks,
     user: str | None = Query(default=None),
     notes: str | None = None,
 ) -> dict:
-    """Resolve an incident, as `user` or as the authenticated principal."""
+    """Resolve an incident, as `user` or as the authenticated principal.
+
+    Fans out on `incident_resolved` — see create_incident.
+    """
     store = get_incident_store()
     actor = _acting_user(user)
     incident = await store.resolve_incident(incident_id, actor, notes)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     log.info("Incident %s resolved by %s", incident_id, actor)
+    background.add_task(
+        notify,
+        "incident_resolved",
+        f"Resolved: {incident.title}",
+        (notes or "").strip() or f"{incident.title} was resolved by {actor}.",
+        # Never critical: a resolution is good news, and holding it for a digest
+        # or a quiet window costs nobody anything.
+        data={"incident_id": str(incident.id), "service": incident.service,
+              "resolved_by": actor},
+        dedupe_key=f"incident:{incident.id}",
+    )
     return {"id": incident.id, "status": incident.status, "resolved_by": actor}
 
 

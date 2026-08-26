@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from app.database.engine import session_dependency as get_async_session
 from app.database.orgs import ensure_org_row, org_uuid
+from app.notifications.delivery import notify
 from app.oncall.schedule_service import get_schedule_service
 from app.oncall.escalation_service import get_escalation_service
 from app.oncall.ai_oncall_service import get_ai_oncall_service
@@ -576,6 +577,7 @@ async def list_schedule_shifts(
 @router.post("/overrides")
 async def create_override(
     request: CreateOverrideRequest,
+    background_tasks: BackgroundTasks,
     db=Depends(get_async_session),
 ):
     """Create a schedule override."""
@@ -597,12 +599,30 @@ async def create_override(
     await db.refresh(override)
 
     log.info("Created override %s", override.id)
+    # An override is the shortest path there is to "somebody else is on call
+    # now", which is the one thing the rest of the team has to hear about
+    # without being told in person.
+    background_tasks.add_task(
+        notify,
+        "oncall_changed",
+        "On-call override created",
+        f"{request.override_user_id} is covering for {request.original_user_id} "
+        f"from {request.start_time} to {request.end_time}."
+        + (f" Reason: {request.reason}" if request.reason else ""),
+        data={
+            "override_id": str(override.id),
+            "schedule_id": str(request.schedule_id),
+            "user_id": str(request.override_user_id),
+        },
+        dedupe_key=f"oncall-override:{override.id}",
+    )
     return {"id": override.id, "status": override.status}
 
 
 @router.delete("/overrides/{override_id}")
 async def cancel_override(
     override_id: UUID,
+    background_tasks: BackgroundTasks,
     db=Depends(get_async_session),
 ):
     """Cancel an override."""
@@ -612,6 +632,17 @@ async def cancel_override(
     await db.commit()
 
     log.info("Cancelled override %s", override_id)
+    # Announced for the same reason the creation is: whoever rearranged their
+    # evening around the override needs to know it is off again.
+    background_tasks.add_task(
+        notify,
+        "oncall_changed",
+        "On-call override cancelled",
+        f"The override covering {override.original_user_id} has been cancelled; "
+        f"the rotation's original assignment applies again.",
+        data={"override_id": str(override_id), "schedule_id": str(override.schedule_id)},
+        dedupe_key=f"oncall-override-cancelled:{override_id}",
+    )
     return {"success": True}
 
 
@@ -648,6 +679,7 @@ async def create_swap_request(
 async def accept_swap(
     swap_id: UUID,
     accepting_user_id: UUID,
+    background_tasks: BackgroundTasks,
     db=Depends(get_async_session),
 ):
     """Accept a swap request, and carry out the swap.
@@ -694,6 +726,22 @@ async def accept_swap(
     log.info(
         "Swap request %s accepted by %s; shift %s reassigned to %s",
         swap_id, accepting_user_id, from_shift.id, from_shift.user_id,
+    )
+    # An accepted swap reassigns a shift, so it changes who is on call just as
+    # much as an override does.
+    background_tasks.add_task(
+        notify,
+        "oncall_changed",
+        "On-call shift swapped",
+        f"Shift {from_shift.id} is now {from_shift.user_id} after "
+        f"{accepting_user_id} accepted the swap request."
+        + (" The two shifts were traded." if swap.to_shift_id else ""),
+        data={
+            "swap_id": str(swap_id),
+            "shift_id": str(from_shift.id),
+            "user_id": str(from_shift.user_id),
+        },
+        dedupe_key=f"oncall-swap:{swap_id}",
     )
     return {
         "success": True,
@@ -885,6 +933,27 @@ async def create_alert(
             await service.start_escalation(escalating)
 
     background_tasks.add_task(start_escalation)
+
+    # Separate from the escalation policy above, and deliberately so: the policy
+    # decides who gets *paged*, an individual chosen by rotation; the org's
+    # notification preferences decide where the team as a whole hears about it.
+    # An org that wants only the page can switch every channel off for this row.
+    background_tasks.add_task(
+        notify,
+        "alert_triggered",
+        f"[{alert.severity.upper()}] {alert.title}",
+        (alert.description or "").strip()
+        or f"A {alert.severity} alert was raised from {alert.source or 'an unnamed source'}.",
+        critical=str(alert.severity).lower() in ("critical", "sev1", "p1"),
+        data={
+            "alert_id": str(alert_id),
+            "team_id": str(team.id),
+            "severity": alert.severity,
+            "source": alert.source,
+            "url": alert.source_url,
+        },
+        dedupe_key=f"oncall-alert:{alert_id}",
+    )
 
     log.info("Created alert %s", alert.id)
     return alert

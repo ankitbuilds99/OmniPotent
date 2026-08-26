@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.models import Base
@@ -111,3 +111,33 @@ class NotificationDeliverySettings(Base):
     quiet_hours_end: Mapped[str] = mapped_column(String(5), default="08:00", nullable=False)
     digest_mode: Mapped[str] = mapped_column(String(16), default="realtime", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NotificationDigestEntry(Base):
+    """A notification held back because the org batches non-critical ones.
+
+    A digest cannot be assembled from memory: the window is an hour or a day,
+    which is longer than a process is guaranteed to live, and an org's digest
+    must survive a deploy in the middle of it. `channels` is resolved and stored
+    when the entry is queued rather than re-derived at flush time, so editing
+    the routing matrix does not silently discard everything already collected.
+    """
+
+    __tablename__ = "notification_digest_entries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    channels: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_notif_digest_org_created", "org_id", "created_at"),)

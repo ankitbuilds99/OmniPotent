@@ -157,6 +157,13 @@ class Settings(BaseSettings):
     # and the cloud metadata endpoint. An operator naming their own observability
     # hosts here is the only thing that should widen it.
     copilot_sync_allowed_hosts: str = ""
+    # Comma-separated `host` or `host:port` values exempt from the outbound-URL
+    # check in app/url_guard.py, which otherwise refuses to send a status-page
+    # webhook to a loopback, link-local, private or reserved address. Empty is
+    # the right default for a hosted deployment: subscribers are customers, and
+    # their endpoints are external. Name hosts here only for an on-prem install
+    # whose subscribers genuinely are on the internal network.
+    copilot_webhook_allowed_hosts: str = ""
 
     # --- URLs (configurable for different environments) ---
     # Frontend URL for redirects (Stripe, OAuth, etc.)

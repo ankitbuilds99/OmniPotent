@@ -462,8 +462,34 @@ async def lifespan(app: FastAPI):
         )
     except Exception:
         log.exception("escalation sweeper failed to start; alerts will not escalate past step 0")
+
+    # Notification digests. An org that chose "hourly" or "daily" batching has its
+    # notifications written to a table instead of sent; without something to empty
+    # that table the setting is a way to switch notifications off permanently.
+    # In-process next to the sweeper rather than in `app/tasks/worker.py`, whose
+    # scheduler is an optional separate process behind a message broker — a digest
+    # that only arrives on deployments that happen to run that process is worse
+    # than no digest, because the setting still says it is on.
+    async def _digest_loop() -> None:
+        from datetime import datetime, timezone
+
+        from app.notifications.delivery import flush_due_digests
+
+        while True:
+            now = datetime.now(timezone.utc)
+            # Wake on the hour: "hourly" and "daily" are both hour-granular, and
+            # a loop that slept a fixed hour from startup would put an org's
+            # daily digest at whatever minute the process last restarted.
+            await asyncio.sleep(3600 - (now.minute * 60 + now.second))
+            try:
+                await flush_due_digests()
+            except Exception:  # noqa: BLE001
+                log.exception("notification digest flush failed")
+
+    digest_task = asyncio.create_task(_digest_loop())
+
     yield
-    for _task in (escalation_task, slo_task, job_task):
+    for _task in (digest_task, escalation_task, slo_task, job_task):
         if _task:
             _task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -705,6 +731,82 @@ def _record_slo(result: Any, latency_s: float) -> None:
     _record_slo_fields(
         result.report, result.final_text, result.tokens_used, latency_s
     )
+
+
+def _record_slo_failure(latency_s: float) -> None:
+    """Record a turn that errored out.
+
+    Without this only successful terminal states were ever sampled, so
+    `copilot_investigations_failed_total` was pinned at zero and
+    `copilot_investigations_total` omitted every errored turn — the exposed
+    error rate read a permanent 0% while users were getting error responses
+    back, and the CopilotHighFailureRate alert in
+    deploy/observability/prometheus-alerts.yaml could not fire under any
+    traffic. Nothing else can move that counter: `success` is
+    `bool(report) or bool(final_text)`, and a completed turn always has one or
+    the other (`_last_ai_text` falls back to a literal placeholder).
+
+    Client-side rejections — an over-long message, a thread paused mid-approval,
+    an exhausted quota — are deliberately not recorded: no investigation ran, so
+    counting them would make the agent's own error rate track user mistakes.
+    """
+    _record_slo_fields(None, "", 0, latency_s)
+
+
+#: Strong references to fire-and-forget tasks. asyncio only holds a weak one, so
+#: a task nobody keeps can be garbage-collected mid-await and vanish without
+#: running to completion.
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro: Any) -> None:
+    """Run `coro` detached from the request that started it."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+
+def _pause_paged(thread_id: str, approval_request: dict | None) -> None:
+    """Tell the org that a turn is blocked waiting for a human to approve it.
+
+    A paused investigation is the one state that nobody finds out about on their
+    own: the agent stops mid-run and waits, and the only signal is a browser tab
+    somebody has to already be looking at. The Slack trigger path posts its own
+    approval blocks (`_post_to_slack`), but a turn started from the UI or the API
+    posted nothing anywhere, so an agent could sit on a proposed write for hours.
+
+    Fire-and-forget rather than awaited: the SSE stream and the JSON response
+    both need to reach the caller now, and a slow webhook must not be what stands
+    between an operator and the approval prompt. Failures are logged by
+    `deliver`, which never raises.
+    """
+    req = approval_request or {}
+    actions = req.get("actions") or []
+    names = ", ".join(str(a.get("tool")) for a in actions if a.get("tool"))
+    body = req.get("message") or "The agent is waiting for approval to continue."
+    if names:
+        body = f"{body}\nProposed: {names}"
+
+    async def _send() -> None:
+        from app.notifications.delivery import notify
+
+        await notify(
+            "ai_action_pending",
+            "An investigation is waiting for approval",
+            body,
+            data={
+                "thread_id": thread_id,
+                "actions": actions,
+                # A write is the case where waiting is the point, so it is worth
+                # carrying through to whatever renders the notification.
+                "write": any(a.get("write") for a in actions),
+            },
+            dedupe_key=f"approval:{thread_id}",
+        )
+
+    # A task rather than a BackgroundTasks entry: three of the five pause sites
+    # are inside SSE generators, which have no BackgroundTasks to add to.
+    _spawn(_send())
 
 
 async def _record_history(req: Any, result: Any, latency_s: float) -> None:
@@ -1811,6 +1913,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
     _check_message(req.message)
     tid = _scoped(req.thread_id)  # tenant-namespaced internal key (client sees its own id)
     existed = tid in _SESSIONS
+    # Started before the try so the failure path below has a latency to report:
+    # a turn that dies inside _get_session never reaches the inner assignment.
+    _t0 = time.monotonic()
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -1824,10 +1929,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     "the pending action (POST /approve) before sending a new message.",
                 )
             _AWAITING.discard(tid)
-            _t0 = time.monotonic()
             result = await session.ask(req.message)
             if result.status == "awaiting_approval":
                 _AWAITING.add(tid)
+                _pause_paged(req.thread_id, result.approval_request)
             elif result.status == "completed":
                 await _meter_and_spend(result.tokens_used)
                 _record_slo(result, time.monotonic() - _t0)
@@ -1836,6 +1941,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         raise  # 409/4xx should surface as real HTTP errors, not a 200 error body
     except Exception as exc:  # noqa: BLE001 — surface a clean error to the UI
         log.exception("chat turn failed (thread=%s)", tid)
+        _record_slo_failure(time.monotonic() - _t0)
         # If this session was just created and its first turn failed, drop it so
         # a retry rebuilds cleanly instead of reusing a half-initialized session.
         if not existed:
@@ -1913,16 +2019,27 @@ async def approve(req: ApproveRequest) -> ChatResponse:
                 404, f"no investigation awaiting approval for thread '{req.thread_id}'"
             )
         audit.record("approval.decided", thread=req.thread_id, approved=req.approved)
+        # An investigation that pauses for approval is never sampled at the pause,
+        # so without recording here the whole thing goes uncounted — every
+        # investigation that touched a risky action was missing from /metrics/slo.
+        # The latency measured is the continuation only, deliberately: the human's
+        # thinking time is not the agent's.
+        _t0 = time.monotonic()
         try:
             result = await session.resume(approved=req.approved, reason=req.reason)
             if result.status == "awaiting_approval":
                 _AWAITING.add(tid)
+                # A resumed turn can stop at a *second* gate; without this the
+                # first approval is announced and every one after it is silent.
+                _pause_paged(req.thread_id, result.approval_request)
             else:
                 _AWAITING.discard(tid)
                 if result.status == "completed":
                     await _meter_and_spend(result.tokens_used)
+                    _record_slo(result, time.monotonic() - _t0)
         except Exception as exc:  # noqa: BLE001
             log.exception("approve/resume failed (thread=%s)", tid)
+            _record_slo_failure(time.monotonic() - _t0)
             return ChatResponse(
                 thread_id=req.thread_id, status="error", answer=_friendly_error(exc)
             )
@@ -1984,6 +2101,7 @@ async def _stream_chat_turn(tid: str, req: "ChatRequest", session: Any):
         t = ev.get("type")
         if t == "approval":
             _AWAITING.add(tid)
+            _pause_paged(req.thread_id, ev.get("approval_request"))
         elif t == "done":
             _AWAITING.discard(tid)
             await _meter_and_spend(ev.get("tokens_used", 0))
@@ -2070,6 +2188,10 @@ async def chat_stream(req: ChatRequest):
 
     async def gen():
         tok = tenant_context.set_tenant(cfg)
+        # _stream_chat_turn keeps its own clock for the success sample; this one
+        # exists for the failure path, which can be reached before the turn ever
+        # starts (a session that fails to build).
+        _t0 = time.monotonic()
         try:
             async with _running_turn(tid):
                 existed = tid in _SESSIONS
@@ -2121,6 +2243,7 @@ async def chat_stream(req: ChatRequest):
                             yield payload
                 except Exception as exc:  # noqa: BLE001
                     log.exception("chat stream failed (thread=%s)", tid)
+                    _record_slo_failure(time.monotonic() - _t0)
                     # Always drop the session, not just a freshly built one: a
                     # turn that raised may have left the MCP transport or the
                     # graph in an unusable state, and keeping it in the pool made
@@ -2196,6 +2319,10 @@ async def approve_stream(req: ApproveRequest):
                     }
                     return
                 audit.record("approval.decided", thread=req.thread_id, approved=req.approved)
+                # See the non-streaming /approve: the pause was never sampled, so
+                # this is the only chance to count an investigation that went
+                # through an approval gate.
+                _t0 = time.monotonic()
                 try:
                     async for ev in session.resume_stream(
                         approved=req.approved, reason=req.reason
@@ -2203,12 +2330,20 @@ async def approve_stream(req: ApproveRequest):
                         t = ev.get("type")
                         if t == "approval":
                             _AWAITING.add(tid)
+                            _pause_paged(req.thread_id, ev.get("approval_request"))
                         elif t == "done":
                             _AWAITING.discard(tid)
                             await _meter_and_spend(ev.get("tokens_used", 0))
+                            _record_slo_fields(
+                                ev.get("report"),
+                                ev.get("final_text", ""),
+                                ev.get("tokens_used", 0),
+                                time.monotonic() - _t0,
+                            )
                         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
                 except Exception as exc:  # noqa: BLE001
                     log.exception("approve stream failed (thread=%s)", tid)
+                    _record_slo_failure(time.monotonic() - _t0)
                     # Drop the session so the thread isn't stuck on a broken one.
                     # The checkpointer keeps the pending interrupt, so the human
                     # can approve again on a rebuilt session. Unlike /chat/stream
@@ -3280,13 +3415,19 @@ async def _run_triggered_investigation(incident: dict) -> None:
         + ". Investigate the root cause from logs, metrics, code, and recent changes, "
         "then propose a fix."
     )
+    _t0 = time.monotonic()
     try:
         async with _running_turn(thread_id):
             session = await _get_session(thread_id)
-            _t0 = time.monotonic()
             result = await session.ask(seed)
             if result.status == "awaiting_approval":
                 _AWAITING.add(thread_id)
+                # Also announced on the org's own channels, not just via
+                # `_post_to_slack` below: that posts with the deployment's bot
+                # token to the deployment's channel, which on a multi-tenant
+                # install is not the org's channel and may not be configured at
+                # all. This is the path with nobody watching a browser tab.
+                _pause_paged(thread_id, result.approval_request)
             elif result.status == "completed":
                 # Meter the triggered path the same as the interactive one (no-op
                 # without a tenant); idem-keyed by the incident so a re-run can't double-bill.
@@ -3310,6 +3451,7 @@ async def _run_triggered_investigation(incident: dict) -> None:
         await webhook_receivers.record_incident_outcome(incident, result)
     except Exception as exc:  # noqa: BLE001 — best-effort background trigger
         log.exception("triggered investigation failed (incident=%s)", incident.get("id"))
+        _record_slo_failure(time.monotonic() - _t0)
         await webhook_receivers.record_incident_outcome(
             incident, None, error=f"{type(exc).__name__}: {exc}"
         )
@@ -3432,6 +3574,7 @@ async def _resume_triggered(thread_id: str, approved: bool) -> None:
             result = await session.resume(approved=approved, reason="decided via Slack")
             if result.status == "awaiting_approval":
                 _AWAITING.add(thread_id)
+                _pause_paged(thread_id, result.approval_request)
             else:
                 _AWAITING.discard(thread_id)
         await _post_to_slack(thread_id, thread_id, result)

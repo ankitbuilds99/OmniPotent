@@ -332,7 +332,50 @@ class EscalationService:
 
         await self._execute_escalation_step(alert, policy, next_step % total)
         log.info("Escalated alert %s to step %d", alert_id, next_step)
+        await self._announce_escalation(alert, next_step % total, total)
         return True
+
+    async def _announce_escalation(
+        self, alert: OncallAlert, step: int, total: int
+    ) -> None:
+        """Tell the org's own channels that an alert moved up a level.
+
+        Distinct from the step's targets, which page a specific responder chosen
+        by the policy: an alert reaching level 3 is a fact about the incident,
+        and the team asks to hear it on the channels it picked on the
+        Notification Preferences page rather than by being paged individually.
+
+        The sweeper runs on a timer with no request behind it, so there is no
+        tenant in the context and `org_uuid()` would fall through to the
+        single-tenant org — which on a multi-tenant deployment means reading
+        somebody else's routing table. The alert's own `org_id` is the authority,
+        so it is what gets established here. Never raises: an escalation that
+        fired must not be rolled back because a webhook was down.
+        """
+        from app.notifications.delivery import notify
+        from app.tenant_context import TenantConfig, run_with_tenant
+
+        cfg = TenantConfig(org_id=str(alert.org_id)) if alert.org_id else None
+        try:
+            await run_with_tenant(
+                cfg,
+                notify(
+                    "escalation",
+                    f"Escalated to level {step + 1}: {alert.title}",
+                    f"{alert.title} is still unacknowledged and has escalated to "
+                    f"level {step + 1} of {total}.",
+                    critical=str(alert.severity).lower() in ("critical", "sev1", "p1"),
+                    data={
+                        "alert_id": str(alert.id),
+                        "severity": alert.severity,
+                        "step": step + 1,
+                        "url": alert.source_url,
+                    },
+                    dedupe_key=f"oncall-escalation:{alert.id}:{step}",
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("Could not announce escalation of alert %s", alert.id, exc_info=True)
 
     async def _execute_escalation_step(
         self,

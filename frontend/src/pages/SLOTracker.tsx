@@ -21,13 +21,30 @@ interface SLO {
   service: string;
   type: "availability" | "latency" | "error_rate" | "throughput";
   target: number;
-  current: number;
+  /** The measured SLI as a percentage, or null when nothing has been measured. */
+  current: number | null;
   window: "30d" | "7d" | "1d";
-  budget_total: number;
-  budget_remaining: number;
+  /** Minutes of the window, or null when the budget could not be read. */
+  budget_total: number | null;
+  budget_remaining: number | null;
   budget_burn_rate: number;
+  /** SLI samples behind `current`; 0 means the SLO exists but has no data yet. */
+  sample_count: number;
   status: "healthy" | "warning" | "critical" | "exhausted";
   alerts: SLOAlert[];
+}
+
+/** The shape of GET /api/slos/{id}/budget. */
+interface BudgetResponse {
+  remaining: number;
+  remaining_percent: number;
+  burn_rate: number;
+  status: string;
+  current_sli: number;
+  good_count: number;
+  total_count: number;
+  budget_minutes_total: number;
+  budget_minutes_remaining: number;
 }
 
 function StatusBadge({ status }: { status: SLO["status"] }) {
@@ -47,7 +64,14 @@ function StatusBadge({ status }: { status: SLO["status"] }) {
   );
 }
 
-function BudgetGauge({ remaining, total, status }: { remaining: number; total: number; status: SLO["status"] }) {
+function BudgetGauge({ remaining, total, status }: { remaining: number | null; total: number | null; status: SLO["status"] }) {
+  if (remaining === null || total === null) {
+    return (
+      <div className="w-full text-xs text-gray-500">
+        Error budget unavailable — the budget endpoint could not be read.
+      </div>
+    );
+  }
   const pct = total > 0 ? Math.max(0, Math.min(100, (remaining / total) * 100)) : 0;
   const color = status === "healthy" ? "bg-green-500" :
                 status === "warning" ? "bg-yellow-500" :
@@ -93,16 +117,22 @@ function SLOCard({ slo, onSelect }: { slo: SLO; onSelect: () => void }) {
     throughput: "Throughput",
   };
 
-  const formatValue = (value: number, type: SLO["type"]) => {
-    if (type === "availability") return `${value.toFixed(2)}%`;
-    if (type === "latency") return `${value}ms`;
-    if (type === "error_rate") return `${value}%`;
-    return `${value}/s`;
-  };
+  // A percentage for every SLI type: the tracker measures good/total, so a
+  // latency SLO's number is "% of requests within the threshold", not a
+  // millisecond figure. Rendering it as `250ms` when the value is 99.4 was how
+  // a healthy latency SLO came to read as "99.4ms".
+  const formatValue = (value: number) => `${value.toFixed(2)}%`;
 
-  const isMet = slo.type === "latency" || slo.type === "error_rate"
-    ? slo.current <= slo.target
-    : slo.current >= slo.target;
+  // An SLO with no samples is neither met nor missed, and colouring it either
+  // way asserts something the data does not say.
+  //
+  // Higher is better for every type: `current` is good/total whatever the SLI
+  // measures, so an error-rate SLO's number is the share of requests that did
+  // *not* error. The comparison used to be inverted for latency and error_rate,
+  // which was correct only for the raw millisecond/error-percentage readings
+  // this page never actually had — so those two types showed green exactly when
+  // they were failing.
+  const isMet = slo.current === null ? null : slo.current >= slo.target;
 
   return (
     <div
@@ -125,11 +155,16 @@ function SLOCard({ slo, onSelect }: { slo: SLO; onSelect: () => void }) {
       <div className="grid grid-cols-2 gap-4 mb-4">
         <div>
           <div className="text-xs text-gray-500 uppercase">{typeLabels[slo.type]}</div>
-          <div className={`text-2xl font-bold ${isMet ? "text-green-600" : "text-red-600"}`}>
-            {formatValue(slo.current, slo.type)}
+          <div
+            className={`text-2xl font-bold ${
+              isMet === null ? "text-gray-400" : isMet ? "text-green-600" : "text-red-600"
+            }`}
+          >
+            {slo.current === null ? "No data" : formatValue(slo.current)}
           </div>
           <div className="text-xs text-gray-500">
-            Target: {formatValue(slo.target, slo.type)}
+            Target: {formatValue(slo.target)}
+            {slo.current !== null && ` · ${slo.sample_count.toLocaleString()} samples`}
           </div>
         </div>
         <div>
@@ -182,8 +217,16 @@ function SLODetailPanel({ slo, onClose }: { slo: SLO; onClose: () => void }) {
           </div>
           <div className="mt-1 flex items-center justify-between text-sm">
             <span>Time to Exhaustion</span>
-            <span className={slo.budget_remaining < 10 ? "text-red-600 font-bold" : ""}>
-              {slo.budget_burn_rate > 0 ? `${Math.round(slo.budget_remaining / slo.budget_burn_rate)}h` : "N/A"}
+            <span
+              className={
+                slo.budget_remaining !== null && slo.budget_remaining < 10
+                  ? "text-red-600 font-bold"
+                  : ""
+              }
+            >
+              {slo.budget_remaining !== null && slo.budget_burn_rate > 0
+                ? `${Math.round(slo.budget_remaining / slo.budget_burn_rate)}h`
+                : "N/A"}
             </span>
           </div>
         </div>
@@ -321,9 +364,14 @@ function CreateSLOModal({ onClose, onCreate }: { onClose: () => void; onCreate: 
                 placeholder="99.9"
                 className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
               />
-              <span className="text-gray-500">
-                {sloType === "latency" ? "ms" : sloType === "throughput" ? "/s" : "%"}
-              </span>
+              {/* Always a percentage. This said "ms" for a latency SLO and "/s"
+                  for a throughput one, which invited a target of 250 — the API
+                  takes a 0..1 ratio for every SLI type, because the SLI is
+                  good/total in all of them ("99% of requests under 250ms"), so
+                  250 was silently sent as 2.5 and rejected. There is no field
+                  for the 250ms threshold itself; it belongs to whatever records
+                  the SLI. */}
+              <span className="text-gray-500">%</span>
             </div>
           </div>
         </div>
@@ -371,126 +419,67 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [filter, setFilter] = useState<"all" | "healthy" | "warning" | "critical">("all");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchSLOs = useCallback(async () => {
+    // Everything shown here comes from /api/slos and its /budget endpoint.
+    // This used to fall back to inventing SLOs out of the incident list when
+    // that returned nothing — a "99.9% target, 43.2 minutes of budget" row per
+    // service with an uptime of `100 - incidents * 0.1`, none of which was
+    // measured. A service with no SLO defined looked like a service meeting one.
+    setError(null);
     try {
-      // Try to fetch from real SLO API first
       const sloRes = await apiFetch(`/api/slos`);
-      if (sloRes.ok) {
-        const sloData = await sloRes.json();
-        if (sloData.length > 0) {
-          // Fetch error budgets for each SLO
-          const slosWithBudgets: SLO[] = await Promise.all(
-            sloData.map(async (slo: Record<string, unknown>) => {
-              let budget = { remaining: 43.2, total: 43.2, burn_rate: 0.5, status: "healthy" };
-              try {
-                const budgetRes = await apiFetch(`/api/slos/${slo.id}/budget`);
-                if (budgetRes.ok) {
-                  const budgetData = await budgetRes.json();
-                  budget = {
-                    remaining: budgetData.remaining * 43.2 / (1 - (slo.target as number)),
-                    total: 43.2,
-                    burn_rate: budgetData.burn_rate,
-                    status: budgetData.status,
-                  };
-                }
-              } catch {
-                // Use defaults
-              }
-
-              let status: SLO["status"] = "healthy";
-              if (budget.status === "breached") status = "exhausted";
-              else if (budget.status === "at_risk") status = "critical";
-              else if (budget.burn_rate > 1) status = "warning";
-
-              return {
-                id: slo.id as string,
-                name: slo.name as string,
-                service: slo.service as string,
-                type: (slo.sli_type as string) || "availability",
-                target: ((slo.target as number) * 100),
-                current: ((slo.target as number) * 100) - (budget.burn_rate * 0.1),
-                window: (slo.window as string)?.replace("rolling_", "") || "30d",
-                budget_total: budget.total,
-                budget_remaining: budget.remaining,
-                budget_burn_rate: budget.burn_rate,
-                status,
-                alerts: [],
-              };
-            })
-          );
-          setSlos(slosWithBudgets);
-          setLoading(false);
-          return;
-        }
+      if (!sloRes.ok) {
+        throw new Error(`SLO list failed: HTTP ${sloRes.status}`);
       }
+      const sloData = await sloRes.json();
 
-      // Fallback: derive SLOs from incidents/alerts
-      const incidentsRes = await apiFetch(`/api/incidents`);
-      const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
+      const slosWithBudgets: SLO[] = await Promise.all(
+        (sloData as Record<string, unknown>[]).map(async (slo) => {
+          const target = (slo.target as number) ?? 0;
+          let budget: BudgetResponse | null = null;
+          try {
+            const budgetRes = await apiFetch(`/api/slos/${slo.id}/budget`);
+            if (budgetRes.ok) budget = await budgetRes.json();
+          } catch {
+            // Leave the budget null; the row renders as "no data" rather than
+            // borrowing a number from somewhere else.
+          }
 
-      const alertsRes = await apiFetch(`/oncall/alerts?limit=50`);
-      const alerts = alertsRes.ok ? await alertsRes.json() : [];
+          let status: SLO["status"] = "healthy";
+          if (budget?.status === "breached") status = "exhausted";
+          else if (budget?.status === "at_risk") status = "critical";
+          else if ((budget?.burn_rate ?? 0) > 1) status = "warning";
 
-      const serviceMap = new Map<string, { incidents: number; alerts: Record<string, unknown>[] }>();
-
-      incidents.forEach((inc: Record<string, unknown>) => {
-        const service = (inc.service as string) || "default-service";
-        if (!serviceMap.has(service)) {
-          serviceMap.set(service, { incidents: 0, alerts: [] });
-        }
-        serviceMap.get(service)!.incidents++;
-      });
-
-      alerts.forEach((alert: Record<string, unknown>) => {
-        const service = (alert.service as string) || "default-service";
-        if (!serviceMap.has(service)) {
-          serviceMap.set(service, { incidents: 0, alerts: [] });
-        }
-        serviceMap.get(service)!.alerts.push(alert);
-      });
-
-      const generatedSLOs: SLO[] = [];
-      let idx = 0;
-      serviceMap.forEach((data, service) => {
-        idx++;
-        const incidentCount = data.incidents + data.alerts.length;
-        const uptime = 100 - (incidentCount * 0.1);
-        const budgetUsed = incidentCount * 5;
-
-        let status: SLO["status"] = "healthy";
-        if (budgetUsed > 90) status = "exhausted";
-        else if (budgetUsed > 70) status = "critical";
-        else if (budgetUsed > 50) status = "warning";
-
-        generatedSLOs.push({
-          id: `slo-${idx}`,
-          name: `${service} Availability`,
-          service,
-          type: "availability",
-          target: 99.9,
-          current: Math.max(90, uptime),
-          window: "30d",
-          budget_total: 43.2,
-          budget_remaining: Math.max(0, 43.2 - (budgetUsed * 0.432)),
-          budget_burn_rate: incidentCount > 0 ? 0.5 + (incidentCount * 0.3) : 0.5,
-          status,
-          alerts: data.alerts
-            .filter((a: Record<string, unknown>) => a.status !== "resolved")
-            .slice(0, 3)
-            .map((a: Record<string, unknown>, i: number) => ({
-              id: `alert-${idx}-${i}`,
-              type: "burn_rate" as const,
-              severity: (a.severity === "critical" ? "critical" : "warning") as "critical" | "warning",
-              message: (a.title as string) || "Alert triggered",
-              triggered_at: (a.triggered_at as string) || new Date().toISOString(),
-            })),
-        });
-      });
-
-      setSlos(generatedSLOs);
-    } catch (error) {
-      console.error("Failed to fetch SLOs:", error);
+          return {
+            id: slo.id as string,
+            name: slo.name as string,
+            service: slo.service as string,
+            type: ((slo.sli_type as string) || "availability") as SLO["type"],
+            target: target * 100,
+            // The measured SLI, not `target - burn_rate * 0.1`. That expression
+            // could only ever produce a number just below the target, so every
+            // SLO rendered as very nearly met however badly it was doing.
+            current: budget && budget.total_count > 0 ? budget.current_sli * 100 : null,
+            window: (((slo.window as string) || "").replace("rolling_", "") ||
+              "30d") as SLO["window"],
+            // Minutes of the SLO's own window, computed server-side from its own
+            // target — not the 43.2 that only ever applied to a monthly 99.9%.
+            budget_total: budget?.budget_minutes_total ?? null,
+            budget_remaining: budget?.budget_minutes_remaining ?? null,
+            budget_burn_rate: budget?.burn_rate ?? 0,
+            sample_count: budget?.total_count ?? 0,
+            status,
+            alerts: [],
+          };
+        })
+      );
+      setSlos(slosWithBudgets);
+    } catch (err) {
+      console.error("Failed to fetch SLOs:", err);
+      setError(err instanceof Error ? err.message : "Failed to load SLOs");
+      setSlos([]);
     } finally {
       setLoading(false);
     }
@@ -503,8 +492,13 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
   }, [fetchSLOs]);
 
   const handleCreateSLO = async (sloData: Partial<SLO>) => {
+    // A failed create used to append the SLO to local state anyway, with a
+    // fabricated 43.2-minute budget and `current` set to the target — so the new
+    // SLO appeared, healthy and exactly on target, and stayed that way until the
+    // page was reloaded and it silently vanished. A create that did not happen
+    // has to say so.
+    setError(null);
     try {
-      // Call real API to create SLO
       const response = await apiFetch(`/api/slos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -512,52 +506,24 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
           name: sloData.name || "New SLO",
           service: sloData.service || "unknown",
           sli_type: sloData.type || "availability",
-          target: (sloData.target || 99.9) / 100, // Convert percentage to decimal
+          // Always a ratio. Every SLI here is good_count/total_count, including
+          // latency ("99% of requests under the threshold") — the API constrains
+          // target to 0..1 for that reason.
+          target: (sloData.target ?? 99.9) / 100,
           window: `rolling_${sloData.window || "30d"}`,
         }),
       });
 
-      if (response.ok) {
-        // Refresh SLOs from API
-        fetchSLOs();
-      } else {
-        // Fallback to local state
-        const newSLO: SLO = {
-          id: `slo-${Date.now()}`,
-          name: sloData.name || "New SLO",
-          service: sloData.service || "unknown",
-          type: sloData.type || "availability",
-          target: sloData.target || 99.9,
-          current: sloData.target || 99.9,
-          window: sloData.window || "30d",
-          budget_total: 43.2,
-          budget_remaining: 43.2,
-          budget_burn_rate: 0.5,
-          status: "healthy",
-          alerts: [],
-        };
-        setSlos([...slos, newSLO]);
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail.slice(0, 200) || `HTTP ${response.status}`);
       }
-    } catch (error) {
-      console.error("Failed to create SLO:", error);
-      // Fallback to local state
-      const newSLO: SLO = {
-        id: `slo-${Date.now()}`,
-        name: sloData.name || "New SLO",
-        service: sloData.service || "unknown",
-        type: sloData.type || "availability",
-        target: sloData.target || 99.9,
-        current: sloData.target || 99.9,
-        window: sloData.window || "30d",
-        budget_total: 43.2,
-        budget_remaining: 43.2,
-        budget_burn_rate: 0.5,
-        status: "healthy",
-        alerts: [],
-      };
-      setSlos([...slos, newSLO]);
+      await fetchSLOs();
+      setShowCreateModal(false);
+    } catch (err) {
+      console.error("Failed to create SLO:", err);
+      setError(err instanceof Error ? err.message : "Failed to create SLO");
     }
-    setShowCreateModal(false);
   };
 
   const filteredSLOs = slos.filter(slo => {
@@ -596,6 +562,21 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {/* Shown above the list rather than instead of it: a create that failed
+            must not hide the SLOs that already exist. */}
+        {error && (
+          <div className="rounded-lg border border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/30 p-3 text-sm text-red-700 dark:text-red-300 flex items-start gap-2">
+            <Icon name="alert-circle" size={16} />
+            <span className="flex-1">{error}</span>
+            <button
+              onClick={() => setError(null)}
+              className="text-red-700 dark:text-red-300 hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <LoadingState />
         ) : slos.length === 0 ? (

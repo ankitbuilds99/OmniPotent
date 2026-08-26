@@ -473,12 +473,13 @@ async def _handle_chat(
         return
 
     tid = _scoped(thread_id)
-    existed = tid in _get_session.__self__._SESSIONS if hasattr(_get_session, '__self__') else False
 
-    # Import _SESSIONS directly
-    from app.api.main import _SESSIONS
+    # Imported here rather than threaded through the argument list, which is
+    # already long; the module-level import is what would be circular, not this.
+    from app.api.main import _SESSIONS, _record_slo_failure
     existed = tid in _SESSIONS
 
+    _t0 = time_mod.monotonic()
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -493,7 +494,6 @@ async def _handle_chat(
                 return
 
             _AWAITING.discard(tid)
-            _t0 = time_mod.monotonic()
 
             async for ev in session.ask_stream(message):
                 t = ev.get("type")
@@ -517,6 +517,7 @@ async def _handle_chat(
 
     except Exception as exc:
         log.exception("WebSocket chat failed: thread=%s", tid)
+        _record_slo_failure(time_mod.monotonic() - _t0)
         if not existed:
             await _evict(tid)
         await manager.send(conn, {
@@ -542,11 +543,17 @@ async def _handle_approval(
     _meter_and_spend,
 ) -> None:
     """Handle an approval response (resume investigation)."""
-    from app.api.main import _SESSIONS
+    import time as time_mod
+
+    from app.api.main import _SESSIONS, _record_slo_failure, _record_slo_fields
 
     tid = _scoped(thread_id)
     existed = tid in _SESSIONS
 
+    # The pause itself is never sampled, so an investigation that went through an
+    # approval gate was missing from /metrics/slo entirely unless it is counted
+    # here. Latency covers the continuation only — not the human's thinking time.
+    _t0 = time_mod.monotonic()
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -570,12 +577,19 @@ async def _handle_approval(
                 elif t == "done":
                     _AWAITING.discard(tid)
                     await _meter_and_spend(ev.get("tokens_used", 0))
+                    _record_slo_fields(
+                        ev.get("report"),
+                        ev.get("final_text", ""),
+                        ev.get("tokens_used", 0),
+                        time_mod.monotonic() - _t0,
+                    )
 
                 payload = _stream_payload(thread_id, ev)
                 await manager.send(conn, payload)
 
     except Exception as exc:
         log.exception("WebSocket approval failed: thread=%s", tid)
+        _record_slo_failure(time_mod.monotonic() - _t0)
         await manager.send(conn, {
             "type": "error",
             "thread_id": thread_id,

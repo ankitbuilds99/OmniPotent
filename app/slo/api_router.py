@@ -87,6 +87,22 @@ class ErrorBudgetResponse(BaseModel):
     status: str
     window_start: datetime
     window_end: datetime
+    #: The measured success ratio over the window, 0..1. `SLOTracker` has always
+    #: computed it and the dataclass has always carried it; this model dropped
+    #: it, so the only number the page could show for "current" was one it made
+    #: up from `100 - remaining_percent`, which is a budget figure and not an SLI
+    #: at all — a 99.9% SLO with half its budget gone rendered as "50% current"
+    #: next to a "99.9% target".
+    current_sli: float = 0.0
+    #: The sample counts behind `current_sli`, so a reader can tell a genuine
+    #: 100% from one measured over four requests.
+    good_count: int = 0
+    total_count: int = 0
+    #: Minutes of downtime the budget allows over the whole window, derived from
+    #: the SLO's own target and window. The page hardcoded 43.2 — the figure for
+    #: a 99.9% monthly SLO — and printed it for every SLO regardless of either.
+    budget_minutes_total: float = 0.0
+    budget_minutes_remaining: float = 0.0
 
 
 class SLIResponse(BaseModel):
@@ -296,6 +312,12 @@ async def get_error_budget(
     if not budget:
         raise HTTPException(404, f"SLO not found: {slo_id}")
 
+    # Budget expressed in minutes of the SLO's own window, which is the unit an
+    # on-call engineer reasons in ("we have 12 minutes left this month"). Derived
+    # here rather than in the tracker because it is a presentation of
+    # `total_budget` over `window`, and both are already on the response.
+    window_minutes = (budget.window_end - budget.window_start).total_seconds() / 60
+
     return ErrorBudgetResponse(
         slo_id=budget.slo_id,
         total_budget=budget.total_budget,
@@ -307,6 +329,11 @@ async def get_error_budget(
         status=budget.status.value,
         window_start=budget.window_start,
         window_end=budget.window_end,
+        current_sli=budget.current_sli,
+        good_count=budget.good_count,
+        total_count=budget.total_count,
+        budget_minutes_total=round(budget.total_budget * window_minutes, 2),
+        budget_minutes_remaining=round(budget.remaining * window_minutes, 2),
     )
 
 

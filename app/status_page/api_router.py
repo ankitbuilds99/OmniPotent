@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from pydantic import BaseModel, Field, EmailStr
 
 from app.config import get_settings
@@ -27,6 +27,7 @@ from app.status_page.notifications import (
     send_verification_email,
 )
 from app.status_page.store import get_status_store
+from app.url_guard import BlockedURL, assert_public_url
 
 router = APIRouter(prefix="/api/status", tags=["Status Page"])
 
@@ -310,7 +311,9 @@ async def subscribe_to_updates(
     accepting an address it could never verify.
 
     A webhook subscription is verified on creation: possession of the URL is the
-    only credential a webhook has.
+    only credential a webhook has. The URL itself is checked first — see
+    app/url_guard.py for why a subscriber must not be able to point this at the
+    inside of the deployment's network.
     """
     store = get_status_store()
 
@@ -327,7 +330,14 @@ async def subscribe_to_updates(
         target = request.email
     else:
         subscription_type = SubscriptionType.WEBHOOK
-        target = request.webhook_url  # type: ignore
+        target = request.webhook_url or ""
+        # Anything at all used to be accepted and stored as verified —
+        # `file:///etc/passwd`, `not-a-url`, and `http://169.254.169.254/`, which
+        # the server then really did POST to on the next incident.
+        try:
+            await assert_public_url(target, field="webhook_url")
+        except BlockedURL as blocked:
+            raise HTTPException(400, str(blocked)) from None
 
     # Check for existing subscription
     existing = await store.get_subscriber_by_target(target)
@@ -528,8 +538,16 @@ async def delete_component(component_id: str) -> None:
 
 
 @router.post("/incidents", response_model=IncidentResponse, status_code=201)
-async def create_incident(request: IncidentCreateRequest) -> IncidentResponse:
-    """Create a new incident (admin only)."""
+async def create_incident(
+    request: IncidentCreateRequest, background: BackgroundTasks
+) -> IncidentResponse:
+    """Create a new incident (admin only).
+
+    Subscribers are notified after the response goes out. Awaiting delivery
+    inline meant one unreachable subscriber held the request open for the
+    webhook timeout plus its retry backoff — measured at ~11 seconds for a
+    single dead URL, on the endpoint an operator reaches for mid-outage.
+    """
     store = get_status_store()
 
     # Validate severity
@@ -554,7 +572,7 @@ async def create_incident(request: IncidentCreateRequest) -> IncidentResponse:
     # Notify subscribers
     notifier = get_status_notifier()
     subscribers = await store.list_subscribers()
-    await notifier.notify_incident_created(subscribers, incident)
+    background.add_task(notifier.notify_incident_created, subscribers, incident)
 
     return IncidentResponse(**incident.to_dict())
 
@@ -563,8 +581,10 @@ async def create_incident(request: IncidentCreateRequest) -> IncidentResponse:
 async def update_incident(
     incident_id: str,
     request: IncidentUpdateRequest,
+    background: BackgroundTasks,
 ) -> IncidentResponse:
-    """Update an incident (admin only)."""
+    """Update an incident (admin only). Delivery runs after the response —
+    see create_incident."""
     store = get_status_store()
 
     # Validate status if provided
@@ -596,16 +616,23 @@ async def update_incident(
     subscribers = await store.list_subscribers()
 
     if status == IncidentStatus.RESOLVED:
-        await notifier.notify_incident_resolved(subscribers, incident, request.message or "")
+        background.add_task(
+            notifier.notify_incident_resolved, subscribers, incident, request.message or ""
+        )
     elif request.message:
-        await notifier.notify_incident_updated(subscribers, incident, request.message)
+        background.add_task(
+            notifier.notify_incident_updated, subscribers, incident, request.message
+        )
 
     return IncidentResponse(**incident.to_dict())
 
 
 @router.post("/maintenances", response_model=MaintenanceResponse, status_code=201)
-async def create_maintenance(request: MaintenanceCreateRequest) -> MaintenanceResponse:
-    """Create a scheduled maintenance window (admin only)."""
+async def create_maintenance(
+    request: MaintenanceCreateRequest, background: BackgroundTasks
+) -> MaintenanceResponse:
+    """Create a scheduled maintenance window (admin only). Delivery runs after
+    the response — see create_incident."""
     store = get_status_store()
 
     # Validate times
@@ -629,7 +656,7 @@ async def create_maintenance(request: MaintenanceCreateRequest) -> MaintenanceRe
     # Notify subscribers
     notifier = get_status_notifier()
     subscribers = await store.list_subscribers()
-    await notifier.notify_maintenance_scheduled(subscribers, maintenance)
+    background.add_task(notifier.notify_maintenance_scheduled, subscribers, maintenance)
 
     return MaintenanceResponse(**maintenance.to_dict())
 
@@ -638,8 +665,10 @@ async def create_maintenance(request: MaintenanceCreateRequest) -> MaintenanceRe
 async def update_maintenance(
     maintenance_id: str,
     request: MaintenanceUpdateRequest,
+    background: BackgroundTasks,
 ) -> MaintenanceResponse:
-    """Update a maintenance window (admin only)."""
+    """Update a maintenance window (admin only). Delivery runs after the
+    response — see create_incident."""
     store = get_status_store()
 
     # Handle status transitions
@@ -654,13 +683,17 @@ async def update_maintenance(
             if maintenance:
                 notifier = get_status_notifier()
                 subscribers = await store.list_subscribers()
-                await notifier.notify_maintenance_started(subscribers, maintenance)
+                background.add_task(
+                    notifier.notify_maintenance_started, subscribers, maintenance
+                )
         elif status == MaintenanceStatus.COMPLETED:
             maintenance = await store.complete_maintenance(maintenance_id)
             if maintenance:
                 notifier = get_status_notifier()
                 subscribers = await store.list_subscribers()
-                await notifier.notify_maintenance_completed(subscribers, maintenance)
+                background.add_task(
+                    notifier.notify_maintenance_completed, subscribers, maintenance
+                )
         else:
             updates = request.model_dump(exclude_none=True)
             maintenance = await store.update_maintenance(maintenance_id, **updates)
