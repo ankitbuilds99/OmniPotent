@@ -35,7 +35,7 @@ class TestHeadersAreActuallySent:
         assert "camera=()" in response.headers["Permissions-Policy"]
 
     @pytest.mark.parametrize(
-        "method,path,expected", [("GET", "/api/nope", 404), ("POST", "/api/investigate", 405)]
+        "method,path,expected", [("GET", "/api/nope", 404), ("POST", "/healthz", 405)]
     )
     def test_error_responses_carry_them_too(self, client, method, path, expected):
         """It is added last, so it is outermost and stamps responses it never routed.
@@ -43,6 +43,13 @@ class TestHeadersAreActuallySent:
         A 404 for an unmatched path and a 405 for a wrong verb are produced by
         the router, below every other middleware; clickjacking protection that
         only covered 200s would be worth very little.
+
+        The 405 comes from `/healthz`, a real GET-only route, rather than from a
+        path no route declares. `POST /api/investigate` answered 405 only where
+        `frontend/dist` had been built: the SPA mount then matched the path for
+        GET and the router reported the verb as wrong. Without a build — CI, a
+        fresh clone — there was no mount, nothing matched, and the answer was a
+        404 that had nothing to do with the method.
         """
         response = client.request(method, path, json={} if method == "POST" else None)
 
