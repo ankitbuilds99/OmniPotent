@@ -5,6 +5,10 @@ import { Icon } from "../components/Icon";
 // (`|| ""` here vs `??` elsewhere meant two different behaviours for one concept)
 // and attaches the Authorization header these calls were missing.
 import { apiFetch, describeFailure } from "../lib/apiClient";
+// Imported rather than reimplemented: the card and the map must not be able to
+// disagree about whether the same service is healthy. Every page ships in one
+// bundle already, so this costs nothing.
+import { classifyStatus } from "./ServiceMap";
 
 type Tab = "overview" | "alerts" | "runbooks" | "metrics";
 
@@ -48,7 +52,101 @@ interface DashboardStats {
   runbookCount: number;
   pendingApprovals: number;
   serviceCount: number;
-  healthyServices: number;
+  /** null when nothing measures health, so the card can say so rather than
+   *  guess. See `ServiceHealth` below. */
+  healthyServices: number | null;
+}
+
+/** What the Services card knows, which is not always "how many are healthy".
+ *
+ *  `healthy` was `serviceCount` — the same number, assigned to itself under a
+ *  different name — so the card read "5 healthy" out of 5 whatever the fleet was
+ *  actually doing, and no outage could ever change it. And the count came from
+ *  `new Set(runbooks.map(r => r.service))`, which counts services that happen to
+ *  have a runbook, not services that exist.
+ *
+ *  Health needs a measurement, and the only thing that measures it is Prometheus
+ *  behind `/api/knowledge-graph/service-metrics` — which answers 503 when none
+ *  is configured, deliberately, rather than reporting zeros that look like a
+ *  healthy fleet. `healthy: null` carries that 503 through to the card instead
+ *  of flattening it into a number. */
+interface ServiceHealth {
+  total: number;
+  healthy: number | null;
+  note: string | null;
+}
+
+type ServiceMetricRow = { error_rate?: number | null; latency_p99?: number | null };
+
+/** Turn the topology and metrics responses into what the Services card can
+ *  honestly claim.
+ *
+ *  A service counts as healthy only if `classifyStatus` says so — from a real
+ *  measurement where Prometheus has one, from the status the graph recorded
+ *  otherwise, and from neither when neither exists. */
+export async function readServiceHealth(
+  topologyRes: PromiseSettledResult<Response>,
+  metricsRes: PromiseSettledResult<Response>,
+): Promise<ServiceHealth> {
+  if (topologyRes.status !== "fulfilled") {
+    const why = String(topologyRes.reason);
+    return { total: 0, healthy: null, note: `service inventory unavailable — ${why}` };
+  }
+  if (!topologyRes.value.ok) {
+    const why = await describeFailure(topologyRes.value);
+    return { total: 0, healthy: null, note: `service inventory unavailable — ${why}` };
+  }
+  const topology = (await topologyRes.value.json()) as {
+    nodes?: { id?: string; name?: string; health_status?: string }[];
+  };
+  const nodes = (topology.nodes ?? []).filter(n => typeof n.id === "string" && n.id);
+  const total = nodes.length;
+
+  // Why the readings are missing, if they are. The endpoint answers 503 on
+  // purpose when no Prometheus is configured; that is "unmeasured", not "all
+  // zero", and zeros here would have read as a perfectly healthy fleet.
+  let unmeasured: string | null = null;
+  let measured: Record<string, ServiceMetricRow> = {};
+  if (metricsRes.status !== "fulfilled") {
+    unmeasured = String(metricsRes.reason);
+  } else if (!metricsRes.value.ok) {
+    unmeasured = await describeFailure(metricsRes.value);
+  } else {
+    const body = (await metricsRes.value.json()) as { services?: Record<string, ServiceMetricRow> };
+    measured = body.services ?? {};
+  }
+
+  let healthy = 0;
+  let known = 0;
+  for (const n of nodes) {
+    const m = measured[n.id as string] ?? measured[n.name ?? ""] ?? {};
+    const status = classifyStatus(
+      {
+        requests_per_sec: null,
+        error_rate: m.error_rate ?? null,
+        latency_p99: m.latency_p99 ?? null,
+      },
+      n.health_status,
+    );
+    if (status !== "unknown") known += 1;
+    if (status === "healthy") healthy += 1;
+  }
+
+  // Nothing knows anything about any service. "0 healthy" would read as a total
+  // outage, which is a different claim from having no data.
+  if (total > 0 && known === 0) {
+    const why = unmeasured ?? "nothing has reported service health";
+    return { total, healthy: null, note: `health unmeasured — ${why}` };
+  }
+  // Some services measured, some not. Worth saying: "1 healthy" out of 3 reads
+  // as two sick services when in fact two were never looked at. Prometheus
+  // being up does not mean it has a series for everything in the graph, so this
+  // is not conditional on the metrics call having failed.
+  const partial =
+    known < total
+      ? `${total - known} of ${total} unmeasured${unmeasured ? ` — ${unmeasured}` : ""}`
+      : null;
+  return { total, healthy, note: partial };
 }
 
 function SeverityBadge({ severity }: { severity: string }) {
@@ -108,12 +206,14 @@ function OverviewTab({
   runbooks,
   executions,
   stats,
+  servicesNote,
   loading
 }: {
   alerts: Alert[];
   runbooks: Runbook[];
   executions: Execution[];
   stats: DashboardStats;
+  servicesNote: string | null;
   loading: boolean;
 }) {
   if (loading) return <LoadingSpinner />;
@@ -164,7 +264,11 @@ function OverviewTab({
             </span>
           </div>
           <p className="text-2xl font-bold mt-2">{stats.serviceCount}</p>
-          <p className="text-xs text-gray-500 mt-1">{stats.healthyServices} healthy</p>
+          <p className="text-xs text-gray-500 mt-1" title={servicesNote ?? undefined}>
+            {stats.healthyServices === null
+              ? "health unmeasured"
+              : `${stats.healthyServices} healthy`}
+          </p>
         </div>
       </div>
 
@@ -456,6 +560,11 @@ export function Dashboard({
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
+  const [services, setServices] = useState<ServiceHealth>({
+    total: 0,
+    healthy: null,
+    note: null,
+  });
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(new Date());
   const [actionError, setActionError] = useState<string | null>(null);
@@ -463,11 +572,17 @@ export function Dashboard({
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [alertsRes, runbooksRes, executionsRes] = await Promise.allSettled([
-        apiFetch(`/oncall/alerts`),
-        apiFetch(`/api/runbooks`),
-        apiFetch(`/api/runbooks/executions`),
-      ]);
+      const [alertsRes, runbooksRes, executionsRes, topologyRes, metricsRes] =
+        await Promise.allSettled([
+          apiFetch(`/oncall/alerts`),
+          apiFetch(`/api/runbooks`),
+          apiFetch(`/api/runbooks/executions`),
+          // The service inventory, and the only thing that measures its health.
+          // Both are best-effort: an unconfigured Prometheus 503s by design, and
+          // that must leave the rest of the dashboard standing.
+          apiFetch(`/api/knowledge-graph/topology`),
+          apiFetch(`/api/knowledge-graph/service-metrics`),
+        ]);
 
       if (alertsRes.status === "fulfilled" && alertsRes.value.ok) {
         const data = await alertsRes.value.json();
@@ -484,6 +599,8 @@ export function Dashboard({
         setExecutions(data);
       }
 
+      setServices(await readServiceHealth(topologyRes, metricsRes));
+
       setLastUpdated(new Date());
     } catch (error) {
       console.error("Failed to fetch dashboard data:", error);
@@ -498,15 +615,14 @@ export function Dashboard({
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  const serviceSet = new Set(runbooks.map(r => r.service).filter(s => s && s !== "*"));
   const stats: DashboardStats = {
     activeAlerts: alerts.filter(a => a.status !== "resolved").length,
     criticalAlerts: alerts.filter(a => a.severity === "critical" && a.status !== "resolved").length,
     highAlerts: alerts.filter(a => a.severity === "high" && a.status !== "resolved").length,
     runbookCount: runbooks.length,
     pendingApprovals: executions.filter(e => e.status === "waiting_approval" || e.status === "pending").length,
-    serviceCount: serviceSet.size,
-    healthyServices: serviceSet.size,
+    serviceCount: services.total,
+    healthyServices: services.healthy,
   };
 
   // Every button on this page used to be `if (res.ok) { fetchData(); }` with no
@@ -722,6 +838,7 @@ export function Dashboard({
             runbooks={runbooks}
             executions={executions}
             stats={stats}
+            servicesNote={services.note}
             loading={loading}
           />
         )}
