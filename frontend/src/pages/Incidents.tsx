@@ -87,6 +87,32 @@ interface Incident {
   investigation_confidence: number | null;
 }
 
+/** One incident row, from either shape the API sends it in.
+ *
+ *  `GET /api/incidents` returns the summary (`has_investigation`,
+ *  `investigation_confidence`); `GET /api/incidents/{id}` returns the full
+ *  record with the investigation nested. Both map here so the detail view and
+ *  the list cannot drift into disagreeing about the same incident. */
+function toIncident(raw: Record<string, unknown>): Incident {
+  const investigation = (raw.investigation as Investigation | null) ?? null;
+  const triggered = (raw.triggered_at as string) || new Date().toISOString();
+  return {
+    id: raw.id as string,
+    title: raw.title as string,
+    severity: (raw.severity as Incident["severity"]) || "medium",
+    status: (raw.status as Incident["status"]) || "triggered",
+    affected_services: raw.service ? [raw.service as string] : [],
+    created_at: triggered,
+    updated_at: (raw.resolved_at as string) || (raw.acknowledged_at as string) || triggered,
+    assigned_to: (raw.assignee as string) || undefined,
+    has_investigation: raw.has_investigation === true || investigation !== null,
+    investigation_confidence:
+      typeof raw.investigation_confidence === "number"
+        ? raw.investigation_confidence
+        : investigation?.overall_confidence ?? null,
+  };
+}
+
 function SeverityBadge({ severity }: { severity: Incident["severity"] }) {
   const config = {
     critical: { bg: "var(--bad)", text: "white" },
@@ -443,59 +469,92 @@ function IncidentRow({ incident, onSelect }: { incident: Incident; onSelect: () 
 }
 
 function IncidentDetail({
-  incident,
+  seed,
   onBack,
-  onAcknowledge,
-  onResolve
+  onChanged,
+  onError
 }: {
-  incident: Incident;
+  /** The row that was clicked. Only the starting picture: everything below is
+   *  re-read from the server, so this is here to avoid a blank frame. */
+  seed: Incident;
   onBack: () => void;
-  onAcknowledge: () => void;
-  onResolve: () => void;
+  onChanged: () => void;
+  onError: (message: string | null) => void;
 }) {
-  // The real investigation, fetched here rather than assembled in the list
-  // transform. GET /api/incidents/{id}/investigation has existed all along and
-  // nothing in the frontend called it.
+  // The detail view used to render the object captured at click time and never
+  // look at it again — the 10s list poll replaced `incidents` and nothing
+  // copied the fresh row back in. So an investigation dispatched while the page
+  // was open never appeared, and an incident someone else had already resolved
+  // kept showing its old badge and a live "Resolve" button. It reads its own
+  // record now, from GET /api/incidents/{id}, which carries the investigation
+  // with it — one request where there used to be a stale prop and a second fetch.
+  const [incident, setIncident] = useState<Incident>(seed);
   const [investigation, setInvestigation] = useState<Investigation | null>(null);
   const [invError, setInvError] = useState<string | null>(null);
-  const [invLoading, setInvLoading] = useState(false);
+  const [invLoading, setInvLoading] = useState(seed.has_investigation);
+  const [acting, setActing] = useState<string | null>(null);
+
+  const incidentId = seed.id;
+
+  const load = useCallback(async () => {
+    setInvLoading(true);
+    try {
+      const res = await apiFetch(`/api/incidents/${incidentId}`);
+      if (!res.ok) throw new Error(await describeFailure(res));
+      const body = await res.json();
+      const raw = (body.incident ?? body) as Record<string, unknown>;
+      const found = (body.investigation as Investigation | null) ?? null;
+      setIncident(toIncident({ ...raw, investigation: found }));
+      setInvestigation(found);
+      setInvError(null);
+    } catch (err) {
+      // The incident itself stays on screen — what failed is the refresh, and
+      // blanking the page an operator is reading would be the worse answer.
+      setInvError(err instanceof Error ? err.message : "Could not refresh this incident");
+    } finally {
+      setInvLoading(false);
+    }
+  }, [incidentId]);
 
   useEffect(() => {
-    if (!incident.has_investigation) {
-      setInvestigation(null);
-      setInvError(null);
-      return;
-    }
     let cancelled = false;
-    const load = async () => {
-      setInvLoading(true);
-      try {
-        const res = await apiFetch(`/api/incidents/${incident.id}/investigation`);
-        if (!res.ok) throw new Error(await describeFailure(res));
-        const data: Investigation = await res.json();
-        if (!cancelled) {
-          setInvestigation(data);
-          setInvError(null);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setInvestigation(null);
-          setInvError(err instanceof Error ? err.message : "Could not load the investigation");
-        }
-      } finally {
-        if (!cancelled) setInvLoading(false);
-      }
-    };
-    load();
-    // A running investigation changes underneath the page, so poll it.
-    const interval = setInterval(() => {
+    const tick = () => {
       if (!cancelled) load();
-    }, 10000);
+    };
+    tick();
+    // A running investigation changes underneath the page, and so does the
+    // incident: someone else can acknowledge or resolve it while this is open.
+    const interval = setInterval(tick, 10000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [incident.id, incident.has_investigation]);
+  }, [load]);
+
+  /** Acknowledge or resolve.
+   *
+   *  Neither of these checked `res.ok`. `await apiFetch(...)` resolves for a
+   *  404, a 422 or a 500 exactly as it does for a 200, so the page closed the
+   *  detail view and refreshed the list either way — and the incident was still
+   *  sitting there unacknowledged with nothing on screen to say why. */
+  const runAction = async (label: string, path: string) => {
+    setActing(label);
+    try {
+      const res = await apiFetch(path, { method: "POST" });
+      if (!res.ok) throw new Error(await describeFailure(res));
+      onError(null);
+      // Stay on the incident being worked and show the new status, rather than
+      // bouncing back to the list and making the operator find it again.
+      await load();
+      onChanged();
+    } catch (err) {
+      onError(
+        `Could not ${label} incident ${incidentId}: ${err instanceof Error ? err.message : "request failed"}`
+      );
+    } finally {
+      setActing(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -520,20 +579,22 @@ function IncidentDetail({
         <div className="flex gap-2">
           {incident.status === "triggered" && (
             <button
-              onClick={onAcknowledge}
+              onClick={() => runAction("acknowledge", `/api/incidents/${incidentId}/acknowledge`)}
+              disabled={acting !== null}
               className="px-4 py-2 rounded-lg font-medium"
-              style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
+              style={{ backgroundColor: "var(--accent)", color: "var(--bg)", opacity: acting ? 0.6 : 1 }}
             >
-              Acknowledge
+              {acting === "acknowledge" ? "Acknowledging..." : "Acknowledge"}
             </button>
           )}
           {incident.status !== "resolved" && (
             <button
-              onClick={onResolve}
+              onClick={() => runAction("resolve", `/api/incidents/${incidentId}/resolve`)}
+              disabled={acting !== null}
               className="px-4 py-2 rounded-lg"
-              style={{ border: "1px solid var(--ok)", color: "var(--ok)" }}
+              style={{ border: "1px solid var(--ok)", color: "var(--ok)", opacity: acting ? 0.6 : 1 }}
             >
-              Resolve
+              {acting === "resolve" ? "Resolving..." : "Resolve"}
             </button>
           )}
         </div>
@@ -801,6 +862,9 @@ function DeclareIncidentModal({ onClose, onCreated }: { onClose: () => void; onC
 
 export function Incidents({ onBack }: { onBack: () => void }) {
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  // The clicked row, kept only to seed the detail view so it has something to
+  // draw on its first frame. It is not the detail view's source of truth any
+  // more — that was the bug: the object captured here never changed again.
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("active");
   const [loading, setLoading] = useState(true);
@@ -816,19 +880,7 @@ export function Incidents({ onBack }: { onBack: () => void }) {
       // used to synthesise here — a fabricated `inv-${id}`, a hardcoded "running"
       // status, an empty agent list and the literal root cause "Investigation in
       // progress..." — is gone; the detail view fetches the real one.
-      setIncidents(data.map((inc) => ({
-        id: inc.id as string,
-        title: inc.title as string,
-        severity: (inc.severity as Incident["severity"]) || "medium",
-        status: (inc.status as Incident["status"]) || "triggered",
-        affected_services: inc.service ? [inc.service as string] : [],
-        created_at: (inc.triggered_at as string) || new Date().toISOString(),
-        updated_at: (inc.acknowledged_at as string) || (inc.triggered_at as string) || new Date().toISOString(),
-        assigned_to: (inc.assignee as string) || undefined,
-        has_investigation: inc.has_investigation === true,
-        investigation_confidence:
-          typeof inc.investigation_confidence === "number" ? inc.investigation_confidence : null,
-      })));
+      setIncidents(data.map(toIncident));
       setError(null);
     } catch (err) {
       console.error("Failed to fetch incidents:", err);
@@ -843,29 +895,6 @@ export function Incidents({ onBack }: { onBack: () => void }) {
     const interval = setInterval(fetchIncidents, 10000);
     return () => clearInterval(interval);
   }, [fetchIncidents]);
-
-  // Neither of these checked `res.ok`. `await apiFetch(...)` resolves for a 404,
-  // a 422 or a 500 exactly as it does for a 200, so the page closed the detail
-  // view and refreshed the list either way — and the incident was still sitting
-  // there unacknowledged with nothing on screen to say why.
-  const runAction = async (label: string, incidentId: string, path: string) => {
-    try {
-      const res = await apiFetch(path, { method: "POST" });
-      if (!res.ok) throw new Error(await describeFailure(res));
-      setError(null);
-      setSelectedIncident(null);
-      await fetchIncidents();
-    } catch (err) {
-      console.error(`Failed to ${label} incident:`, err);
-      setError(`Could not ${label} incident ${incidentId}: ${err instanceof Error ? err.message : "request failed"}`);
-    }
-  };
-
-  const handleAcknowledge = (incidentId: string) =>
-    runAction("acknowledge", incidentId, `/api/incidents/${incidentId}/acknowledge`);
-
-  const handleResolve = (incidentId: string) =>
-    runAction("resolve", incidentId, `/api/incidents/${incidentId}/resolve`);
 
   const filteredIncidents = incidents.filter(inc => {
     if (filter === "active") return inc.status !== "resolved";
@@ -936,10 +965,11 @@ export function Incidents({ onBack }: { onBack: () => void }) {
         {selectedIncident ? (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
             <IncidentDetail
-              incident={selectedIncident}
+              key={selectedIncident.id}
+              seed={selectedIncident}
               onBack={() => setSelectedIncident(null)}
-              onAcknowledge={() => handleAcknowledge(selectedIncident.id)}
-              onResolve={() => handleResolve(selectedIncident.id)}
+              onChanged={fetchIncidents}
+              onError={setError}
             />
           </motion.div>
         ) : (

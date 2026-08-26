@@ -67,6 +67,26 @@ const INVESTIGATION = {
   ],
 }
 
+/** What GET /api/incidents/{id} returns: the full record, investigation nested. */
+function detail(overrides: Record<string, unknown> = {}, investigation: unknown = INVESTIGATION) {
+  return {
+    incident: {
+      ...LIST_ROW,
+      description: 'Checkout is returning 500s',
+      acknowledged_by: null,
+      resolved_by: null,
+      timeline: [],
+      investigation,
+      related_alerts: [],
+      impact: null,
+      customer_impact: false,
+      dedupe_key: null,
+      ...overrides,
+    },
+    investigation,
+  }
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -84,7 +104,7 @@ function installFetch(overrides: Record<string, () => Response> = {}) {
       const key = `${method} ${url}`
       if (overrides[key]) return overrides[key]()
       if (key === 'GET /api/incidents') return json([LIST_ROW])
-      if (key === `GET /api/incidents/${INCIDENT_ID}/investigation`) return json(INVESTIGATION)
+      if (key === `GET /api/incidents/${INCIDENT_ID}`) return json(detail())
       return json({ detail: `no route for ${key}` }, 405)
     })
   )
@@ -115,9 +135,7 @@ describe('Incidents', () => {
     // The literal every incident used to show.
     expect(screen.queryByText('Investigation in progress...')).not.toBeInTheDocument()
 
-    expect(
-      calls.some(c => c.url === `/api/incidents/${INCIDENT_ID}/investigation`)
-    ).toBe(true)
+    expect(calls.some(c => c.url === `/api/incidents/${INCIDENT_ID}`)).toBe(true)
   })
 
   it('shows the recommended actions the server returned', async () => {
@@ -142,7 +160,7 @@ describe('Incidents', () => {
 
   it('says so when the investigation cannot be loaded', async () => {
     installFetch({
-      [`GET /api/incidents/${INCIDENT_ID}/investigation`]: () =>
+      [`GET /api/incidents/${INCIDENT_ID}`]: () =>
         json({ detail: 'Investigation not found' }, 404),
     })
     render(<Incidents onBack={() => {}} />)
@@ -155,6 +173,7 @@ describe('Incidents', () => {
     installFetch({
       // Acknowledge is only offered on an incident nobody has picked up yet.
       'GET /api/incidents': () => json([{ ...LIST_ROW, status: 'triggered' }]),
+      [`GET /api/incidents/${INCIDENT_ID}`]: () => json(detail({ status: 'triggered' })),
       [`POST /api/incidents/${INCIDENT_ID}/acknowledge`]: () =>
         json({ detail: 'Incident not found' }, 404),
     })
@@ -201,4 +220,109 @@ describe('Incidents', () => {
 
     expect(await screen.findByText(/Not authenticated/)).toBeInTheDocument()
   })
+})
+
+// The detail view rendered the object captured at click time — `onSelect={() =>
+// setSelectedIncident(incident)}` — and the 10s poll only ever replaced the
+// list. Nothing copied the refreshed row back, so an investigation dispatched
+// while the page was open never appeared and an incident someone else had
+// already resolved kept its old badge and a live Resolve button.
+describe('Incidents detail view staleness', () => {
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('picks up an investigation dispatched after the incident was opened', async () => {
+    let dispatched = false
+    installFetch({
+      // The list row still says there is no investigation — that is the whole
+      // point: the page must not need a re-open to notice one.
+      'GET /api/incidents': () => json([{ ...LIST_ROW, has_investigation: false, investigation_confidence: null }]),
+      [`GET /api/incidents/${INCIDENT_ID}`]: () =>
+        json(dispatched ? detail() : detail({}, null)),
+    })
+    render(<Incidents onBack={() => {}} />)
+    fireEvent.click(await screen.findByText('Checkout API returning 500s'))
+    await screen.findByText('Timeline')
+    expect(
+      screen.queryByText('A leaked transaction exhausted the connection pool.')
+    ).not.toBeInTheDocument()
+
+    dispatched = true
+
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText('A leaked transaction exhausted the connection pool.')
+        ).toBeInTheDocument(),
+      { timeout: 12_000 }
+    )
+    // A real 10s poll, deliberately: the point of the test is that the interval
+    // fires and carries a fresh record in, which fake timers would stub out.
+  }, 15_000)
+
+  it('drops the Resolve button when someone else resolves the incident', async () => {
+    let status = 'investigating'
+    installFetch({
+      'GET /api/incidents': () => json([{ ...LIST_ROW, status }]),
+      [`GET /api/incidents/${INCIDENT_ID}`]: () => json(detail({ status })),
+    })
+    render(<Incidents onBack={() => {}} />)
+    fireEvent.click(await screen.findByText('Checkout API returning 500s'))
+    expect(await screen.findByText('Resolve')).toBeInTheDocument()
+
+    status = 'resolved'
+
+    await waitFor(() => expect(screen.queryByText('Resolve')).not.toBeInTheDocument(), {
+      timeout: 12_000,
+    })
+    expect(screen.getByText('resolved')).toBeInTheDocument()
+  }, 15_000)
+
+  it('stays on the incident after acknowledging and shows the new status', async () => {
+    let status = 'triggered'
+    installFetch({
+      'GET /api/incidents': () => json([{ ...LIST_ROW, status }]),
+      [`GET /api/incidents/${INCIDENT_ID}`]: () => json(detail({ status })),
+      [`POST /api/incidents/${INCIDENT_ID}/acknowledge`]: () => {
+        status = 'investigating'
+        return json({ ...LIST_ROW, status })
+      },
+    })
+    render(<Incidents onBack={() => {}} />)
+    fireEvent.click(await screen.findByText('Checkout API returning 500s'))
+
+    fireEvent.click(await screen.findByText('Acknowledge'))
+
+    // Not bounced back to the list: the incident is still open, with the badge
+    // the acknowledge produced.
+    expect(await screen.findByText('investigating')).toBeInTheDocument()
+    expect(screen.getByText(`ID: ${INCIDENT_ID}`)).toBeInTheDocument()
+    expect(screen.queryByText('Acknowledge')).not.toBeInTheDocument()
+  })
+
+  it('keeps the incident on screen when a refresh fails', async () => {
+    let broken = false
+    installFetch({
+      [`GET /api/incidents/${INCIDENT_ID}`]: () =>
+        broken ? json({ detail: 'Incident not found' }, 404) : json(detail()),
+    })
+    render(<Incidents onBack={() => {}} />)
+    fireEvent.click(await screen.findByText('Checkout API returning 500s'))
+    await screen.findByText('A leaked transaction exhausted the connection pool.')
+
+    broken = true
+
+    await waitFor(() => expect(screen.getByText(/Incident not found/)).toBeInTheDocument(), {
+      timeout: 12_000,
+    })
+    // The operator is reading this page. Blanking it would be the worse answer.
+    expect(screen.getByText(`ID: ${INCIDENT_ID}`)).toBeInTheDocument()
+  }, 15_000)
 })
