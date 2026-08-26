@@ -25,12 +25,17 @@ WORKDIR /app
 
 # Install deps first for better layer caching. Editable install keeps the package
 # rooted at /app so config.ROOT resolves sample_repo/ and frontend/dist/ correctly.
-# Include postgres extra for production Postgres checkpoint storage, and tasks
-# (dramatiq + apscheduler) because the worker runs from this same image with a
-# different command — without it the worker container dies on import.
-COPY pyproject.toml README.md ./
+# postgres   -> Postgres checkpoint + asyncpg driver for production.
+# migrations -> alembic, which deploy/kubernetes/base/migration-job.yaml runs from
+#               THIS image (`alembic upgrade head`); without the extra and the two
+#               COPYs below that Job dies with "alembic: not found".
+# tasks      -> dramatiq + apscheduler, because the worker runs from this same
+#               image with a different command — without it the worker container
+#               dies on import.
+COPY pyproject.toml README.md alembic.ini ./
 COPY app ./app
-RUN pip install --no-cache-dir -e ".[postgres,tasks]"
+COPY migrations ./migrations
+RUN pip install --no-cache-dir -e ".[postgres,migrations,tasks]"
 
 # Sample fixtures so the container is runnable out of the box.
 COPY sample_repo ./sample_repo

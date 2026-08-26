@@ -9,6 +9,7 @@ Adding a new capability = adding one entry here. No agent code changes.
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import AsyncExitStack
 
@@ -19,6 +20,10 @@ from langchain_mcp_adapters.tools import load_mcp_tools as _load_session_tools
 from app import policy, runtime, tenant_context
 from app.config import get_settings
 
+log = logging.getLogger("omnipotent.mcp")
+
+# Built-in servers. Marketplace-installed agents are appended at call time by
+# _server_config(); iterate the config, not this tuple.
 _SERVERS = (
     "datadog", "repo", "github", "pagerduty", "kubernetes", "sentry", "memory",
     "traces", "deploys", "argocd", "terraform", "docker", "cicd", "security",
@@ -30,10 +35,7 @@ _SERVERS = (
 def _isecret(name: str, fallback: str) -> str:
     """Resolve an integration secret: the request's tenant when multi-tenant
     (their decrypted creds, never the host's), else the .env fallback."""
-    t = tenant_context.get_tenant()
-    if t is not None:
-        return t.integration_secrets.get(name, "")
-    return fallback
+    return tenant_context.integration_secret(name, fallback)
 
 
 def _server_config() -> dict:
@@ -43,10 +45,13 @@ def _server_config() -> dict:
     current Python interpreter and forward the relevant paths via env so the
     servers read the same data the app is configured with. Integration secrets
     come from the resolved tenant when multi-tenant, else from .env.
+
+    Enabled marketplace agents are merged in on top, so installing one adds its
+    tools and disabling one removes them. Built-ins win on a name collision.
     """
     py = sys.executable
     s = get_settings()
-    return {
+    builtin: dict = {
         "datadog": {
             "command": py,
             "args": ["-m", "app.mcp.servers.datadog.server"],
@@ -234,9 +239,36 @@ def _server_config() -> dict:
             "command": py,
             "args": ["-m", "app.mcp.servers.runbooks.server"],
             "transport": "stdio",
-            "env": {},
+            # This server reads and writes the same runbook tables as the HTTP
+            # API, so it has to be pointed at the same database. A stdio server
+            # is started with `get_default_environment()` plus whatever is in
+            # this dict — HOME, PATH, SHELL, TERM, USER and nothing else — so
+            # none of this is inherited implicitly. With the dict empty the
+            # subprocess fell back to the local sqlite default, which meant the
+            # agent listed the built-in runbooks only (never the customer's) and
+            # wrote its executions somewhere the UI does not read.
+            "env": {
+                "COPILOT_DATABASE_URL": s.copilot_database_url,
+                # Executed steps shell out to the cluster; without these the
+                # server would run every remediation against a different
+                # cluster, or none, from the one the app is configured with.
+                "KUBE_CONFIG_PATH": _isecret("KUBE_CONFIG_PATH", s.kube_config_path),
+                "KUBE_NAMESPACE": _isecret("KUBE_NAMESPACE", s.kube_namespace),
+            },
         },
     }
+
+    # Imported lazily: reading install state costs a file read, and this module
+    # is imported by tooling that never launches a server.
+    from app.marketplace.manager import installed_server_configs
+
+    try:
+        installed = installed_server_configs(py)
+    except Exception as exc:  # a broken install file must not take the agent down
+        log.warning("Could not load marketplace agents: %s", exc)
+        installed = {}
+
+    return {**installed, **builtin}
 
 
 # Tool names that mutate external state and require human approval. The action
@@ -256,7 +288,8 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
     handshake per call that dominated latency in a multi-tool investigation.
     """
     settings = get_settings()
-    client = MultiServerMCPClient(_server_config())
+    config = _server_config()
+    client = MultiServerMCPClient(config)
     tools: list[BaseTool] = []
 
     # Groq free tier has severe limitations:
@@ -268,11 +301,16 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
         # No tools for Groq - avoids hallucination and rate limits
         return [], client
 
-    for name in _SERVERS:
+    # Iterate the config, not _SERVERS: marketplace-installed agents live only in
+    # the config, and a name in _SERVERS with no config entry raised KeyError into
+    # the swallow below — silently dropping the server.
+    for name in config:
         try:
             session = await stack.enter_async_context(client.session(name))
             tools.extend(await _load_session_tools(session))
-        except Exception:
-            pass  # Server not configured or failed to start
+        except Exception as exc:
+            # Not fatal — an unconfigured integration is a normal state — but it
+            # is the answer to "why are this agent's tools missing?", so say so.
+            log.debug("MCP server %r did not start: %s", name, exc)
 
     return tools, client

@@ -65,26 +65,26 @@ def upgrade() -> None:
         # String, not UUID, and no FK to organizations — see the module docstring.
         sa.Column("org_id", sa.String(128), nullable=False),
         sa.Column("thread_id", sa.String(128), nullable=False),
-        sa.Column("status", sa.String(32), nullable=False, server_default="active"),
+        sa.Column("status", sa.String(32), nullable=False),
         sa.Column("query", sa.Text(), nullable=True),
         sa.Column("summary", sa.Text(), nullable=True),
         sa.Column("report", JSONType, nullable=True),
-        sa.Column("tokens_used", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("tokens_used", sa.Integer(), nullable=False),
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("feedback_rating", sa.String(16), nullable=True),
         sa.Column("feedback_comment", sa.Text(), nullable=True),
         # Dashboard analytics.
         sa.Column(
-            "outcome", sa.String(32), nullable=False, server_default="partial_diagnosis"
+            "outcome", sa.String(32), nullable=False
         ),
-        sa.Column("severity", sa.String(32), nullable=False, server_default="unknown"),
-        sa.Column("service", sa.String(255), nullable=False, server_default=""),
+        sa.Column("severity", sa.String(32), nullable=False),
+        sa.Column("service", sa.String(255), nullable=False),
         sa.Column(
-            "hypotheses_generated", sa.Integer(), nullable=False, server_default="0"
+            "hypotheses_generated", sa.Integer(), nullable=False
         ),
-        sa.Column("tools_used", JSONType, nullable=False, server_default="[]"),
-        sa.Column("duration_seconds", sa.Float(), nullable=False, server_default="0"),
-        sa.Column("time_saved_minutes", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("tools_used", JSONType, nullable=False),
+        sa.Column("duration_seconds", sa.Float(), nullable=False),
+        sa.Column("time_saved_minutes", sa.Float(), nullable=False),
         sa.Column(
             "started_at",
             sa.DateTime(timezone=True),
@@ -122,7 +122,7 @@ def upgrade() -> None:
         # annotation, so `create_all` emits NOT NULL and the two schema paths
         # disagreed. Recreating the table here is the natural place to settle it,
         # and the stricter side is the correct one: every writer supplies a dict.
-        sa.Column("data", JSONType, nullable=False, server_default="{}"),
+        sa.Column("data", JSONType, nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -158,11 +158,11 @@ def downgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("org_id", sa.Uuid(), nullable=False),
         sa.Column("thread_id", sa.String(128), nullable=False),
-        sa.Column("status", sa.String(32), nullable=False, server_default="active"),
+        sa.Column("status", sa.String(32), nullable=False),
         sa.Column("query", sa.Text(), nullable=False),
         sa.Column("summary", sa.Text(), nullable=True),
         sa.Column("report", JSONType, nullable=True),
-        sa.Column("tokens_used", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("tokens_used", sa.Integer(), nullable=False),
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("feedback_rating", sa.String(16), nullable=True),
         sa.Column("feedback_comment", sa.Text(), nullable=True),
@@ -192,7 +192,7 @@ def downgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("investigation_id", sa.Uuid(), nullable=False),
         sa.Column("event_type", sa.String(32), nullable=False),
-        sa.Column("data", JSONType, nullable=True, server_default="{}"),
+        sa.Column("data", JSONType, nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

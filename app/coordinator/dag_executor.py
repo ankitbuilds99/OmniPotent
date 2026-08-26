@@ -172,6 +172,19 @@ class TaskExecution:
     duration_ms: int | None = None
     resource_usage: dict[str, float] | None = None
 
+    @property
+    def simulated(self) -> bool:
+        """Whether this task reported that it did not really do anything.
+
+        The remediation handlers set `simulated` in their output when no cluster
+        is configured, and `to_dict()` dropped `output` entirely — so a scale
+        that never happened was serialized as a task in state `completed`,
+        indistinguishable from one that rolled out. That is the single most
+        misleading thing this API could say, so it is lifted out of the output
+        blob and reported in its own right.
+        """
+        return bool(isinstance(self.output, dict) and self.output.get("simulated"))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
@@ -181,6 +194,7 @@ class TaskExecution:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "duration_ms": self.duration_ms,
             "error": self.error,
+            "simulated": self.simulated,
         }
 
     def serialize(self) -> dict[str, Any]:
@@ -242,17 +256,29 @@ class DAGExecution:
     checkpoint_id: str | None = None
     resumed_from: str | None = None
 
+    # Why the run as a whole did not proceed — a rejected checkpoint, an
+    # unreachable handler registry — as opposed to a task that ran and failed.
+    # Without it, a DAG that never got off the ground was indistinguishable
+    # from one still working, for as long as anyone cared to poll.
+    error: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "dag_id": self.dag_id,
             "state": self.state.value,
+            "error": self.error,
             "current_level": self.current_level,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "task_executions": {
                 tid: te.to_dict() for tid, te in self.task_executions.items()
             },
+            # A rollup so a caller reading the top level does not have to walk
+            # every task to find out that nothing was actually changed.
+            "simulated_tasks": sorted(
+                tid for tid, te in self.task_executions.items() if te.simulated
+            ),
             "checkpoint_id": self.checkpoint_id,
         }
 
@@ -263,6 +289,11 @@ class DAGExecution:
             "id": self.id,
             "dag_id": self.dag_id,
             "state": self.state.value,
+            # Carried through storage as well as `to_dict`: a run that died
+            # before any task started has nothing else to explain itself with,
+            # and dropping it here made the reason survive only until the
+            # process that logged it went away.
+            "error": self.error,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "task_executions": {
@@ -282,6 +313,7 @@ class DAGExecution:
             id=data["id"],
             dag_id=data["dag_id"],
             state=ExecutionState(data.get("state", ExecutionState.PENDING.value)),
+            error=data.get("error"),
             started_at=_parse_dt(data.get("started_at")),
             completed_at=_parse_dt(data.get("completed_at")),
             task_executions={
@@ -308,15 +340,25 @@ class TaskDAG:
         self._reverse_adjacency: dict[str, set[str]] = defaultdict(set)
 
     def add_task(self, task: TaskNode) -> TaskDAG:
-        """Add a task to the DAG."""
+        """Add a task to the DAG.
+
+        A dependency that is not in the graph *yet* is fine: the edge is
+        recorded and `validate()` reports it if it is still missing once the
+        graph is complete. This used to raise, which made insertion order part
+        of the contract — a DAG is a set of nodes and edges, not a list, and
+        nothing about `{"tasks": [...]}` in a request body says the caller
+        sorted it topologically. It also broke the replanner, which copies
+        downstream tasks into a recovery graph whose upstreams it never copies.
+
+        Missing dependencies are still an error; `validate()` is where it is
+        raised, in one place, with all of them listed rather than the first.
+        """
         if task.id in self.tasks:
             raise ValueError(f"Task {task.id} already exists")
 
         self.tasks[task.id] = task
 
         for dep in task.depends_on:
-            if dep not in self.tasks:
-                raise ValueError(f"Dependency {dep} not found for task {task.id}")
             self._adjacency[dep].add(task.id)
             self._reverse_adjacency[task.id].add(dep)
 
@@ -497,7 +539,9 @@ class DAGExecutor:
         self._running_tasks: dict[str, asyncio.Task[Any]] = {}
         self._semaphore = asyncio.Semaphore(max_parallel)
         self._approval_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+        # Keyed on (execution_id, task_id): a task id alone is shared by every
+        # concurrent run of the same DAG. See `approve_task`.
+        self._pending_approvals: dict[tuple[str, str], asyncio.Future[bool]] = {}
 
         self._on_task_start: (
             Callable[[TaskNode, DAGExecution], Awaitable[None]] | None
@@ -879,7 +923,7 @@ class DAGExecutor:
             await self._on_approval_needed(task, execution)
 
         future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
-        self._pending_approvals[task.id] = future
+        self._pending_approvals[(execution.id, task.id)] = future
 
         try:
             approved = await asyncio.wait_for(
@@ -890,15 +934,37 @@ class DAGExecutor:
         except asyncio.TimeoutError:
             return False
         finally:
-            self._pending_approvals.pop(task.id, None)
+            self._pending_approvals.pop((execution.id, task.id), None)
 
-    async def approve_task(self, task_id: str, approved: bool = True) -> bool:
-        """Approve or reject a pending task."""
-        future = self._pending_approvals.get(task_id)
+    async def approve_task(
+        self, execution_id: str, task_id: str, approved: bool = True
+    ) -> bool:
+        """Approve or reject one execution's pending task.
+
+        Keyed on the execution as well as the task. Task ids come from the DAG
+        definition, not from the run, so two concurrent executions of the same
+        DAG — the normal case when two incidents hit the same service — both
+        park on a task called `restart_service`, and a single approval of it
+        used to release *both*. One human decision, two production restarts,
+        one of which nobody was asked about.
+        """
+        future = self._pending_approvals.get((execution_id, task_id))
         if future and not future.done():
             future.set_result(approved)
             return True
         return False
+
+    def pending_approvals(self, execution_id: str | None = None) -> list[dict[str, str]]:
+        """The approvals currently waiting on a human, newest state as-is.
+
+        Exposed because a DAG blocked on approval is otherwise only discoverable
+        by knowing the task id in advance.
+        """
+        return [
+            {"execution_id": exec_id, "task_id": task_id}
+            for (exec_id, task_id), future in self._pending_approvals.items()
+            if not future.done() and (execution_id is None or exec_id == execution_id)
+        ]
 
     async def _save_checkpoint(self, execution: DAGExecution) -> None:
         """Save execution state for recovery."""

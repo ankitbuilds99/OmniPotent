@@ -3,7 +3,6 @@
 import asyncio
 
 import pytest
-from datetime import datetime, timezone, timedelta
 
 from app import config as cfg
 from app.database.engine import close_db
@@ -13,8 +12,13 @@ from app.database.engine import close_db
 def _oauth_db(tmp_path, monkeypatch):
     """Give the OAuth tests below their own database.
 
-    Linked accounts and pending states are rows since migration 008_oauth, so
-    these no longer read whatever the last test left in a module dict.
+    Linked accounts and pending states are rows since migration 008_oauth, and
+    logged-out session ids are rows too, so these no longer read whatever the
+    last test left in a module dict. The engine is a module global, so it is
+    disposed on the way in as well as out -- otherwise a test inherits the
+    previous test's engine, still pointing at *that* test's tmp_path. No
+    explicit `init_db()` here: every ORM caller in `app/auth/oauth.py` goes
+    through a session helper that awaits `ensure_schema()` first.
     """
     monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
     cfg.get_settings.cache_clear()
@@ -34,9 +38,15 @@ class TestOAuthModule:
         providers = get_available_providers()
         assert isinstance(providers, list)
 
-    def test_session_token_creation_and_verification(self):
+    async def test_session_token_creation_and_verification(self, monkeypatch):
         """Test JWT session token creation and verification."""
         from app.auth.oauth import create_session_token, verify_session_token
+        from app.config import get_settings
+
+        # Session signing has no development fallback on purpose — a hardcoded
+        # default would let anyone forge an owner session — so supply a key.
+        monkeypatch.setenv("COPILOT_SECRET_KEY", "test-signing-key-32-bytes-minimum-length")
+        get_settings.cache_clear()
 
         token = create_session_token(
             user_id="user_123",
@@ -48,7 +58,9 @@ class TestOAuthModule:
         assert token
         assert isinstance(token, str)
 
-        payload = verify_session_token(token)
+        # Awaited: verification is a revocation lookup against the database now,
+        # not a pure signature check.
+        payload = await verify_session_token(token)
         assert payload is not None
         assert payload["sub"] == "user_123"
         assert payload["org_id"] == "org_456"
@@ -226,64 +238,6 @@ class TestNotificationDispatcher:
         assert NotificationChannel.EMAIL in loaded.enabled_channels
 
 
-class TestReportGenerator:
-    """Tests for report generation."""
-
-    def test_report_config(self):
-        """Test report configuration."""
-        from app.reports.generator import ReportConfig, ReportGenerator
-
-        config = ReportConfig(
-            title="Test Report",
-            subtitle="Test Subtitle",
-            author="Test Author",
-        )
-
-        gen = ReportGenerator(config)
-        assert gen.config.title == "Test Report"
-
-    def test_report_sections(self):
-        """Test adding report sections."""
-        from app.reports.generator import ReportConfig, ReportGenerator
-
-        config = ReportConfig(title="Test Report")
-        gen = ReportGenerator(config)
-
-        gen.add_text("Summary", "This is the summary text")
-        gen.add_table("Data", [{"col1": "val1", "col2": "val2"}])
-        gen.add_key_value("Details", {"key1": "value1", "key2": "value2"})
-
-        assert len(gen.sections) == 3
-
-    def test_markdown_generation(self):
-        """Test markdown report generation."""
-        from app.reports.generator import ReportConfig, ReportGenerator, ReportFormat
-
-        config = ReportConfig(title="Test Report")
-        gen = ReportGenerator(config)
-        gen.add_text("Summary", "Test summary content")
-
-        report = gen.generate(ReportFormat.MARKDOWN)
-        assert report.format == ReportFormat.MARKDOWN
-        assert b"# Test Report" in report.content
-        assert b"Test summary content" in report.content
-
-    def test_json_generation(self):
-        """Test JSON report generation."""
-        import json
-        from app.reports.generator import ReportConfig, ReportGenerator, ReportFormat
-
-        config = ReportConfig(title="Test Report")
-        gen = ReportGenerator(config)
-        gen.add_text("Summary", "Test content")
-
-        report = gen.generate(ReportFormat.JSON)
-        data = json.loads(report.content)
-
-        assert data["title"] == "Test Report"
-        assert len(data["sections"]) == 1
-
-
 class TestTeamsIntegration:
     """Tests for MS Teams integration."""
 
@@ -325,360 +279,3 @@ class TestTeamsIntegration:
         assert message["type"] == "message"
         assert len(message["attachments"]) == 1
         assert message["attachments"][0]["contentType"] == "application/vnd.microsoft.card.adaptive"
-
-
-class TestPostmortemGenerator:
-    """Tests for postmortem generation."""
-
-    def test_postmortem_templates(self):
-        """Test postmortem templates."""
-        from app.postmortem.generator import get_postmortem_templates
-
-        templates = get_postmortem_templates()
-
-        assert "google" in templates
-        assert "pagerduty" in templates
-        assert "minimal" in templates
-
-    def test_action_item_creation(self):
-        """Test action item dataclass."""
-        from app.postmortem.generator import ActionItem, ActionItemPriority, ActionItemStatus
-
-        item = ActionItem(
-            id="ai_1",
-            title="Fix the bug",
-            description="Detailed description",
-            priority=ActionItemPriority.P1,
-        )
-
-        assert item.status == ActionItemStatus.OPEN
-        assert item.priority == ActionItemPriority.P1
-
-    @pytest.mark.asyncio
-    async def test_postmortem_generation(self):
-        """Test generating a postmortem document."""
-        from app.postmortem.generator import generate_postmortem
-
-        incident_data = {
-            "title": "Database Outage",
-            "summary": "Database became unavailable",
-            "severity": "high",
-            "impact": "Users could not access data",
-            "root_cause": "Connection pool exhaustion due to configuration error",
-            "started_at": "2024-01-15T10:00:00Z",
-            "detected_at": "2024-01-15T10:05:00Z",
-            "resolved_at": "2024-01-15T11:30:00Z",
-        }
-
-        doc = await generate_postmortem("INC-123", incident_data)
-
-        assert doc.incident_id == "INC-123"
-        assert "Database Outage" in doc.title
-        assert doc.root_cause
-        assert len(doc.action_items) > 0
-
-    def test_postmortem_to_markdown(self):
-        """Test converting postmortem to markdown."""
-        from app.postmortem.generator import PostmortemDocument, PostmortemGenerator
-
-        doc = PostmortemDocument(
-            id="pm_1",
-            incident_id="INC-456",
-            title="Test Postmortem",
-            summary="Test summary",
-            root_cause="Test root cause",
-        )
-
-        gen = PostmortemGenerator()
-        md = gen.to_markdown(doc)
-
-        assert "# Test Postmortem" in md
-        assert "INC-456" in md
-
-
-class TestTimelineCollector:
-    """Tests for incident timeline collection."""
-
-    def test_timeline_event_creation(self):
-        """Test timeline event dataclass."""
-        from app.timeline.collector import (
-            TimelineEvent,
-            EventType,
-            EventSeverity,
-            EventSource,
-        )
-
-        event = TimelineEvent(
-            id="evt_1",
-            timestamp=datetime.now(timezone.utc),
-            title="Alert fired",
-            event_type=EventType.ALERT,
-            severity=EventSeverity.WARNING,
-            source=EventSource.PROMETHEUS,
-        )
-
-        assert event.event_type == EventType.ALERT
-        assert event.source == EventSource.PROMETHEUS
-
-    def test_timeline_filter(self):
-        """Test timeline filtering."""
-        from app.timeline.collector import (
-            TimelineEvent,
-            TimelineFilter,
-            EventType,
-            EventSeverity,
-        )
-
-        now = datetime.now(timezone.utc)
-        event = TimelineEvent(
-            id="evt_1",
-            timestamp=now,
-            title="Test event",
-            event_type=EventType.ALERT,
-            severity=EventSeverity.WARNING,
-            service="api",
-        )
-
-        filter_match = TimelineFilter(
-            event_types=[EventType.ALERT],
-            services=["api"],
-        )
-        assert filter_match.matches(event)
-
-        filter_no_match = TimelineFilter(
-            event_types=[EventType.DEPLOY],
-        )
-        assert not filter_no_match.matches(event)
-
-    def test_event_aggregation(self):
-        """Test event aggregation."""
-        from app.timeline.collector import TimelineEvent, aggregate_events
-
-        now = datetime.now(timezone.utc)
-        events = [
-            TimelineEvent(id=f"evt_{i}", timestamp=now + timedelta(minutes=i), title=f"Event {i}")
-            for i in range(10)
-        ]
-
-        windows = aggregate_events(events, window_seconds=300)
-        assert len(windows) >= 1
-
-    def test_event_correlation(self):
-        """Test event correlation."""
-        from app.timeline.collector import TimelineEvent, correlate_events
-
-        now = datetime.now(timezone.utc)
-        events = [
-            TimelineEvent(id="evt_1", timestamp=now, title="Alert 1", service="api"),
-            TimelineEvent(id="evt_2", timestamp=now + timedelta(seconds=30), title="Alert 2", service="api"),
-            TimelineEvent(id="evt_3", timestamp=now + timedelta(minutes=10), title="Unrelated", service="web"),
-        ]
-
-        groups = correlate_events(events, correlation_window_seconds=120)
-        assert len(groups) >= 1
-
-
-class TestRunbookBuilder:
-    """Tests for runbook builder."""
-
-    def test_runbook_creation(self):
-        """Test building a runbook."""
-        from app.runbook_builder.builder import RunbookBuilder
-
-        builder = RunbookBuilder("Test Runbook", "Test description")
-        builder.add_variable("service", "Service name", required=True)
-        builder.add_script_step("Check status", "echo 'checking'")
-        builder.add_wait_step("Wait", 5)
-        builder.add_notify_step("Notify", "slack", "Done!")
-
-        runbook = builder.build()
-
-        assert runbook.name == "Test Runbook"
-        assert len(runbook.variables) == 1
-        assert len(runbook.steps) == 3
-
-    def test_runbook_validation(self):
-        """Test runbook validation."""
-        from app.runbook_builder.builder import RunbookBuilder
-
-        builder = RunbookBuilder("Valid Runbook")
-        builder.add_script_step("Step 1", "echo hello")
-
-        runbook = builder.build()
-        errors = runbook.validate()
-
-        assert len(errors) == 0
-
-    def test_step_conditions(self):
-        """Test step condition evaluation."""
-        from app.runbook_builder.builder import StepCondition
-
-        cond = StepCondition(variable="status", operator="equals", value="success")
-        assert cond.evaluate({"status": "success"})
-        assert not cond.evaluate({"status": "failed"})
-
-        cond_gt = StepCondition(variable="count", operator="greater_than", value=10)
-        assert cond_gt.evaluate({"count": 15})
-        assert not cond_gt.evaluate({"count": 5})
-
-    def test_runbook_storage(self):
-        """Test runbook storage operations."""
-        from app.runbook_builder.builder import (
-            RunbookBuilder,
-            create_runbook,
-            get_runbook,
-            list_runbooks,
-        )
-
-        builder = RunbookBuilder("Stored Runbook")
-        builder.add_script_step("Step", "echo test")
-        runbook = builder.build()
-
-        create_runbook(runbook)
-
-        loaded = get_runbook(runbook.id)
-        assert loaded is not None
-        assert loaded.name == "Stored Runbook"
-
-        all_runbooks = list_runbooks()
-        assert any(r.id == runbook.id for r in all_runbooks)
-
-
-class TestOnboardingWizard:
-    """Tests for onboarding wizard."""
-
-    def test_onboarding_progress_creation(self):
-        """Test creating onboarding progress."""
-        from app.onboarding.wizard import OnboardingWizard
-
-        wizard = OnboardingWizard()
-        progress = wizard.create_progress("user_onboard_test", "org_test")
-
-        assert progress.user_id == "user_onboard_test"
-        assert len(progress.steps) > 0
-        assert progress.current_step_id == "welcome"
-
-    def test_step_completion(self):
-        """Test completing onboarding steps."""
-        from app.onboarding.wizard import OnboardingWizard
-
-        wizard = OnboardingWizard()
-        wizard.create_progress("user_step_test", "org_test")
-
-        updated = wizard.complete_step("user_step_test", "welcome")
-        assert updated is not None
-        assert updated.current_step_id == "profile"
-
-    def test_progress_percentage(self):
-        """Test progress percentage calculation."""
-        from app.onboarding.wizard import OnboardingWizard
-
-        wizard = OnboardingWizard()
-        progress = wizard.create_progress("user_pct_test", "org_test")
-
-        pct = progress.get_progress_percentage()
-        assert pct == 0
-
-        wizard.complete_step("user_pct_test", "welcome")
-        progress = wizard.get_progress("user_pct_test")
-        pct = progress.get_progress_percentage()
-        assert pct > 0
-
-    def test_step_skipping(self):
-        """Test skipping optional steps."""
-        from app.onboarding.wizard import OnboardingWizard
-
-        wizard = OnboardingWizard()
-        wizard.create_progress("user_skip_test", "org_test")
-
-        wizard.complete_step("user_skip_test", "welcome")
-        wizard.complete_step("user_skip_test", "profile")
-        wizard.complete_step("user_skip_test", "organization")
-
-        result = wizard.skip_step("user_skip_test", "integrations")
-        assert result is not None
-
-
-class TestAnalyticsTracker:
-    """Tests for analytics tracking."""
-
-    def test_event_tracking(self):
-        """Test tracking analytics events."""
-        from app.analytics.tracker import (
-            AnalyticsTracker,
-            AnalyticsEvent,
-            EventType,
-        )
-
-        tracker = AnalyticsTracker()
-
-        event = AnalyticsEvent(
-            id="evt_1",
-            event_type=EventType.INVESTIGATION_START,
-            user_id="user_analytics_test",
-            properties={"severity": "high"},
-        )
-
-        tracker.track(event)
-
-        events = tracker.get_events(event_type=EventType.INVESTIGATION_START)
-        assert len(events) >= 1
-
-    def test_counter_metrics(self):
-        """Test counter metrics."""
-        from app.analytics.tracker import AnalyticsTracker
-
-        tracker = AnalyticsTracker()
-
-        tracker.increment("test.counter")
-        tracker.increment("test.counter")
-        tracker.increment("test.counter")
-
-        value = tracker.get_counter("test.counter")
-        assert value == 3
-
-    def test_histogram_stats(self):
-        """Test histogram statistics."""
-        from app.analytics.tracker import AnalyticsTracker
-
-        tracker = AnalyticsTracker()
-
-        for i in range(100):
-            tracker.histogram("test.histogram", float(i))
-
-        stats = tracker.get_histogram_stats("test.histogram")
-
-        assert stats["count"] == 100
-        assert stats["min"] == 0
-        assert stats["max"] == 99
-        assert 49 <= stats["avg"] <= 50
-
-    def test_usage_summary(self):
-        """Test usage summary generation."""
-        from app.analytics.tracker import (
-            track_investigation,
-            get_usage_summary,
-        )
-
-        track_investigation(
-            investigation_id="inv_sum_test",
-            status="started",
-            user_id="user_sum_test",
-            severity="high",
-        )
-
-        summary = get_usage_summary()
-        assert summary.total_investigations >= 0
-
-    def test_top_users(self):
-        """Test top users report."""
-        from app.analytics.tracker import track_user_action, get_top_users
-
-        for i in range(5):
-            track_user_action(
-                action="view_dashboard",
-                user_id="user_top_test",
-            )
-
-        users = get_top_users()
-        assert isinstance(users, list)

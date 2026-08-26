@@ -1,5 +1,17 @@
 /**
- * Notification Preferences - Real API integration
+ * Notification Preferences — backed by GET/PUT /api/notifications/preferences.
+ *
+ * Every channel and rule on this page used to be a literal in this file: nine
+ * `ChannelConfig`s with `configured: true` hardcoded on the first two, eight
+ * `NotificationRule`s, and a second copy of both inside the catch block. The
+ * only network call was `await apiFetch('/oncall/teams')` whose result was
+ * discarded, and Save was
+ *
+ *     const saveConfig = async () => { setSaved(true); setTimeout(...) }
+ *
+ * — a two-second checkmark that issued no request. Toggling a channel, pasting
+ * a Slack webhook or switching off deploy notifications survived exactly until
+ * the next reload.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -19,23 +31,75 @@ import {
   type LucideIcon
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
+
+/** Sentinel the API accepts to erase a stored secret. A blank submission means
+ *  "leave it alone", because the GET never echoes a secret back. */
+const CLEAR_SECRET = "__clear__";
+
+interface FieldSpec {
+  key: string;
+  label: string;
+  type: string;
+  secret: boolean;
+  required: boolean;
+  value: string;
+  is_set: boolean;
+}
 
 interface ChannelConfig {
   id: string;
   name: string;
-  icon: LucideIcon;
   description: string;
+  icon: string;
   enabled: boolean;
   configured: boolean;
-  configFields?: { key: string; label: string; type: string; value: string }[];
+  fields: FieldSpec[];
 }
 
 interface NotificationRule {
-  id: string;
   event: string;
   description: string;
-  channels: Record<string, { enabled: boolean; severity?: string }>;
+  channels: Record<string, boolean>;
+}
+
+interface QuietHours {
+  enabled: boolean;
+  start: string;
+  end: string;
+}
+
+interface Preferences {
+  channels: ChannelConfig[];
+  rules: NotificationRule[];
+  quiet_hours: QuietHours;
+  digest_mode: string;
+}
+
+const ICONS: Record<string, LucideIcon> = {
+  mail: Mail,
+  "message-square": MessageSquare,
+  phone: Phone,
+  smartphone: Smartphone,
+  bell: Bell,
+  "alert-triangle": AlertTriangle,
+};
+
+function iconFor(name: string): LucideIcon {
+  return ICONS[name] ?? Bell;
+}
+
+/** Read an error body without assuming it is JSON. */
+async function errorDetail(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown; message?: unknown };
+    if (typeof parsed?.detail === "string") return parsed.detail;
+    if (typeof parsed?.message === "string") return parsed.message;
+  } catch {
+    /* not JSON */
+  }
+  return text.slice(0, 300) || `${res.status} ${res.statusText}`;
 }
 
 function ChannelCard({
@@ -47,7 +111,7 @@ function ChannelCard({
   onToggle: () => void;
   onConfigure: () => void;
 }) {
-  const Icon = channel.icon;
+  const Icon = iconFor(channel.icon);
 
   return (
     <motion.div
@@ -72,17 +136,25 @@ function ChannelCard({
           <div className="flex items-center gap-2">
             <span className="font-medium" style={{ color: "var(--text)" }}>{channel.name}</span>
             {channel.configured && channel.enabled && (
-              <Check size={14} style={{ color: "var(--ok)" }} />
+              <Check size={14} aria-label={`${channel.name} configured`} style={{ color: "var(--ok)" }} />
             )}
             {!channel.configured && channel.enabled && (
-              <AlertTriangle size={14} style={{ color: "#eab308" }} />
+              <AlertTriangle
+                size={14}
+                aria-label={`${channel.name} enabled but not configured`}
+                style={{ color: "#eab308" }}
+              />
             )}
           </div>
-          <span className="text-sm" style={{ color: "var(--text-2)" }}>{channel.description}</span>
+          <span className="text-sm" style={{ color: "var(--text-2)" }}>
+            {channel.enabled && !channel.configured
+              ? `${channel.description} — credentials missing`
+              : channel.description}
+          </span>
         </div>
       </div>
       <div className="flex items-center gap-3">
-        {channel.configFields && (
+        {channel.fields.length > 0 && (
           <button
             onClick={onConfigure}
             className="px-3 py-1.5 text-sm rounded transition-colors"
@@ -93,6 +165,8 @@ function ChannelCard({
         )}
         <button
           onClick={onToggle}
+          aria-label={`Toggle ${channel.name}`}
+          aria-pressed={channel.enabled}
           className="w-12 h-6 rounded-full p-1 transition-colors"
           style={{ backgroundColor: channel.enabled ? "var(--accent)" : "var(--bg)" }}
         >
@@ -126,13 +200,14 @@ function RuleRow({
         </div>
       </td>
       {channels.filter(c => c.enabled).map((channel) => {
-        const ruleChannel = rule.channels[channel.id];
-        const isEnabled = ruleChannel?.enabled ?? false;
+        const isEnabled = rule.channels[channel.id] ?? false;
 
         return (
           <td key={channel.id} className="py-3 px-2 text-center">
             <button
               onClick={() => onToggleChannel(channel.id)}
+              aria-label={`${rule.event} via ${channel.name}`}
+              aria-pressed={isEnabled}
               className="w-8 h-8 rounded-lg flex items-center justify-center mx-auto transition-colors"
               style={{
                 backgroundColor: isEnabled ? "var(--accent)" : "var(--bg)",
@@ -155,17 +230,30 @@ function ConfigModal({
 }: {
   channel: ChannelConfig;
   onClose: () => void;
-  onSave: (fields: Record<string, string>) => void;
+  onSave: (fields: Record<string, string>) => Promise<string | null>;
 }) {
   const [values, setValues] = useState<Record<string, string>>(
-    Object.fromEntries((channel.configFields || []).map(f => [f.key, f.value]))
+    Object.fromEntries(channel.fields.map(f => [f.key, f.value]))
   );
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleSave = async () => {
     setSaving(true);
-    await new Promise(r => setTimeout(r, 500));
-    onSave(values);
+    setError(null);
+    // Only send what the user actually typed. A secret sent as "" means "leave
+    // it as it is" server-side, so untouched secret inputs are simply omitted.
+    const submitted = Object.fromEntries(
+      Object.entries(values).filter(([key, value]) => {
+        const spec = channel.fields.find(f => f.key === key);
+        if (!spec) return false;
+        if (spec.secret) return value.trim() !== "";
+        return true;
+      })
+    );
+    const failure = await onSave(submitted);
+    setSaving(false);
+    if (failure) setError(failure);
   };
 
   return (
@@ -190,12 +278,14 @@ function ConfigModal({
         </h3>
 
         <div className="space-y-4">
-          {channel.configFields?.map((field) => (
+          {channel.fields.map((field) => (
             <div key={field.key}>
-              <label className="block text-sm mb-1" style={{ color: "var(--text-2)" }}>
+              <label className="block text-sm mb-1" style={{ color: "var(--text-2)" }} htmlFor={`cfg-${field.key}`}>
                 {field.label}
+                {!field.required && " (optional)"}
               </label>
               <input
+                id={`cfg-${field.key}`}
                 type={field.type}
                 value={values[field.key] || ""}
                 onChange={e => setValues({ ...values, [field.key]: e.target.value })}
@@ -205,11 +295,31 @@ function ConfigModal({
                   border: "1px solid var(--border)",
                   color: "var(--text)",
                 }}
-                placeholder={`Enter ${field.label.toLowerCase()}`}
+                placeholder={
+                  field.secret && field.is_set
+                    ? "Stored — leave blank to keep it"
+                    : `Enter ${field.label.toLowerCase()}`
+                }
               />
+              {field.secret && field.is_set && (
+                <button
+                  type="button"
+                  className="mt-1 text-xs underline"
+                  style={{ color: "var(--text-2)" }}
+                  onClick={() => setValues({ ...values, [field.key]: CLEAR_SECRET })}
+                >
+                  Clear stored value
+                </button>
+              )}
             </div>
           ))}
         </div>
+
+        {error && (
+          <p className="mt-4 text-sm" role="alert" style={{ color: "var(--bad)" }}>
+            {error}
+          </p>
+        )}
 
         <div className="flex gap-3 mt-6">
           <button
@@ -225,11 +335,7 @@ function ConfigModal({
             className="flex-1 px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2"
             style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
           >
-            {saving ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Save size={16} />
-            )}
+            {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
             {saving ? "Saving..." : "Save"}
           </button>
         </div>
@@ -248,56 +354,30 @@ function LoadingState() {
 }
 
 export function NotificationPreferences({ onBack }: { onBack: () => void }) {
-  const [channels, setChannels] = useState<ChannelConfig[]>([]);
-  const [rules, setRules] = useState<NotificationRule[]>([]);
+  const [prefs, setPrefs] = useState<Preferences | null>(null);
   const [configuring, setConfiguring] = useState<ChannelConfig | null>(null);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const fetchPreferences = useCallback(async () => {
+    setLoading(true);
     try {
-      // Verify backend is reachable
-      await fetch(`${API_BASE}/oncall/teams`);
-
-      // Default channels based on what the system supports
-      const defaultChannels: ChannelConfig[] = [
-        { id: "email", name: "Email", icon: Mail, description: "Email notifications", enabled: true, configured: true, configFields: [{ key: "address", label: "Email Address", type: "email", value: "" }] },
-        { id: "slack", name: "Slack", icon: MessageSquare, description: "Slack workspace messages", enabled: true, configured: true, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
-        { id: "pagerduty", name: "PagerDuty", icon: Phone, description: "PagerDuty incidents", enabled: false, configured: false, configFields: [{ key: "key", label: "Routing Key", type: "password", value: "" }] },
-        { id: "teams", name: "MS Teams", icon: MessageSquare, description: "Microsoft Teams channels", enabled: false, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
-        { id: "discord", name: "Discord", icon: MessageSquare, description: "Discord webhooks", enabled: false, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
-        { id: "sms", name: "SMS", icon: Smartphone, description: "Text message alerts", enabled: false, configured: false, configFields: [{ key: "phone", label: "Phone Number", type: "tel", value: "" }] },
-        { id: "push", name: "Push", icon: Bell, description: "Browser push notifications", enabled: true, configured: true },
-        { id: "webhook", name: "Webhook", icon: Bell, description: "Custom webhook endpoints", enabled: false, configured: false, configFields: [{ key: "url", label: "Endpoint URL", type: "url", value: "" }, { key: "secret", label: "HMAC Secret", type: "password", value: "" }] },
-        { id: "jira", name: "Jira", icon: AlertTriangle, description: "Create Jira tickets", enabled: false, configured: false, configFields: [{ key: "project", label: "Project Key", type: "text", value: "" }] },
-      ];
-
-      // Default notification rules
-      const defaultRules: NotificationRule[] = [
-        { id: "1", event: "incident_created", description: "New incident created", channels: { email: { enabled: true }, slack: { enabled: true }, pagerduty: { enabled: false }, push: { enabled: true } } },
-        { id: "2", event: "incident_resolved", description: "Incident resolved", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
-        { id: "3", event: "deployment_started", description: "Deployment started", channels: { slack: { enabled: true }, push: { enabled: false } } },
-        { id: "4", event: "deployment_failed", description: "Deployment failed", channels: { email: { enabled: true }, slack: { enabled: true }, pagerduty: { enabled: false }, push: { enabled: true } } },
-        { id: "5", event: "alert_triggered", description: "Alert triggered", channels: { slack: { enabled: true }, pagerduty: { enabled: false }, push: { enabled: true } } },
-        { id: "6", event: "oncall_changed", description: "On-call rotation changed", channels: { email: { enabled: true }, slack: { enabled: true } } },
-        { id: "7", event: "ai_action_pending", description: "AI action pending approval", channels: { slack: { enabled: true }, push: { enabled: true } } },
-        { id: "8", event: "escalation", description: "Incident escalated", channels: { email: { enabled: true }, pagerduty: { enabled: false }, sms: { enabled: false } } },
-      ];
-
-      setChannels(defaultChannels);
-      setRules(defaultRules);
-    } catch (error) {
-      console.error("Failed to fetch notification preferences:", error);
-      // Set defaults on error
-      setChannels([
-        { id: "email", name: "Email", icon: Mail, description: "Email notifications", enabled: true, configured: false, configFields: [{ key: "address", label: "Email Address", type: "email", value: "" }] },
-        { id: "slack", name: "Slack", icon: MessageSquare, description: "Slack workspace messages", enabled: true, configured: false, configFields: [{ key: "webhook", label: "Webhook URL", type: "url", value: "" }] },
-        { id: "push", name: "Push", icon: Bell, description: "Browser push notifications", enabled: true, configured: true },
-      ]);
-      setRules([
-        { id: "1", event: "incident_created", description: "New incident created", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
-        { id: "2", event: "incident_resolved", description: "Incident resolved", channels: { email: { enabled: true }, slack: { enabled: true }, push: { enabled: true } } },
-      ]);
+      const res = await apiFetch("/api/notifications/preferences");
+      if (!res.ok) {
+        // No literals to fall back on: an unreachable API means we do not know
+        // what this org's routing is, and guessing is how the old page lied.
+        setLoadError(await errorDetail(res));
+        setPrefs(null);
+        return;
+      }
+      setPrefs((await res.json()) as Preferences);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(`Could not load notification preferences: ${(err as Error).message}`);
+      setPrefs(null);
     } finally {
       setLoading(false);
     }
@@ -308,40 +388,74 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
   }, [fetchPreferences]);
 
   const toggleChannel = (id: string) => {
-    setChannels(cs => cs.map(c =>
-      c.id === id ? { ...c, enabled: !c.enabled } : c
-    ));
+    setPrefs(p =>
+      p === null
+        ? p
+        : { ...p, channels: p.channels.map(c => (c.id === id ? { ...c, enabled: !c.enabled } : c)) }
+    );
   };
 
-  const toggleRuleChannel = (ruleId: string, channelId: string) => {
-    setRules(rs => rs.map(r => {
-      if (r.id !== ruleId) return r;
-      const current = r.channels[channelId]?.enabled ?? false;
-      return {
-        ...r,
-        channels: {
-          ...r.channels,
-          [channelId]: { ...r.channels[channelId], enabled: !current },
-        },
-      };
-    }));
+  const toggleRuleChannel = (event: string, channelId: string) => {
+    setPrefs(p =>
+      p === null
+        ? p
+        : {
+            ...p,
+            rules: p.rules.map(r =>
+              r.event === event
+                ? { ...r, channels: { ...r.channels, [channelId]: !(r.channels[channelId] ?? false) } }
+                : r
+            ),
+          }
+    );
   };
+
+  /** PUT a partial document; returns an error message, or null on success. */
+  const put = useCallback(async (body: Record<string, unknown>): Promise<string | null> => {
+    try {
+      const res = await apiFetch("/api/notifications/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) return await errorDetail(res);
+      setPrefs((await res.json()) as Preferences);
+      return null;
+    } catch (err) {
+      return `Could not save: ${(err as Error).message}`;
+    }
+  }, []);
 
   const saveConfig = async () => {
+    if (!prefs) return;
+    setSaving(true);
+    setSaveError(null);
+    const failure = await put({
+      channels: prefs.channels.map(c => ({ id: c.id, enabled: c.enabled })),
+      rules: prefs.rules.map(r => ({ event: r.event, channels: r.channels })),
+      quiet_hours: prefs.quiet_hours,
+      digest_mode: prefs.digest_mode,
+    });
+    setSaving(false);
+    if (failure) {
+      setSaveError(failure);
+      return;
+    }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
 
-  const handleConfigSave = (fields: Record<string, string>) => {
-    if (!configuring) return;
-    setChannels(cs => cs.map(c =>
-      c.id === configuring.id
-        ? { ...c, configured: true, configFields: c.configFields?.map(f => ({ ...f, value: fields[f.key] || f.value })) }
-        : c
-    ));
-    setConfiguring(null);
+  const handleConfigSave = async (fields: Record<string, string>): Promise<string | null> => {
+    if (!configuring) return null;
+    const failure = await put({
+      channels: [{ id: configuring.id, enabled: configuring.enabled, config: fields }],
+    });
+    if (!failure) setConfiguring(null);
+    return failure;
   };
 
+  const channels = prefs?.channels ?? [];
+  const rules = prefs?.rules ?? [];
   const enabledChannels = channels.filter(c => c.enabled);
 
   return (
@@ -365,24 +479,60 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
           <button
             onClick={fetchPreferences}
             className="p-2 rounded-lg mr-2"
+            aria-label="Reload preferences"
             style={{ border: "1px solid var(--border)" }}
           >
             <RefreshCw size={16} />
           </button>
           <button
             onClick={saveConfig}
+            disabled={saving || prefs === null}
             className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors"
-            style={{ backgroundColor: saved ? "var(--ok)" : "var(--accent)", color: "var(--bg)" }}
+            style={{
+              backgroundColor: saved ? "var(--ok)" : "var(--accent)",
+              color: "var(--bg)",
+              opacity: prefs === null ? 0.5 : 1,
+            }}
           >
-            {saved ? <Check size={16} /> : <Save size={16} />}
-            {saved ? "Saved!" : "Save Changes"}
+            {saving ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : saved ? (
+              <Check size={16} />
+            ) : (
+              <Save size={16} />
+            )}
+            {saving ? "Saving..." : saved ? "Saved!" : "Save Changes"}
           </button>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto p-6 space-y-8">
+        {saveError && (
+          <div
+            className="rounded-lg p-4 text-sm"
+            role="alert"
+            style={{ border: "1px solid var(--bad)", color: "var(--bad)" }}
+          >
+            Save failed — {saveError}
+          </div>
+        )}
+
         {loading ? (
           <LoadingState />
+        ) : loadError || !prefs ? (
+          <div
+            className="rounded-lg p-6 text-center"
+            role="alert"
+            style={{ border: "1px solid var(--border)", backgroundColor: "var(--surface)" }}
+          >
+            <AlertTriangle className="w-8 h-8 mx-auto" style={{ color: "var(--bad)" }} />
+            <p className="mt-3 font-medium" style={{ color: "var(--text)" }}>
+              Could not load notification preferences
+            </p>
+            <p className="mt-1 text-sm" style={{ color: "var(--text-2)" }}>
+              {loadError ?? "The API returned no preferences."}
+            </p>
+          </div>
         ) : (
           <>
             {/* Channels */}
@@ -431,7 +581,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
                           Event
                         </th>
                         {enabledChannels.map((channel) => {
-                          const Icon = channel.icon;
+                          const Icon = iconFor(channel.icon);
                           return (
                             <th key={channel.id} className="py-3 px-2 text-center">
                               <div className="flex flex-col items-center gap-1">
@@ -448,10 +598,10 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
                     <tbody>
                       {rules.map((rule) => (
                         <RuleRow
-                          key={rule.id}
+                          key={rule.event}
                           rule={rule}
                           channels={channels}
-                          onToggleChannel={(channelId) => toggleRuleChannel(rule.id, channelId)}
+                          onToggleChannel={(channelId) => toggleRuleChannel(rule.event, channelId)}
                         />
                       ))}
                     </tbody>
@@ -460,31 +610,61 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
               </div>
             </section>
 
-            {/* Quick Settings */}
+            {/* Delivery settings */}
             <section>
               <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text)" }}>
-                Quick Settings
+                Delivery Settings
               </h2>
               <div className="grid md:grid-cols-2 gap-4">
                 <div
                   className="rounded-lg p-4"
                   style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
                 >
-                  <h3 className="font-medium mb-2" style={{ color: "var(--text)" }}>Quiet Hours</h3>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-medium" style={{ color: "var(--text)" }}>Quiet Hours</h3>
+                    <label className="flex items-center gap-2 text-sm" style={{ color: "var(--text-2)" }}>
+                      <input
+                        type="checkbox"
+                        checked={prefs.quiet_hours.enabled}
+                        aria-label="Enable quiet hours"
+                        onChange={e =>
+                          setPrefs({
+                            ...prefs,
+                            quiet_hours: { ...prefs.quiet_hours, enabled: e.target.checked },
+                          })
+                        }
+                      />
+                      Enabled
+                    </label>
+                  </div>
                   <p className="text-sm mb-3" style={{ color: "var(--text-2)" }}>
                     Pause non-critical notifications during specified hours
                   </p>
                   <div className="flex items-center gap-3">
                     <input
                       type="time"
-                      defaultValue="22:00"
+                      aria-label="Quiet hours start"
+                      value={prefs.quiet_hours.start}
+                      onChange={e =>
+                        setPrefs({
+                          ...prefs,
+                          quiet_hours: { ...prefs.quiet_hours, start: e.target.value },
+                        })
+                      }
                       className="px-3 py-2 rounded"
                       style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
                     />
                     <span style={{ color: "var(--text-2)" }}>to</span>
                     <input
                       type="time"
-                      defaultValue="08:00"
+                      aria-label="Quiet hours end"
+                      value={prefs.quiet_hours.end}
+                      onChange={e =>
+                        setPrefs({
+                          ...prefs,
+                          quiet_hours: { ...prefs.quiet_hours, end: e.target.value },
+                        })
+                      }
                       className="px-3 py-2 rounded"
                       style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
                     />
@@ -500,7 +680,9 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
                     Batch non-critical notifications into periodic digests
                   </p>
                   <select
-                    defaultValue="realtime"
+                    aria-label="Digest mode"
+                    value={prefs.digest_mode}
+                    onChange={e => setPrefs({ ...prefs, digest_mode: e.target.value })}
                     className="w-full px-3 py-2 rounded"
                     style={{ backgroundColor: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)" }}
                   >

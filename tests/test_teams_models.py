@@ -134,9 +134,9 @@ class TestTeamInvitation:
             invited_by="user456",
         )
         # Check expires_at is approximately 7 days from now. Aware, not
-        # `utcnow()`: these timestamps round-trip through a database column that
-        # carries an offset, and subtracting a naive datetime from an aware one
-        # raises rather than comparing wrong.
+        # `utcnow()`: these timestamps round trip through a
+        # `DateTime(timezone=True)` column, and a naive-vs-aware subtraction is
+        # a TypeError rather than a failed assertion.
         assert invite.expires_at.tzinfo is not None
         expected = datetime.now(timezone.utc) + timedelta(days=7)
         delta = abs((invite.expires_at - expected).total_seconds())

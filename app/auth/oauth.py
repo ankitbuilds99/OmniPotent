@@ -6,8 +6,8 @@ Provides:
 - Session management with JWT tokens
 - Account linking (multiple providers)
 
-Linked accounts and pending login states live in Postgres (migration
-008_oauth), not in this module. They used to be the dicts `_OAUTH_ACCOUNTS`,
+Linked accounts, pending login states and revoked sessions live in the database,
+not in this module. They used to be the dicts `_OAUTH_ACCOUNTS`,
 `_USER_ACCOUNTS` and `_OAUTH_STATES`, which made identity per-process: the
 callback in app/auth/endpoints.py mints a fresh `user_id` whenever the account
 lookup misses, and after a restart every lookup missed, so returning users came
@@ -15,8 +15,23 @@ back as new people and left their memberships and history behind. The state
 dict additionally broke login outright on any deployment with more than one
 replica, since the redirect and the callback need not reach the same pod.
 
-Session tokens are still stateless JWTs -- there is nothing to store for those,
-and `create_session_token`/`verify_session_token` are unchanged.
+* `oauth_accounts`   -> `OAuthAccountDB` in app/database/auth_models.py
+* `oauth_states`     -> `OAuthStateRecord` in app/database/models.py
+* `revoked_sessions` -> `RevokedSessionDB` in app/database/auth_models.py
+
+`oauth_accounts` is keyed by a surrogate uuid with a unique constraint on
+(`provider`, `provider_id`); origin/main declared the same table as
+`OAuthAccountRecord` keyed on the natural key `"{provider}:{provider_id}"`. Only
+one declaration of a table can exist on the shared metadata, so the surrogate
+one wins (it is the one migration 014_auth creates and the one
+`revoked_sessions` sits beside). The natural key survives as `OAuthAccount.id`,
+which is what `touch_last_login` and the endpoints pass around.
+
+Session tokens remain JWTs, but they are no longer purely stateless: each one
+carries a `jti` and `verify_session_token` refuses any `jti` that `logout` has
+written to `revoked_sessions`. Without that, a token that had already been
+copied out of a browser could not be withdrawn short of rotating
+COPILOT_SECRET_KEY -- which is also the secrets-vault KEK.
 """
 
 from __future__ import annotations
@@ -26,7 +41,6 @@ import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
 from urllib.parse import urlencode
 
@@ -37,8 +51,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.database.auth_models import OAuthAccountDB, RevokedSessionDB
 from app.database.engine import ensure_schema, get_session
-from app.database.models import OAuthAccountRecord, OAuthStateRecord
+from app.database.models import OAuthStateRecord
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import CursorResult
@@ -132,6 +147,11 @@ def get_available_providers() -> list[str]:
 #: bounds how long a captured login redirect is worth replaying.
 STATE_TTL = timedelta(minutes=15)
 
+#: Separates the random half of a state from the id of the user an account-link
+#: flow was started by. `secrets.token_urlsafe` emits only [A-Za-z0-9_-], so a
+#: "~" can never appear in the random half and the split is unambiguous.
+_STATE_LINK_SEP = "~"
+
 
 @asynccontextmanager
 async def _session() -> AsyncGenerator[AsyncSession, None]:
@@ -147,14 +167,37 @@ def _utc(value: datetime | None) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-async def generate_oauth_state(provider: str) -> str:
+def _state_link_user(state: str) -> str:
+    """The link target encoded in a state string, or "" for a login flow.
+
+    Parsing alone proves nothing — anyone can append `~user_victim` to a string.
+    Every caller checks the state against the stored row first; see
+    `peek_oauth_link_user`.
+    """
+    _random, sep, link_user_id = state.partition(_STATE_LINK_SEP)
+    return link_user_id if sep else ""
+
+
+async def generate_oauth_state(provider: str, link_user_id: str = "") -> str:
     """Generate a secure state parameter for CSRF protection.
 
-    Stored in Postgres rather than in this process: the callback that presents
-    this state back is a separate request arriving from the provider's redirect,
-    which load-balances independently of the request being served now.
+    Stored in the `oauth_states` table rather than in this process: the callback
+    that presents this state back is a separate request arriving from the
+    provider's redirect, which load-balances independently of the request being
+    served now. Held in a dict, any deployment with more than one replica failed
+    every login whose callback happened to land on a different pod.
+
+    `link_user_id` is set when the flow was started by POST /auth/{provider}/link
+    rather than by a login: it is the id of the already-authenticated user the
+    new provider should attach to. It rides on the state rather than on the
+    callback URL because the callback URL comes back from the browser and is
+    attacker-suppliable, while a state has to match a row only this server can
+    write. (`oauth_states.state` is 128 chars and the random half is 43, leaving
+    84 for the id; ids minted here are `user_<16 hex>`.)
     """
     state = secrets.token_urlsafe(32)
+    if link_user_id:
+        state = f"{state}{_STATE_LINK_SEP}{link_user_id}"
 
     async with _session() as session:
         session.add(OAuthStateRecord(state=state, provider=provider))
@@ -169,6 +212,36 @@ async def generate_oauth_state(provider: str) -> str:
         await session.commit()
 
     return state
+
+
+async def peek_oauth_link_user(state: str) -> str:
+    """The user id an account-link flow was started by, without consuming the state.
+
+    Non-destructive on purpose: the callback still calls `verify_oauth_state` to
+    check and consume the state, and that has to stay the one place a state is
+    spent. Returns "" for a login flow, an unknown state or an expired one, so a
+    forged `state=anything~user_victim` reads as a plain login and then fails
+    verification like any other unknown state.
+    """
+    link_user_id = _state_link_user(state)
+    if not link_user_id:
+        return ""
+
+    async with _session() as session:
+        row = (
+            await session.execute(
+                select(OAuthStateRecord).where(OAuthStateRecord.state == state)
+            )
+        ).scalar_one_or_none()
+
+    if row is None:
+        return ""
+
+    created_at = _utc(row.created_at) or datetime.now(timezone.utc)
+    if datetime.now(timezone.utc) - created_at > STATE_TTL:
+        return ""
+
+    return link_user_id
 
 
 async def verify_oauth_state(state: str) -> str | None:
@@ -205,13 +278,15 @@ async def verify_oauth_state(state: str) -> str | None:
     return provider
 
 
-async def get_authorization_url(provider: str, redirect_uri: str) -> str | None:
+async def get_authorization_url(
+    provider: str, redirect_uri: str, link_user_id: str = ""
+) -> str | None:
     """Get OAuth authorization URL for a provider."""
     config = get_oauth_config(provider)
     if not config:
         return None
 
-    state = await generate_oauth_state(provider)
+    state = await generate_oauth_state(provider, link_user_id=link_user_id)
 
     params = {
         "client_id": config.client_id,
@@ -332,30 +407,30 @@ async def get_user_info(provider: str, access_token: str) -> OAuthUser | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def _ephemeral_session_secret() -> str:
-    """Random per-process HMAC key used when COPILOT_SECRET_KEY is unset.
+def _session_signing_key() -> str:
+    """Return the key used to sign/verify OAuth session JWTs.
 
-    Cached so the whole process signs and verifies with the same value, and so
-    the warning below is emitted exactly once.
+    Fails closed: there is deliberately no development fallback. A hardcoded
+    default here would let anyone forge an owner session, and the same value is
+    the KEK that wraps every tenant's integration secrets (app/secrets_vault.py).
+
+    Both branches agreed the old `or "dev-secret-key"` literal had to go; they
+    disagreed on what replaces it. origin/main degraded to a random
+    per-process key (`_ephemeral_session_secret`) so a local run without
+    COPILOT_SECRET_KEY still issues tokens, leaning on app/config.py to refuse
+    production without one. That is dropped here in favour of refusing outright:
+    an ephemeral key silently invalidates every session on restart and across
+    replicas, which reads as "randomly logged out" rather than as the
+    misconfiguration it is. Callers that must not raise use
+    `decode_session_token`, which turns the RuntimeError into a rejected token.
     """
-    log.warning(
-        "COPILOT_SECRET_KEY not set — signing session tokens with an ephemeral "
-        "per-process key; sessions will NOT survive a restart and will not "
-        "validate across replicas. Set one in production."
-    )
-    return secrets.token_urlsafe(32)
-
-
-def _session_secret() -> str:
-    """Resolve the HMAC key for session JWTs — never a fixed literal.
-
-    A shared default here would let anyone who has read the source mint a valid
-    session for any org, so an unset key falls back to random bytes rather than
-    a guessable constant. app/config.py already refuses to boot production
-    without COPILOT_SECRET_KEY, so the fallback only ever applies to local runs.
-    """
-    return get_settings().copilot_secret_key.strip() or _ephemeral_session_secret()
+    secret = get_settings().copilot_secret_key
+    if not secret:
+        raise RuntimeError(
+            "COPILOT_SECRET_KEY must be set to issue or verify OAuth session tokens. "
+            "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+    return secret
 
 
 def create_session_token(
@@ -365,8 +440,15 @@ def create_session_token(
     role: str = "viewer",
     expires_hours: int = 24,
 ) -> str:
-    """Create a JWT session token."""
-    secret = _session_secret()
+    """Create a JWT session token.
+
+    The `jti` is what makes logout mean something: `revoke_session` writes it to
+    the `revoked_sessions` table and `verify_session_token` refuses any token
+    carrying a revoked one. Without it a token could only be withdrawn by
+    rotating COPILOT_SECRET_KEY, which would also invalidate every tenant's
+    encrypted integration secrets.
+    """
+    secret = _session_signing_key()
 
     now = datetime.now(timezone.utc)
     payload = {
@@ -376,15 +458,24 @@ def create_session_token(
         "role": role,
         "iat": now,
         "exp": now + timedelta(hours=expires_hours),
+        "jti": secrets.token_urlsafe(16),
         "type": "session",
     }
 
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def verify_session_token(token: str) -> dict[str, Any] | None:
-    """Verify and decode a session token."""
-    secret = _session_secret()
+def decode_session_token(token: str) -> dict[str, Any] | None:
+    """Signature/expiry/type check only — no revocation lookup.
+
+    Callers that gate access want `verify_session_token`; this exists for the
+    paths that only need the claims of a token they have already accepted.
+    """
+    try:
+        secret = _session_signing_key()
+    except RuntimeError:
+        log.error("Cannot verify session token: COPILOT_SECRET_KEY is not set")
+        return None
 
     try:
         payload = jwt.decode(token, secret, algorithms=["HS256"])
@@ -397,6 +488,83 @@ def verify_session_token(token: str) -> dict[str, Any] | None:
     except jwt.InvalidTokenError as e:
         log.debug("Invalid session token: %s", e)
         return None
+
+
+async def verify_session_token(token: str) -> dict[str, Any] | None:
+    """Verify a session token: signature, expiry, type, and not revoked.
+
+    Async because the revocation list is a table rather than process memory —
+    logout on one pod has to be visible to every other pod, and to the next
+    process after a restart.
+    """
+    payload = decode_session_token(token)
+    if payload is None:
+        return None
+    jti = payload.get("jti")
+    if jti and await is_session_revoked(str(jti)):
+        log.debug("Session token %s was revoked", jti)
+        return None
+    return payload
+
+
+async def is_session_revoked(jti: str) -> bool:
+    """Whether this token id has been logged out.
+
+    Fails *open* when the database is unreachable: the alternative is that a
+    database blip logs every signed-in user out of an incident-response tool
+    mid-incident. The token is still signature- and expiry-checked.
+    """
+    try:
+        async with _session() as session:
+            found = await session.scalar(
+                select(RevokedSessionDB.jti).where(RevokedSessionDB.jti == jti)
+            )
+        return found is not None
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        log.warning("Revocation check unavailable (%s); accepting on signature alone", exc)
+        return False
+
+
+async def revoke_session(token: str) -> bool:
+    """Record this token's `jti` as revoked. Returns True if anything was revoked.
+
+    Also sweeps rows whose token would have expired anyway, so the table tracks
+    live sessions rather than growing without bound.
+    """
+    payload = decode_session_token(token)
+    if not payload:
+        return False
+    jti = payload.get("jti")
+    if not jti:
+        # Tokens minted before `jti` existed cannot be revoked individually.
+        return False
+
+    exp = payload.get("exp")
+    expires_at = (
+        datetime.fromtimestamp(float(exp), tz=timezone.utc)
+        if exp
+        else datetime.now(timezone.utc) + timedelta(hours=24)
+    )
+
+    try:
+        async with _session() as session:
+            await session.merge(
+                RevokedSessionDB(
+                    jti=str(jti),
+                    user_id=str(payload.get("sub") or ""),
+                    expires_at=expires_at,
+                )
+            )
+            await session.execute(
+                delete(RevokedSessionDB).where(
+                    RevokedSessionDB.expires_at < datetime.now(timezone.utc)
+                )
+            )
+            await session.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("Could not record session revocation: %s", exc)
+        return False
 
 
 @dataclass
@@ -414,16 +582,38 @@ class OAuthAccount:
     last_login: datetime
 
 
-def _to_account(row: OAuthAccountRecord) -> OAuthAccount:
-    """Build the dataclass callers already expect from a row.
+def _account_key(provider: str, provider_id: str) -> str:
+    """The natural key `"{provider}:{provider_id}"` exposed as `OAuthAccount.id`.
+
+    The table's own primary key is a surrogate uuid, but callers (and the
+    endpoints' `touch_last_login(existing.id)`) address an account by the
+    identity the provider asserts, which is what this spells.
+    """
+    return f"{provider}:{provider_id}"
+
+
+def _split_account_key(account_id: str) -> tuple[str, str]:
+    """Inverse of `_account_key`. Splits on the first ":" only."""
+    provider, _sep, provider_id = account_id.partition(":")
+    return provider, provider_id
+
+
+def _to_account(row: OAuthAccountDB) -> OAuthAccount:
+    """Read a row back as the dataclass the endpoints work in.
 
     The result is a detached copy: assigning to it does not write anything back,
     which is why refreshing `last_login` is `touch_last_login()` below rather
     than an attribute assignment at the call site.
+
+    `created_at`/`last_login` are re-attached to UTC: SQLite, the default
+    database, has no timezone type, so a `DateTime(timezone=True)` column round
+    trips naive and `.isoformat()` would claim a local time it never stored.
     """
     now = datetime.now(timezone.utc)
     return OAuthAccount(
-        id=row.id,
+        # Not `row.id` — that is the surrogate uuid. Callers key on the identity
+        # the provider asserted.
+        id=_account_key(row.provider, row.provider_id),
         user_id=row.user_id,
         provider=row.provider,
         provider_id=row.provider_id,
@@ -447,19 +637,20 @@ async def link_oauth_account(
     otherwise each mint an id and the loser's would win the write, handing one
     person's account to whichever request committed last.
     """
-    account_id = f"{oauth_user.provider}:{oauth_user.provider_id}"
+    provider_id = str(oauth_user.provider_id)
     now = datetime.now(timezone.utc)
 
     async with _session() as session:
-        row = OAuthAccountRecord(
-            id=account_id,
+        row = OAuthAccountDB(
             user_id=user_id,
             provider=oauth_user.provider,
-            provider_id=oauth_user.provider_id,
+            provider_id=provider_id,
             # Lower-cased on the way in so the email lookup can use its index
-            # rather than scanning and folding case in Python.
-            email=oauth_user.email.lower(),
-            name=oauth_user.name,
+            # rather than scanning and folding case in Python. `or ""` because
+            # a provider may hand back no address at all and the column is NOT
+            # NULL — GitHub does exactly this when the address is private.
+            email=(oauth_user.email or "").strip().lower(),
+            name=oauth_user.name or "",
             # Passed explicitly even though it is nullable: a column left out of
             # the INSERT is not loaded on the instance, and reading it back to
             # build the response would emit a lazy SELECT that raises here.
@@ -470,23 +661,35 @@ async def link_oauth_account(
         session.add(row)
         try:
             await session.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             await session.rollback()
+            # Bound to a name that outlives the handler: `exc` is unbound at the
+            # end of the `except` block, and a bare `raise` below would be
+            # outside any handler and so raise "No active exception to re-raise"
+            # instead of the failure we actually want to surface.
+            conflict = exc
         else:
             return _to_account(row)
 
         existing = (
             await session.execute(
-                select(OAuthAccountRecord).where(OAuthAccountRecord.id == account_id)
+                select(OAuthAccountDB).where(
+                    OAuthAccountDB.provider == oauth_user.provider,
+                    OAuthAccountDB.provider_id == provider_id,
+                )
             )
         ).scalar_one_or_none()
         if existing is None:
             # The conflict was not this row after all; nothing sensible to
             # return, so let the caller see the original failure.
-            raise
+            raise conflict
 
-        existing.email = oauth_user.email.lower()
-        existing.name = oauth_user.name
+        # The profile fields are refreshed, `user_id` is not: an existing
+        # provider identity keeps the local user it was first bound to.
+        # Re-pointing it at whoever is logging in now would let a second login
+        # silently take over another user's account.
+        existing.email = (oauth_user.email or "").strip().lower()
+        existing.name = oauth_user.name or ""
         existing.avatar_url = oauth_user.avatar_url
         existing.last_login = now
         await session.commit()
@@ -499,11 +702,18 @@ async def touch_last_login(account_id: str) -> None:
     Its own function because the dict version updated this by mutating the
     object `find_account_by_provider` handed back. That object is now a detached
     copy, so the same assignment would be silently discarded.
+
+    `account_id` is the natural key `"{provider}:{provider_id}"` — i.e. exactly
+    what `OAuthAccount.id` carries.
     """
+    provider, provider_id = _split_account_key(account_id)
     async with _session() as session:
         await session.execute(
-            update(OAuthAccountRecord)
-            .where(OAuthAccountRecord.id == account_id)
+            update(OAuthAccountDB)
+            .where(
+                OAuthAccountDB.provider == provider,
+                OAuthAccountDB.provider_id == provider_id,
+            )
             .values(last_login=datetime.now(timezone.utc))
             .execution_options(synchronize_session=False)
         )
@@ -512,11 +722,13 @@ async def touch_last_login(account_id: str) -> None:
 
 async def find_account_by_provider(provider: str, provider_id: str) -> OAuthAccount | None:
     """Find an OAuth account by provider and provider ID."""
-    account_id = f"{provider}:{provider_id}"
     async with _session() as session:
         row = (
             await session.execute(
-                select(OAuthAccountRecord).where(OAuthAccountRecord.id == account_id)
+                select(OAuthAccountDB).where(
+                    OAuthAccountDB.provider == provider,
+                    OAuthAccountDB.provider_id == str(provider_id),
+                )
             )
         ).scalar_one_or_none()
     return _to_account(row) if row else None
@@ -528,13 +740,19 @@ async def find_account_by_email(email: str) -> OAuthAccount | None:
     Ordered by creation: the dict version returned whichever match came first in
     insertion order, and an unordered query would let the answer -- and so which
     user id a new provider gets folded into -- vary between identical calls.
+    The (provider, provider_id) tie-break is there because the primary key is a
+    random uuid, which would make same-instant rows order differently per run.
     """
     async with _session() as session:
         row = (
             await session.execute(
-                select(OAuthAccountRecord)
-                .where(OAuthAccountRecord.email == email.lower())
-                .order_by(OAuthAccountRecord.created_at, OAuthAccountRecord.id)
+                select(OAuthAccountDB)
+                .where(OAuthAccountDB.email == (email or "").strip().lower())
+                .order_by(
+                    OAuthAccountDB.created_at,
+                    OAuthAccountDB.provider,
+                    OAuthAccountDB.provider_id,
+                )
                 .limit(1)
             )
         ).scalar_one_or_none()
@@ -552,9 +770,13 @@ async def get_user_accounts(user_id: str) -> list[OAuthAccount]:
         rows = (
             (
                 await session.execute(
-                    select(OAuthAccountRecord)
-                    .where(OAuthAccountRecord.user_id == user_id)
-                    .order_by(OAuthAccountRecord.created_at, OAuthAccountRecord.id)
+                    select(OAuthAccountDB)
+                    .where(OAuthAccountDB.user_id == user_id)
+                    .order_by(
+                        OAuthAccountDB.created_at,
+                        OAuthAccountDB.provider,
+                        OAuthAccountDB.provider_id,
+                    )
                 )
             )
             .scalars()
@@ -564,8 +786,12 @@ async def get_user_accounts(user_id: str) -> list[OAuthAccount]:
 
 
 async def clear() -> None:
-    """Drop every linked account and pending state. For tests."""
+    """Drop every linked account, pending state and revoked session. For tests."""
     async with _session() as session:
-        await session.execute(delete(OAuthAccountRecord))
+        await session.execute(delete(OAuthAccountDB))
         await session.execute(delete(OAuthStateRecord))
+        try:
+            await session.execute(delete(RevokedSessionDB))
+        except Exception as exc:  # noqa: BLE001 - a test helper, not a gate
+            log.debug("Could not clear revoked sessions: %s", exc)
         await session.commit()

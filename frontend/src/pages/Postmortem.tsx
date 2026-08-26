@@ -1,17 +1,32 @@
 /**
- * Postmortem Page - Real API integration
+ * Postmortem page.
+ *
+ * This page used to build the entire document in the browser. Two of its four
+ * sections were string constants — Root Cause Analysis was always "The incident
+ * was caused by an issue that requires further investigation…" and Lessons
+ * Learned was always the same What Went Well / What Could Be Improved block —
+ * as were both action items, and every one of them was rendered under an "AI
+ * Generated" badge. `regenerateSection` awaited a 2000ms timer and changed
+ * nothing. No postmortem route existed to call.
+ *
+ * It now POSTs `/api/incidents/{id}/postmortem`, which reads the incident's real
+ * timeline and durations off the record and has the configured model write the
+ * prose from exactly those facts. When no model is configured the server answers
+ * 503 and this page shows that, because the previous behaviour — printing a
+ * canned root cause under an "AI Generated" badge — is the thing being fixed.
  */
 
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
 
 interface PostmortemSection {
   id: string;
   title: string;
   content: string;
-  aiGenerated: boolean;
+  /** "model" while it is the generated text; "edited" once a human changes it. */
+  source: "model" | "edited";
   editing: boolean;
 }
 
@@ -21,24 +36,28 @@ interface ActionItem {
   owner: string;
   priority: "P0" | "P1" | "P2" | "P3";
   status: "open" | "in_progress" | "completed";
-  due_date: string;
+  /** null unless a date was actually agreed — the page used to stamp now+7d. */
+  due_date: string | null;
   type: "prevent" | "detect" | "mitigate";
 }
 
 interface TimelineEvent {
   timestamp: string;
   event: string;
-  actor?: string;
-  type: "detection" | "action" | "communication" | "resolution";
+  actor?: string | null;
+  type: string;
 }
 
+/** Minutes, or null where the record has no second endpoint to measure against.
+ *  The old page coerced these to 0 and printed "0m", which reads as "instant". */
 interface PostmortemMetrics {
-  time_to_detect: number;
-  time_to_acknowledge: number;
-  time_to_mitigate: number;
-  time_to_resolve: number;
-  customer_impact: string;
+  time_to_detect: number | null;
+  time_to_acknowledge: number | null;
+  time_to_mitigate: number | null;
+  time_to_resolve: number | null;
   affected_services: string[];
+  customer_impact: boolean;
+  impact: string | null;
 }
 
 interface PostmortemData {
@@ -47,14 +66,27 @@ interface PostmortemData {
   title: string;
   status: "draft" | "in_review" | "published";
   severity: "SEV1" | "SEV2" | "SEV3" | "SEV4";
-  created_at: string;
-  updated_at: string;
+  generated_at: string;
   authors: string[];
   reviewers: string[];
   sections: PostmortemSection[];
   action_items: ActionItem[];
   timeline: TimelineEvent[];
   metrics: PostmortemMetrics;
+}
+
+/** Pull a human-readable reason out of an error response of any shape. */
+async function errorDetail(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  try {
+    const body = JSON.parse(text);
+    const detail = body?.detail ?? body;
+    if (typeof detail === "string") return detail;
+    if (detail?.message) return String(detail.message);
+  } catch {
+    // Not JSON — fall through to the raw body.
+  }
+  return text.trim() || `${res.status} ${res.statusText}`;
 }
 
 function SeverityBadge({ severity }: { severity: PostmortemData["severity"] }) {
@@ -84,36 +116,75 @@ function StatusBadge({ status }: { status: PostmortemData["status"] }) {
   );
 }
 
+/** One duration. A null value renders "—", not "0m": the record has no second
+ *  timestamp to measure against, and 0 would be a claim that it was instant. */
+function Duration({
+  label,
+  minutes,
+  color,
+  unmeasured,
+}: {
+  label: string;
+  minutes: number | null;
+  color: string;
+  unmeasured: string;
+}) {
+  return (
+    <div>
+      <div className="text-xs text-gray-500 uppercase">{label}</div>
+      {minutes === null ? (
+        <div className="text-2xl font-bold text-gray-400" title={unmeasured}>
+          —
+        </div>
+      ) : (
+        <div className={`text-2xl font-bold ${color}`}>{minutes}m</div>
+      )}
+    </div>
+  );
+}
+
 function MetricsCard({ metrics }: { metrics: PostmortemMetrics }) {
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <h3 className="font-semibold mb-4">Incident Metrics</h3>
       <div className="grid grid-cols-2 gap-4">
-        <div>
-          <div className="text-xs text-gray-500 uppercase">Time to Detect</div>
-          <div className="text-2xl font-bold text-blue-600">{metrics.time_to_detect}m</div>
-        </div>
-        <div>
-          <div className="text-xs text-gray-500 uppercase">Time to Acknowledge</div>
-          <div className="text-2xl font-bold text-green-600">{metrics.time_to_acknowledge}m</div>
-        </div>
-        <div>
-          <div className="text-xs text-gray-500 uppercase">Time to Mitigate</div>
-          <div className="text-2xl font-bold text-yellow-600">{metrics.time_to_mitigate}m</div>
-        </div>
-        <div>
-          <div className="text-xs text-gray-500 uppercase">Time to Resolve</div>
-          <div className="text-2xl font-bold text-red-600">{metrics.time_to_resolve}m</div>
-        </div>
+        <Duration
+          label="Time to Detect"
+          minutes={metrics.time_to_detect}
+          color="text-blue-600"
+          unmeasured="Not measurable: the record holds when the incident was declared, not when the fault began."
+        />
+        <Duration
+          label="Time to Acknowledge"
+          minutes={metrics.time_to_acknowledge}
+          color="text-green-600"
+          unmeasured="Never acknowledged, so there is no interval to measure."
+        />
+        <Duration
+          label="Time to Mitigate"
+          minutes={metrics.time_to_mitigate}
+          color="text-yellow-600"
+          unmeasured="No move to 'monitoring' was recorded, so mitigation has no timestamp."
+        />
+        <Duration
+          label="Time to Resolve"
+          minutes={metrics.time_to_resolve}
+          color="text-red-600"
+          unmeasured="Still open, so there is no resolution time yet."
+        />
       </div>
       <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
         <div className="text-xs text-gray-500 uppercase mb-2">Affected Services</div>
         <div className="flex flex-wrap gap-1">
-          {metrics.affected_services.map((svc) => (
-            <span key={svc} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">
-              {svc}
-            </span>
-          ))}
+          {metrics.affected_services.length === 0 ? (
+            <span className="text-xs text-gray-500">None recorded</span>
+          ) : (
+            metrics.affected_services.map((svc) => (
+              <span key={svc} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">
+                {svc}
+              </span>
+            ))
+          )}
         </div>
       </div>
     </div>
@@ -121,7 +192,7 @@ function MetricsCard({ metrics }: { metrics: PostmortemMetrics }) {
 }
 
 function TimelineView({ events }: { events: TimelineEvent[] }) {
-  const typeColors = {
+  const typeColors: Record<string, string> = {
     detection: "bg-blue-500",
     action: "bg-yellow-500",
     communication: "bg-purple-500",
@@ -144,7 +215,7 @@ function TimelineView({ events }: { events: TimelineEvent[] }) {
         {events.map((event, i) => (
           <div key={i} className="flex gap-3">
             <div className="flex flex-col items-center">
-              <div className={`w-3 h-3 rounded-full ${typeColors[event.type]}`} />
+              <div className={`w-3 h-3 rounded-full ${typeColors[event.type] ?? "bg-gray-400"}`} />
               {i < events.length - 1 && <div className="w-0.5 flex-1 bg-gray-200 dark:bg-gray-700 my-1" />}
             </div>
             <div className="flex-1 pb-3">
@@ -217,14 +288,16 @@ function ActionItemsTable({ items, onUpdate }: { items: ActionItem[]; onUpdate: 
           {items.map((item) => (
             <tr key={item.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
               <td className="px-4 py-3 text-sm">{item.title}</td>
-              <td className="px-4 py-3 text-sm">{item.owner}</td>
+              <td className="px-4 py-3 text-sm">
+                {item.owner || <span className="text-gray-400">Unassigned</span>}
+              </td>
               <td className="px-4 py-3">
                 <span className={`px-2 py-0.5 text-xs font-medium rounded ${priorityColors[item.priority]}`}>
                   {item.priority}
                 </span>
               </td>
               <td className="px-4 py-3 text-sm text-gray-500">
-                {new Date(item.due_date).toLocaleDateString()}
+                {item.due_date ? new Date(item.due_date).toLocaleDateString() : "Not set"}
               </td>
               <td className="px-4 py-3">
                 <select
@@ -285,17 +358,17 @@ function LoadingState() {
   );
 }
 
-function EmptyState({ onSelectIncident }: { onSelectIncident: () => void }) {
+function EmptyState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-gray-500">
       <Icon name="file-text" size={48} />
       <p className="mt-4 text-lg font-medium">No Postmortem</p>
-      <p className="text-sm">Select an incident to generate a postmortem</p>
+      <p className="text-sm max-w-xl text-center">{message}</p>
       <button
-        onClick={onSelectIncident}
+        onClick={onRetry}
         className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
       >
-        Select Incident
+        Try Again
       </button>
     </div>
   );
@@ -304,116 +377,79 @@ function EmptyState({ onSelectIncident }: { onSelectIncident: () => void }) {
 export function Postmortem({ onBack }: { onBack: () => void }) {
   const [postmortem, setPostmortem] = useState<PostmortemData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
+  /** The id of the section currently being regenerated, or null. */
+  const [generating, setGenerating] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"content" | "timeline" | "actions">("content");
 
+  /** A server document into page state. `editing` is presentation-only and is
+   *  not part of the API shape, so it is added here rather than expected back. */
+  const applyDocument = useCallback((doc: PostmortemData) => {
+    setPostmortem({
+      ...doc,
+      action_items: doc.action_items ?? [],
+      sections: (doc.sections ?? []).map((s: PostmortemSection) => ({ ...s, editing: false })),
+    });
+  }, []);
+
   const fetchPostmortem = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      // Fetch the most recent resolved incident to generate postmortem from
-      const incidentsRes = await fetch(`${API_BASE}/api/incidents`);
-      const incidents = incidentsRes.ok ? await incidentsRes.json() : [];
-
-      // Find a resolved incident to base postmortem on
-      const resolvedIncident = incidents.find((i: Record<string, unknown>) => i.status === "resolved") || incidents[0];
-
-      if (resolvedIncident) {
-        // Generate postmortem data from incident with real timestamps
-        const now = new Date();
-        const triggeredAt = new Date(resolvedIncident.triggered_at || now.toISOString());
-        const acknowledgedAt = resolvedIncident.acknowledged_at ? new Date(resolvedIncident.acknowledged_at) : null;
-        const resolvedAt = new Date(resolvedIncident.resolved_at || now.toISOString());
-        const ttDetect = 0;
-        const ttAck = acknowledgedAt ? Math.floor((acknowledgedAt.getTime() - triggeredAt.getTime()) / 60000) : 0;
-        const ttMitigate = Math.floor((resolvedAt.getTime() - triggeredAt.getTime()) / 60000) || 0;
-        const ttResolve = ttMitigate;
-
-        const pm: PostmortemData = {
-          id: `pm-${resolvedIncident.id}`,
-          incident_id: resolvedIncident.id,
-          title: resolvedIncident.title || "Service Incident",
-          status: "draft",
-          severity: resolvedIncident.severity === "critical" ? "SEV1" :
-                   resolvedIncident.severity === "high" ? "SEV2" :
-                   resolvedIncident.severity === "medium" ? "SEV3" : "SEV4",
-          created_at: now.toISOString(),
-          updated_at: now.toISOString(),
-          authors: ["On-Call Engineer"],
-          reviewers: ["Team Lead"],
-          sections: [
-            {
-              id: "summary",
-              title: "Executive Summary",
-              content: `On ${triggeredAt.toLocaleDateString()}, the ${resolvedIncident.service || "service"} experienced an incident. The root cause was identified and the issue was resolved after ${ttResolve} minutes.`,
-              aiGenerated: true,
-              editing: false,
-            },
-            {
-              id: "impact",
-              title: "Impact",
-              content: `- **Duration**: ${ttResolve} minutes\n- **Affected Service**: ${resolvedIncident.service || "Unknown"}\n- **Severity**: ${resolvedIncident.severity || "Medium"}`,
-              aiGenerated: true,
-              editing: false,
-            },
-            {
-              id: "root_cause",
-              title: "Root Cause Analysis",
-              content: "The incident was caused by an issue that requires further investigation. Initial analysis suggests the root cause may be related to recent changes or increased load.",
-              aiGenerated: true,
-              editing: false,
-            },
-            {
-              id: "lessons",
-              title: "Lessons Learned",
-              content: "### What Went Well\n- Incident was detected quickly\n- Team responded promptly\n\n### What Could Be Improved\n- Detection could be faster\n- Documentation should be updated",
-              aiGenerated: true,
-              editing: false,
-            },
-          ],
-          action_items: [
-            {
-              id: "ai-1",
-              title: "Review and update monitoring alerts",
-              owner: "On-Call Engineer",
-              priority: "P1",
-              status: "open",
-              due_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-              type: "detect",
-            },
-            {
-              id: "ai-2",
-              title: "Document runbook for this incident type",
-              owner: "Team Lead",
-              priority: "P2",
-              status: "open",
-              due_date: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-              type: "mitigate",
-            },
-          ],
-          timeline: [
-            { timestamp: triggeredAt.toISOString(), event: "Incident detected", type: "detection" },
-            { timestamp: new Date(triggeredAt.getTime() + ttAck * 60000).toISOString(), event: "Incident acknowledged", actor: "On-Call", type: "action" },
-            { timestamp: resolvedAt.toISOString(), event: "Incident resolved", type: "resolution" },
-          ],
-          metrics: {
-            time_to_detect: ttDetect,
-            time_to_acknowledge: ttAck,
-            time_to_mitigate: ttMitigate,
-            time_to_resolve: ttResolve,
-            customer_impact: "Service was degraded during the incident",
-            affected_services: [resolvedIncident.service || "unknown-service"],
-          },
-        };
-
-        setPostmortem(pm);
-      } else {
+      const incidentsRes = await apiFetch("/api/incidents");
+      if (!incidentsRes.ok) {
         setPostmortem(null);
+        setError(`Could not load incidents: ${await errorDetail(incidentsRes)}`);
+        return;
       }
-    } catch (error) {
-      console.error("Failed to fetch postmortem:", error);
+      const incidents = await incidentsRes.json();
+      // Prefer a resolved incident — a postmortem of something still burning is
+      // premature — but fall back to the most recent one.
+      const incident =
+        incidents.find((i: Record<string, unknown>) => i.status === "resolved") ?? incidents[0];
+      if (!incident) {
+        setPostmortem(null);
+        setError("There are no incidents to write a postmortem about yet.");
+        return;
+      }
+
+      // Read the stored document first. This page used to POST unconditionally,
+      // which re-ran the model on every visit — a fresh draft each time, and any
+      // edit an operator had made was overwritten by a document that had never
+      // seen it. 404 here means nobody has written one yet, so generate.
+      const stored = await apiFetch(`/api/incidents/${incident.id}/postmortem`);
+      if (stored.ok) {
+        applyDocument(await stored.json());
+        return;
+      }
+      if (stored.status !== 404) {
+        setPostmortem(null);
+        setError(await errorDetail(stored));
+        return;
+      }
+
+      // The server assembles the document: real timeline and durations off the
+      // incident record, prose written by the configured model from those facts.
+      const res = await apiFetch(`/api/incidents/${incident.id}/postmortem`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        // 503 here means no model is configured. Say so — the version of this
+        // page that printed a canned root cause instead is what we are fixing.
+        setPostmortem(null);
+        setError(await errorDetail(res));
+        return;
+      }
+      applyDocument(await res.json());
+    } catch (err) {
+      setPostmortem(null);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyDocument]);
 
   useEffect(() => {
     fetchPostmortem();
@@ -429,30 +465,113 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const saveSection = (sectionId: string, content: string) => {
+  // Both of these used to be `setPostmortem(...)` and nothing more. The Save
+  // button on a section and the status dropdown on an action item wrote to
+  // component state, so the rewrite of a root cause — the one part of the
+  // document a human actually authored — and every action item marked done were
+  // discarded by the next reload. They now PATCH the stored document, and the
+  // server's copy is what re-renders.
+  const saveSection = async (sectionId: string, content: string) => {
     if (!postmortem) return;
+    const previous = postmortem;
+    // Optimistic: the editor closes immediately, and a failure restores it with
+    // the operator's text intact rather than silently dropping what they wrote.
     setPostmortem({
       ...postmortem,
       sections: postmortem.sections.map(s =>
-        s.id === sectionId ? { ...s, content, editing: false, aiGenerated: false } : s
+        s.id === sectionId ? { ...s, content, editing: false, source: "edited" } : s
       ),
     });
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/incidents/${postmortem.incident_id}/postmortem/sections/${sectionId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        }
+      );
+      if (!res.ok) throw new Error(await errorDetail(res));
+      applyDocument(await res.json());
+    } catch (err) {
+      setPostmortem({
+        ...previous,
+        sections: previous.sections.map(s =>
+          s.id === sectionId ? { ...s, content, editing: true } : s
+        ),
+      });
+      setError(`Could not save this section: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
-  const updateActionItem = (itemId: string, status: ActionItem["status"]) => {
+  const updateActionItem = async (itemId: string, status: ActionItem["status"]) => {
     if (!postmortem) return;
+    const previous = postmortem;
     setPostmortem({
       ...postmortem,
       action_items: postmortem.action_items.map(item =>
         item.id === itemId ? { ...item, status } : item
       ),
     });
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/incidents/${postmortem.incident_id}/postmortem/action-items/${itemId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        }
+      );
+      if (!res.ok) throw new Error(await errorDetail(res));
+      applyDocument(await res.json());
+    } catch (err) {
+      setPostmortem(previous);
+      setError(`Could not update this action item: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
-  const regenerateSection = async (_sectionId: string) => {
-    setGenerating(true);
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    setGenerating(false);
+  /** Re-run the model for one section. This used to be a 2000ms sleep. */
+  const regenerateSection = async (sectionId: string) => {
+    if (!postmortem) return;
+    setGenerating(sectionId);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/incidents/${postmortem.incident_id}/postmortem`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sections: [sectionId] }),
+      });
+      if (!res.ok) {
+        setError(`Could not regenerate this section: ${await errorDetail(res)}`);
+        return;
+      }
+      const doc = await res.json();
+      const fresh = (doc.sections ?? []).find(
+        (s: PostmortemSection) => s.id === sectionId
+      );
+      if (!fresh) {
+        setError(`The server returned no "${sectionId}" section.`);
+        return;
+      }
+      setPostmortem(prev =>
+        prev
+          ? {
+              ...prev,
+              sections: prev.sections.map(s =>
+                s.id === sectionId
+                  ? { ...s, content: fresh.content, source: "model", editing: false }
+                  : s
+              ),
+            }
+          : prev
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGenerating(null);
+    }
   };
 
   const exportMarkdown = () => {
@@ -513,14 +632,33 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
         {loading ? (
           <LoadingState />
         ) : !postmortem ? (
-          <EmptyState onSelectIncident={fetchPostmortem} />
+          <EmptyState
+            message={error ?? "There are no incidents to write a postmortem about yet."}
+            onRetry={fetchPostmortem}
+          />
         ) : (
           <>
+            {error && (
+              <div
+                role="alert"
+                className="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
+              >
+                {error}
+              </div>
+            )}
             <div className="mb-6">
               <h2 className="text-2xl font-bold">{postmortem.title}</h2>
               <div className="flex items-center gap-4 mt-2 text-sm text-gray-500">
-                <span>Authors: {postmortem.authors.join(", ")}</span>
-                <span>Reviewers: {postmortem.reviewers.join(", ")}</span>
+                <span>
+                  Authors:{" "}
+                  {postmortem.authors.length ? postmortem.authors.join(", ") : "none recorded"}
+                </span>
+                <span>
+                  Reviewers:{" "}
+                  {postmortem.reviewers.length
+                    ? postmortem.reviewers.join(", ")
+                    : "not yet reviewed"}
+                </span>
               </div>
             </div>
 
@@ -551,26 +689,35 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
                       <div className="flex items-center justify-between mb-3">
                         <h3 className="font-semibold flex items-center gap-2">
                           {section.title}
-                          {section.aiGenerated && (
+                          {section.source === "model" ? (
                             <span className="text-xs bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 px-1.5 py-0.5 rounded">
                               AI Generated
+                            </span>
+                          ) : (
+                            <span className="text-xs bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300 px-1.5 py-0.5 rounded">
+                              Edited
                             </span>
                           )}
                         </h3>
                         <div className="flex gap-1">
-                          {section.aiGenerated && (
-                            <button
-                              onClick={() => regenerateSection(section.id)}
-                              disabled={generating}
-                              className="p-1.5 text-gray-400 hover:text-purple-600 rounded"
-                              title="Regenerate with AI"
-                            >
-                              <Icon name="refresh-cw" size={14} />
-                            </button>
-                          )}
+                          <button
+                            onClick={() => regenerateSection(section.id)}
+                            disabled={generating !== null}
+                            className="p-1.5 text-gray-400 hover:text-purple-600 rounded disabled:opacity-50"
+                            title="Regenerate with AI"
+                            aria-label={`Regenerate ${section.title}`}
+                          >
+                            <Icon
+                              name="refresh-cw"
+                              size={14}
+                              className={generating === section.id ? "animate-spin" : undefined}
+                            />
+                          </button>
                           <button
                             onClick={() => toggleEdit(section.id)}
                             className="p-1.5 text-gray-400 hover:text-blue-600 rounded"
+                            title={section.editing ? "Stop editing" : "Edit"}
+                            aria-label={`${section.editing ? "Stop editing" : "Edit"} ${section.title}`}
                           >
                             <Icon name="edit-2" size={14} />
                           </button>

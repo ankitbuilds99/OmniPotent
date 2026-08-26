@@ -29,6 +29,10 @@ log = logging.getLogger("omnipotent.llm")
 
 # Per-provider default models: {"main": ..., "fast": ...}. Sourced from the model
 # catalog so the factory can't drift from the IDs the routers and pricing use.
+# Every id here must also have a price in
+# app/model_router/cost_optimizer.py:CostOptimizer.DEFAULT_COSTS — otherwise the
+# cost tracker bills real traffic at its most-expensive-known fallback rate.
+# tests/test_model_router_pricing.py enforces that.
 _DEFAULTS = model_catalog.DEFAULT_MODELS
 
 # DeepSeek speaks the OpenAI wire protocol — reuse ChatOpenAI against this base URL.

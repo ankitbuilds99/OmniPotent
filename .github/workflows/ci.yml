@@ -58,6 +58,31 @@ jobs:
     name: Backend (lint + tests + coverage)
     runs-on: ubuntu-latest
     needs: security
+    # tests/integration/ needs a real Postgres and Redis; without them its
+    # fixtures skip and 30 tests silently never ran in CI at all.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: omnipotent
+          POSTGRES_PASSWORD: omnipotent
+          POSTGRES_DB: omnipotent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -80,8 +105,18 @@ jobs:
             --cov-report=xml \
             --cov-report=html \
             --cov-report=term-missing \
-            --cov-fail-under=38 \
+            --cov-fail-under=48 \
             -q
+
+      # A separate step, not env on the step above: the 2400-odd unit tests build
+      # their own sqlite fixtures and must not be repointed at Postgres. This one
+      # runs only tests/integration/, which migrates the service database with
+      # Alembic and drives the app over it.
+      - name: Integration tests (Postgres + Redis)
+        env:
+          COPILOT_DATABASE_URL: postgresql+asyncpg://omnipotent:omnipotent@localhost:5432/omnipotent_test
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest tests/integration -q
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -137,7 +172,6 @@ jobs:
 
       - name: Vitest with coverage
         run: npm run test -- --coverage
-        continue-on-error: true
 
       - name: Check coverage thresholds
         run: |

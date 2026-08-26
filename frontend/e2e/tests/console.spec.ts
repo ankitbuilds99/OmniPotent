@@ -1,52 +1,52 @@
 import { test, expect } from '@playwright/test';
 
+// The previous version of this file clicked a nine-way-ambiguous "launch"
+// locator in beforeEach (strict-mode violation, so every test errored before
+// its body ran) and then asserted `expect(count).toBeGreaterThanOrEqual(0)` —
+// a tautology that passes on a blank page. /console is a plain route in
+// App.tsx, so we can just navigate to it and assert what it actually renders.
+
+const SUGGESTIONS = [
+  'Why is the checkout API throwing 500 errors?',
+  'What deploy caused the checkout failures?',
+  'Are any pods crashing in Kubernetes?',
+  'Have we seen this incident before?',
+];
+
 test.describe('Console', () => {
   test.beforeEach(async ({ page }) => {
-    // Navigate to console (skip login for now - may need mock auth)
-    await page.goto('/');
+    await page.goto('/console');
+  });
 
-    // Try to get to console via guest/skip login if available
-    const launchButton = page.getByRole('button', { name: /launch|start|get started|try/i });
-    if (await launchButton.isVisible()) {
-      await launchButton.click();
-    }
+  test('renders the empty state with its suggestion prompts', async ({ page }) => {
+    await expect(
+      page.getByRole('heading', { name: 'What can I help investigate?' })
+    ).toBeVisible();
 
-    // Look for skip/guest option or continue without login
-    const skipButton = page.getByRole('button', { name: /skip|guest|continue|demo/i });
-    if (await skipButton.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await skipButton.click();
+    for (const text of SUGGESTIONS) {
+      await expect(page.getByRole('button', { name: text })).toBeVisible();
     }
   });
 
-  test('should display suggestion prompts', async ({ page }) => {
-    // Wait for console to load
-    await page.waitForTimeout(1000);
+  test('the composer accepts input and enables Send', async ({ page }) => {
+    const composer = page.getByRole('textbox', { name: 'Ask about an incident' });
+    await expect(composer).toBeVisible();
 
-    // Check for suggestion prompts (common phrases in the app)
-    const suggestions = page.locator('.prompt, [class*="suggestion"], button:has-text("Why is")');
-    const count = await suggestions.count();
+    const send = page.getByRole('button', { name: 'Send message' });
+    // Empty composer: Send stays disabled, so an empty investigation cannot
+    // be submitted.
+    await expect(send).toBeDisabled();
 
-    // Should have at least one suggestion or be on login page
-    expect(count).toBeGreaterThanOrEqual(0);
+    await composer.fill('why is checkout 500ing?');
+    await expect(composer).toHaveValue('why is checkout 500ing?');
+    await expect(send).toBeEnabled();
   });
 
-  test('should have input field for queries', async ({ page }) => {
-    await page.waitForTimeout(1000);
+  test('the top bar links back to the landing page', async ({ page }) => {
+    const nav = page.locator('header.nav');
+    await expect(nav).toBeVisible();
 
-    // Look for textarea or input for queries
-    const input = page.locator('textarea, input[type="text"]').first();
-    if (await input.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await expect(input).toBeVisible();
-    }
-  });
-
-  test('should show navigation elements', async ({ page }) => {
-    await page.waitForTimeout(1000);
-
-    // Check for nav elements
-    const nav = page.locator('header, nav, .nav');
-    if (await nav.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await expect(nav).toBeVisible();
-    }
+    await nav.getByRole('button', { name: 'OmniPotent' }).click();
+    await expect(page).toHaveURL(/localhost:\d+\/$/);
   });
 });

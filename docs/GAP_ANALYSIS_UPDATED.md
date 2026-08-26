@@ -461,7 +461,7 @@ requires prior history for that service/metric pair before it fires.
 |-----------|--------|----------|
 | Customers, trials, billing usage events | ✅ Postgres | `app/customers/manager.py` → `crm_customers` / `crm_trials` / `crm_usage_events`, Alembic `002_crm` |
 | ORM schema creation | ✅ Wired | `app/database/engine.py:ensure_schema`, called from the API lifespan |
-| Investigation history & dashboard analytics | ✅ Postgres | `app/dashboard/metrics.py` → `investigations`, Alembic `003_investigations`; served by `GET /dashboard/metrics` and `/dashboard/trends` |
+| Investigation history & dashboard analytics | ✅ Postgres | `app/dashboard/metrics.py` → `investigations`, Alembic `003_investigations`; served by `GET /api/dashboard/metrics` and `/api/dashboard/trends` |
 | Planning graphs, coordinator DAG executions | ✅ Postgres | `app/planning/store.py` → `planning_graphs`, `app/coordinator/store.py` → `coordinator_executions`, Alembic `004_planning_coord` |
 | Runbook definitions & executions | ✅ Postgres | `app/runbooks/store.py` → `runbook_definitions` / `runbook_runs`, Alembic `005_runbooks`; built-ins seeded per org |
 | Waitlist signups | ✅ Postgres | `app/waitlist/store.py` → `waitlist_signups`, Alembic `006_waitlist`; not org-scoped, positions from `MAX(position)+1` under a unique constraint |

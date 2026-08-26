@@ -215,8 +215,11 @@ jobs:
 
       - name: Run smoke tests
         run: |
+          # /healthz, not /health: the SPA catch-all mount answers any unknown
+          # extension-less path with index.html, so `curl -sf .../health` returns
+          # 200 even when every API route is failing.
           for i in {1..30}; do
-            if curl -sf https://staging-api.omnipotent.com/health; then
+            if curl -sf https://staging-api.omnipotent.com/healthz; then
               echo "Health check passed"
               exit 0
             fi

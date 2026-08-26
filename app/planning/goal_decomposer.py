@@ -6,6 +6,7 @@ with dependency tracking and priority assignment.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
 import re
@@ -100,6 +101,11 @@ class DecompositionResult:
     parallelization_factor: float
     confidence: float
     reasoning: str
+    # Which of the three routes in `GoalDecomposer._select_decomposition`
+    # produced these sub-goals: "template", "llm" or "generic". Callers were
+    # told "template approach" whatever had actually happened, including for the
+    # five categories that have no template at all.
+    strategy: str = "template"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +116,7 @@ class DecompositionResult:
             "parallelization_factor": self.parallelization_factor,
             "confidence": self.confidence,
             "reasoning": self.reasoning,
+            "strategy": self.strategy,
         }
 
 
@@ -297,6 +304,15 @@ class GoalDecomposer:
         ],
     }
 
+    # How much to trust each route. A hand-written template for a category we
+    # have one for is the most reliable thing here; the four-step generic plan
+    # is a placeholder that has not read the goal, and says so.
+    STRATEGY_CONFIDENCE = {"template": 0.85, "llm": 0.7, "generic": 0.3}
+
+    # Bound on the per-org decomposition cache. One entry per distinct goal, held
+    # for the life of the process, was an unbounded dict keyed on user input.
+    CACHE_LIMIT = 256
+
     def __init__(
         self,
         llm_client: Any | None = None,
@@ -306,6 +322,77 @@ class GoalDecomposer:
         self.use_templates = use_templates
         self._decomposition_cache: dict[str, DecompositionResult] = {}
 
+    def _cache_key(self, goal: Goal) -> str:
+        """A key over everything that changes the decomposition.
+
+        The key was `category:description[:50]`, so two goals that differed only
+        in their context, constraints or priority — or only after the fiftieth
+        character of the description — were served each other's plan, labelled
+        "(cached)". Anything that feeds the prompt or the template belongs here.
+        """
+        payload = json.dumps(
+            {
+                "category": goal.category.value,
+                "description": goal.description,
+                "context": goal.context,
+                "constraints": goal.constraints,
+                "success_criteria": goal.success_criteria,
+                "priority": goal.priority.value,
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    async def _select_decomposition(
+        self,
+        goal: Goal,
+        max_depth: int,
+        max_sub_goals: int,
+    ) -> tuple[list[SubGoal], str]:
+        """Sub-goals plus the name of the route that produced them.
+
+        The old routing asked one question — `use_templates and category in
+        DECOMPOSITION_TEMPLATES` — and treated the else branch as "the LLM did
+        it". Only three of the eight categories have a template, so
+        optimization, maintenance, migration, security and monitoring all fell
+        through to a path that, with no `llm_client` configured (the only way
+        the API ever built this object), returned the same four generic tasks no
+        matter what the goal said. The caller then reported confidence 0.85 and
+        "using template approach" for all of it.
+        """
+        if self.use_templates and goal.category in self.DECOMPOSITION_TEMPLATES:
+            return self._apply_template(goal), "template"
+
+        if self.llm_client:
+            sub_goals = await self._decompose_with_llm(goal, max_depth, max_sub_goals)
+            if sub_goals:
+                return sub_goals, "llm"
+
+        return self._generate_basic_decomposition(goal), "generic"
+
+    def _reasoning(self, goal: Goal, sub_goals: list[SubGoal], strategy: str) -> str:
+        """A sentence a reader can act on, naming the route and its limits."""
+        count = len(sub_goals)
+        if strategy == "template":
+            return (
+                f"Decomposed into {count} sub-goals from the built-in "
+                f"{goal.category.value} template. The steps are fixed for this "
+                f"category; the goal text is passed to each of them as input."
+            )
+        if strategy == "llm":
+            return f"Decomposed into {count} sub-goals by the LLM from the goal description."
+        detail = (
+            "no LLM provider is configured"
+            if not self.llm_client
+            else "the LLM returned no usable sub-goals"
+        )
+        return (
+            f"No template exists for {goal.category.value} and {detail}, so this "
+            f"is a generic {count}-step placeholder that has not read the goal "
+            f"description. Treat it as a starting point, not a plan."
+        )
+
     async def decompose(
         self,
         goal: Goal,
@@ -313,7 +400,7 @@ class GoalDecomposer:
         max_sub_goals: int = 15,
     ) -> DecompositionResult:
         """Decompose a goal into sub-goals and task graph."""
-        cache_key = f"{goal.category.value}:{goal.description[:50]}"
+        cache_key = self._cache_key(goal)
         if cache_key in self._decomposition_cache:
             cached = self._decomposition_cache[cache_key]
             return DecompositionResult(
@@ -324,12 +411,10 @@ class GoalDecomposer:
                 parallelization_factor=cached.parallelization_factor,
                 confidence=cached.confidence,
                 reasoning=cached.reasoning + " (cached)",
+                strategy=cached.strategy,
             )
 
-        if self.use_templates and goal.category in self.DECOMPOSITION_TEMPLATES:
-            sub_goals = self._apply_template(goal)
-        else:
-            sub_goals = await self._decompose_with_llm(goal, max_depth, max_sub_goals)
+        sub_goals, strategy = await self._select_decomposition(goal, max_depth, max_sub_goals)
 
         sub_goals = self._enrich_with_context(sub_goals, goal)
 
@@ -353,12 +438,14 @@ class GoalDecomposer:
             task_graph=task_graph,
             estimated_total_minutes=total_minutes,
             parallelization_factor=parallel_factor,
-            confidence=0.85 if self.use_templates else 0.7,
-            reasoning=f"Decomposed into {len(sub_goals)} sub-goals using "
-            f"{'template' if self.use_templates else 'LLM'} approach",
+            confidence=self.STRATEGY_CONFIDENCE[strategy],
+            reasoning=self._reasoning(goal, sub_goals, strategy),
+            strategy=strategy,
         )
 
         self._decomposition_cache[cache_key] = result
+        while len(self._decomposition_cache) > self.CACHE_LIMIT:
+            self._decomposition_cache.pop(next(iter(self._decomposition_cache)))
 
         return result
 
@@ -389,9 +476,15 @@ class GoalDecomposer:
         max_depth: int,
         max_sub_goals: int,
     ) -> list[SubGoal]:
-        """Use LLM to decompose a goal."""
+        """Sub-goals from the LLM, or an empty list if it produced none.
+
+        Failure used to return `_generate_basic_decomposition(goal)`, which made
+        a failed call indistinguishable from a successful one at the call site:
+        the caller reported the confidence and reasoning it had already decided
+        on. Returning nothing lets `_select_decomposition` fall back and say so.
+        """
         if not self.llm_client:
-            return self._generate_basic_decomposition(goal)
+            return []
 
         prompt = self._build_decomposition_prompt(goal, max_sub_goals)
 
@@ -402,7 +495,7 @@ class GoalDecomposer:
 
         except Exception as e:
             log.error("LLM decomposition failed: %s", e)
-            return self._generate_basic_decomposition(goal)
+            return []
 
     def _build_decomposition_prompt(self, goal: Goal, max_sub_goals: int) -> str:
         """Build prompt for LLM decomposition."""
@@ -521,6 +614,13 @@ Output only valid JSON array.
                 "goal_id": goal.id,
                 "goal_category": goal.category.value,
                 "goal_context": goal.context,
+                # The text the user actually typed, plus what they said would
+                # count as done. A templated sub-goal is otherwise identical for
+                # every goal in its category, so without these the handler that
+                # runs it has no way to know what it is working on.
+                "goal_description": goal.description,
+                "goal_constraints": goal.constraints,
+                "goal_success_criteria": goal.success_criteria,
             })
 
             if goal.context.get("affected_services"):
@@ -606,6 +706,7 @@ Provide an updated JSON array of sub-goals with the same schema.
                     parallelization_factor=result.parallelization_factor,
                     confidence=result.confidence * 0.9,
                     reasoning=f"Refined based on feedback: {feedback[:100]}",
+                    strategy="llm",
                 )
 
         except Exception as e:

@@ -1,0 +1,84 @@
+# Break-glass schema downgrade — `alembic downgrade -1`.
+#
+# Deliberately NOT in deploy/kubernetes/kustomization.yaml. It used to be an
+# ArgoCD `SyncFail` hook in migration-job.yaml, which means a sync that failed for
+# any reason at all (bad image pull, quota, a wedged readiness probe) would drop
+# the last migration's columns underneath a running fleet. Downgrades destroy data
+# and must be a human decision, so run it explicitly:
+#
+#   kubectl -n omnipotent delete job omnipotent-migration-rollback --ignore-not-found
+#   kubectl -n omnipotent create -f deploy/kubernetes/base/migration-rollback-job.yaml
+#   kubectl -n omnipotent logs -f job/omnipotent-migration-rollback
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: omnipotent-migration-rollback
+  labels:
+    app.kubernetes.io/name: omnipotent-migration-rollback
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: omnipotent
+spec:
+  ttlSecondsAfterFinished: 7200
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omnipotent-migration-rollback
+        app.kubernetes.io/component: database
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      # The ServiceAccount serviceaccount.yaml actually creates (see migration-job.yaml).
+      serviceAccountName: omnipotent
+      # Matches the `appuser` UID the Dockerfile creates (see migration-job.yaml).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+
+      containers:
+        - name: rollback
+          image: ghcr.io/ankit25bcs10610/omnipotent:latest
+          imagePullPolicy: Always
+          workingDir: /app
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              CURRENT=$(alembic current 2>/dev/null | head -1 || echo "none")
+              echo "Current migration: $CURRENT"
+
+              echo "Rolling back one migration..."
+              alembic downgrade -1
+
+              echo "Rolled back to: $(alembic current 2>/dev/null | head -1 || echo none)"
+          env:
+            - name: COPILOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: omnipotent-secrets
+                  key: COPILOT_DATABASE_URL
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        - name: tmp
+          emptyDir: {}

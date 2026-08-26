@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
 from uuid import uuid4
 
 from app.billing.models import (
@@ -583,145 +582,138 @@ class TestFeatureGateService:
         assert status["api_access"]["expires_at"] is not None
 
 
-class TestRequireFeatureDecorator:
-    """Tests for require_feature decorator."""
+@pytest.fixture
+def gated(monkeypatch):
+    """Route the gate dependencies at a mock store and a known org.
+
+    `require_feature` / `check_usage_limit` are FastAPI dependencies, not
+    decorators: they take no arguments and resolve the store and the org the
+    same way the /billing/* routes do. Their previous incarnation read `db` and
+    `current_org` out of the endpoint's kwargs — parameters no route in this app
+    has — so the old tests here exercised a shape that could not be attached to
+    anything, and the paywall went unenforced with a green suite.
+    """
+    from app.api import billing_router
+    from app import config as cfg
+
+    store = MockBillingStore()
+    org_id = uuid4()
+    monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
+    cfg.get_settings.cache_clear()
+    monkeypatch.setattr(billing_router, "_get_store", lambda: store)
+    monkeypatch.setattr(billing_router, "_current_org_id", lambda: org_id)
+    yield store, org_id
+    cfg.get_settings.cache_clear()
+
+
+def _subscribe(store, org_id, plan):
+    store.subscriptions[org_id] = Subscription(
+        org_id=org_id, plan_id=plan.plan_id, status=SubscriptionStatus.ACTIVE
+    )
+    store.plans[plan.plan_id] = plan
+
+
+class TestRequireFeatureDependency:
+    """Tests for the require_feature route dependency."""
 
     @pytest.mark.asyncio
-    async def test_require_feature_missing_dependencies(self):
-        """require_feature should raise for missing dependencies."""
-
-        @require_feature("api_access")
-        async def test_func():
-            return "success"
-
-        with pytest.raises(PermissionError, match="Missing dependencies"):
-            await test_func()
-
-    @pytest.mark.asyncio
-    async def test_require_feature_allowed(self):
-        """require_feature should allow access when feature is available."""
-        store = MockBillingStore()
-        org_id = uuid4()
-        plan = PricingPlan(
+    async def test_require_feature_allowed(self, gated):
+        """A plan that includes the feature passes the dependency."""
+        store, org_id = gated
+        _subscribe(store, org_id, PricingPlan(
             plan_id=uuid4(),
             name="team",
             tier=PlanTier.TEAM,
             features=PlanFeatures(api_access=True),
-        )
-        sub = Subscription(
-            org_id=org_id,
-            plan_id=plan.plan_id,
-            status=SubscriptionStatus.ACTIVE,
-        )
-        store.subscriptions[org_id] = sub
-        store.plans[plan.plan_id] = plan
+        ))
 
-        mock_org = MagicMock()
-        mock_org.org_id = org_id
-
-        @require_feature("api_access")
-        async def test_func(db=None, current_org=None):
-            return "success"
-
-        result = await test_func(db=store, current_org=mock_org)
-        assert result == "success"
+        assert await require_feature("api_access")() is None
 
     @pytest.mark.asyncio
-    async def test_require_feature_denied(self):
-        """require_feature should deny access when feature is not available."""
-        store = MockBillingStore()
-        org_id = uuid4()
+    async def test_require_feature_denied_is_402_with_an_upgrade_path(self, gated):
+        """A plan without the feature gets 402 and is told what to buy."""
+        from fastapi import HTTPException
 
-        mock_org = MagicMock()
-        mock_org.org_id = org_id
+        with pytest.raises(HTTPException) as exc:
+            await require_feature("api_access")()
 
-        @require_feature("api_access")
-        async def test_func(db=None, current_org=None):
-            return "success"
-
-        with pytest.raises(PermissionError, match="Feature not available"):
-            await test_func(db=store, current_org=mock_org)
-
-
-class TestCheckUsageLimitDecorator:
-    """Tests for check_usage_limit decorator."""
+        assert exc.value.status_code == 402
+        assert exc.value.detail["error"] == "feature_not_available"
+        assert exc.value.detail["feature"] == "api_access"
+        assert exc.value.detail["upgrade_url"]
 
     @pytest.mark.asyncio
-    async def test_check_usage_limit_missing_dependencies(self):
-        """check_usage_limit should raise for missing dependencies."""
+    async def test_single_tenant_deployments_are_not_gated(self, gated, monkeypatch):
+        """A self-hosted install has no subscription; gating it locks its own
+        operator out of features they were never billed for."""
+        from app import config as cfg
 
-        @check_usage_limit(MetricType.AI_INVESTIGATION)
-        async def test_func():
-            return "success"
+        monkeypatch.setenv("COPILOT_MULTI_TENANT", "false")
+        cfg.get_settings.cache_clear()
 
-        with pytest.raises(PermissionError, match="Missing dependencies"):
-            await test_func()
+        assert await require_feature("api_access")() is None
+
+
+class TestCheckUsageLimitDependency:
+    """Tests for the check_usage_limit route dependency."""
 
     @pytest.mark.asyncio
-    async def test_check_usage_limit_within_limit(self):
-        """check_usage_limit should allow when within limit."""
-        store = MockBillingStore()
-        org_id = uuid4()
-        plan = PricingPlan(
+    async def test_check_usage_limit_within_limit(self, gated):
+        """Headroom left in the monthly allowance passes the dependency."""
+        store, org_id = gated
+        _subscribe(store, org_id, PricingPlan(
             plan_id=uuid4(),
             name="team",
             tier=PlanTier.TEAM,
             max_ai_investigations_monthly=500,
-        )
-        sub = Subscription(
-            org_id=org_id,
-            plan_id=plan.plan_id,
-            status=SubscriptionStatus.ACTIVE,
-        )
-        store.subscriptions[org_id] = sub
-        store.plans[plan.plan_id] = plan
+        ))
 
-        mock_org = MagicMock()
-        mock_org.org_id = org_id
-
-        @check_usage_limit(MetricType.AI_INVESTIGATION)
-        async def test_func(db=None, current_org=None):
-            return "success"
-
-        result = await test_func(db=store, current_org=mock_org)
-        assert result == "success"
+        assert await check_usage_limit(MetricType.AI_INVESTIGATION)() is None
 
     @pytest.mark.asyncio
-    async def test_check_usage_limit_exceeded(self):
-        """check_usage_limit should deny when limit exceeded."""
-        store = MockBillingStore()
-        org_id = uuid4()
-        plan = PricingPlan(
+    async def test_check_usage_limit_exceeded_is_402(self, gated):
+        """A spent allowance gets 402 with the count and the limit."""
+        from fastapi import HTTPException
+
+        store, org_id = gated
+        _subscribe(store, org_id, PricingPlan(
             plan_id=uuid4(),
             name="starter",
             tier=PlanTier.STARTER,
             max_ai_investigations_monthly=25,
-        )
-        sub = Subscription(
-            org_id=org_id,
-            plan_id=plan.plan_id,
-            status=SubscriptionStatus.ACTIVE,
-        )
-        store.subscriptions[org_id] = sub
-        store.plans[plan.plan_id] = plan
+        ))
 
         year_month = datetime.now(timezone.utc).strftime("%Y-%m")
-        summary = UsageSummary(
+        store.usage_summaries[f"{org_id}:{year_month}"] = UsageSummary(
             org_id=org_id,
             year_month=year_month,
             ai_investigations_count=25,
         )
-        store.usage_summaries[f"{org_id}:{year_month}"] = summary
 
-        mock_org = MagicMock()
-        mock_org.org_id = org_id
+        with pytest.raises(HTTPException) as exc:
+            await check_usage_limit(MetricType.AI_INVESTIGATION)()
 
-        @check_usage_limit(MetricType.AI_INVESTIGATION)
-        async def test_func(db=None, current_org=None):
-            return "success"
+        assert exc.value.status_code == 402
+        assert exc.value.detail["error"] == "usage_limit_exceeded"
+        assert exc.value.detail["current_usage"] == 25
+        assert exc.value.detail["limit"] == 25
 
-        with pytest.raises(PermissionError, match="Usage limit exceeded"):
-            await test_func(db=store, current_org=mock_org)
+    @pytest.mark.asyncio
+    async def test_single_tenant_deployments_are_not_metered(self, gated, monkeypatch):
+        """Same no-op as require_feature, for the same reason."""
+        from app import config as cfg
+
+        store, org_id = gated
+        _subscribe(store, org_id, PricingPlan(
+            plan_id=uuid4(),
+            name="starter",
+            tier=PlanTier.STARTER,
+            max_ai_investigations_monthly=0,
+        ))
+        monkeypatch.setenv("COPILOT_MULTI_TENANT", "false")
+        cfg.get_settings.cache_clear()
+
+        assert await check_usage_limit(MetricType.AI_INVESTIGATION)() is None
 
 
 class TestFeatureGateContextManager:

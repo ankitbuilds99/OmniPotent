@@ -38,6 +38,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 # same Base.metadata as app/database/models.py, so create_all() compiles all of them
 # together and one postgresql-only column here makes every table in the app
 # uncreatable on SQLite — the default backend. Same PostgreSQL DDL either way.
+# `JSONType` is app/database/types.py's portable JSON column, re-exported from
+# app/database/models.py.
 from app.database.models import Base, JSONType
 
 
@@ -552,6 +554,14 @@ class OncallAlert(Base):
     )
     current_escalation_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     escalation_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the next step is due. `_schedule_next_escalation` only wrote a log
+    # line, so nothing ever called `escalate_to_next_step` and every alert sat
+    # on step 0 forever — the delays configured in a policy were decorative.
+    # Persisting the due time (rather than sleeping in-process) is what makes an
+    # escalation survive the restart that happens mid-incident.
+    next_escalation_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
 
     # AI analysis
     ai_analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONType)

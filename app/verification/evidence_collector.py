@@ -75,22 +75,62 @@ class EvidenceCollector:
         k8s_client: Any = None,
         github_token: str | None = None,
         knowledge_graph: Any = None,
+        github_repo: str | None = None,
+        github_api_url: str = "https://api.github.com",
     ):
         self.prometheus_url = prometheus_url
         self.loki_url = loki_url
         self.elasticsearch_url = elasticsearch_url
         self.k8s = k8s_client
         self.github_token = github_token
+        self.github_repo = github_repo
+        self.github_api_url = github_api_url.rstrip("/")
         self.graph = knowledge_graph
         self._http_client: httpx.AsyncClient | None = None
 
+    def configured_sources(self) -> list[EvidenceSource]:
+        """The evidence sources this collector can actually reach.
+
+        Empty means the collector cannot gather anything, so any verdict it
+        produced would be an artefact of missing configuration rather than a
+        statement about the claim. Callers use this to fail loudly.
+        """
+        available: list[EvidenceSource] = []
+        if self.prometheus_url:
+            available.append(EvidenceSource.METRICS)
+        if self.loki_url or self.elasticsearch_url:
+            available.append(EvidenceSource.LOGS)
+        if self.k8s:
+            available.append(EvidenceSource.KUBERNETES)
+        if self.github_token and self.github_repo:
+            available.append(EvidenceSource.GIT)
+        if self.graph:
+            available.append(EvidenceSource.KNOWLEDGE_GRAPH)
+        return available
+
+    @staticmethod
+    def missing_source_config() -> dict[str, str]:
+        """Setting name -> what enabling it buys, for the 503 body."""
+        return {
+            "PROMETHEUS_URL": "metric evidence (Prometheus HTTP API)",
+            "LOKI_URL or ELASTICSEARCH_URL": "log evidence",
+            "GITHUB_TOKEN + GITHUB_REPO": "git/deploy evidence",
+        }
+
     async def _get_http_client(self) -> httpx.AsyncClient:
+        # No default Authorization header: this one client also talks to
+        # Prometheus, Loki and Elasticsearch, and a default header would send
+        # the GitHub token to every one of them. The token is attached per
+        # request, to GitHub only (see _github_headers).
         if self._http_client is None:
-            headers = {}
-            if self.github_token:
-                headers["Authorization"] = f"token {self.github_token}"
-            self._http_client = httpx.AsyncClient(timeout=30.0, headers=headers)
+            self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
+
+    def _github_headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/vnd.github+json"}
+        if self.github_token:
+            headers["Authorization"] = f"token {self.github_token}"
+        return headers
 
     async def close(self) -> None:
         if self._http_client:
@@ -397,11 +437,77 @@ class EvidenceCollector:
         service_id: str | None,
         time_window: int,
     ) -> list[Evidence]:
-        """Collect Git/GitHub evidence."""
+        """Collect Git/GitHub evidence: commits landed inside the time window."""
         evidence: list[Evidence] = []
 
         if not self.github_token or not service_id:
             return evidence
+
+        if not self.github_repo:
+            log.debug(
+                "GITHUB_TOKEN is set but GITHUB_REPO is not; no repository to "
+                "read commit history from, so no git evidence is collected"
+            )
+            return evidence
+
+        since = datetime.now(timezone.utc) - timedelta(minutes=time_window)
+        client = await self._get_http_client()
+
+        try:
+            response = await client.get(
+                f"{self.github_api_url}/repos/{self.github_repo}/commits",
+                params={"since": since.isoformat(), "per_page": 30},
+                headers=self._github_headers(),
+            )
+            response.raise_for_status()
+            commits = response.json()
+        except Exception as e:
+            log.debug("GitHub commit query failed for %s: %s", self.github_repo, e)
+            return evidence
+
+        if not isinstance(commits, list) or not commits:
+            return evidence
+
+        service_lower = service_id.lower()
+        parsed: list[dict[str, Any]] = []
+        for item in commits:
+            if not isinstance(item, dict):
+                continue
+            commit = item.get("commit") or {}
+            author = (commit.get("author") or {}).get("name")
+            message = commit.get("message") or ""
+            parsed.append({
+                "sha": item.get("sha"),
+                "author": author,
+                "message": message.splitlines()[0][:200] if message else "",
+                "committed_at": (commit.get("author") or {}).get("date"),
+                "mentions_service": service_lower in message.lower(),
+            })
+
+        if not parsed:
+            return evidence
+
+        service_commits = [c for c in parsed if c["mentions_service"]]
+        relevant = service_commits or parsed
+        # A commit naming the service is much stronger evidence that a change
+        # touched it than "something landed in the monorepo".
+        confidence = 0.8 if service_commits else 0.4
+
+        evidence.append(Evidence(
+            source=EvidenceSource.GIT,
+            data={
+                "type": "recent_commits",
+                "repo": self.github_repo,
+                "window_minutes": time_window,
+                "count": len(relevant),
+                "matched_service": bool(service_commits),
+                "commits": relevant[:5],
+            },
+            timestamp=datetime.now(timezone.utc),
+            confidence=confidence,
+            commit_sha=relevant[0]["sha"],
+            author=relevant[0]["author"],
+        ))
 
         return evidence
 

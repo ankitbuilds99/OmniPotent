@@ -8,6 +8,8 @@ resources:
   - configmap.yaml
   - secret.yaml
   - serviceaccount.yaml
+  # Runs `alembic upgrade head` before the Deployment rolls (ArgoCD sync-wave -1).
+  - base/migration-job.yaml
   - deployment.yaml
   - service.yaml
   - ingress.yaml

@@ -97,3 +97,35 @@ async def resolve_jwt(token: str) -> tuple[TenantConfig, str] | None:
         return None
     secrets = await store.get_integration_secrets(org_id)
     return build_tenant_config(org, role, secrets), f"user:{email}"
+
+
+async def resolve_session(token: str) -> tuple[TenantConfig, str] | None:
+    """Validate a session token minted by our own OAuth flow (app/auth/oauth.py,
+    HS256 over COPILOT_SECRET_KEY) and map it to a TenantConfig.
+
+    This is the credential a user actually holds after completing GitHub/Google
+    login, so without it a signed-in user is anonymous to every API route.
+
+    The org and role come from the tenant store's membership table, not from the
+    token, so revoking a membership or demoting a role takes effect immediately
+    instead of at token expiry. The token only proves *identity* (email).
+    Returns (config, actor) or None (bad/expired token, or not a member).
+    """
+    from app.auth.oauth import verify_session_token
+
+    claims = await verify_session_token(token)
+    if not claims:
+        return None
+    email = (claims.get("email") or "").strip().lower()
+    if not email:
+        return None
+    store = get_store()
+    membership = await store.get_membership_by_email(email)
+    if not membership:
+        return None  # authenticated, but not provisioned into any org
+    org_id, role = membership
+    org = await store.get_org(org_id)
+    if not org:
+        return None
+    secrets = await store.get_integration_secrets(org_id)
+    return build_tenant_config(org, role, secrets), f"user:{email}"

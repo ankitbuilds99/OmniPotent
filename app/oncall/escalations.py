@@ -92,13 +92,23 @@ class EscalationTarget:
     slack_mention_users: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary."""
+        """Convert to dictionary.
+
+        This is what gets persisted into the policy's JSONB column, so anything
+        omitted here is lost for good. `webhook_url` and `slack_channel_id` used
+        to be dropped, which left a webhook or Slack target with no destination
+        to deliver to once it was read back out.
+        """
         return {
             "target_type": self.target_type.value,
             "target_id": self.target_id,
             "target_name": self.target_name,
             "schedule_layer": self.schedule_layer,
             "team_notify_strategy": self.team_notify_strategy,
+            "webhook_url": self.webhook_url,
+            "webhook_headers": self.webhook_headers,
+            "slack_channel_id": self.slack_channel_id,
+            "slack_mention_users": self.slack_mention_users,
         }
 
 
@@ -187,6 +197,14 @@ class EscalationStep:
             "repeat_count": self.repeat_count,
             "repeat_delay_minutes": self.repeat_delay_minutes,
             "description": self.description,
+            # `create_escalation_policy` persists `step_config.get("skip_if")`.
+            # This key was never emitted, so it was always None and the "stop
+            # paging once someone acknowledges" guard never fired — an
+            # acknowledged alert kept escalating through every remaining step.
+            "skip_if": {
+                "acknowledged": self.skip_if_acknowledged,
+                "resolved": self.skip_if_resolved,
+            },
         }
 
 

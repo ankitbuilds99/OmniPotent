@@ -259,50 +259,6 @@ class TestWebhookSignatureVerification:
         assert not verify_signature(secret, old_timestamp, body, sig)
 
 
-class TestAPIKeyValidation:
-    """Tests for API key validation."""
-
-    def test_valid_api_key_format(self):
-        """Test that valid API key formats are accepted."""
-        from app.security.api_auth import validate_api_key_format
-
-        valid_keys = [
-            "sk_live_" + "a" * 32,
-            "sk_test_" + "b" * 32,
-            "cop_" + "c" * 40,
-        ]
-
-        for key in valid_keys:
-            assert validate_api_key_format(key)
-
-    def test_invalid_api_key_format_rejected(self):
-        """Test that invalid API key formats are rejected."""
-        from app.security.api_auth import validate_api_key_format
-
-        invalid_keys = [
-            "",
-            "short",
-            "no_prefix_" + "a" * 32,
-            "<script>alert(1)</script>",
-            "sk_live_" + "x" * 10,
-        ]
-
-        for key in invalid_keys:
-            assert not validate_api_key_format(key)
-
-    def test_api_key_extraction_from_header(self):
-        """Test API key extraction from Authorization header."""
-        from app.security.api_auth import extract_api_key
-
-        assert extract_api_key("Bearer sk_live_abc123") == "sk_live_abc123"
-        assert extract_api_key("bearer SK_LIVE_ABC123") == "SK_LIVE_ABC123"
-        assert extract_api_key("sk_live_abc123") == "sk_live_abc123"
-
-        assert extract_api_key("") is None
-        assert extract_api_key("Basic dXNlcjpwYXNz") is None
-        assert extract_api_key("InvalidScheme token") is None
-
-
 class TestRateLimiting:
     """Tests for rate limiting security."""
 

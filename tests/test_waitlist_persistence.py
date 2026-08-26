@@ -30,6 +30,11 @@ from app.database.engine import close_db, get_session
 from app.database.models import WaitlistSignup
 from app.waitlist import manager, store
 
+# Joining the waitlist is anonymous, but the roll-up over every lead's email is
+# operator-only; tests/test_growth_api_auth.py pins who may reach which.
+OPERATOR_TOKEN = "test-operator-token"
+OPERATOR = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
+
 
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):
@@ -40,6 +45,7 @@ def db(tmp_path, monkeypatch):
     at *that* test's tmp_path.
     """
     monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("COPILOT_OPERATOR_TOKEN", OPERATOR_TOKEN)
     cfg.get_settings.cache_clear()
     asyncio.run(close_db())
     yield
@@ -475,7 +481,7 @@ def test_api_stats_reflect_the_table(client):
     client.post("/waitlist", json={"email": "s1@example.com", "source": "product_hunt"})
     client.post("/waitlist", json={"email": "s2@example.com"})
 
-    stats = client.get("/waitlist/stats")
+    stats = client.get("/waitlist/stats", headers=OPERATOR)
     assert stats.status_code == 200
     body = stats.json()
     assert body["total_signups"] == 2

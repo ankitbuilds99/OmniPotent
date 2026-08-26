@@ -17,6 +17,12 @@ task at the same instant each read, mutate and write the whole state, so one
 task is lost. That is a real change from the shared-dict behaviour and is
 accepted here because a graph is built by one operator issuing sequential calls.
 Anything that needs concurrent writers wants per-task rows, not this table.
+
+The execution engine and the goal decomposer are per-org too (`_engines` /
+`_decomposers` below, via `app/tenancy/scoping.py`), and both are built from the
+deployment's real configuration: the engine's default tools query the configured
+Loki/Prometheus/Slack instead of returning constant success dicts, and the
+decomposer gets an LLM client when a provider key is set.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
+from app.config import get_settings
 from app.planning import store
 from app.planning.task_graph import (
     TaskGraph,
@@ -43,32 +50,88 @@ from app.planning.execution_engine import (
     ExecutionEngine,
     create_default_tools,
 )
-from app.tenant_context import storage_org_id
+from app.tenancy.scoping import scoped
+from app.tenant_context import integration_secret, storage_org_id
 
 log = logging.getLogger("omnipotent.planning.api")
 
 router = APIRouter(prefix="/planning", tags=["planning"])
 
-_execution_engine: ExecutionEngine | None = None
-_goal_decomposer: GoalDecomposer | None = None
+
+def _build_execution_engine() -> ExecutionEngine:
+    """An engine whose default tools point at whatever this deployment has.
+
+    The tools were built with no arguments, which meant every one of them was a
+    stub returning a constant success dict. They now take the same backend URLs
+    the rest of the app uses, and the ones with nothing behind them say so.
+    """
+    settings = get_settings()
+    engine = ExecutionEngine()
+    tools = create_default_tools(
+        prometheus_url=settings.prometheus_url or None,
+        loki_url=settings.loki_url or None,
+        elasticsearch_url=settings.elasticsearch_url or None,
+        traces_api_url=settings.traces_api_url or None,
+        slack_token=integration_secret("SLACK_BOT_TOKEN", settings.slack_bot_token),
+        slack_channel=integration_secret("SLACK_CHANNEL", settings.slack_channel),
+    )
+    for name, handler in tools.items():
+        engine.register_tool(name, handler)
+    return engine
+
+
+class _LLMTextClient:
+    """The `generate(prompt) -> str` interface `GoalDecomposer` expects, over the
+    app's configured chat model.
+
+    The decomposer was only ever constructed without one, so its LLM path could
+    not be reached: every category without a built-in template produced the same
+    four-step placeholder regardless of what the goal said.
+    """
+
+    async def generate(self, prompt: str) -> str:
+        from app.llm import get_llm
+
+        message = await get_llm(fast=True).ainvoke(prompt)
+        content = getattr(message, "content", message)
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        return str(content)
+
+
+def _build_goal_decomposer() -> GoalDecomposer:
+    """Templates for the categories that have one, the LLM for the rest.
+
+    `llm_client` stays None when no provider key is configured; the decomposer
+    then reports its `generic` strategy and a confidence to match, rather than
+    presenting the placeholder as a template it does not have.
+    """
+    from app.llm import active_api_key
+
+    client = _LLMTextClient() if active_api_key() else None
+    return GoalDecomposer(llm_client=client, use_templates=True)
+
+
+# One engine and one decomposer per org. The engine holds a tenant's live
+# execution results and its tools are built from that tenant's configured
+# integrations, so a shared process global let any tenant read and run against
+# another's. (The graphs themselves are no longer held in process at all — they
+# are rows in planning_graphs, keyed on (id, org_id); see app/planning/store.py.)
+_engines = scoped(_build_execution_engine)
+_decomposers = scoped(_build_goal_decomposer)
 
 
 def get_execution_engine() -> ExecutionEngine:
-    """Get or create execution engine."""
-    global _execution_engine
-    if _execution_engine is None:
-        _execution_engine = ExecutionEngine()
-        for name, handler in create_default_tools().items():
-            _execution_engine.register_tool(name, handler)
-    return _execution_engine
+    """The execution engine for the org on the current request."""
+    return _engines.get()
 
 
 def get_goal_decomposer() -> GoalDecomposer:
-    """Get or create goal decomposer."""
-    global _goal_decomposer
-    if _goal_decomposer is None:
-        _goal_decomposer = GoalDecomposer(use_templates=True)
-    return _goal_decomposer
+    """The goal decomposer for the org on the current request."""
+    return _decomposers.get()
 
 
 async def _require_graph(org_id: str, graph_id: str) -> TaskGraph:
@@ -286,7 +349,8 @@ async def execute_graph(
     """Execute a task graph."""
     # Resolved here, not inside run_execution: a BackgroundTask can run after the
     # middleware has reset the tenant contextvar, which would file the saved
-    # result under the wrong org.
+    # result under the wrong org — and `get_execution_engine()` reads the same
+    # contextvar, so the engine has to be picked here too.
     org_id = storage_org_id()
     graph = await _require_graph(org_id, graph_id)
     engine = get_execution_engine()

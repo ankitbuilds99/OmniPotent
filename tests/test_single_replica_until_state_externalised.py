@@ -35,8 +35,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Removed from this list because they were externalised, not because they were
 # forgotten:
 #   app/customers/manager.py  _customer_store / _email_index / _trial_store /
-#                             _usage_store  ->  Postgres (crm_customers,
-#                             crm_trials, crm_usage_events; migration 002_crm).
+#                             _usage_store  ->  Postgres (customers, trials,
+#                             customer_usage_records; migration 015_growth).
+#                             This line used to name crm_customers / crm_trials
+#                             / crm_usage_events (migration 002_crm), which is a
+#                             different, older set of tables that the manager
+#                             does not read: it imports growth_models, so an
+#                             operator following this ledger to find a lost
+#                             customer would have queried three empty tables.
 #                             tests/test_customers.py::TestPersistence covers it.
 #   app/dashboard/metrics.py  _investigation_store  ->  Postgres (investigations;
 #                             migration 003_investigations). One row per
@@ -107,6 +113,38 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 #                             `(org_id, seq)`, which is what lets several
 #                             processes append to a serial chain at once.
 #                             tests/test_audit_chain_persistence.py covers it.
+#   app/slo/tracker.py        _SLOS / _SLI_DATA  ->  Postgres (slos,
+#                             sli_measurements; migration 007_slos). The two
+#                             dicts, not the tracker, were where every objective
+#                             lived — `_get_tracker` builds a fresh SLOTracker
+#                             per request — so a restart deleted each customer's
+#                             objectives together with the measurement series
+#                             the error budget is computed from, and the
+#                             burn-rate alerts went quiet at exactly the moment
+#                             the deploy that caused the burn happened.
+#                             tests/test_slo_store.py covers it.
+#   app/status_page/store.py  _components / _incidents / _maintenances /
+#                             _subscribers  ->  Postgres (status_components,
+#                             status_incidents, status_incident_updates,
+#                             status_maintenances, status_subscribers,
+#                             status_uptime_records; migration 008_status). The
+#                             page a customer's users refresh during an outage
+#                             came back reading "All Systems Operational" as
+#                             soon as the process holding the incident went
+#                             away. Component status is now measured by real
+#                             health checks rather than typed in by an admin,
+#                             and anything the checks cannot classify is
+#                             DEGRADED, never OPERATIONAL.
+#                             tests/test_status_page_store.py covers it.
+#   app/incidents/store.py    _incidents / _investigations  ->  Postgres
+#                             (incidents, incident_investigations; migration
+#                             003_incidents). Both reads and writes filter on
+#                             `org_uuid()`, so isolation no longer depends on
+#                             which in-process instance the caller was handed,
+#                             and the three fabricated demo incidents the dict
+#                             was seeded with — which every org saw as its own —
+#                             are gone rather than relabelled.
+#                             tests/test_incidents_store.py covers it.
 #
 # The list below was rebuilt after the teams and OAuth slices, because both were
 # missing from it and the reason was the same each time: the scan that seeded it
@@ -156,13 +194,6 @@ IN_MEMORY_STORES: list[tuple[str, str]] = [
     # Same file, same shape, missed when the first two were listed.
     ("app/cost_optimizer/api_router.py", "_token_optimizers"),
     ("app/cost_optimizer/api_router.py", "_gpu_trackers"),
-    # SLO definitions and the samples compliance is computed from, behind the
-    # wired /slo routes. UPPER_CASE, which is the only reason they were missed.
-    # Note the tracker is constructed per request (`_get_tracker` returns a new
-    # SLOTracker every call), so these two dicts — not the tracker — are where
-    # every SLO actually lives.
-    ("app/slo/tracker.py", "_SLOS"),
-    ("app/slo/tracker.py", "_SLI_DATA"),
     # Read by /investigations in app/api/main.py, which imports it inside the
     # handler — an import edge no module-level scan would have followed.
     ("app/api/graphql/schema.py", "_investigations"),
@@ -178,19 +209,12 @@ IN_MEMORY_STORES: list[tuple[str, str]] = [
 # so these move to Postgres exactly the way the module-level dicts did. They are
 # listed apart only because finding them needs the instance-attribute scan —
 # the blind spot that hid the teams store through six slices.
-SINGLETON_HELD_STORES: list[tuple[str, str]] = [
-    # `get_status_store()` returns an InMemoryStatusStore; there is no other
-    # implementation. Behind the wired /status routes, so a public status page's
-    # components, incidents and subscribers are per-pod and reset on deploy —
-    # including the subscribers who asked to be told about the next outage.
-    ("app/status_page/store.py", "_components"),
-    ("app/status_page/store.py", "_incidents"),
-    ("app/status_page/store.py", "_maintenances"),
-    ("app/status_page/store.py", "_subscribers"),
-    # `get_incident_store()`, behind the wired /api/incidents routes.
-    ("app/incidents/store.py", "_incidents"),
-    ("app/incidents/store.py", "_investigations"),
-]
+#
+# Empty as of the status-page and incident slices, and kept rather than deleted:
+# the category is what tells the next reader that a `get_*_store()` singleton is
+# a place to look. The scan that fills it (`_instance_dict_attrs`) is what found
+# the teams store, and losing the category loses that.
+SINGLETON_HELD_STORES: list[tuple[str, str]] = []
 
 # Process-local state held on *instances* rather than at module scope, as
 # (module path, attribute name). Reached through a module-level singleton, so it

@@ -17,31 +17,33 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+
+# Not `sqlalchemy.dialects.postgresql` directly. JSONB stays JSONB on PostgreSQL,
+# so the emitted PostgreSQL DDL is unchanged and a database that already ran this
+# revision is unaffected — but a bare postgresql.JSONB() cannot be COMPILED
+# outside PostgreSQL, and alembic.ini defaults sqlalchemy.url to SQLite. Every
+# scripted `alembic upgrade head` therefore died at this revision, before
+# creating a single table, with:
+#   CompileError (in table 'organizations', column 'settings'): ...
+#   can't render element of type JSONB
+# These are the same portable types the ORM models use, which is also what keeps
+# `alembic check` (see .github/workflows/database-migrations.yml) quiet.
+from app.database.types import JSONB, UUID
 
 revision: str = "001_initial"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# JSONB on PostgreSQL, plain JSON anywhere else. The emitted PostgreSQL DDL is
-# unchanged (so a database that already ran this revision is unaffected), but a
-# bare postgresql.JSONB() cannot be COMPILED outside PostgreSQL — and alembic.ini
-# defaults sqlalchemy.url to SQLite, so `alembic upgrade head` failed at this
-# revision on the default configuration with:
-#   CompileError (in table 'organizations', column 'settings'): ...
-#   can't render element of type JSONB
-JSONType = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
-
 
 def upgrade() -> None:
     op.create_table(
         "organizations",
-        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("id", UUID(), nullable=False),
         sa.Column("slug", sa.String(64), nullable=False),
         sa.Column("name", sa.String(256), nullable=False),
-        sa.Column("plan", sa.String(32), nullable=False, server_default="free"),
-        sa.Column("settings", JSONType, nullable=True, server_default="{}"),
+        sa.Column("plan", sa.String(32), nullable=False),
+        sa.Column("settings", JSONB, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -50,13 +52,13 @@ def upgrade() -> None:
 
     op.create_table(
         "api_keys",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=False),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=False),
         sa.Column("key_hash", sa.String(128), nullable=False),
         sa.Column("key_prefix", sa.String(16), nullable=False),
-        sa.Column("name", sa.String(128), nullable=False, server_default=""),
-        sa.Column("role", sa.String(32), nullable=False, server_default="responder"),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default="true"),
+        sa.Column("name", sa.String(128), nullable=False),
+        sa.Column("role", sa.String(32), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False),
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -68,11 +70,11 @@ def upgrade() -> None:
 
     op.create_table(
         "members",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=False),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=False),
         sa.Column("email", sa.String(256), nullable=False),
-        sa.Column("role", sa.String(32), nullable=False, server_default="viewer"),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default="true"),
+        sa.Column("role", sa.String(32), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["org_id"], ["organizations.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -81,14 +83,14 @@ def upgrade() -> None:
 
     op.create_table(
         "investigations",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=False),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=False),
         sa.Column("thread_id", sa.String(128), nullable=False),
-        sa.Column("status", sa.String(32), nullable=False, server_default="active"),
+        sa.Column("status", sa.String(32), nullable=False),
         sa.Column("query", sa.Text(), nullable=False),
         sa.Column("summary", sa.Text(), nullable=True),
-        sa.Column("report", JSONType, nullable=True),
-        sa.Column("tokens_used", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("report", JSONB, nullable=True),
+        sa.Column("tokens_used", sa.Integer(), nullable=False),
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("feedback_rating", sa.String(16), nullable=True),
         sa.Column("feedback_comment", sa.Text(), nullable=True),
@@ -103,10 +105,10 @@ def upgrade() -> None:
 
     op.create_table(
         "investigation_events",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("investigation_id", sa.UUID(), nullable=False),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("investigation_id", UUID(), nullable=False),
         sa.Column("event_type", sa.String(32), nullable=False),
-        sa.Column("data", JSONType, nullable=True, server_default="{}"),
+        sa.Column("data", JSONB, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["investigation_id"], ["investigations.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -116,10 +118,10 @@ def upgrade() -> None:
     op.create_table(
         "audit_logs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=True),
+        sa.Column("org_id", UUID(), nullable=True),
         sa.Column("actor", sa.String(256), nullable=True),
         sa.Column("event_type", sa.String(64), nullable=False),
-        sa.Column("data", JSONType, nullable=True, server_default="{}"),
+        sa.Column("data", JSONB, nullable=False),
         sa.Column("prev_hash", sa.String(64), nullable=False),
         sa.Column("entry_hash", sa.String(64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -132,19 +134,19 @@ def upgrade() -> None:
 
     op.create_table(
         "alert_rules",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=True),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=True),
         sa.Column("name", sa.String(128), nullable=False),
-        sa.Column("description", sa.Text(), nullable=False, server_default=""),
-        sa.Column("service", sa.String(128), nullable=False, server_default="*"),
+        sa.Column("description", sa.Text(), nullable=False),
+        sa.Column("service", sa.String(128), nullable=False),
         sa.Column("metric", sa.String(128), nullable=False),
         sa.Column("condition", sa.String(32), nullable=False),
         sa.Column("threshold", sa.Float(), nullable=False),
-        sa.Column("duration_seconds", sa.Integer(), nullable=False, server_default="300"),
-        sa.Column("severity", sa.String(16), nullable=False, server_default="high"),
-        sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default="true"),
-        sa.Column("notification_channels", JSONType, nullable=True, server_default="[]"),
-        sa.Column("labels", JSONType, nullable=True, server_default="{}"),
+        sa.Column("duration_seconds", sa.Integer(), nullable=False),
+        sa.Column("severity", sa.String(16), nullable=False),
+        sa.Column("is_enabled", sa.Boolean(), nullable=False),
+        sa.Column("notification_channels", JSONB, nullable=False),
+        sa.Column("labels", JSONB, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -153,12 +155,12 @@ def upgrade() -> None:
 
     op.create_table(
         "alert_events",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("rule_id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=True),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("rule_id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=True),
         sa.Column("service", sa.String(128), nullable=False),
-        sa.Column("status", sa.String(16), nullable=False, server_default="firing"),
-        sa.Column("message", sa.Text(), nullable=False, server_default=""),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("message", sa.Text(), nullable=False),
         sa.Column("value", sa.Float(), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
@@ -171,15 +173,15 @@ def upgrade() -> None:
 
     op.create_table(
         "runbook_executions",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=True),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=True),
         sa.Column("runbook_id", sa.String(128), nullable=False),
         sa.Column("runbook_name", sa.String(256), nullable=False),
-        sa.Column("status", sa.String(32), nullable=False, server_default="pending"),
-        sa.Column("trigger", sa.String(32), nullable=False, server_default="manual"),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("trigger", sa.String(32), nullable=False),
         sa.Column("triggered_by", sa.String(256), nullable=True),
-        sa.Column("variables", JSONType, nullable=True, server_default="{}"),
-        sa.Column("results", JSONType, nullable=True, server_default="{}"),
+        sa.Column("variables", JSONB, nullable=False),
+        sa.Column("results", JSONB, nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
@@ -189,11 +191,11 @@ def upgrade() -> None:
 
     op.create_table(
         "usage_records",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("org_id", sa.UUID(), nullable=False),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("org_id", UUID(), nullable=False),
         sa.Column("period", sa.String(7), nullable=False),
-        sa.Column("investigations", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("tokens_used", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("investigations", sa.Integer(), nullable=False),
+        sa.Column("tokens_used", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),

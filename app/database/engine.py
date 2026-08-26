@@ -14,9 +14,11 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator
+from pathlib import Path
+from typing import Any, AsyncGenerator, cast
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult, Result
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -30,7 +32,15 @@ log = logging.getLogger("omnipotent.database")
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
-_schema_ready = False
+
+# The engine `init_db()` last created the schema against — not a bare bool.
+# "The schema exists" is only ever true *of a particular database*, and the
+# engine is what names one. A plain flag outlived the engine it described: any
+# caller that repointed the database by assigning `_engine = None` (which is how
+# most test fixtures swap in a throwaway SQLite file) left the flag set, so
+# `ensure_schema()` returned immediately for a database it had never touched and
+# the first query failed with "no such table".
+_schema_ready_for: AsyncEngine | None = None
 
 # Serializes the first-caller schema creation. Keyed by the running loop rather
 # than held as one module global: an asyncio.Lock binds to the loop that first
@@ -156,22 +166,72 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         await session.close()
 
 
+async def session_dependency() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency yielding a session.
+
+    `get_session` is an @asynccontextmanager, which FastAPI cannot consume as a
+    dependency — it tries to iterate the returned context-manager object and
+    raises "'_AsyncGeneratorContextManager' object is not an async iterator".
+    The on-call router used it directly, so every /oncall/* endpoint answered
+    500. FastAPI wants a bare async generator, which is what this is.
+    """
+    async with get_session() as session:
+        yield session
+
+
+def rows_affected(result: Result[Any]) -> int:
+    """How many rows an UPDATE or DELETE actually touched.
+
+    `AsyncSession.execute` is annotated as returning the read-side `Result`,
+    which has no `rowcount`; a DML statement produces a `CursorResult` at
+    runtime, which does. The cast lives here rather than at each call site so
+    the reason is written down once.
+
+    Callers use this to tell "no such row" apart from "row updated" without a
+    prior SELECT, which is what makes the update atomic.
+    """
+    return cast("CursorResult[Any]", result).rowcount
+
+
+def _ensure_sqlite_directory(url: str) -> None:
+    """Create the directory holding a file-backed SQLite database.
+
+    The default URL is `sqlite+aiosqlite:///data/copilot.db`; SQLite will not
+    create `data/` itself, it just fails to open the file.
+    """
+    path = url.split("///", 1)[-1].split("?", 1)[0]
+    if not path or path == ":memory:":
+        return
+    parent = Path(path).parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+
+
 async def init_db() -> None:
     """Initialize database tables and run migrations.
 
     Called during application startup. Creates tables if they don't exist
     (dev mode) or verifies migration state (production).
     """
+    # Importing the model modules is what registers their tables on the shared
+    # metadata; create_all only creates what has been imported.
     from app.database.models import Base
+    import app.database.auth_models  # noqa: F401
+    import app.database.team_models  # noqa: F401
+    import app.database.growth_models  # noqa: F401
+    import app.oncall.models  # noqa: F401
+    import app.model_router.models  # noqa: F401
+    import app.notifications.models  # noqa: F401
 
     engine = get_engine()
     url = _get_database_url()
     is_sqlite = "sqlite" in url
 
     if is_sqlite:
+        _ensure_sqlite_directory(url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        log.info("SQLite database initialized (tables created)")
+        log.info("SQLite database initialized (%d tables)", len(Base.metadata.tables))
     else:
         log.info("PostgreSQL database ready (use Alembic for migrations)")
 
@@ -195,17 +255,21 @@ async def ensure_schema() -> None:
     asyncio.Lock binds to the loop that first awaits it and raises on every
     other one (pytest-asyncio gives each test its own loop).
     """
-    global _schema_ready
+    global _schema_ready_for
 
-    if _schema_ready:
+    # Compared against the live engine rather than a flag, so repointing the
+    # database invalidates "ready" on its own — the caller does not have to
+    # remember to say so.
+    engine = get_engine()
+    if _schema_ready_for is engine:
         return
     async with _schema_lock():
         # Re-checked inside the lock: the coroutine that waited here while
         # another one created the schema must not create it a second time.
-        if _schema_ready:
+        if _schema_ready_for is engine:
             return
         await init_db()
-        _schema_ready = True
+        _schema_ready_for = engine
 
 
 async def close_db() -> None:
@@ -214,16 +278,16 @@ async def close_db() -> None:
     Called during application shutdown. Disposes the engine and clears
     the connection pool.
     """
-    global _engine, _session_factory, _schema_ready
+    global _engine, _session_factory, _schema_ready_for
 
     if _engine is not None:
         await _engine.dispose()
         log.info("Database engine disposed")
         _engine = None
         _session_factory = None
-    # The next engine may point somewhere else entirely (a test that repoints
-    # COPILOT_DATABASE_URL), so "schema exists" does not survive a dispose.
-    _schema_ready = False
+    # Dropped rather than left to compare unequal, so a disposed engine is not
+    # kept alive by this reference alone.
+    _schema_ready_for = None
     # Locks belong to loops that are being torn down with the engine; keeping
     # them would grow the dict once per test and hand a stale loop's lock to a
     # new loop that happened to reuse the same id.

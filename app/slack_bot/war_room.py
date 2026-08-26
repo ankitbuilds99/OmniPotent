@@ -145,16 +145,25 @@ class WarRoomManager:
         severity: str = "P2",
         services: list[str] | None = None,
         description: str = "",
+        channel_id: str | None = None,
+        channel_name: str | None = None,
     ) -> WarRoom:
-        """Create a new war room for an incident."""
-        channel_name = self._generate_channel_name(incident_id, title)
+        """Create a new war room for an incident.
+
+        `channel_id` is the id Slack returned for the channel the caller already
+        created. Without one we fall back to a synthesised `C<incident_id>`,
+        which is not a channel anyone can open — callers that have really made a
+        channel must pass the real id, or every later post to this war room goes
+        nowhere.
+        """
+        channel_name = channel_name or self._generate_channel_name(incident_id, title)
 
         war_room_id = f"wr_{incident_id}"
 
         war_room = WarRoom(
             war_room_id=war_room_id,
             incident_id=incident_id,
-            channel_id=f"C{incident_id}",
+            channel_id=channel_id or f"C{incident_id}",
             channel_name=channel_name,
             org_id=org_id,
             severity=severity,

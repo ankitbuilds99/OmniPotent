@@ -5,7 +5,11 @@ metadata:
   labels:
     {{- include "omnipotent.labels" . | nindent 4 }}
 data:
-  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  # Every key here must be a real field on app/config.py:Settings — the model is
+  # declared with extra="ignore", so a misspelt key is silently discarded rather
+  # than rejected. tests/test_deploy_manifests.py enforces the mapping.
+  COPILOT_ENV: {{ .Values.environment | quote }}
+  COPILOT_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  COPILOT_LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   COPILOT_MULTI_TENANT: {{ .Values.config.multiTenant | quote }}
-  COPILOT_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
-  COPILOT_REDIS_ENABLED: {{ .Values.redis.enabled | quote }}
+  CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}

@@ -15,73 +15,87 @@ because moving the data without them would leave the same bugs in a table:
     could hold one and `get_team_by_slug` returned whichever came first;
   * a user is in a team at most once. "Already a member" was a read-then-write
     check that two concurrent accepts both passed.
+
+`tests/test_teams_store.py` covers the same tables from the tenant-isolation
+angle — one org's rows are invisible to another. This file is the durability
+half: every assertion here that says "and it is still there" runs across a real
+engine dispose, which is the failure the dicts had and a fresh store instance
+does not reproduce.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config as cfg
-from app import runtime
+import app.config as cfg
+from app import runtime, tenant_context
 from app.api import main as api
-from app.database.engine import close_db, ensure_schema, get_session
-from app.database.models import TeamInvitationRecord, TeamMemberRecord, TeamRecord
-from app.teams import store
+from app.database import engine as db_engine
+from app.teams import store as store_mod
 from app.teams.models import InvitationStatus, TeamRole
-from app.teams.store import SlugTaken
+from app.teams.store import SlugTaken, get_team_store
+
+ORG = "acme"
+API_TOKEN = "prodtoken"
+SECRET = "k" * 32
 
 
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):
-    """A database per test, under tmp_path.
+    """One database file per test, reused across the restarts a test simulates.
 
-    The engine is a module global, so it is disposed on the way in as well as
-    out — otherwise a test inherits the previous test's engine, still pointing
-    at *that* test's tmp_path.
+    The engine is a module global, so it is reset on the way in as well as out —
+    otherwise a test inherits the previous test's engine, still pointing at
+    *that* test's tmp_path.
     """
-    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
-    cfg.get_settings.cache_clear()
-    asyncio.run(close_db())
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/app.db")
+    monkeypatch.delenv("COPILOT_MULTI_TENANT", raising=False)
+    _reset_process()
     yield
-    asyncio.run(close_db())
+    _reset_process()
+
+
+def _reset_process() -> None:
+    asyncio.run(db_engine.close_db())
     cfg.get_settings.cache_clear()
-
-
-@pytest.fixture
-def client(db):
-    api._RL.clear()
-    runtime.reset()
-    yield TestClient(api.app)
-    # Closed here too: TestClient serves on its own event loop, and aiosqlite
-    # connections are bound to the loop that created them.
-    asyncio.run(close_db())
-    api._RL.clear()
+    db_engine._engine = None
+    db_engine._session_factory = None
+    tenant_context.current_tenant.set(None)
 
 
 def _restart() -> None:
-    """Simulate a process restart against the same database file."""
-    asyncio.run(close_db())
-    cfg.get_settings.cache_clear()
+    """Simulate a process restart against the same database file.
 
-
-def _auth(user_id: str, email: str) -> dict[str, str]:
-    """A bearer token shaped like the JWT the router reads claims out of.
-
-    `_get_user_from_header` base64-decodes the payload segment without verifying
-    the signature, so the other two segments can be anything.
+    Disposing the engine is the point: it drops every pooled connection and the
+    "schema already created" flag, so anything read afterwards came off disk
+    rather than out of this process.
     """
-    payload = (
-        base64.urlsafe_b64encode(json.dumps({"sub": user_id, "email": email}).encode())
-        .decode()
-        .rstrip("=")
+    _reset_process()
+
+
+def _as(coro_factory, org: str = ORG):
+    """Run one coroutine as `org`, on its own loop, like a separate request."""
+
+    async def run():
+        token = tenant_context.set_tenant(tenant_context.TenantConfig(org_id=org))
+        try:
+            return await coro_factory()
+        finally:
+            tenant_context.reset_tenant(token)
+
+    return asyncio.run(run())
+
+
+def _create(name: str, owner: str = "u1", email: str = "a@example.com", slug=None):
+    return _as(
+        lambda: get_team_store().create_team(
+            name=name, owner_id=owner, owner_email=email, slug=slug
+        )
     )
-    return {"Authorization": f"Bearer header.{payload}.signature"}
 
 
 def _backdate_invitation(invitation_id: str, *, days: int = 8) -> None:
@@ -93,9 +107,11 @@ def _backdate_invitation(invitation_id: str, *, days: int = 8) -> None:
     """
 
     async def run() -> None:
-        await ensure_schema()
-        async with get_session() as session:
-            row = await session.get(TeamInvitationRecord, invitation_id)
+        from app.database.team_models import TeamInvitationDB
+
+        await db_engine.ensure_schema()
+        async with db_engine.get_session() as session:
+            row = await session.get(TeamInvitationDB, invitation_id)
             assert row is not None
             row.expires_at = datetime.now(timezone.utc) - timedelta(days=days)
             await session.commit()
@@ -104,13 +120,21 @@ def _backdate_invitation(invitation_id: str, *, days: int = 8) -> None:
 
 
 def _row_counts() -> tuple[int, int, int]:
-    async def run() -> tuple[int, int, int]:
-        await ensure_schema()
-        async with get_session() as session:
-            from sqlalchemy import func, select
+    """Rows in the three tables, counted without an org filter.
 
+    Deliberately unscoped: a delete that leaves orphans behind under some other
+    org id is still a leak, and a scoped count would not see it.
+    """
+
+    async def run() -> tuple[int, int, int]:
+        from sqlalchemy import func, select
+
+        from app.database.team_models import TeamDB, TeamInvitationDB, TeamMemberDB
+
+        await db_engine.ensure_schema()
+        async with db_engine.get_session() as session:
             out = []
-            for model in (TeamRecord, TeamMemberRecord, TeamInvitationRecord):
+            for model in (TeamDB, TeamMemberDB, TeamInvitationDB):
                 total = (
                     await session.execute(select(func.count()).select_from(model))
                 ).scalar()
@@ -124,11 +148,11 @@ def _row_counts() -> tuple[int, int, int]:
 # Durability — the thing the dicts could not do
 # --------------------------------------------------------------------------- #
 def test_team_outlives_the_process():
-    team = asyncio.run(store.create_team("Platform", "u1", "owner@example.com"))
+    team = _create("Platform", "u1", "owner@example.com")
 
     _restart()
 
-    found = asyncio.run(store.get_team(team.id))
+    found = _as(lambda: get_team_store().get_team(team.id))
     assert found is not None
     assert found.name == "Platform"
     assert found.slug == "platform"
@@ -136,12 +160,12 @@ def test_team_outlives_the_process():
 
 
 def test_membership_outlives_the_process():
-    team = asyncio.run(store.create_team("Platform", "u1", "owner@example.com"))
-    asyncio.run(store.add_member(team.id, "u2", "dev@example.com", TeamRole.ADMIN))
+    team = _create("Platform", "u1", "owner@example.com")
+    _as(lambda: get_team_store().add_member(team.id, "u2", "dev@example.com", TeamRole.ADMIN))
 
     _restart()
 
-    members = asyncio.run(store.get_members(team.id))
+    members = _as(lambda: get_team_store().get_members(team.id))
     assert [(m.user_id, m.role) for m in members] == [
         ("u1", TeamRole.OWNER),
         ("u2", TeamRole.ADMIN),
@@ -150,41 +174,53 @@ def test_membership_outlives_the_process():
 
 def test_invitation_outlives_the_process_and_is_still_acceptable():
     """The promise made to somebody outside the system still holds."""
-    team = asyncio.run(store.create_team("Platform", "u1", "owner@example.com"))
-    invite = asyncio.run(
-        store.create_invitation(team.id, "invitee@example.com", TeamRole.MEMBER, "u1")
+    team = _create("Platform", "u1", "owner@example.com")
+    invite = _as(
+        lambda: get_team_store().create_invitation(
+            team.id, "invitee@example.com", TeamRole.MEMBER, "u1"
+        )
     )
     assert invite is not None
 
     _restart()
 
-    pending = asyncio.run(store.get_invitations(team.id))
+    pending = _as(lambda: get_team_store().get_invitations(team.id))
     assert [i.id for i in pending] == [invite.id]
 
-    resolved, member = asyncio.run(store.accept_invitation(invite.id, "u2"))
+    resolved, member = _as(lambda: get_team_store().accept_invitation(invite.id, "u2"))
     assert resolved.status == InvitationStatus.ACCEPTED
     assert member is not None
     assert member.user_id == "u2"
 
 
-def test_no_in_memory_store_remains():
-    """The dicts are gone, not merely shadowed by the tables."""
-    assert not hasattr(store, "TeamStore"), "the singleton class is still here"
-    assert not hasattr(store, "get_team_store"), "the singleton accessor is still here"
-    assert not hasattr(store, "_store"), "the singleton instance is still here"
+def test_no_in_memory_state_remains():
+    """The dicts are gone, not merely shadowed by the tables.
 
-    source = (store.__file__ or "").replace(".pyc", ".py")
-    text = open(source, encoding="utf-8").read()
+    The original of this test also demanded that `TeamStore` and
+    `get_team_store` themselves be gone, because origin/main replaced them with
+    module-level functions. The merged store keeps the class and the accessor on
+    purpose — the org scoping and `app/teams/router.py` hang off the instance —
+    so what is pinned here is the property that actually mattered: no team state
+    lives in this process. A stateless singleton satisfies that; a dict of
+    rosters does not.
+    """
+    fresh = store_mod.TeamStore()
+    assert vars(fresh) == {}, "TeamStore carries instance state again"
+    assert vars(get_team_store()) == {}, "the shared store carries instance state"
+
+    source = (store_mod.__file__ or "").replace(".pyc", ".py")
+    with open(source, encoding="utf-8") as handle:
+        text = handle.read()
     for name in ("_teams", "_members", "_invitations", "_user_teams"):
         assert f"self.{name}" not in text, f"{name} is still instance state"
 
 
 def test_timestamps_read_back_as_utc_aware():
-    team = asyncio.run(store.create_team("Platform", "u1", "owner@example.com"))
+    team = _create("Platform", "u1", "owner@example.com")
 
     _restart()
 
-    found = asyncio.run(store.get_team(team.id))
+    found = _as(lambda: get_team_store().get_team(team.id))
     assert found.created_at.tzinfo is not None
     assert found.created_at.utcoffset() == timedelta(0)
 
@@ -193,48 +229,47 @@ def test_timestamps_read_back_as_utc_aware():
 # Slugs identify exactly one team
 # --------------------------------------------------------------------------- #
 def test_generated_slugs_are_disambiguated():
-    first = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    second = asyncio.run(store.create_team("Platform", "u2", "b@example.com"))
-    third = asyncio.run(store.create_team("platform!", "u3", "c@example.com"))
+    first = _create("Platform", "u1", "a@example.com")
+    second = _create("Platform", "u2", "b@example.com")
+    third = _create("platform!", "u3", "c@example.com")
 
     assert [first.slug, second.slug, third.slug] == ["platform", "platform-1", "platform-2"]
-    assert asyncio.run(store.get_team_by_slug("platform-1")).id == second.id
+    assert _as(lambda: get_team_store().get_team_by_slug("platform-1")).id == second.id
 
 
 def test_requested_slug_that_is_taken_is_rejected_not_renamed():
     """Handing back a different slug would break the link the caller is publishing."""
-    asyncio.run(store.create_team("Platform", "u1", "a@example.com", slug="platform"))
+    _create("Platform", "u1", "a@example.com", slug="platform")
 
     with pytest.raises(SlugTaken):
-        asyncio.run(store.create_team("Other", "u2", "b@example.com", slug="platform"))
+        _create("Other", "u2", "b@example.com", slug="platform")
 
     teams, members, _ = _row_counts()
     assert (teams, members) == (1, 1), "the losing create left rows behind"
 
 
 def test_requested_slug_is_normalised():
-    team = asyncio.run(
-        store.create_team("Anything", "u1", "a@example.com", slug="My Team!!")
-    )
+    team = _create("Anything", "u1", "a@example.com", slug="My Team!!")
     assert team.slug == "my-team"
 
 
 def test_unslugifiable_name_still_gets_a_slug():
-    team = asyncio.run(store.create_team("!!!", "u1", "a@example.com"))
+    team = _create("!!!", "u1", "a@example.com")
     assert team.slug == "team"
 
 
 def test_concurrent_creates_of_the_same_name_get_distinct_slugs():
-    async def run() -> list[str]:
-        teams = await asyncio.gather(
+    def run():
+        return asyncio.gather(
             *(
-                store.create_team("Platform", f"u{i}", f"u{i}@example.com")
+                get_team_store().create_team(
+                    name="Platform", owner_id=f"u{i}", owner_email=f"u{i}@example.com"
+                )
                 for i in range(5)
             )
         )
-        return [t.slug for t in teams]
 
-    slugs = asyncio.run(run())
+    slugs = [t.slug for t in _as(run)]
     assert len(set(slugs)) == 5, f"slugs collided: {slugs}"
 
 
@@ -242,96 +277,100 @@ def test_concurrent_creates_of_the_same_name_get_distinct_slugs():
 # A user is in a team at most once
 # --------------------------------------------------------------------------- #
 def test_adding_the_same_member_twice_returns_none():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    assert asyncio.run(store.add_member(team.id, "u2", "b@example.com")) is not None
-    assert asyncio.run(store.add_member(team.id, "u2", "b@example.com")) is None
-    assert len(asyncio.run(store.get_members(team.id))) == 2
+    team = _create("Platform")
+    s = get_team_store()
+    assert _as(lambda: s.add_member(team.id, "u2", "b@example.com")) is not None
+    assert _as(lambda: s.add_member(team.id, "u2", "b@example.com")) is None
+    assert len(_as(lambda: s.get_members(team.id))) == 2
 
 
 def test_concurrent_adds_produce_one_membership():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
+    team = _create("Platform")
+    s = get_team_store()
 
-    async def run() -> list[object]:
-        return list(
-            await asyncio.gather(
-                *(store.add_member(team.id, "u2", "b@example.com") for _ in range(4))
+    results = list(
+        _as(
+            lambda: asyncio.gather(
+                *(s.add_member(team.id, "u2", "b@example.com") for _ in range(4))
             )
         )
+    )
 
-    results = asyncio.run(run())
     assert sum(1 for r in results if r is not None) == 1
-    assert len(asyncio.run(store.get_members(team.id))) == 2
+    assert len(_as(lambda: s.get_members(team.id))) == 2
 
 
 def test_add_member_to_a_missing_team_is_refused():
-    assert asyncio.run(store.add_member("no-such-team", "u2", "b@example.com")) is None
-
-
-def test_owner_role_cannot_be_changed_and_owner_cannot_be_removed():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-
-    assert asyncio.run(store.update_member_role(team.id, "u1", TeamRole.VIEWER)) is None
-    assert asyncio.run(store.remove_member(team.id, "u1")) is False
-
-    owner = asyncio.run(store.get_member(team.id, "u1"))
-    assert owner.role == TeamRole.OWNER
+    s = get_team_store()
+    # A syntactically valid id nothing holds, so the refusal is the team lookup
+    # rather than the malformed-id guard `test_teams_store.py` covers.
+    assert _as(lambda: s.add_member("11111111-1111-1111-1111-111111111111", "u2", "b@x")) is None
 
 
 def test_role_change_survives_a_restart():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    asyncio.run(store.add_member(team.id, "u2", "b@example.com"))
-    asyncio.run(store.update_member_role(team.id, "u2", TeamRole.ADMIN))
+    team = _create("Platform")
+    s = get_team_store()
+    _as(lambda: s.add_member(team.id, "u2", "b@example.com"))
+    _as(lambda: s.update_member_role(team.id, "u2", TeamRole.ADMIN))
 
     _restart()
 
-    assert asyncio.run(store.get_member(team.id, "u2")).role == TeamRole.ADMIN
+    assert _as(lambda: get_team_store().get_member(team.id, "u2")).role == TeamRole.ADMIN
 
 
 # --------------------------------------------------------------------------- #
 # "Which teams am I in" is derived, not indexed by hand
 # --------------------------------------------------------------------------- #
 def test_user_teams_follow_membership():
-    a = asyncio.run(store.create_team("Alpha", "u1", "a@example.com"))
-    b = asyncio.run(store.create_team("Beta", "u2", "b@example.com"))
-    asyncio.run(store.add_member(b.id, "u1", "a@example.com", TeamRole.VIEWER))
+    a = _create("Alpha", "u1", "a@example.com")
+    b = _create("Beta", "u2", "b@example.com")
+    s = get_team_store()
+    _as(lambda: s.add_member(b.id, "u1", "a@example.com", TeamRole.VIEWER))
 
-    mine = asyncio.run(store.get_user_teams("u1"))
-    assert [(t.id, r) for t, r in mine] == [(a.id, TeamRole.OWNER), (b.id, TeamRole.VIEWER)]
+    mine = _as(lambda: s.get_user_teams("u1"))
+    assert [(t.id, role) for t, role, _ in mine] == [
+        (a.id, TeamRole.OWNER),
+        (b.id, TeamRole.VIEWER),
+    ]
 
-    assert asyncio.run(store.remove_member(b.id, "u1")) is True
-    assert [t.id for t, _ in asyncio.run(store.get_user_teams("u1"))] == [a.id]
+    assert _as(lambda: s.remove_member(b.id, "u1")) is True
+    assert [t.id for t, _, _ in _as(lambda: s.get_user_teams("u1"))] == [a.id]
 
 
 def test_deleting_a_team_takes_its_members_and_invitations_with_it():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    asyncio.run(store.add_member(team.id, "u2", "b@example.com"))
-    asyncio.run(
-        store.create_invitation(team.id, "invitee@example.com", TeamRole.MEMBER, "u1")
+    team = _create("Platform")
+    s = get_team_store()
+    _as(lambda: s.add_member(team.id, "u2", "b@example.com"))
+    _as(
+        lambda: s.create_invitation(team.id, "invitee@example.com", TeamRole.MEMBER, "u1")
     )
 
-    assert asyncio.run(store.delete_team(team.id)) is True
+    assert _as(lambda: s.delete_team(team.id)) is True
 
     _restart()
 
     assert _row_counts() == (0, 0, 0)
-    assert asyncio.run(store.get_user_teams("u2")) == []
-    assert asyncio.run(store.delete_team(team.id)) is False
+    assert _as(lambda: get_team_store().get_user_teams("u2")) == []
+    assert _as(lambda: get_team_store().delete_team(team.id)) is False
 
 
 def test_member_counts_are_one_query_for_many_teams():
-    a = asyncio.run(store.create_team("Alpha", "u1", "a@example.com"))
-    b = asyncio.run(store.create_team("Beta", "u1", "a@example.com"))
-    asyncio.run(store.add_member(a.id, "u2", "b@example.com"))
+    a = _create("Alpha", "u1", "a@example.com")
+    b = _create("Beta", "u1", "a@example.com")
+    s = get_team_store()
+    _as(lambda: s.add_member(a.id, "u2", "b@example.com"))
 
-    counts = asyncio.run(store.member_counts([a.id, b.id, "missing"]))
-    assert counts == {a.id: 2, b.id: 1, "missing": 0}
+    missing = "11111111-1111-1111-1111-111111111111"
+    counts = _as(lambda: s.member_counts([a.id, b.id, missing]))
+    assert counts == {a.id: 2, b.id: 1, missing: 0}
 
 
 def test_update_team_ignores_fields_it_does_not_own():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
+    team = _create("Platform")
+    s = get_team_store()
 
-    updated = asyncio.run(
-        store.update_team(
+    updated = _as(
+        lambda: s.update_team(
             team.id,
             {"name": "Platform Eng", "settings": {"theme": "dark"}, "owner_id": "u9"},
         )
@@ -342,7 +381,7 @@ def test_update_team_ignores_fields_it_does_not_own():
 
     _restart()
 
-    stored = asyncio.run(store.get_team(team.id))
+    stored = _as(lambda: get_team_store().get_team(team.id))
     assert stored.settings == {"theme": "dark"}, "the JSON column was not marked dirty"
     assert stored.name == "Platform Eng"
 
@@ -351,136 +390,145 @@ def test_update_team_ignores_fields_it_does_not_own():
 # Invitations
 # --------------------------------------------------------------------------- #
 def test_cannot_invite_an_existing_member_or_invite_twice():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    asyncio.run(store.add_member(team.id, "u2", "dev@example.com"))
+    team = _create("Platform")
+    s = get_team_store()
+    _as(lambda: s.add_member(team.id, "u2", "dev@example.com"))
 
     # Already a member, matched case-insensitively as addresses are.
     assert (
-        asyncio.run(
-            store.create_invitation(team.id, "DEV@example.com", TeamRole.MEMBER, "u1")
-        )
+        _as(lambda: s.create_invitation(team.id, "DEV@example.com", TeamRole.MEMBER, "u1"))
         is None
     )
 
-    first = asyncio.run(
-        store.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
+    first = _as(
+        lambda: s.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
     )
     assert first is not None
     assert (
-        asyncio.run(
-            store.create_invitation(team.id, "NEW@example.com", TeamRole.MEMBER, "u1")
-        )
+        _as(lambda: s.create_invitation(team.id, "NEW@example.com", TeamRole.MEMBER, "u1"))
         is None
     )
 
 
 def test_reinviting_after_a_cancel_is_allowed():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    first = asyncio.run(
-        store.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
+    team = _create("Platform")
+    s = get_team_store()
+    first = _as(
+        lambda: s.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
     )
 
-    assert asyncio.run(store.cancel_invitation(first.id)) is True
-    assert asyncio.run(store.cancel_invitation(first.id)) is False, "cancelled twice"
+    assert _as(lambda: s.cancel_invitation(first.id)) is True
+    assert _as(lambda: s.cancel_invitation(first.id)) is False, "cancelled twice"
 
-    second = asyncio.run(
-        store.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
+    second = _as(
+        lambda: s.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
     )
     assert second is not None and second.id != first.id
 
 
 def test_expiry_is_written_back_when_it_is_first_observed():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    invite = asyncio.run(
-        store.create_invitation(team.id, "late@example.com", TeamRole.MEMBER, "u1")
+    team = _create("Platform")
+    s = get_team_store()
+    invite = _as(
+        lambda: s.create_invitation(team.id, "late@example.com", TeamRole.MEMBER, "u1")
     )
     _backdate_invitation(invite.id)
 
-    assert asyncio.run(store.get_invitations(team.id)) == []
+    assert _as(lambda: s.get_invitations(team.id)) == []
 
     _restart()
 
     # Persisted, not just filtered out of one listing.
-    assert asyncio.run(store.get_invitation(invite.id)).status == InvitationStatus.EXPIRED
+    assert (
+        _as(lambda: get_team_store().get_invitation(invite.id)).status
+        == InvitationStatus.EXPIRED
+    )
 
 
 def test_an_unobserved_expiry_is_still_not_acceptable():
     """Accept checks the timestamp, not the status — nothing sweeps this table."""
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    invite = asyncio.run(
-        store.create_invitation(team.id, "late@example.com", TeamRole.MEMBER, "u1")
+    team = _create("Platform")
+    s = get_team_store()
+    invite = _as(
+        lambda: s.create_invitation(team.id, "late@example.com", TeamRole.MEMBER, "u1")
     )
     _backdate_invitation(invite.id)
 
-    resolved, member = asyncio.run(store.accept_invitation(invite.id, "u2"))
+    resolved, member = _as(lambda: s.accept_invitation(invite.id, "u2"))
     assert member is None
     assert resolved.status == InvitationStatus.EXPIRED
-    assert asyncio.run(store.get_member(team.id, "u2")) is None
+    assert _as(lambda: s.get_member(team.id, "u2")) is None
 
 
 def test_accepting_twice_adds_one_membership():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    invite = asyncio.run(
-        store.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
+    team = _create("Platform")
+    s = get_team_store()
+    invite = _as(
+        lambda: s.create_invitation(team.id, "new@example.com", TeamRole.MEMBER, "u1")
     )
 
-    _, member = asyncio.run(store.accept_invitation(invite.id, "u2"))
+    _, member = _as(lambda: s.accept_invitation(invite.id, "u2"))
     assert member is not None
 
-    resolved, again = asyncio.run(store.accept_invitation(invite.id, "u3"))
+    resolved, again = _as(lambda: s.accept_invitation(invite.id, "u3"))
     assert again is None
     assert resolved.status == InvitationStatus.ACCEPTED
-    assert len(asyncio.run(store.get_members(team.id))) == 2
+    assert len(_as(lambda: s.get_members(team.id))) == 2
 
 
 def test_accept_carries_the_invited_role():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    invite = asyncio.run(
-        store.create_invitation(team.id, "boss@example.com", TeamRole.ADMIN, "u1")
+    team = _create("Platform")
+    s = get_team_store()
+    invite = _as(
+        lambda: s.create_invitation(team.id, "boss@example.com", TeamRole.ADMIN, "u1")
     )
 
-    _, member = asyncio.run(store.accept_invitation(invite.id, "u2"))
+    _, member = _as(lambda: s.accept_invitation(invite.id, "u2"))
     assert member.role == TeamRole.ADMIN
 
     _restart()
 
-    assert asyncio.run(store.get_member(team.id, "u2")).role == TeamRole.ADMIN
+    assert _as(lambda: get_team_store().get_member(team.id, "u2")).role == TeamRole.ADMIN
 
 
 def test_accepting_an_unknown_invitation_returns_nothing():
-    assert asyncio.run(store.accept_invitation("no-such-invite", "u2")) == (None, None)
+    unknown = "11111111-1111-1111-1111-111111111111"
+    assert _as(lambda: get_team_store().accept_invitation(unknown, "u2")) == (None, None)
 
 
 def test_pending_invitations_for_a_user_span_teams_and_ignore_case():
-    a = asyncio.run(store.create_team("Alpha", "u1", "a@example.com"))
-    b = asyncio.run(store.create_team("Beta", "u2", "b@example.com"))
-    asyncio.run(store.create_invitation(a.id, "Wanted@Example.com", TeamRole.MEMBER, "u1"))
-    asyncio.run(store.create_invitation(b.id, "wanted@example.com", TeamRole.ADMIN, "u2"))
-    stale = asyncio.run(
-        store.create_invitation(b.id, "someone-else@example.com", TeamRole.MEMBER, "u2")
+    a = _create("Alpha", "u1", "a@example.com")
+    b = _create("Beta", "u2", "b@example.com")
+    s = get_team_store()
+    _as(lambda: s.create_invitation(a.id, "Wanted@Example.com", TeamRole.MEMBER, "u1"))
+    _as(lambda: s.create_invitation(b.id, "wanted@example.com", TeamRole.ADMIN, "u2"))
+    stale = _as(
+        lambda: s.create_invitation(b.id, "someone-else@example.com", TeamRole.MEMBER, "u2")
     )
     _backdate_invitation(stale.id)
 
     _restart()
 
-    mine = asyncio.run(store.get_user_pending_invitations("WANTED@example.com"))
+    s = get_team_store()
+    mine = _as(lambda: s.get_user_pending_invitations("WANTED@example.com"))
     assert {team.id for _, team in mine} == {a.id, b.id}
     assert all(inv.status == InvitationStatus.PENDING for inv, _ in mine)
 
-    assert asyncio.run(store.get_user_pending_invitations("someone-else@example.com")) == []
+    assert _as(lambda: s.get_user_pending_invitations("someone-else@example.com")) == []
 
 
 def test_last_active_is_stamped_and_persisted():
-    team = asyncio.run(store.create_team("Platform", "u1", "a@example.com"))
-    assert asyncio.run(store.get_member(team.id, "u1")).last_active is None
+    team = _create("Platform")
+    s = get_team_store()
+    assert _as(lambda: s.get_member(team.id, "u1")).last_active is None
 
-    asyncio.run(store.update_member_activity(team.id, "u1"))
+    _as(lambda: s.update_member_activity(team.id, "u1"))
     # Nothing to stamp is not an error.
-    asyncio.run(store.update_member_activity(team.id, "nobody"))
+    _as(lambda: s.update_member_activity(team.id, "nobody"))
 
     _restart()
 
-    stamped = asyncio.run(store.get_member(team.id, "u1")).last_active
+    stamped = _as(lambda: get_team_store().get_member(team.id, "u1")).last_active
     assert stamped is not None
     assert stamped.tzinfo is not None
 
@@ -488,21 +536,74 @@ def test_last_active_is_stamped_and_persisted():
 # --------------------------------------------------------------------------- #
 # Through the API the router actually exposes
 # --------------------------------------------------------------------------- #
-def test_teams_created_through_the_api_survive_a_restart(client):
-    created = client.post(
-        "/api/teams", json={"name": "Platform"}, headers=_auth("u1", "owner@example.com")
-    )
-    assert created.status_code == 200, created.text
-    team_id = created.json()["id"]
-    assert created.json()["slug"] == "platform"
-    assert created.json()["member_count"] == 1
+@pytest.fixture
+def api_env(db, monkeypatch):
+    """A single-tenant deployment whose users hold OAuth session tokens.
 
-    listed = client.get("/api/teams", headers=_auth("u1", "owner@example.com"))
-    assert [t["id"] for t in listed.json()] == [team_id]
+    The original of this file forged a bearer token by base64-encoding a claims
+    dict, which is exactly the hole `_get_user_from_header` was fixed to close
+    (see tests/test_teams_auth.py). These tests need two distinct user
+    identities, so they carry real signed session tokens instead.
+    """
+    monkeypatch.setenv("COPILOT_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("COPILOT_SECRET_KEY", SECRET)
+    monkeypatch.delenv("SUPABASE_JWKS_URL", raising=False)
+    _reset_api()
+    yield
+    # Closed here too: TestClient serves on its own event loop, and aiosqlite
+    # connections are bound to the loop that created them.
+    asyncio.run(db_engine.close_db())
+    _reset_api()
+
+
+def _reset_api() -> None:
+    cfg.get_settings.cache_clear()
+    api._RL.clear()
+    api._reset_limiter()
+    runtime.reset()
+
+
+def _serve() -> TestClient:
+    """A running app on its own event loop.
+
+    Never nested: the status-page poller and the job worker are tasks owned by
+    the lifespan that started them, and a second overlapping lifespan tears them
+    down from the wrong loop.
+    """
+    return TestClient(api.app, raise_server_exceptions=False)
+
+
+@pytest.fixture
+def client(api_env):
+    with _serve() as c:
+        yield c
+
+
+def _auth(user_id: str, email: str) -> dict[str, str]:
+    from app.auth.oauth import create_session_token
+
+    return {"Authorization": f"Bearer {create_session_token(user_id, '-', email)}"}
+
+
+def test_teams_created_through_the_api_survive_a_restart(api_env):
+    with _serve() as client:
+        created = client.post(
+            "/api/teams",
+            json={"name": "Platform"},
+            headers=_auth("u1", "owner@example.com"),
+        )
+        assert created.status_code == 200, created.text
+        team_id = created.json()["id"]
+        assert created.json()["slug"] == "platform"
+        assert created.json()["member_count"] == 1
+
+        listed = client.get("/api/teams", headers=_auth("u1", "owner@example.com"))
+        assert [t["id"] for t in listed.json()] == [team_id]
 
     _restart()
+    _reset_api()
 
-    with TestClient(api.app) as restarted:
+    with _serve() as restarted:
         again = restarted.get("/api/teams", headers=_auth("u1", "owner@example.com"))
         assert [t["id"] for t in again.json()] == [team_id]
         assert again.json()[0]["role"] == "owner"

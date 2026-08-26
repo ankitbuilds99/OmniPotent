@@ -40,6 +40,7 @@ class SeverityFactors:
     revenue_impact: bool
     customer_facing: bool
     slo_breach: bool
+    alert_type_score: float = 0.5  # 0-1, from ALERT_TYPE_WEIGHTS
 
 
 @dataclass
@@ -66,6 +67,7 @@ class SeverityPrediction:
                 "historical_pattern_score": self.factors.historical_pattern_score,
                 "error_rate_impact": self.factors.error_rate_impact,
                 "user_impact_score": self.factors.user_impact_score,
+                "alert_type_score": self.factors.alert_type_score,
                 "revenue_impact": self.factors.revenue_impact,
                 "customer_facing": self.factors.customer_facing,
                 "slo_breach": self.factors.slo_breach,
@@ -210,13 +212,16 @@ class SeverityPredictor:
         user_impact = self._calculate_user_impact(context)
 
         # Revenue path check
-        revenue_impact = self._check_revenue_impact(context.service)
+        revenue_impact = self.is_revenue_path(context.service)
 
         # Customer facing check
-        customer_facing = self._is_customer_facing(context.service)
+        customer_facing = self.is_customer_facing(context.service)
 
         # SLO breach check
         slo_breach = self._check_slo_breach(context.current_slo_status)
+
+        # What kind of alert this is
+        alert_type_score = self._get_alert_type_weight(context.alert_type)
 
         return SeverityFactors(
             service_criticality=service_crit,
@@ -228,7 +233,23 @@ class SeverityPredictor:
             revenue_impact=revenue_impact,
             customer_facing=customer_facing,
             slo_breach=slo_breach,
+            alert_type_score=alert_type_score,
         )
+
+    def _get_alert_type_weight(self, alert_type: str) -> float:
+        """How severe this kind of alert is on its own.
+
+        ALERT_TYPE_WEIGHTS shipped with the module but nothing read it, so a
+        service being *down* scored exactly the same as a CPU alert on it.
+        Substring matching because callers send "error_rate", "high_error_rate"
+        and "ErrorRate" for the same thing; an unrecognised type gets 0.5 rather
+        than 0, so an unusual name cannot talk the score down.
+        """
+        key = (alert_type or "").strip().lower().replace("-", "_")
+        if key in self.ALERT_TYPE_WEIGHTS:
+            return self.ALERT_TYPE_WEIGHTS[key]
+        matches = [w for name, w in self.ALERT_TYPE_WEIGHTS.items() if name in key]
+        return max(matches) if matches else 0.5
 
     def _get_service_criticality(self, service: str) -> float:
         """Get service criticality score."""
@@ -244,10 +265,14 @@ class SeverityPredictor:
 
         return 0.5  # Default medium criticality
 
+    # What an unknown blast radius scores. Named so `_calculate_confidence` can
+    # tell "we worked out the blast radius and it is small" from "nobody told us".
+    UNKNOWN_BLAST_RADIUS = 0.3
+
     def _calculate_blast_radius_score(self, blast_radius: Optional[dict[str, Any]]) -> float:
         """Calculate blast radius impact score."""
         if not blast_radius:
-            return 0.3  # Unknown, assume moderate
+            return self.UNKNOWN_BLAST_RADIUS  # Unknown, assume moderate
 
         affected_pct = blast_radius.get("affected_percentage", 0)
         revenue_affected = blast_radius.get("revenue_path_affected", False)
@@ -357,7 +382,7 @@ class SeverityPredictor:
 
         return min(score, 1.0)
 
-    def _check_revenue_impact(self, service: str) -> bool:
+    def is_revenue_path(self, service: str) -> bool:
         """Check if service is on revenue-critical path."""
         revenue_services = {
             "checkout", "payment", "billing", "subscription",
@@ -365,7 +390,7 @@ class SeverityPredictor:
         }
         return any(rs in service.lower() for rs in revenue_services)
 
-    def _is_customer_facing(self, service: str) -> bool:
+    def is_customer_facing(self, service: str) -> bool:
         """Check if service is customer-facing."""
         customer_facing = {
             "api-gateway", "frontend", "web", "mobile",
@@ -384,15 +409,21 @@ class SeverityPredictor:
         return budget_remaining < 10 or status in ["critical", "exhausted"]
 
     def _calculate_severity_score(self, factors: SeverityFactors) -> float:
-        """Calculate weighted severity score."""
+        """Calculate weighted severity score.
+
+        The weights sum to 1.0, so a total outage of a tier-0 service with a
+        known blast radius can actually reach the 0.85 SEV1 threshold. Alert
+        type is one of the terms; it used to be scored nowhere at all.
+        """
         weights = {
-            "service_criticality": 0.20,
-            "blast_radius": 0.20,
-            "error_rate": 0.15,
-            "user_impact": 0.15,
-            "time_sensitivity": 0.10,
-            "historical": 0.10,
-            "binary_factors": 0.10,
+            "service_criticality": 0.18,
+            "blast_radius": 0.18,
+            "error_rate": 0.14,
+            "user_impact": 0.14,
+            "alert_type": 0.12,
+            "time_sensitivity": 0.08,
+            "historical": 0.08,
+            "binary_factors": 0.08,
         }
 
         score = 0.0
@@ -401,6 +432,7 @@ class SeverityPredictor:
         score += factors.blast_radius_score * weights["blast_radius"]
         score += factors.error_rate_impact * weights["error_rate"]
         score += factors.user_impact_score * weights["user_impact"]
+        score += factors.alert_type_score * weights["alert_type"]
         score += factors.time_sensitivity * weights["time_sensitivity"]
         score += factors.historical_pattern_score * weights["historical"]
 
@@ -442,8 +474,10 @@ class SeverityPredictor:
         if factors.historical_pattern_score != 0.5:
             confidence += 0.1
 
-        # Blast radius calculated
-        if factors.blast_radius_score > 0:
+        # Blast radius calculated. `> 0` was always true, because the fallback
+        # for "no blast radius supplied" is 0.3 -- so every prediction got this
+        # bump for a number nobody had computed.
+        if factors.blast_radius_score != self.UNKNOWN_BLAST_RADIUS:
             confidence += 0.1
 
         # Clear signals
@@ -471,6 +505,8 @@ class SeverityPredictor:
             reasons.append("Customer-facing service")
         if factors.error_rate_impact >= 0.6:
             reasons.append("High error rate")
+        if factors.alert_type_score >= 0.8:
+            reasons.append("Severe alert type")
         if factors.time_sensitivity >= 0.8:
             reasons.append("Peak business hours")
 

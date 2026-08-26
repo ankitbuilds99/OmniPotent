@@ -1,13 +1,19 @@
 // Thin, typed client for the OmniPotent backend.
 
-import { API_BASE_URL, API_TOKEN, authHeaders, wsUrl } from "./config";
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 
-// Resolved once in ./config so every module agrees on the base URL and on what
-// "unset" means (blank env vars included — `??` used to let "" through).
-const BASE_URL = API_BASE_URL;
-// Optional bearer token (set VITE_API_TOKEN when the backend has COPILOT_API_TOKEN).
-const TOKEN = API_TOKEN;
+// The credential is read per call (see lib/authToken), so signing in takes effect
+// without a reload — ./config's authHeaders is fixed at build time and cannot.
+import { authHeaders } from "./lib/authToken";
+import { API_BASE, wsUrl } from "./lib/apiClient";
+
+// One shared base with apiClient, resolved once so every module agrees on the
+// base URL and on what "unset" means (blank env vars included — `??` used to let
+// "" through). It used to default to "http://localhost:8000", which points a
+// production browser at the user's own machine whenever VITE_API_URL is unset —
+// the setup both the Vite dev proxy and the single-origin production deploy
+// assume. "" means same-origin.
+const BASE_URL = API_BASE;
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -266,15 +272,15 @@ export async function health(): Promise<boolean> {
 // WebSocket support
 // --------------------------------------------------------------------------- //
 
-/** Get the WebSocket base URL (converts http(s) to ws(s)). */
+/** Get the WebSocket base URL (converts http(s) to ws(s)).
+ *  Delegates to apiClient so the same-origin case (BASE_URL === "") works —
+ *  `new URL("")` throws, which is what this used to do on every real deploy. */
 export function getWebSocketUrl(): string {
-  return wsUrl();
+  return wsUrl("");
 }
 
 /** Get the auth token for WebSocket connections. */
-export function getAuthToken(): string {
-  return TOKEN;
-}
+export { getAuthToken } from "./lib/authToken";
 
 /** Health check response type with WebSocket info. */
 export interface HealthResponse {

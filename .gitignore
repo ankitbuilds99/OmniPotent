@@ -99,6 +99,15 @@ yarn-error.log
 test-results/
 coverage/
 *.coverage
+playwright-report/
+.playwright-mcp/
+junit-results.xml
+test-results.json
+
+# Local SQLite (the default COPILOT_DATABASE_URL writes here)
+data/
+*.db
+*.sqlite3
 
 # Docker
 .docker/

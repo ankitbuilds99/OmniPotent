@@ -10,6 +10,11 @@ become coroutines:
    asserted through the HTTP surface too, not just at the manager level: a
    customer created through the API has to still be there after the process that
    served the request is gone.
+
+Every route here is operator-only (COPILOT_OPERATOR_TOKEN), which is what makes
+the CRM unreadable by a tenant API key; who may reach them is pinned separately
+in tests/test_growth_api_auth.py. This file supplies the token so it is exercising
+persistence rather than re-testing the guard.
 """
 
 from __future__ import annotations
@@ -20,8 +25,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.billing.plans import PRICING_PLANS
 from app.config import get_settings
 from app.database.engine import close_db
+
+OPERATOR_TOKEN = "test-operator-token"
+OPERATOR = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
 
 # Every route that reads or writes customer state, as (method, path, body).
 # Listed exhaustively: the failure mode is a single un-awaited call site, so
@@ -47,6 +56,7 @@ def isolated_db(tmp_path, monkeypatch):
     test's tmp_path.
     """
     monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("COPILOT_OPERATOR_TOKEN", OPERATOR_TOKEN)
     get_settings.cache_clear()
     asyncio.run(close_db())
     yield
@@ -57,7 +67,11 @@ def isolated_db(tmp_path, monkeypatch):
 def test_every_customer_route_responds_without_a_server_error():
     """No route may 500 — that is what an un-awaited coroutine looks like here."""
     with TestClient(app) as client:
-        created = client.post("/customers", json={"email": "seed@test.com", "company": "Seed Co"})
+        created = client.post(
+            "/customers",
+            json={"email": "seed@test.com", "company": "Seed Co"},
+            headers=OPERATOR,
+        )
         assert created.status_code == 200
         customer_id = created.json()["customer"]["id"]
 
@@ -65,7 +79,7 @@ def test_every_customer_route_responds_without_a_server_error():
             payload = dict(body) if body else None
             if payload and "customer_id" in payload:
                 payload["customer_id"] = customer_id
-            response = client.request(method, path, json=payload)
+            response = client.request(method, path, json=payload, headers=OPERATOR)
             assert response.status_code < 500, (
                 f"{method} {path} returned {response.status_code}: {response.text}"
             )
@@ -83,6 +97,7 @@ def test_a_customer_created_through_the_api_outlives_the_process():
         response = client.post(
             "/customers",
             json={"email": "survivor@test.com", "company": "Survivor Co", "start_trial": True},
+            headers=OPERATOR,
         )
         assert response.status_code == 200
         customer_id = response.json()["customer"]["id"]
@@ -90,19 +105,20 @@ def test_a_customer_created_through_the_api_outlives_the_process():
         assert client.post(
             "/customers/usage",
             json={"customer_id": customer_id, "event_type": "investigation", "tokens_used": 250},
+            headers=OPERATOR,
         ).status_code == 200
 
     # Second app instance — same database, no shared memory.
     with TestClient(app) as client:
-        stats = client.get("/customers/stats").json()
+        stats = client.get("/customers/stats", headers=OPERATOR).json()
         assert stats["total_customers"] == 1
         assert stats["total_investigations"] == 1
 
-        dashboard = client.get("/customers/dashboard").json()
+        dashboard = client.get("/customers/dashboard", headers=OPERATOR).json()
         assert [c["id"] for c in dashboard["recent_customers"]] == [customer_id]
         assert len(dashboard["active_trials"]) == 1
 
-        trials = client.get("/customers/trials/active").json()
+        trials = client.get("/customers/trials/active", headers=OPERATOR).json()
         assert trials["count"] == 1
 
 
@@ -110,21 +126,27 @@ def test_conversion_recorded_through_the_api_is_durable():
     """Revenue state in particular has to be readable by the next pod."""
     with TestClient(app) as client:
         customer_id = client.post(
-            "/customers", json={"email": "paid@test.com", "company": "Paid Co"}
+            "/customers",
+            json={"email": "paid@test.com", "company": "Paid Co"},
+            headers=OPERATOR,
         ).json()["customer"]["id"]
 
+        # `team`, not the old `pro`, and no `mrr_cents` in the body: the catalog
+        # is the only source of the recorded MRR now, so what survives the
+        # restart is a price the deployment actually sells.
         converted = client.post(
             "/customers/convert",
-            json={"customer_id": customer_id, "tier": "pro", "mrr_cents": 49900},
+            json={"customer_id": customer_id, "tier": "team"},
+            headers=OPERATOR,
         )
         assert converted.status_code == 200
         assert converted.json()["success"] is True
 
     with TestClient(app) as client:
-        stats = client.get("/customers/stats").json()
+        stats = client.get("/customers/stats", headers=OPERATOR).json()
         assert stats["paying_customers"] == 1
-        assert stats["mrr_usd"] == 499.0
-        assert stats["by_tier"] == {"pro": 1}
+        assert stats["mrr_usd"] == PRICING_PLANS["team"].monthly_price_cents / 100
+        assert stats["by_tier"] == {"team": 1}
 
 
 def test_usage_for_an_unknown_customer_is_still_a_404():
@@ -133,5 +155,6 @@ def test_usage_for_an_unknown_customer_is_still_a_404():
         response = client.post(
             "/customers/usage",
             json={"customer_id": "cust_ghost", "event_type": "investigation"},
+            headers=OPERATOR,
         )
         assert response.status_code == 404

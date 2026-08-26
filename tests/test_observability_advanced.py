@@ -552,15 +552,17 @@ class TestCostEstimation:
 
         The old table matched with ``m in model``, so the substring ``claude-opus-4``
         hit first and the newer model's spend was reported at the older, dearer
-        rate. It now resolves to its own catalog row, whose price is unverified —
-        so the honest answer is "no figure", not a figure from another model.
+        rate. It now resolves to its own catalog row and is priced from that row
+        — $5/$25, not the $15/$75 of the model whose name it merely contains.
         """
         from app.observability.metrics import _estimate_llm_cost
 
         assert _estimate_llm_cost("anthropic", "claude-opus-4", 1_000_000, 0) == pytest.approx(
             15.0, abs=0.01
         )
-        assert _estimate_llm_cost("anthropic", "claude-opus-4-8", 1_000_000, 0) is None
+        assert _estimate_llm_cost(
+            "anthropic", "claude-opus-4-8", 1_000_000, 0
+        ) == pytest.approx(5.0, abs=0.01)
 
     def test_dated_snapshot_prices_as_its_base_model(self):
         """Providers return dated IDs; those must still price correctly."""
@@ -593,23 +595,28 @@ class TestCostEstimation:
         cost graph is looking. The gap has to be visible in the same system as
         the number it undercuts.
         """
+        from app.model_catalog import MODELS
         from app.observability.metrics import get_metrics_registry, record_llm_call
 
         registry = get_metrics_registry()
         registry.reset()
 
-        # The default Anthropic model, and deliberately unpriced: its row exists
-        # but carries no verified price, so this is the default configuration.
+        # Asked of the catalog rather than named, because the model that is
+        # unpriced changes as rates get verified: this test used to hardcode the
+        # default Anthropic model, which has since been priced.
+        unpriced = next(
+            m.id for m in MODELS if m.provider == "anthropic" and m.input_per_1m is None
+        )
         record_llm_call(
             provider="anthropic",
-            model="claude-opus-4-8",
+            model=unpriced,
             input_tokens=1_000_000,
             output_tokens=500_000,
             latency_seconds=1.0,
         )
         output = registry.render_prometheus()
         assert (
-            'copilot_llm_calls_unpriced_total{model="claude-opus-4-8",'
+            f'copilot_llm_calls_unpriced_total{{model="{unpriced}",'
             'provider="anthropic"} 1.0' in output
         )
         assert "copilot_llm_cost_dollars{" not in output

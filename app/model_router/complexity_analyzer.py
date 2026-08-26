@@ -343,10 +343,20 @@ class ComplexityAnalyzer:
 
     def _score_to_level(self, overall: float, stakes: float) -> ComplexityLevel:
         """Convert overall score to complexity level."""
-        # Stakes override: high stakes always bumps up
-        if stakes > 0.5:
+        # Stakes override: high stakes always bumps up.
+        #
+        # These comparisons are inclusive because the thresholds are exactly
+        # the numbers the severity contributes: a declared P0 adds 0.50 and a
+        # P1 adds 0.30, so `stakes > 0.5` and `stakes > 0.3` both missed the
+        # case they were written for unless the query text happened to also
+        # match a high-stakes keyword. A P0 with no such keyword scored
+        # MEDIUM, which COMPLEXITY_TIER_MAP routes to the *balanced* model
+        # instead of premium; a P1 scored TRIVIAL — indistinguishable from
+        # passing no severity at all — and went to the *fast* one. The worst
+        # incidents got the cheapest models.
+        if stakes >= 0.5:
             return ComplexityLevel.CRITICAL
-        if stakes > 0.3:
+        if stakes >= 0.3:
             if overall > 0.4:
                 return ComplexityLevel.HIGH
             return ComplexityLevel.MEDIUM

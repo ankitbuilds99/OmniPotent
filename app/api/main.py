@@ -30,25 +30,32 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
+import anyio
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocketException
+from starlette.requests import HTTPConnection
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+
+from app.security.headers import SecurityHeadersMiddleware
 
 from app import (
     audit,
     feedback,
+    investigation_history,
     metering,
     metrics_source,
     model_catalog,
@@ -239,6 +246,31 @@ _gate = _ConfigGate()
 _OPEN_PATHS = frozenset({"/healthz", "/readyz", "/metrics/slo", "/frontend-config", "/auth/providers"})
 # Auth callback paths need to be open for OAuth redirects
 _AUTH_PATH_PREFIXES = ("/auth/",)
+# Back-office paths authenticated by COPILOT_OPERATOR_TOKEN rather than a tenant API
+# key. These skip tenant-key resolution in require_auth; each route still carries
+# _operator_guard, which fails closed when the token is unset or wrong.
+#
+# The CRM and the waitlist roll-up are here because they are the deployment's own
+# conversion tracking — every customer's contact details, health score and MRR,
+# and every lead's email. They were behind `require_auth`, which on a
+# multi-tenant deployment means any tenant API key: the cheapest self-serve
+# signup could read the whole customer list and the whole waitlist.
+_OPERATOR_PATHS = frozenset(
+    {
+        "/admin/plan",
+        "/waitlist/stats",
+        "/customers",
+        "/customers/stats",
+        "/customers/dashboard",
+        "/customers/trials/active",
+        "/customers/usage",
+        "/customers/convert",
+    }
+)
+# Anonymous-reachable paths. Deliberately NOT in _OPEN_PATHS: those bypass the
+# limits middleware too, and an unauthenticated POST with no rate limit is a
+# spam endpoint. These skip only the credential check.
+_PUBLIC_PATHS = frozenset({"/signup", "/waitlist", "/waitlist/position"})
 
 # --- In-memory per-IP fixed-window rate limiter (single-instance only) ---
 # {ip: (window_start_epoch, count)}. Good enough for one process; a multi-instance
@@ -381,12 +413,25 @@ async def lifespan(app: FastAPI):
         if get_settings().copilot_tenant_db.startswith(("postgres://", "postgresql://")) is False:
             log.warning("multi-tenant on SQLite is app-level isolated, not RLS-hard-isolated; "
                         "use Postgres + RLS for production tenant isolation")
-    # ORM schema (customers, trials, usage events, on-call). Had no caller at all
-    # before: init_db() existed and was never invoked, so on the default SQLite
-    # backend every table in app/database/models.py was unreachable. On Postgres
-    # this only verifies connectivity — Alembic owns the schema there.
+    # ORM schema (customers, trials, usage events, on-call, organizations, ...).
+    # Had no caller at all before: init_db() existed and was never invoked, so on
+    # the default SQLite backend every table in app/database/models.py was
+    # unreachable and every DB-backed endpoint answered 500 against a missing
+    # table. On Postgres this only verifies connectivity — Alembic owns the
+    # schema there.
+    #
+    # `ensure_schema` rather than `init_db` directly: it is the once-per-engine,
+    # locked wrapper, so the callers that touch the ORM outside a request (a
+    # worker, a script, a background task) can run it too without racing.
+    #
+    # Failure is logged rather than fatal: the bulk of the app (chat,
+    # investigations, incidents) does not touch this database, and refusing to
+    # boot over it would be a worse outcome than today's.
     from app.database.engine import close_db, ensure_schema
-    await ensure_schema()
+    try:
+        await ensure_schema()
+    except Exception:
+        log.exception("database init failed; DB-backed endpoints (on-call) will not work")
     # Drain queued audit events to the hash chain. `audit.record` is synchronous
     # (five of its call sites are in sync functions), so it queues and this task
     # writes. Started after ensure_schema so the first drain has a table.
@@ -415,17 +460,61 @@ async def lifespan(app: FastAPI):
         )
         slo_task = asyncio.create_task(poller.run())
         log.info("proactive SLO poller enabled")
+    # On-call escalation sweeper. Without it `escalate_to_next_step` has no
+    # caller at all, so every alert stops at step 0 and a policy's later levels
+    # are unreachable however long nobody acknowledges.
+    escalation_task: asyncio.Task | None = None
+    try:
+        from app.database.engine import _get_session_factory
+        from app.oncall.escalation_service import EscalationSweeper
+
+        escalation_task = asyncio.create_task(
+            EscalationSweeper(
+                _get_session_factory(),
+                interval=get_settings().copilot_escalation_sweep_interval_s,
+            ).run()
+        )
+    except Exception:
+        log.exception("escalation sweeper failed to start; alerts will not escalate past step 0")
+
+    # Notification digests. An org that chose "hourly" or "daily" batching has its
+    # notifications written to a table instead of sent; without something to empty
+    # that table the setting is a way to switch notifications off permanently.
+    # In-process next to the sweeper rather than in `app/tasks/worker.py`, whose
+    # scheduler is an optional separate process behind a message broker — a digest
+    # that only arrives on deployments that happen to run that process is worse
+    # than no digest, because the setting still says it is on.
+    async def _digest_loop() -> None:
+        from datetime import datetime, timezone
+
+        from app.notifications.delivery import flush_due_digests
+
+        while True:
+            now = datetime.now(timezone.utc)
+            # Wake on the hour: "hourly" and "daily" are both hour-granular, and
+            # a loop that slept a fixed hour from startup would put an org's
+            # daily digest at whatever minute the process last restarted.
+            await asyncio.sleep(3600 - (now.minute * 60 + now.second))
+            try:
+                await flush_due_digests()
+            except Exception:  # noqa: BLE001
+                log.exception("notification digest flush failed")
+
+    digest_task = asyncio.create_task(_digest_loop())
+
     # Live status page health check polling
     from app.status_page import start_live_status_polling, stop_live_status_polling
     await start_live_status_polling()
     log.info("live status page polling started")
+
     yield
+
     # Write whatever audit events are still queued before anything else shuts
     # down; they are the record of what this process did.
     await audit.stop_drain()
     # Stop live status polling first
     await stop_live_status_polling()
-    for _task in (slo_task, job_task):
+    for _task in (digest_task, escalation_task, slo_task, job_task):
         if _task:
             _task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -445,30 +534,95 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-async def require_auth(request: Request) -> None:
+def _auth_header(conn: HTTPConnection) -> str:
+    """Return the Authorization header, or its WebSocket equivalent.
+
+    Browsers cannot set an Authorization header on a WebSocket handshake, so the
+    token arrives as an `auth-<token>` entry in Sec-WebSocket-Protocol instead
+    (kept out of the query string, which gets written to access logs). Normalising
+    it to `Bearer <token>` lets both transports run the same checks.
+    """
+    header = conn.headers.get("authorization", "")
+    if header or conn.scope.get("type") != "websocket":
+        return header
+    for proto in conn.headers.get("sec-websocket-protocol", "").split(","):
+        proto = proto.strip()
+        if proto.startswith("auth-"):
+            return f"Bearer {proto[5:]}"
+    return ""
+
+
+def _reject(conn: HTTPConnection, detail: str) -> Exception:
+    """Build the right rejection for the transport.
+
+    An HTTPException raised during a WebSocket handshake has no response to be
+    written to, so websockets get a policy-violation close instead.
+    """
+    if conn.scope.get("type") == "websocket":
+        return WebSocketException(code=1008, reason=detail)
+    return HTTPException(401, detail)
+
+
+async def require_auth(conn: HTTPConnection) -> None:
     """Bearer-token gate for every route except probes and CORS preflight.
 
     When COPILOT_API_TOKEN is unset the API is open (local-dev default); set it
     in production and the frontend must send `Authorization: Bearer <token>`.
     (The static SPA mount is a sub-app, so it bypasses this dependency entirely.)
+
+    Takes an HTTPConnection, not a Request, so it can also gate WebSocket routes:
+    FastAPI cannot supply a Request to a websocket handler, and asking for one
+    made every /ws/* handshake fail with a TypeError before the route was reached.
     """
-    if request.method == "OPTIONS" or request.url.path in _OPEN_PATHS:
+    # WebSocket scopes carry no method, and CORS preflight never reaches a handler.
+    if conn.scope.get("method") == "OPTIONS" or conn.url.path in _OPEN_PATHS:
         return
     # Auth routes need to be open for OAuth login/callback flows.
-    if any(request.url.path.startswith(p) for p in _AUTH_PATH_PREFIXES):
+    if any(conn.url.path.startswith(p) for p in _AUTH_PATH_PREFIXES):
         return
-    # Webhooks authenticate via their own provider signatures (HMAC), not the
-    # shared bearer token — PagerDuty/Slack don't send it.
-    if request.url.path.startswith("/webhooks/"):
+    # Webhooks authenticate per-route, not with the shared bearer token, because
+    # the sending platform cannot be told to present it in the form this gate
+    # wants: PagerDuty/GitHub/GitLab sign the body (verified in the handler,
+    # fail-closed), and the receivers that have no signature at all —
+    # Alertmanager, Datadog, Grafana, /generic — go through
+    # `app.webhooks.router._verify_shared_secret`, which accepts the shared
+    # secret as X-Webhook-Secret, bearer or basic-auth password. Skipping here
+    # moves the credential check, it does not remove it.
+    #
+    # Both prefixes, because there are two mounts: `POST /webhooks/stripe` is
+    # declared on the app directly, while app/webhooks/router.py (Alertmanager,
+    # Grafana, Datadog, PagerDuty, the generic receiver) carries its own
+    # `/webhooks` prefix and is included with `prefix="/api"` — so it really
+    # lives at /api/webhooks/*. Only the first prefix was listed, so on any
+    # deployment with COPILOT_API_TOKEN set every alert delivery was rejected
+    # 401 before reaching its signature check, and no alert ever became an
+    # incident.
+    if conn.url.path.startswith(("/webhooks/", "/api/webhooks/")):
+        return
+    # The Slack bot router is mounted at /api/slack and is the same case: Slack
+    # signs every request with X-Slack-Signature and never sends an Authorization
+    # header, so demanding the shared bearer here makes the integration
+    # unreachable by Slack itself. This is not a hole — the router carries a
+    # router-wide `enforce_slack_signature` dependency that fails closed (503 when
+    # SLACK_SIGNING_SECRET is unset, 401 on a bad or replayed HMAC), so the
+    # credential check moves to the signature rather than disappearing.
+    if conn.url.path.startswith("/api/slack/"):
         return
     # SCIM provisioning authenticates with its own IdP-issued bearer token, checked
     # in the handler (not the shared app token).
-    if request.url.path.startswith("/scim/"):
+    if conn.url.path.startswith("/scim/"):
         return
-    # Self-serve signup is how a new tenant GETS its first credential, so it can't
-    # require one. It stays out of _OPEN_PATHS so the IP rate-limiter still applies
-    # (abuse guard); the handler itself enforces multi-tenant + the enabled flag.
-    if request.url.path == "/signup":
+    # Operator/back-office endpoints carry COPILOT_OPERATOR_TOKEN instead of a tenant
+    # key, and _operator_guard checks it. Skipping here only skips the tenant-key
+    # resolution below; the route's own dependency still fails closed.
+    if conn.url.path in _OPERATOR_PATHS:
+        return
+    # Self-serve signup is how a new tenant GETS its first credential, and joining
+    # a waitlist is something a visitor does before they have an account at all,
+    # so neither can require one. They stay out of _OPEN_PATHS so the IP
+    # rate-limiter still applies (abuse guard); /signup's handler additionally
+    # enforces multi-tenant + the enabled flag.
+    if conn.url.path in _PUBLIC_PATHS:
         return
 
     s = get_settings()
@@ -476,18 +630,23 @@ async def require_auth(request: Request) -> None:
     # TenantConfig + actor on the contextvar. Task-isolated, so it's scoped to
     # this request and read by runtime.py / the agent for the rest of the call.
     if s.copilot_multi_tenant:
-        provided = request.headers.get("authorization", "")
+        provided = _auth_header(conn)
         token = provided[7:].strip() if provided.startswith("Bearer ") else provided.strip()
-        # A `dcp_…` value is a tenant API key; anything with two dots is a JWT
-        # (Supabase/SSO login). Both resolve to the same TenantConfig + actor.
+        # A `dcp_…` value is a tenant API key; anything with two dots is a JWT.
+        # Two kinds of JWT reach us: a Supabase/SSO one, and the session token our
+        # own OAuth callback mints (app/auth/oauth.py, HS256 over COPILOT_SECRET_KEY).
+        # Both must be accepted — otherwise a user who completed GitHub/Google login
+        # holds a credential every route rejects. All resolve to a TenantConfig + actor.
         if token.startswith("dcp_"):
             resolved = await tenant_auth.resolve(token)
         elif token.count(".") == 2:
-            resolved = await tenant_auth.resolve_jwt(token)
+            resolved = await tenant_auth.resolve_jwt(token) or await tenant_auth.resolve_session(
+                token
+            )
         else:
             resolved = None
         if resolved is None:
-            raise HTTPException(401, "Invalid or revoked credential.")
+            raise _reject(conn, "Invalid or revoked credential.")
         cfg, actor = resolved
         tenant_context.set_tenant(cfg)
         tenant_context.set_actor(actor)
@@ -496,10 +655,20 @@ async def require_auth(request: Request) -> None:
     expected = s.copilot_api_token
     if not expected:
         return  # auth disabled (dev)
-    provided = request.headers.get("authorization", "")
+    provided = _auth_header(conn)
     # Constant-time compare so the token can't be recovered via response timing.
-    if not hmac.compare_digest(provided, f"Bearer {expected}"):
-        raise HTTPException(401, "Missing or invalid API token.")
+    if hmac.compare_digest(provided, f"Bearer {expected}"):
+        return
+    # A single-tenant deployment can still have OAuth login switched on; the session
+    # token it mints is the only credential such a user has, so accept it too rather
+    # than leaving signed-in users locked out of every route.
+    token = provided[7:].strip() if provided.startswith("Bearer ") else ""
+    if token.count(".") == 2:
+        from app.auth.oauth import verify_session_token
+
+        if await verify_session_token(token) is not None:
+            return
+    raise _reject(conn, "Missing or invalid API token.")
 
 
 def require_perm(action: str):
@@ -557,20 +726,139 @@ async def _meter_and_spend(tokens: int, idem: str = "") -> None:
     fleet-wide spend counter."""
     await metering.record_investigation(tokens, idem=idem)
     await _record_spend(tokens)
+    # ...and to the billing meter the Billing page reads, which otherwise has no
+    # writer at all outside the hand-callable POST /billing/track.
+    from app.api.billing_router import record_ai_investigation
+    await record_ai_investigation(tokens, idem)
+    # The graph's nodes price every LLM call and park it on a queue (they run in
+    # worker threads and cannot await a write). This is where a turn's dollar
+    # cost reaches `llm_usage_records`; without it /usage and /stats report on
+    # nothing but hand-POSTed rows. Best-effort inside, like the meters above.
+    from app.model_router import usage_ledger
+    await usage_ledger.flush()
 
 
-def _record_slo(result: Any, latency_s: float) -> None:
+def _record_slo_fields(
+    report: dict | None, final_text: str, tokens_used: int, latency_s: float
+) -> None:
     """Record a completed investigation to the SLO metrics (best-effort)."""
     try:
         from app.slo_metrics import metrics
-        report = result.report or {}
+        report = report or {}
         abstained = bool(report.get("abstained"))
         # "success" = produced a report and didn't error (abstention still counts as
         # a healthy, honest outcome).
-        success = bool(report) or bool(result.final_text)
-        metrics().record(latency_s, result.tokens_used, success, abstained)
+        success = bool(report) or bool(final_text)
+        metrics().record(latency_s, tokens_used, success, abstained)
     except Exception:  # noqa: BLE001 — metrics must never break a request
         log.debug("SLO metric record failed", exc_info=True)
+
+
+def _record_slo(result: Any, latency_s: float) -> None:
+    """Record a completed investigation from a non-streaming TurnResult."""
+    _record_slo_fields(
+        result.report, result.final_text, result.tokens_used, latency_s
+    )
+
+
+def _record_slo_failure(latency_s: float) -> None:
+    """Record a turn that errored out.
+
+    Without this only successful terminal states were ever sampled, so
+    `copilot_investigations_failed_total` was pinned at zero and
+    `copilot_investigations_total` omitted every errored turn — the exposed
+    error rate read a permanent 0% while users were getting error responses
+    back, and the CopilotHighFailureRate alert in
+    deploy/observability/prometheus-alerts.yaml could not fire under any
+    traffic. Nothing else can move that counter: `success` is
+    `bool(report) or bool(final_text)`, and a completed turn always has one or
+    the other (`_last_ai_text` falls back to a literal placeholder).
+
+    Client-side rejections — an over-long message, a thread paused mid-approval,
+    an exhausted quota — are deliberately not recorded: no investigation ran, so
+    counting them would make the agent's own error rate track user mistakes.
+    """
+    _record_slo_fields(None, "", 0, latency_s)
+
+
+#: Strong references to fire-and-forget tasks. asyncio only holds a weak one, so
+#: a task nobody keeps can be garbage-collected mid-await and vanish without
+#: running to completion.
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro: Any) -> None:
+    """Run `coro` detached from the request that started it."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+
+def _pause_paged(thread_id: str, approval_request: dict | None) -> None:
+    """Tell the org that a turn is blocked waiting for a human to approve it.
+
+    A paused investigation is the one state that nobody finds out about on their
+    own: the agent stops mid-run and waits, and the only signal is a browser tab
+    somebody has to already be looking at. The Slack trigger path posts its own
+    approval blocks (`_post_to_slack`), but a turn started from the UI or the API
+    posted nothing anywhere, so an agent could sit on a proposed write for hours.
+
+    Fire-and-forget rather than awaited: the SSE stream and the JSON response
+    both need to reach the caller now, and a slow webhook must not be what stands
+    between an operator and the approval prompt. Failures are logged by
+    `deliver`, which never raises.
+    """
+    req = approval_request or {}
+    actions = req.get("actions") or []
+    names = ", ".join(str(a.get("tool")) for a in actions if a.get("tool"))
+    body = req.get("message") or "The agent is waiting for approval to continue."
+    if names:
+        body = f"{body}\nProposed: {names}"
+
+    async def _send() -> None:
+        from app.notifications.delivery import notify
+
+        await notify(
+            "ai_action_pending",
+            "An investigation is waiting for approval",
+            body,
+            data={
+                "thread_id": thread_id,
+                "actions": actions,
+                # A write is the case where waiting is the point, so it is worth
+                # carrying through to whatever renders the notification.
+                "write": any(a.get("write") for a in actions),
+            },
+            dedupe_key=f"approval:{thread_id}",
+        )
+
+    # A task rather than a BackgroundTasks entry: three of the five pause sites
+    # are inside SSE generators, which have no BackgroundTasks to add to.
+    _spawn(_send())
+
+
+async def _record_history(req: Any, result: Any, latency_s: float) -> None:
+    """Persist a finished investigation so it shows up on the history page.
+
+    Stores the client's thread id, not the tenant-scoped internal key: the row
+    already carries org_id, and the history page links back using the id the
+    client knows.
+
+    Writes the narrative columns of the `investigations` row (query, summary,
+    report, feedback). `_record_dashboard_history` below upserts the analytics
+    columns of the *same* row (outcome, duration, severity, service). They are
+    two writers because they are two readers: GET /api/investigations and
+    GET /api/dashboard/metrics.
+    """
+    report = result.report or {}
+    await investigation_history.record(
+        req.thread_id,
+        req.message,
+        status=result.status,
+        summary=report.get("root_cause") or result.final_text or None,
+        report=report or None,
+        latency_ms=int(latency_s * 1000),
+    )
 
 
 # Org id used for investigation history when running single-tenant. Unlike
@@ -605,8 +893,14 @@ def _outcome_of(result: Any) -> Any:
     return InvestigationOutcome.PARTIAL_DIAGNOSIS
 
 
-async def _record_history(thread_id: str, result: Any, latency_s: float) -> None:
+async def _record_dashboard_history(
+    thread_id: str, result: Any, latency_s: float
+) -> None:
     """Record a completed investigation to the dashboard history (best-effort).
+
+    The analytics half of `_record_history`: same `investigations` row, different
+    columns (outcome, duration, severity, service, hypothesis count), read by
+    GET /api/dashboard/metrics and GET /api/dashboard/trends.
 
     Upserts one row per thread, so a multi-turn conversation stays one
     investigation. Everything written is read off the result: `time_saved_minutes`
@@ -642,14 +936,16 @@ async def _record_history(thread_id: str, result: Any, latency_s: float) -> None
         log.debug("investigation history record failed", exc_info=True)
 
 
-async def _record_history_from_stream(thread_id: str, ev: dict, latency_s: float) -> None:
-    """`_record_history` for the SSE paths, whose completion is a dict event.
+async def _record_dashboard_history_from_stream(
+    thread_id: str, ev: dict, latency_s: float
+) -> None:
+    """`_record_dashboard_history` for the SSE paths, whose completion is a dict event.
 
     The streaming endpoints ran investigations that never reached the dashboard
     or the SLO metrics at all: only the non-streaming /chat had a recording hook,
     so anything the UI ran through /chat/stream was invisible in both.
     """
-    await _record_history(
+    await _record_dashboard_history(
         thread_id,
         TurnResult(
             status="completed",
@@ -663,12 +959,19 @@ async def _record_history_from_stream(thread_id: str, ev: dict, latency_s: float
 
 async def quota_gate() -> None:
     """Route dependency: block a new investigation when the tenant is over its monthly
-    plan quota (402), or when the FLEET-WIDE token cap is reached (429). No-op in
-    single-tenant mode / when the global cap is off."""
+    plan quota (402), over its own DOLLAR budget (402), or when the FLEET-WIDE token
+    cap is reached (429). No-op in single-tenant mode / when the caps are unset."""
     if await metering.over_quota():
         raise HTTPException(
             402, "Monthly investigation quota reached for your plan — upgrade to continue."
         )
+    # The model-router budget an org set through /api/model-router/budget/set.
+    # It had no callers outside its own HTTP handler, so `can_proceed: false`
+    # blocked nothing and a cap could be exceeded indefinitely.
+    from app.model_router.usage_store import over_budget
+    reason = await over_budget()
+    if reason:
+        raise HTTPException(402, f"LLM spend budget reached — {reason}.")
     s = get_settings()
     if s.copilot_global_token_cap > 0:
         from app.spend import over_cap
@@ -804,11 +1107,29 @@ app.add_middleware(LimitsMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Allow the React dev server plus any origins configured via CORS_ORIGINS.
+# The method list has to cover every verb the API actually exposes: with only
+# GET/POST/OPTIONS the browser's preflight rejected every PUT, PATCH and DELETE,
+# so editing or deleting anything from the UI failed before the request was
+# sent. allow_credentials pairs with the explicit (never wildcard) origin list.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().allowed_origins,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+)
+
+# Added LAST, so it is the OUTERMOST middleware and stamps every response —
+# including the 4xx that CORS and the limiter generate themselves, which the
+# inner middleware never gets to touch.
+#
+# HSTS only in production. It is a browser-side pin: once a browser sees the
+# header for a host it refuses plain HTTP to that host until max-age expires,
+# and a year of that pointed at localhost breaks every developer who ever runs
+# the app over http://localhost.
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    enable_hsts=get_settings().copilot_hsts_enabled and get_settings().is_production,
 )
 
 # Include WebSocket router for real-time communication (alternative to SSE).
@@ -838,6 +1159,7 @@ app.include_router(incidents_router, prefix="/api")
 
 # Include webhooks router for auto-triggering investigations.
 from app.webhooks import webhooks_router  # noqa: E402
+from app.webhooks import router as webhook_receivers  # noqa: E402  (result write-back)
 app.include_router(webhooks_router, prefix="/api")
 
 # Include Slack bot router for @mention support and slash commands.
@@ -879,8 +1201,14 @@ app.include_router(model_router_api, prefix="/api")
 # Include knowledge graph router for Neo4j-backed infrastructure knowledge.
 from app.knowledge_graph.api_router import router as knowledge_graph_router  # noqa: E402
 from app.knowledge_graph.api_router import include_graphql_router  # noqa: E402
-app.include_router(knowledge_graph_router, prefix="/api")
+# GraphQL is attached to the router BEFORE the router is mounted on the app.
+# `include_router` copies the routes it finds at the time it is called, so with
+# these two lines the other way round the GraphQL sub-router was added to an
+# object nothing was reading any more: /graphql/status happily reported
+# "available" and handed callers a URL that 404'd, leaving the whole schema in
+# app/knowledge_graph/graphql_schema.py unreachable.
 include_graphql_router(knowledge_graph_router)  # Add GraphQL if strawberry is installed
+app.include_router(knowledge_graph_router, prefix="/api")
 
 # Include planning layer router for task graph management and execution.
 from app.planning.api_router import router as planning_router  # noqa: E402
@@ -901,6 +1229,10 @@ app.include_router(slo_router)
 # Include public status page router for component status, incidents, and maintenance.
 from app.status_page.api_router import router as status_page_router  # noqa: E402
 app.include_router(status_page_router)
+
+# Include notification preferences router (channels + per-event routing rules).
+from app.notifications.router import router as notifications_router  # noqa: E402
+app.include_router(notifications_router, prefix="/api")
 
 # Register global exception handlers for consistent error responses.
 from app.middleware.error_handler import register_exception_handlers  # noqa: E402
@@ -1803,6 +2135,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
     _check_message(req.message)
     tid = _scoped(req.thread_id)  # tenant-namespaced internal key (client sees its own id)
     existed = tid in _SESSIONS
+    # Started before the try so the failure path below has a latency to report:
+    # a turn that dies inside _get_session never reaches the inner assignment.
+    _t0 = time.monotonic()
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -1816,18 +2151,26 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     "the pending action (POST /approve) before sending a new message.",
                 )
             _AWAITING.discard(tid)
-            _t0 = time.monotonic()
             result = await session.ask(req.message)
             if result.status == "awaiting_approval":
                 _AWAITING.add(tid)
+                _pause_paged(req.thread_id, result.approval_request)
             elif result.status == "completed":
                 await _meter_and_spend(result.tokens_used)
                 _record_slo(result, time.monotonic() - _t0)
-                await _record_history(tid, result, time.monotonic() - _t0)
+                await _record_history(req, result, time.monotonic() - _t0)
+                # Same `investigations` row, analytics columns. Keyed on the
+                # client's thread id (not the tenant-scoped `tid`) so it upserts
+                # onto the row `_record_history` just wrote — the row already
+                # carries org_id, so the scoped key would only split it in two.
+                await _record_dashboard_history(
+                    req.thread_id, result, time.monotonic() - _t0
+                )
     except HTTPException:
         raise  # 409/4xx should surface as real HTTP errors, not a 200 error body
     except Exception as exc:  # noqa: BLE001 — surface a clean error to the UI
         log.exception("chat turn failed (thread=%s)", tid)
+        _record_slo_failure(time.monotonic() - _t0)
         # If this session was just created and its first turn failed, drop it so
         # a retry rebuilds cleanly instead of reusing a half-initialized session.
         if not existed:
@@ -1905,11 +2248,19 @@ async def approve(req: ApproveRequest) -> ChatResponse:
                 404, f"no investigation awaiting approval for thread '{req.thread_id}'"
             )
         audit.record("approval.decided", thread=req.thread_id, approved=req.approved)
+        # An investigation that pauses for approval is never sampled at the pause,
+        # so without recording here the whole thing goes uncounted — every
+        # investigation that touched a risky action was missing from /metrics/slo.
+        # The latency measured is the continuation only, deliberately: the human's
+        # thinking time is not the agent's.
+        _t0 = time.monotonic()
         try:
-            _t0 = time.monotonic()
             result = await session.resume(approved=req.approved, reason=req.reason)
             if result.status == "awaiting_approval":
                 _AWAITING.add(tid)
+                # A resumed turn can stop at a *second* gate; without this the
+                # first approval is announced and every one after it is silent.
+                _pause_paged(req.thread_id, result.approval_request)
             else:
                 _AWAITING.discard(tid)
                 if result.status == "completed":
@@ -1917,9 +2268,12 @@ async def approve(req: ApproveRequest) -> ChatResponse:
                     _record_slo(result, time.monotonic() - _t0)
                     # Upserts onto the row the original /chat turn created, so the
                     # investigation keeps its true start time and counts once.
-                    await _record_history(tid, result, time.monotonic() - _t0)
+                    await _record_dashboard_history(
+                        req.thread_id, result, time.monotonic() - _t0
+                    )
         except Exception as exc:  # noqa: BLE001
             log.exception("approve/resume failed (thread=%s)", tid)
+            _record_slo_failure(time.monotonic() - _t0)
             return ChatResponse(
                 thread_id=req.thread_id, status="error", answer=_friendly_error(exc)
             )
@@ -1950,6 +2304,66 @@ def _stream_payload(thread_id: str, ev: dict) -> dict:
             tokens_used=ev.get("tokens_used", 0),
         )
     return out
+
+
+def _transport_dead(exc: BaseException, _depth: int = 0) -> bool:
+    """True if `exc` (or anything it wraps) is a dead MCP stdio transport.
+
+    A session whose MCP subprocess connection has been closed raises
+    ``anyio.ClosedResourceError`` / ``BrokenResourceError`` from inside the
+    tools node, usually re-raised through an ExceptionGroup ("During task with
+    name 'tools'"). The request never reached the MCP server, so nothing ran and
+    the turn is safe to restart on a rebuilt session.
+    """
+    if _depth > 10:  # cheap cycle guard: __context__ chains can loop
+        return False
+    if isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError)):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_transport_dead(inner, _depth + 1) for inner in exc.exceptions)
+    return any(
+        inner is not None and _transport_dead(inner, _depth + 1)
+        for inner in (exc.__cause__, exc.__context__)
+    )
+
+
+async def _stream_chat_turn(tid: str, req: "ChatRequest", session: Any):
+    """Run one chat turn on `session`, yielding SSE payloads and doing the
+    end-of-turn bookkeeping (spend metering, SLO sample, history row)."""
+    _t0 = time.monotonic()
+    async for ev in session.ask_stream(req.message):
+        t = ev.get("type")
+        if t == "approval":
+            _AWAITING.add(tid)
+            _pause_paged(req.thread_id, ev.get("approval_request"))
+        elif t == "done":
+            _AWAITING.discard(tid)
+            await _meter_and_spend(ev.get("tokens_used", 0))
+            # This is the path the UI actually uses. It recorded neither an SLO
+            # sample nor a history row, which is why the SLO dashboard read as
+            # zero investigations and the history page had nothing to list.
+            elapsed = time.monotonic() - _t0
+            _record_slo_fields(
+                ev.get("report"),
+                ev.get("final_text", ""),
+                ev.get("tokens_used", 0),
+                elapsed,
+            )
+            await investigation_history.record(
+                req.thread_id,
+                req.message,
+                status="completed",
+                summary=(ev.get("report") or {}).get("root_cause")
+                or ev.get("final_text")
+                or None,
+                report=ev.get("report"),
+                latency_ms=int(elapsed * 1000),
+            )
+            # ...and the analytics columns of the same row, which is what the
+            # dashboard aggregates over. Same key as above (the client's thread
+            # id) so both writers upsert one row per investigation.
+            await _record_dashboard_history_from_stream(req.thread_id, ev, elapsed)
+        yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
 
 
 @app.post(
@@ -2011,6 +2425,10 @@ async def chat_stream(req: ChatRequest):
 
     async def gen():
         tok = tenant_context.set_tenant(cfg)
+        # _stream_chat_turn keeps its own clock for the success sample; this one
+        # exists for the failure path, which can be reached before the turn ever
+        # starts (a session that fails to build).
+        _t0 = time.monotonic()
         try:
             async with _running_turn(tid):
                 existed = tid in _SESSIONS
@@ -2031,22 +2449,43 @@ async def chat_stream(req: ChatRequest):
                         }
                         return
                     _AWAITING.discard(tid)
-                    _t0 = time.monotonic()
-                    async for ev in session.ask_stream(req.message):
-                        t = ev.get("type")
-                        if t == "approval":
-                            _AWAITING.add(tid)
-                        elif t == "done":
-                            _AWAITING.discard(tid)
-                            await _meter_and_spend(ev.get("tokens_used", 0))
-                            await _record_history_from_stream(
-                                tid, ev, time.monotonic() - _t0
+                    try:
+                        async for payload in _stream_chat_turn(tid, req, session):
+                            yield payload
+                    except Exception as exc:  # noqa: BLE001 — one retry, then report
+                        # A pooled session whose MCP transport died answers every
+                        # later message with the same error, which bricked the
+                        # thread for good. The failed call never reached the MCP
+                        # server, so rebuild the session and re-run the turn once.
+                        if not (existed and _transport_dead(exc)):
+                            raise
+                        log.warning(
+                            "chat stream hit a dead MCP transport (thread=%s); "
+                            "rebuilding the session and retrying the turn once",
+                            tid,
+                        )
+                        await _evict(tid)
+                        yield {
+                            "data": json.dumps(
+                                {
+                                    "type": "trace",
+                                    "thread_id": req.thread_id,
+                                    "line": "🔌 tool connection dropped — reconnecting "
+                                    "and restarting this step",
+                                }
                             )
-                        yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
+                        }
+                        session = await _get_session(tid)
+                        async for payload in _stream_chat_turn(tid, req, session):
+                            yield payload
                 except Exception as exc:  # noqa: BLE001
                     log.exception("chat stream failed (thread=%s)", tid)
-                    if not existed:
-                        await _evict(tid)
+                    _record_slo_failure(time.monotonic() - _t0)
+                    # Always drop the session, not just a freshly built one: a
+                    # turn that raised may have left the MCP transport or the
+                    # graph in an unusable state, and keeping it in the pool made
+                    # every subsequent message on the thread fail identically.
+                    await _evict(tid)
                     yield {
                         "data": json.dumps(
                             {
@@ -2117,23 +2556,44 @@ async def approve_stream(req: ApproveRequest):
                     }
                     return
                 audit.record("approval.decided", thread=req.thread_id, approved=req.approved)
+                # See the non-streaming /approve: the pause was never sampled, so
+                # this is the only chance to count an investigation that went
+                # through an approval gate.
+                _t0 = time.monotonic()
                 try:
-                    _t0 = time.monotonic()
                     async for ev in session.resume_stream(
                         approved=req.approved, reason=req.reason
                     ):
                         t = ev.get("type")
                         if t == "approval":
                             _AWAITING.add(tid)
+                            _pause_paged(req.thread_id, ev.get("approval_request"))
                         elif t == "done":
                             _AWAITING.discard(tid)
                             await _meter_and_spend(ev.get("tokens_used", 0))
-                            await _record_history_from_stream(
-                                tid, ev, time.monotonic() - _t0
+                            _elapsed = time.monotonic() - _t0
+                            _record_slo_fields(
+                                ev.get("report"),
+                                ev.get("final_text", ""),
+                                ev.get("tokens_used", 0),
+                                _elapsed,
+                            )
+                            # Upserts onto the row the original turn created, so
+                            # an approval-gated investigation still counts once.
+                            await _record_dashboard_history_from_stream(
+                                req.thread_id, ev, _elapsed
                             )
                         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
                 except Exception as exc:  # noqa: BLE001
                     log.exception("approve stream failed (thread=%s)", tid)
+                    _record_slo_failure(time.monotonic() - _t0)
+                    # Drop the session so the thread isn't stuck on a broken one.
+                    # The checkpointer keeps the pending interrupt, so the human
+                    # can approve again on a rebuilt session. Unlike /chat/stream
+                    # this is never retried automatically: the approved action may
+                    # have run before the failure, and re-running a write blind is
+                    # exactly what the approval gate exists to prevent.
+                    await _evict(tid)
                     yield {
                         "data": json.dumps(
                             {
@@ -2341,38 +2801,14 @@ async def list_investigations(
     Returns:
         dict: List of investigations.
     """
-    from app.api.graphql.schema import _investigations
-
-    results = list(_investigations.values())
-
-    if status:
-        results = [r for r in results if r.get("status") == status]
-
-    results.sort(key=lambda x: x.get("started_at", ""), reverse=True)
-
-    investigations = []
-    for r in results[offset:offset + limit]:
-        investigations.append({
-            "id": r.get("id", ""),
-            "thread_id": r.get("thread_id", ""),
-            "query": r.get("incident_summary", ""),
-            "summary": r.get("root_cause"),
-            "status": r.get("status", "unknown"),
-            "tokens_used": r.get("tokens_used", 0),
-            "latency_ms": None,
-            "feedback_rating": None,
-            "created_at": r.get("started_at"),
-            "completed_at": r.get("completed_at"),
-            "report": {
-                "root_cause": r.get("root_cause"),
-                "confidence": r.get("confidence"),
-                "hypotheses": r.get("hypotheses", []),
-                "evidence": r.get("evidence", []),
-                "affected_services": r.get("affected_services", []),
-            } if r.get("root_cause") else None,
-        })
-
-    return {"investigations": investigations}
+    # Reads the `investigations` table. This used to import a module-level dict
+    # from app/api/graphql/schema.py, which imports strawberry — not a
+    # dependency — so the history page got a 500 on every load.
+    return {
+        "investigations": await investigation_history.recent(
+            status=status, limit=limit, offset=offset
+        )
+    }
 
 
 @app.post(
@@ -2416,6 +2852,9 @@ async def submit_feedback(req: FeedbackRequest) -> dict:
         entry = feedback.record_feedback(req.thread_id, req.rating, req.comment, req.question)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # Also stamp the history row, so the history page can show which
+    # investigations were rated. Best-effort: the feedback itself is recorded.
+    await investigation_history.set_feedback(req.thread_id, req.rating, req.comment)
     return {"status": "recorded", "feedback": entry}
 
 
@@ -2476,11 +2915,60 @@ async def integration_status() -> dict:
 
 
 @app.get(
+    "/api/metrics/prometheus/query",
+    tags=["Metrics"],
+    summary="Run an instant PromQL query",
+    description="Proxy an instant PromQL query to the configured Prometheus. The browser "
+    "cannot reach Prometheus directly (it is not CORS-enabled and is usually not "
+    "internet-facing), so the Service Map goes through here. Returns 503 naming the "
+    "missing setting when PROMETHEUS_URL is not configured.",
+    responses={
+        200: {"description": "Prometheus instant-query vector"},
+        502: {"description": "Prometheus refused or could not be reached"},
+        503: {"description": "PROMETHEUS_URL is not configured"},
+    },
+)
+async def prometheus_instant_query(query: str) -> dict:
+    """Proxy one instant PromQL query.
+
+    Args:
+        query: PromQL expression.
+
+    Returns:
+        dict: ``{"result": [{"metric": str, "labels": {...}, "value": float,
+        "timestamp": iso}, ...], "source": url}``.
+    """
+    if not query.strip():
+        raise HTTPException(400, "query is required")
+    url = get_settings().prometheus_url.strip()
+    if not url:
+        raise HTTPException(
+            503,
+            "Prometheus is not configured. Set PROMETHEUS_URL to your Prometheus "
+            "HTTP API base (e.g. http://prometheus:9090).",
+        )
+
+    from app.connectors.base import ConnectorConfig
+    from app.connectors.prometheus import PrometheusConnector
+
+    connector = PrometheusConnector(ConnectorConfig(url=url))
+    try:
+        result = await connector.query(query)
+    finally:
+        await connector.close()
+    if not result.success:
+        raise HTTPException(502, f"Prometheus query failed: {result.error}")
+    return {"result": result.data, "source": url}
+
+
+@app.get(
     "/audit",
     tags=["Audit"],
     summary="Query audit trail",
     description="Query the audit trail for recent events. Returns approvals, model changes, "
-    "prompt-injection detections, and feedback events. Supports filtering by event type prefix.",
+    "prompt-injection detections, and feedback events. Supports filtering by event type prefix. "
+    "Requires view_audit permission (admin+).",
+    dependencies=[Depends(require_perm("view_audit"))],
     responses={
         200: {
             "description": "Audit events",
@@ -2520,7 +3008,9 @@ async def get_audit(limit: int = 100, event_prefix: str = "") -> dict:
     tags=["Audit"],
     summary="Verify audit chain integrity",
     description="Verify that the audit hash-chain is intact (tamper-evidence check). "
-    "Reports the first broken link if any tampering is detected.",
+    "Reports the first broken link if any tampering is detected. Scoped to the caller's "
+    "org and requires view_audit permission (admin+).",
+    dependencies=[Depends(require_perm("view_audit"))],
     responses={
         200: {
             "description": "Verification result",
@@ -2547,7 +3037,16 @@ async def audit_verify() -> dict:
     Returns:
         dict: Verification result with valid flag and count or broken index.
     """
-    return await audit.verify_all_chains()
+    # Scoped to the caller's org: an unscoped call reported every other tenant's
+    # event count (and, on a broken link, their event name). '-' in single-tenant
+    # mode, which matches every entry there.
+    #
+    # `verify_org_chain` rather than `verify_all_chains`: the stored chains are
+    # per org, and this route is reachable by any org admin, so the fleet-wide
+    # roll-up would hand one tenant every other tenant's chain summary. Use
+    # `audit.verify_all_chains()` from an operator context if you need the fleet
+    # view.
+    return await audit.verify_org_chain(tenant_context.tenant_id())
 
 
 # --------------------------------------------------------------------------- #
@@ -2827,13 +3326,60 @@ async def admin_set_integration(req: SetIntegrationRequest) -> dict:
     return {"status": "saved", "name": name}
 
 
+@app.delete(
+    "/admin/integrations/{name}",
+    tags=["Admin"],
+    summary="Disconnect an integration",
+    description="Delete the stored secret for an integration, disconnecting it. "
+    "Requires manage_integrations permission.",
+    dependencies=[Depends(require_perm("manage_integrations"))],
+    responses={
+        200: {"description": "Integration disconnected"},
+        404: {"description": "No such integration is configured"},
+    },
+)
+async def admin_delete_integration(name: str) -> dict:
+    """Disconnect an integration by deleting its stored secret.
+
+    There was no delete route at all, so the marketplace's Disconnect button got
+    a 405 and a credential could be stored but never withdrawn.
+    """
+    org_id = _current_org_id()
+    key = name.strip()
+    if not key:
+        raise HTTPException(400, "integration name is required")
+    if not await tenant_auth.get_store().delete_integration_secret(org_id, key):
+        raise HTTPException(404, f"Integration '{key}' is not configured.")
+    audit.record("secret.delete", org=org_id, name=key)
+    return {"status": "disconnected", "name": key}
+
+
+def _operator_guard(request: Request) -> None:
+    """Authenticate a deployment-operator request via COPILOT_OPERATOR_TOKEN.
+
+    Used for mutations that decide what a tenant has paid for. A tenant permission
+    is not sufficient here: `manage_billing` resolves to the owner role, and every
+    self-serve signup issues an owner key, so a role check would let a free account
+    grant itself the most expensive plan. Raises 403 when unconfigured, 401 on a bad
+    token.
+    """
+    s = get_settings()
+    if not s.copilot_operator_token:
+        raise HTTPException(403, "Operator endpoints are not configured on this deployment.")
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not secrets.compare_digest(token, s.copilot_operator_token):
+        raise HTTPException(401, "Invalid operator token.")
+
+
 @app.patch(
     "/admin/plan",
     tags=["Admin"],
-    summary="Update organization plan",
-    description="Change the organization's subscription plan. Typically called by "
-    "billing webhooks. Requires manage_billing permission.",
-    dependencies=[Depends(require_perm("manage_billing"))],
+    summary="Update organization plan (operator only)",
+    description="Change an organization's subscription plan. This is an operator/back-office "
+    "endpoint: it requires COPILOT_OPERATOR_TOKEN, not a tenant API key. Customer-driven "
+    "plan changes go through billing (Stripe checkout and the webhook), never through here.",
+    dependencies=[Depends(_operator_guard)],
     responses={
         200: {
             "description": "Plan updated",
@@ -2843,21 +3389,25 @@ async def admin_set_integration(req: SetIntegrationRequest) -> dict:
                 }
             },
         },
+        401: {"description": "Invalid operator token"},
+        403: {"description": "Operator endpoints not configured"},
     },
 )
-async def admin_set_plan(req: SetPlanRequest) -> dict:
-    """Update the organization plan.
+async def admin_set_plan(req: SetPlanRequest, org_id: str = "") -> dict:
+    """Update an organization's plan.
 
     Args:
         req: New plan tier.
+        org_id: Target organization. Defaults to the ambient tenant when omitted,
+            which is the single-tenant case.
 
     Returns:
         dict: Updated plan.
     """
-    org_id = _current_org_id()
+    target = org_id.strip() or _current_org_id()
     plan = tn_models.normalize_plan(req.plan)
-    await tenant_auth.get_store().set_plan(org_id, plan)
-    audit.record("plan.changed", org=org_id, plan=plan)
+    await tenant_auth.get_store().set_plan(target, plan)
+    audit.record("plan.changed", org=target, plan=plan, actor="operator")
     return {"plan": plan}
 
 
@@ -2867,16 +3417,30 @@ async def admin_set_plan(req: SetPlanRequest) -> dict:
 # but still IP rate-limited. Always provisions the FREE plan; upgrades go through
 # billing/admin so signup can't self-assign a paid tier.
 # --------------------------------------------------------------------------- #
-def _scim_guard(request: Request) -> str:
+async def _scim_guard(request: Request) -> str:
     """Authenticate a SCIM request via COPILOT_SCIM_TOKEN and return the target org.
-    Raises 403 when SCIM is unconfigured, 401 on a bad token."""
+    Raises 403 when SCIM is unconfigured, 401 on a bad token, 503 when
+    COPILOT_SCIM_ORG names an org that does not exist.
+
+    That last check is the point of this being async. The guard only tested that
+    the setting was non-empty, so a typo'd org id made every provisioning call
+    return 201 to the IdP while writing a membership row pointing at nothing —
+    and `resolve_session`/`resolve_jwt` return None when the org lookup misses,
+    so each "successfully provisioned" user got 401 on every route. Failing here
+    puts the error in front of the administrator who can fix it."""
     s = get_settings()
     if not (s.copilot_scim_token and s.copilot_scim_org):
         raise HTTPException(403, "SCIM provisioning is not configured.")
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    if token != s.copilot_scim_token:
+    if not hmac.compare_digest(token, s.copilot_scim_token):
         raise HTTPException(401, "Invalid SCIM token.")
+    if await tenant_auth.get_store().get_org(s.copilot_scim_org) is None:
+        raise HTTPException(
+            503,
+            f"COPILOT_SCIM_ORG '{s.copilot_scim_org}' is not a provisioned "
+            "organization; users cannot be added to it.",
+        )
     return s.copilot_scim_org
 
 
@@ -2903,7 +3467,7 @@ async def scim_create_user(request: Request) -> dict:
         dict: SCIM user resource.
     """
     from app.tenancy import scim
-    org_id = _scim_guard(request)
+    org_id = await _scim_guard(request)
     payload = scim.parse_scim_user(await request.json())
     if not payload["email"]:
         raise HTTPException(400, "SCIM user requires userName (email).")
@@ -2941,7 +3505,7 @@ async def scim_deprovision_user(email: str, request: Request) -> dict:
         dict: Deprovisioning confirmation.
     """
     from app.tenancy import scim
-    org_id = _scim_guard(request)
+    org_id = await _scim_guard(request)
     # DELETE always deprovisions; PATCH deprovisions when it sets active=false.
     if request.method == "PATCH":
         body = await request.json()
@@ -3086,21 +3650,33 @@ async def _enqueue_investigation(incident: dict) -> None:
 
 
 async def _run_triggered_investigation(incident: dict) -> None:
-    thread_id = f"pd-{incident['id']}"
+    # "pd" unless the trigger says otherwise — alert webhooks and CI receivers
+    # feed this too, and a thread named pd-<x> for a GitLab pipeline is a lie.
+    source = str(incident.get("source") or "pd")
+    thread_id = f"{source}-{incident['id']}"
     title = incident.get("title") or thread_id
+    origin = {"pd": "A PagerDuty incident was triggered"}.get(
+        source, f"An alert was ingested from {source}"
+    )
     seed = (
-        f"A PagerDuty incident was triggered: {title}"
+        f"{origin}: {title}"
         + (f" (service: {incident['service']})" if incident.get("service") else "")
         + ". Investigate the root cause from logs, metrics, code, and recent changes, "
         "then propose a fix."
     )
+    _t0 = time.monotonic()
     try:
         async with _running_turn(thread_id):
             session = await _get_session(thread_id)
-            _t0 = time.monotonic()
             result = await session.ask(seed)
             if result.status == "awaiting_approval":
                 _AWAITING.add(thread_id)
+                # Also announced on the org's own channels, not just via
+                # `_post_to_slack` below: that posts with the deployment's bot
+                # token to the deployment's channel, which on a multi-tenant
+                # install is not the org's channel and may not be configured at
+                # all. This is the path with nobody watching a browser tab.
+                _pause_paged(thread_id, result.approval_request)
             elif result.status == "completed":
                 # Meter the triggered path the same as the interactive one (no-op
                 # without a tenant); idem-keyed by the incident so a re-run can't double-bill.
@@ -3108,11 +3684,29 @@ async def _run_triggered_investigation(incident: dict) -> None:
                 # Alert-triggered investigations are the ones an operator most
                 # wants counted in MTTR — they start when the page fires, not when
                 # someone gets to a keyboard.
-                _record_slo(result, time.monotonic() - _t0)
-                await _record_history(thread_id, result, time.monotonic() - _t0)
+                elapsed = time.monotonic() - _t0
+                _record_slo(result, elapsed)
+                report = result.report or {}
+                await investigation_history.record(
+                    thread_id,
+                    seed,
+                    status=result.status,
+                    summary=report.get("root_cause") or result.final_text or None,
+                    report=report or None,
+                    latency_ms=int(elapsed * 1000),
+                )
+                await _record_dashboard_history(thread_id, result, elapsed)
         await _post_to_slack(thread_id, title, result)
-    except Exception:  # noqa: BLE001 — best-effort background trigger
+        # An alert-ingested incident carries the row it came from: write the real
+        # verdict back onto it, so the stored investigation reflects this run
+        # rather than the placeholder values it was created with.
+        await webhook_receivers.record_incident_outcome(incident, result)
+    except Exception as exc:  # noqa: BLE001 — best-effort background trigger
         log.exception("triggered investigation failed (incident=%s)", incident.get("id"))
+        _record_slo_failure(time.monotonic() - _t0)
+        await webhook_receivers.record_incident_outcome(
+            incident, None, error=f"{type(exc).__name__}: {exc}"
+        )
 
 
 async def _slo_trigger(service: str, burn: dict) -> None:
@@ -3232,6 +3826,7 @@ async def _resume_triggered(thread_id: str, approved: bool) -> None:
             result = await session.resume(approved=approved, reason="decided via Slack")
             if result.status == "awaiting_approval":
                 _AWAITING.add(thread_id)
+                _pause_paged(thread_id, result.approval_request)
             else:
                 _AWAITING.discard(thread_id)
         await _post_to_slack(thread_id, thread_id, result)
@@ -3360,11 +3955,20 @@ async def stripe_webhook(request: Request) -> dict:
         event = _json.loads(raw)
     except ValueError:
         raise HTTPException(400, "Malformed Stripe event.") from None
-    mapping = billing.plan_from_stripe_event(event)
+    try:
+        mapping = billing.plan_from_stripe_event(event)
+    except billing.UnknownPlan as exc:
+        # 400, not 200-ignored: Stripe surfaces the failure in its dashboard and
+        # retries, which is the only way anyone finds out that a price was
+        # created with metadata the product does not recognise.
+        raise HTTPException(400, f"Unknown plan in subscription metadata: {exc.plan!r}") from None
     if mapping is None:
         return {"status": "ignored", "type": event.get("type")}
     org_id, plan = mapping
-    await tenant_auth.get_store().set_plan(org_id, plan)
+    if not await tenant_auth.get_store().set_plan(org_id, plan):
+        # Report the failure so Stripe retries rather than recording a change
+        # that never landed on any row.
+        raise HTTPException(404, f"No such organization: {org_id}")
     audit.record("billing.plan_changed", org_id=org_id, plan=plan, via="stripe")
     return {"status": "applied", "org_id": org_id, "plan": plan}
 
@@ -3440,6 +4044,36 @@ def _verify_github_signature(secret: str, payload: bytes, signature: str) -> boo
     return hmac.compare_digest(expected, signature)
 
 
+async def _triage_event(
+    result: dict[str, object], raw: bytes, *, source: str, key: str, reason: str,
+    title: str, service: str,
+) -> None:
+    """Open a real investigation for a triage-worthy SCM/CI event.
+
+    The GitHub and GitLab receivers used to "auto-triage" by writing a string
+    into the response body (`result["auto_triage"] = "incident_detected"`) and
+    returning. Nothing read that string — not the queue, not the incident store,
+    not the UI — so a failed deployment or an incident-labelled issue produced
+    exactly one thing: a 200 with a word in it.
+
+    `auto_triage` is now only set when an investigation was actually queued;
+    when it can't be, the response says why instead of implying triage happened.
+    """
+    if not active_api_key():
+        result["auto_triage_skipped"] = (
+            f"{reason}: no LLM provider key configured, nothing was investigated"
+        )
+        return
+    if not _claim_delivery(raw):
+        result["auto_triage_skipped"] = f"{reason}: duplicate delivery"
+        return
+    await _enqueue_investigation(
+        {"id": key, "source": source, "title": title, "service": service}
+    )
+    result["auto_triage"] = reason
+    result["investigation_thread"] = f"{source}-{key}"
+
+
 @app.post(
     "/webhooks/github",
     tags=["Webhooks"],
@@ -3465,11 +4099,18 @@ async def github_webhook(request: Request) -> dict[str, object]:
     s = get_settings()
     sig = request.headers.get("x-hub-signature-256", "")
 
-    # Unconditional: `if secret and not verify(...)` meant a deployment that never
-    # set GITHUB_WEBHOOK_SECRET accepted unsigned events from anyone, which is the
-    # same hole the helper is written to close.
+    # Fail closed, unconditionally. This used to be `if secret and not verified`,
+    # so with no secret configured — the default — the receiver accepted anything
+    # anyone posted at it, which is also what decides whether LLM spend is
+    # triggered. The unconfigured case is split out from the bad-signature case
+    # only so the 401 names the setting the operator has to fill in;
+    # `_verify_github_signature` rejects (and logs) it either way.
+    if not s.github_webhook_secret:
+        raise HTTPException(
+            401, "GITHUB_WEBHOOK_SECRET is not configured; refusing unverified GitHub delivery"
+        )
     if not _verify_github_signature(s.github_webhook_secret, raw, sig):
-        raise HTTPException(401, "invalid or unconfigured GitHub webhook signature")
+        raise HTTPException(401, "invalid GitHub webhook signature")
 
     try:
         payload = json.loads(raw)
@@ -3486,52 +4127,80 @@ async def github_webhook(request: Request) -> dict[str, object]:
         "delivery_id": delivery_id,
         "processed": True,
     }
+    repo_name = (payload.get("repository") or {}).get("full_name") or "unknown"
 
     if event_type == "push":
         result["action"] = "deployment_tracked"
         result["ref"] = payload.get("ref", "")
-        result["commits"] = len(payload.get("commits", []))
-        result["repository"] = payload.get("repository", {}).get("full_name", "")
+        result["commits"] = len(payload.get("commits") or [])
+        result["repository"] = repo_name
 
     elif event_type == "pull_request":
         action = payload.get("action", "")
-        pr = payload.get("pull_request", {})
+        pr = payload.get("pull_request") or {}
         result["action"] = action
         result["pr_number"] = pr.get("number")
         result["pr_title"] = pr.get("title", "")
         result["pr_state"] = pr.get("state", "")
 
-        if action in ("opened", "synchronize") and active_api_key():
-            changes = pr.get("changed_files", 0)
-            if changes > 50:
-                result["auto_triage"] = "large_pr_flagged"
+        # A big PR is worth flagging, but it is not an incident — it does not
+        # open an investigation, so it does not claim to have been triaged.
+        if action in ("opened", "synchronize") and (pr.get("changed_files") or 0) > 50:
+            result["review_flags"] = ["large_pr"]
 
     elif event_type == "issues":
         action = payload.get("action", "")
-        issue = payload.get("issue", {})
+        issue = payload.get("issue") or {}
         result["action"] = action
         result["issue_number"] = issue.get("number")
         result["issue_title"] = issue.get("title", "")
 
-        if action == "opened" and active_api_key():
-            labels = [lbl.get("name", "").lower() for lbl in issue.get("labels", [])]
+        if action == "opened":
+            labels = [
+                str((lbl or {}).get("name", "")).lower() for lbl in (issue.get("labels") or [])
+            ]
             if "bug" in labels or "incident" in labels:
-                result["auto_triage"] = "incident_detected"
+                await _triage_event(
+                    result, raw,
+                    source="gh-issue",
+                    key=str(issue.get("number") or delivery_id or "unknown"),
+                    reason="incident_detected",
+                    title=f"GitHub issue #{issue.get('number')}: {issue.get('title', '')}".strip(),
+                    service=str(repo_name),
+                )
 
     elif event_type == "deployment_status":
-        deployment = payload.get("deployment", {})
+        deployment = payload.get("deployment") or {}
         result["deployment_id"] = deployment.get("id")
         result["environment"] = deployment.get("environment", "")
-        result["state"] = payload.get("deployment_status", {}).get("state", "")
+        result["state"] = (payload.get("deployment_status") or {}).get("state", "")
 
-        if result["state"] == "failure" and active_api_key():
-            result["auto_triage"] = "deployment_failure_detected"
+        if result["state"] == "failure":
+            await _triage_event(
+                result, raw,
+                source="gh-deploy",
+                key=str(deployment.get("id") or delivery_id or "unknown"),
+                reason="deployment_failure_detected",
+                title=(
+                    f"Deployment failed in {deployment.get('environment') or 'unknown'} "
+                    f"({repo_name or 'unknown repo'})"
+                ),
+                service=str(repo_name),
+            )
 
     elif event_type == "security_advisory":
-        advisory = payload.get("security_advisory", {})
+        advisory = payload.get("security_advisory") or {}
         result["severity"] = advisory.get("severity", "")
         result["summary"] = advisory.get("summary", "")
-        result["auto_triage"] = "security_alert"
+        await _triage_event(
+            result, raw,
+            source="gh-advisory",
+            key=str(advisory.get("ghsa_id") or delivery_id or "unknown"),
+            reason="security_alert",
+            title=f"GitHub security advisory ({advisory.get('severity', 'unknown')}): "
+                  f"{advisory.get('summary', '')}".strip(),
+            service=str(repo_name),
+        )
 
     return result
 
@@ -3540,7 +4209,7 @@ async def github_webhook(request: Request) -> dict[str, object]:
 # GitLab Webhook — auto-triage merge requests, issues, pipelines
 # --------------------------------------------------------------------------- #
 def _verify_gitlab_token(secret: str, token: str) -> bool:
-    """Verify the GitLab webhook secret token.
+    """Verify the GitLab webhook secret token (constant-time).
 
     Fails closed when no secret is configured: this endpoint is unauthenticated
     apart from the token, so "no secret, allow" let anyone on the internet inject
@@ -3584,8 +4253,16 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
     s = get_settings()
     token = request.headers.get("x-gitlab-token", "")
 
+    # Fail closed, as for GitHub: an unset GITLAB_WEBHOOK_SECRET used to skip the
+    # check entirely rather than refuse the delivery. The unconfigured case is
+    # split out only so the 401 names the setting; `_verify_gitlab_token`
+    # rejects (and logs) it either way.
+    if not s.gitlab_webhook_secret:
+        raise HTTPException(
+            401, "GITLAB_WEBHOOK_SECRET is not configured; refusing unverified GitLab delivery"
+        )
     if not _verify_gitlab_token(s.gitlab_webhook_secret, token):
-        raise HTTPException(401, "invalid or unconfigured GitLab webhook token")
+        raise HTTPException(401, "invalid GitLab webhook token")
 
     try:
         payload = json.loads(raw)
@@ -3600,51 +4277,81 @@ async def gitlab_webhook(request: Request) -> dict[str, object]:
         "event": event_type,
         "processed": True,
     }
+    project = (payload.get("project") or {}).get("path_with_namespace") or "unknown"
+    # `or {}`, not `.get(key, {})`: GitLab sends `"object_attributes": null` on
+    # some event kinds, and the default only applies when the key is absent —
+    # every one of these branches was a 500 on a real null.
+    attrs = payload.get("object_attributes") or {}
 
     if event_type == "push":
         result["ref"] = payload.get("ref", "")
-        result["commits"] = len(payload.get("commits", []))
-        result["project"] = payload.get("project", {}).get("path_with_namespace", "")
+        result["commits"] = len(payload.get("commits") or [])
+        result["project"] = project
 
     elif event_type == "merge_request":
-        attrs = payload.get("object_attributes", {})
         result["action"] = attrs.get("action", "")
         result["mr_iid"] = attrs.get("iid")
         result["mr_title"] = attrs.get("title", "")
         result["mr_state"] = attrs.get("state", "")
 
-        if attrs.get("action") == "open" and active_api_key():
-            changes = payload.get("changes", {})
-            if changes:
-                result["auto_triage"] = "mr_opened"
+        # An opened MR is not an incident; flag it, don't claim to have triaged it.
+        if attrs.get("action") == "open" and payload.get("changes"):
+            result["review_flags"] = ["mr_opened"]
 
     elif event_type == "issue":
-        attrs = payload.get("object_attributes", {})
         result["action"] = attrs.get("action", "")
         result["issue_iid"] = attrs.get("iid")
         result["issue_title"] = attrs.get("title", "")
 
-        if attrs.get("action") == "open" and active_api_key():
-            labels = [lbl.get("title", "").lower() for lbl in payload.get("labels", [])]
+        if attrs.get("action") == "open":
+            labels = [
+                str((lbl or {}).get("title", "")).lower() for lbl in (payload.get("labels") or [])
+            ]
             if "bug" in labels or "incident" in labels:
-                result["auto_triage"] = "incident_detected"
+                await _triage_event(
+                    result, raw,
+                    source="gl-issue",
+                    key=str(attrs.get("iid") or attrs.get("id") or "unknown"),
+                    reason="incident_detected",
+                    title=f"GitLab issue #{attrs.get('iid')}: {attrs.get('title', '')}".strip(),
+                    service=str(project),
+                )
 
     elif event_type == "pipeline":
-        attrs = payload.get("object_attributes", {})
         result["pipeline_id"] = attrs.get("id")
         result["status"] = attrs.get("status", "")
         result["ref"] = attrs.get("ref", "")
 
-        if attrs.get("status") == "failed" and active_api_key():
-            result["auto_triage"] = "pipeline_failure_detected"
+        if attrs.get("status") == "failed":
+            await _triage_event(
+                result, raw,
+                source="gl-pipeline",
+                key=str(attrs.get("id") or "unknown"),
+                reason="pipeline_failure_detected",
+                title=(
+                    f"GitLab pipeline {attrs.get('id')} failed on "
+                    f"{attrs.get('ref') or 'unknown ref'} ({project})"
+                ),
+                service=str(project),
+            )
 
     elif event_type == "deployment":
         result["deployment_id"] = payload.get("deployment_id")
         result["environment"] = payload.get("environment", "")
         result["status"] = payload.get("status", "")
 
-        if payload.get("status") == "failed" and active_api_key():
-            result["auto_triage"] = "deployment_failure_detected"
+        if payload.get("status") == "failed":
+            await _triage_event(
+                result, raw,
+                source="gl-deploy",
+                key=str(payload.get("deployment_id") or "unknown"),
+                reason="deployment_failure_detected",
+                title=(
+                    f"GitLab deployment to {payload.get('environment') or 'unknown'} "
+                    f"failed ({project})"
+                ),
+                service=str(project),
+            )
 
     return result
 
@@ -3674,7 +4381,9 @@ class WaitlistSignupRequest(BaseModel):
     tags=["Waitlist"],
     summary="Join the waitlist",
     description="Sign up for early access to OmniPotent. "
-    "Returns your position and referral code.",
+    "Returns your position and referral code. Open to anonymous visitors — a "
+    "waitlist that demanded an API key could only be joined by people who "
+    "already had an account — but per-IP rate limited like any other POST.",
     responses={
         200: {
             "description": "Signup successful",
@@ -3767,9 +4476,12 @@ async def waitlist_position(email: str):
 @app.get(
     "/waitlist/stats",
     tags=["Waitlist"],
-    summary="Get waitlist statistics",
-    description="Get aggregated waitlist statistics (admin only).",
-    dependencies=[Depends(require_auth)],
+    summary="Get waitlist statistics (operator only)",
+    description="Aggregated waitlist statistics. This is a back-office endpoint: it "
+    "requires COPILOT_OPERATOR_TOKEN, not a tenant API key. It was behind "
+    "`require_auth`, which on a multi-tenant deployment means any tenant key — so "
+    "every customer could read the deployment's lead funnel.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def waitlist_stats():
     """Get waitlist statistics."""
@@ -3780,6 +4492,11 @@ async def waitlist_stats():
 
 # --------------------------------------------------------------------------- #
 # Customer & Trial Management — track conversions and engagement
+#
+# Operator-only, every one of them. This is the deployment's own CRM: contact
+# details, health scores and MRR for its customers. It sat behind `require_auth`,
+# which on a multi-tenant deployment is satisfied by any tenant API key, so the
+# cheapest self-serve signup could list every other customer and their revenue.
 # --------------------------------------------------------------------------- #
 class CustomerCreateRequest(BaseModel):
     """Customer creation request."""
@@ -3797,9 +4514,10 @@ class CustomerCreateRequest(BaseModel):
 @app.post(
     "/customers",
     tags=["Customers"],
-    summary="Create a customer",
-    description="Create a new customer and optionally start a trial.",
-    dependencies=[Depends(require_auth)],
+    summary="Create a customer (operator only)",
+    description="Create a new customer and optionally start a trial. Requires "
+    "COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
     responses={
         200: {
             "description": "Customer created",
@@ -3847,9 +4565,10 @@ async def create_customer_endpoint(req: CustomerCreateRequest):
 @app.get(
     "/customers/stats",
     tags=["Customers"],
-    summary="Get customer statistics",
-    description="Get customer and trial statistics for the dashboard.",
-    dependencies=[Depends(require_auth)],
+    summary="Get customer statistics (operator only)",
+    description="Get customer and trial statistics for the dashboard. Requires "
+    "COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def customer_stats():
     """Get customer statistics."""
@@ -3861,9 +4580,10 @@ async def customer_stats():
 @app.get(
     "/customers/dashboard",
     tags=["Customers"],
-    summary="Get customer dashboard",
-    description="Get full customer dashboard including stats, trials, and recent customers.",
-    dependencies=[Depends(require_auth)],
+    summary="Get customer dashboard (operator only)",
+    description="Get full customer dashboard including stats, trials, and recent "
+    "customers. Requires COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def customer_dashboard():
     """Get customer dashboard data."""
@@ -3876,9 +4596,9 @@ async def customer_dashboard():
 @app.get(
     "/customers/trials/active",
     tags=["Customers"],
-    summary="Get active trials",
-    description="Get list of all active trials.",
-    dependencies=[Depends(require_auth)],
+    summary="Get active trials (operator only)",
+    description="Get list of all active trials. Requires COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def active_trials():
     """Get active trials."""
@@ -3903,9 +4623,10 @@ class RecordUsageRequest(BaseModel):
 @app.post(
     "/customers/usage",
     tags=["Customers"],
-    summary="Record customer usage",
-    description="Record a usage event for a customer (investigation, etc).",
-    dependencies=[Depends(require_auth)],
+    summary="Record customer usage (operator only)",
+    description="Record a usage event for a customer (investigation, etc). Requires "
+    "COPILOT_OPERATOR_TOKEN.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def record_customer_usage(req: RecordUsageRequest):
     """Record customer usage."""
@@ -3928,35 +4649,44 @@ async def record_customer_usage(req: RecordUsageRequest):
 class ConvertTrialRequest(BaseModel):
     """Trial conversion request."""
     customer_id: str
-    tier: str = "starter"
-    mrr_cents: int = 0
+    tier: str = "team"
+    annual: bool = False
     stripe_customer_id: str = ""
+    # Only read for the Enterprise tier, which is quoted per contract and so has
+    # no catalog price to derive MRR from. Every other tier ignores it: this
+    # field used to be `mrr_cents`, applied to every tier, which made this
+    # endpoint an API for writing an arbitrary number into the revenue total.
+    contracted_mrr_cents: int | None = None
 
 
 @app.post(
     "/customers/convert",
     tags=["Customers"],
-    summary="Convert trial to paid",
-    description="Convert a trial customer to a paid subscription.",
-    dependencies=[Depends(require_auth)],
+    summary="Convert trial to paid (operator only)",
+    description="Convert a trial customer to a paid subscription. The recorded MRR "
+    "comes from the pricing catalog entry for `tier`, not from the request body; "
+    "`contracted_mrr_cents` is read only for `enterprise`, which has no list price. "
+    "Requires COPILOT_OPERATOR_TOKEN. 400 for a tier the catalog does not sell.",
+    dependencies=[Depends(_operator_guard)],
 )
 async def convert_trial_endpoint(req: ConvertTrialRequest):
     """Convert a trial to paid subscription."""
     from app.customers import convert_trial, CustomerTier
 
-    tier_map = {
-        "free": CustomerTier.FREE,
-        "starter": CustomerTier.STARTER,
-        "pro": CustomerTier.PRO,
-        "enterprise": CustomerTier.ENTERPRISE,
-    }
-    tier = tier_map.get(req.tier.lower(), CustomerTier.STARTER)
+    try:
+        tier = CustomerTier(req.tier.strip().lower())
+    except ValueError:
+        # Silently coercing an unknown tier to Starter is how a Growth
+        # conversion could be recorded as a free plan.
+        valid = ", ".join(t.value for t in CustomerTier)
+        raise HTTPException(400, f"Unknown tier {req.tier!r}; expected one of {valid}.") from None
 
     success, message = await convert_trial(
         customer_id=req.customer_id,
         tier=tier,
-        mrr_cents=req.mrr_cents,
+        annual=req.annual,
         stripe_customer_id=req.stripe_customer_id,
+        contracted_mrr_cents=req.contracted_mrr_cents,
     )
 
     if not success:
@@ -3966,7 +4696,7 @@ async def convert_trial_endpoint(req: ConvertTrialRequest):
         "customer.converted",
         customer_id=req.customer_id,
         tier=tier.value,
-        mrr_cents=req.mrr_cents,
+        annual=req.annual,
     )
 
     return {"success": True, "message": message}
@@ -3978,8 +4708,13 @@ async def convert_trial_endpoint(req: ConvertTrialRequest):
 # The read side of the `investigations` table that /chat, /chat/stream, /approve
 # and the alert-triggered path all write to. Scoped to the calling tenant; in
 # single-tenant mode everything is recorded under one org.
+#
+# Under /api like every other feature router: `dashboard` is a client-side route
+# in App.tsx and the SPA mount below refuses to serve any top-level segment the
+# API has claimed, so a bare /dashboard/* route here would 404 the page a
+# logged-in user lands on after login.
 @app.get(
-    "/dashboard/metrics",
+    "/api/dashboard/metrics",
     tags=["Dashboard"],
     summary="Investigation analytics for the current organization",
     description="""
@@ -4013,7 +4748,7 @@ async def dashboard_metrics(period_days: int = 30) -> dict:
 
 
 @app.get(
-    "/dashboard/trends",
+    "/api/dashboard/trends",
     tags=["Dashboard"],
     summary="Trend analysis over recorded investigations",
     description="""
@@ -4084,5 +4819,47 @@ async def dashboard_trends(period_days: int = 30) -> dict:
 # build) the dist dir is absent and this mount is simply skipped.
 _FRONTEND_DIST = ROOT / "frontend" / "dist"
 if _FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="spa")
-    log.info("serving built frontend from %s", _FRONTEND_DIST)
+    # First path segment of every route registered above. An unknown path under
+    # one of these is a mistyped API call, not a client-side route, and should
+    # keep answering 404 JSON rather than 200 HTML — otherwise a typo'd endpoint
+    # looks like a success to any client that only checks the status code.
+    _API_SEGMENTS = {
+        p.split("/")[1]
+        for p in (getattr(r, "path", "") for r in app.routes)
+        if p.count("/") >= 1 and len(p.split("/")) > 1 and p.split("/")[1]
+    }
+
+    # Client-side routes that live under an API segment anyway. Only one: the
+    # OAuth provider redirects the *browser* here, and it must render the SPA.
+    # There is no backend route at this path — `auth` is a segment because of
+    # /auth/providers, /auth/{provider}/login and friends.
+    _SPA_PATHS = {"auth/callback"}
+
+    class _SPAStaticFiles(StaticFiles):
+        """StaticFiles that falls back to index.html for unknown paths.
+
+        `html=True` only serves index.html for *directory* paths, so a deep link
+        like /dashboard, /login or /settings/billing returned a 404 JSON body.
+        Stripe's default success_url is `{frontend_url}/settings/billing?...`,
+        so a user finishing checkout landed on a hard 404. Handing those to
+        index.html lets the client-side router take over, which is what every
+        SPA deployment needs.
+        """
+
+        async def get_response(self, path: str, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                # Real missing assets should still 404 — falling back for them
+                # would hand JS/CSS requests an HTML body and produce a
+                # confusing MIME-type error in the console instead.
+                if "." in path.rsplit("/", 1)[-1]:
+                    raise
+                if path.split("/")[0] in _API_SEGMENTS and path not in _SPA_PATHS:
+                    raise
+                return await super().get_response("index.html", scope)
+
+    app.mount("/", _SPAStaticFiles(directory=str(_FRONTEND_DIST), html=True), name="spa")
+    log.info("serving built frontend from %s (SPA fallback enabled)", _FRONTEND_DIST)

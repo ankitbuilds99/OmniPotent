@@ -4,6 +4,26 @@ import { Sphere, Line, OrbitControls, Stars } from '@react-three/drei'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as THREE from 'three'
 
+/** A public cloud region, and the round-trip time from *this browser* to it.
+ *
+ *  What used to be here: a `metrics` object carrying `traffic`, `services`,
+ *  `health`, `cpu` and `memory`, every one of them manufactured in
+ *  `fetchCloudStatus` from `Math.random()` and the visitor's clock —
+ *  `busy ? 3000 + Math.random() * 4000 : ...` for traffic, a literal
+ *  `[24, 48, 18, 32, 42, 36]` for service counts, `99.5 + Math.random() * 0.49`
+ *  for health. The section above it read "Real-time cloud monitoring" and "Live
+ *  metrics from AWS, Azure, and GCP regions worldwide". None of it was measured
+ *  and none of it could be: this product does not monitor those clouds, and a
+ *  browser could not read their CPU utilisation if it did.
+ *
+ *  What survives is the one number on this page that was ever real — the
+ *  latency probe. It is a genuine measurement of a genuine thing, just not the
+ *  thing the copy claimed: the network round trip from the visitor's own
+ *  machine to that region's public API endpoint. That is what it is now
+ *  labelled as. Regions whose probe does not come back read "not measured"
+ *  rather than falling back to `baseLatencies[idx] + Math.random() * 10 - 5`,
+ *  which is what produced the plausible little numbers before.
+ */
 interface CloudRegion {
   name: string
   provider: 'aws' | 'azure' | 'gcp'
@@ -11,16 +31,15 @@ interface CloudRegion {
   lng: number
   color: string
   icon: string
-  statusUrl?: string
-  metrics: {
-    latency: string
-    traffic: string
-    services: number
-    health: number
-    cpu: number
-    memory: number
-    status: 'operational' | 'degraded' | 'outage'
-  }
+  /** The host to probe. Regional public endpoints — a HEAD request to one is
+   *  refused, which is fine: DNS, TCP and TLS still complete, and that is the
+   *  round trip being timed. */
+  endpoint: string
+  /** Round-trip milliseconds, or null when the probe has not run or failed. */
+  rttMs: number | null
+  /** True once a probe has completed for this region, successfully or not — so
+   *  "not measured yet" and "could not be measured" render differently. */
+  probed: boolean
 }
 
 const INITIAL_REGIONS: CloudRegion[] = [
@@ -31,7 +50,9 @@ const INITIAL_REGIONS: CloudRegion[] = [
     lng: 72.8777,
     color: '#FF9900',
     icon: 'amazonwebservices',
-    metrics: { latency: '--', traffic: '--', services: 0, health: 0, cpu: 0, memory: 0, status: 'operational' }
+    endpoint: 'https://dynamodb.ap-south-1.amazonaws.com/',
+    rttMs: null,
+    probed: false,
   },
   {
     name: 'AWS Virginia',
@@ -40,7 +61,9 @@ const INITIAL_REGIONS: CloudRegion[] = [
     lng: -78.6569,
     color: '#FF9900',
     icon: 'amazonwebservices',
-    metrics: { latency: '--', traffic: '--', services: 0, health: 0, cpu: 0, memory: 0, status: 'operational' }
+    endpoint: 'https://dynamodb.us-east-1.amazonaws.com/',
+    rttMs: null,
+    probed: false,
   },
   {
     name: 'Azure Singapore',
@@ -49,7 +72,9 @@ const INITIAL_REGIONS: CloudRegion[] = [
     lng: 103.8198,
     color: '#0078D4',
     icon: 'microsoftazure',
-    metrics: { latency: '--', traffic: '--', services: 0, health: 0, cpu: 0, memory: 0, status: 'operational' }
+    endpoint: 'https://southeastasia.batch.azure.com/',
+    rttMs: null,
+    probed: false,
   },
   {
     name: 'Google Tokyo',
@@ -58,7 +83,9 @@ const INITIAL_REGIONS: CloudRegion[] = [
     lng: 139.6503,
     color: '#4285F4',
     icon: 'googlecloud',
-    metrics: { latency: '--', traffic: '--', services: 0, health: 0, cpu: 0, memory: 0, status: 'operational' }
+    endpoint: 'https://asia-northeast1-run.googleapis.com/',
+    rttMs: null,
+    probed: false,
   },
   {
     name: 'AWS Frankfurt',
@@ -67,7 +94,9 @@ const INITIAL_REGIONS: CloudRegion[] = [
     lng: 8.6821,
     color: '#FF9900',
     icon: 'amazonwebservices',
-    metrics: { latency: '--', traffic: '--', services: 0, health: 0, cpu: 0, memory: 0, status: 'operational' }
+    endpoint: 'https://dynamodb.eu-central-1.amazonaws.com/',
+    rttMs: null,
+    probed: false,
   },
   {
     name: 'GCP London',
@@ -76,94 +105,71 @@ const INITIAL_REGIONS: CloudRegion[] = [
     lng: -0.1278,
     color: '#4285F4',
     icon: 'googlecloud',
-    metrics: { latency: '--', traffic: '--', services: 0, health: 0, cpu: 0, memory: 0, status: 'operational' }
-  }
+    endpoint: 'https://europe-west2-run.googleapis.com/',
+    rttMs: null,
+    probed: false,
+  },
 ]
 
-async function fetchCloudStatus(): Promise<CloudRegion[]> {
-  const regions = [...INITIAL_REGIONS]
+/** How a round trip reads at a glance. Deliberately not "operational /
+ *  degraded / outage": a slow round trip from one visitor's laptop says
+ *  something about distance and the path taken, and nothing whatsoever about
+ *  whether that region is healthy. The old code drew an outage badge off a
+ *  random number. */
+type Tone = 'near' | 'far' | 'distant' | 'unmeasured'
 
+function tone(region: CloudRegion): Tone {
+  if (region.rttMs === null) return 'unmeasured'
+  if (region.rttMs < 100) return 'near'
+  if (region.rttMs < 250) return 'far'
+  return 'distant'
+}
+
+const TONE_COLOR: Record<Tone, string> = {
+  near: '#00FFB3',
+  far: '#FFC247',
+  distant: '#FF4757',
+  unmeasured: '#6B7280',
+}
+
+const TONE_LABEL: Record<Tone, string> = {
+  near: 'Nearby',
+  far: 'Cross-region',
+  distant: 'Far side of the world',
+  unmeasured: 'Not measured',
+}
+
+/** Time one round trip to `endpoint`.
+ *
+ *  `mode: 'no-cors'` means the response is opaque and its status unreadable —
+ *  which is exactly what is wanted. The endpoint will refuse an unauthenticated
+ *  HEAD, but DNS, the TCP handshake and the TLS handshake all complete first,
+ *  and that is the network path being timed. A rejection means the host did not
+ *  resolve or the connection failed; that returns null rather than a guess.
+ *
+ *  Two requests, timing the second: the first pays for DNS and the TLS
+ *  handshake, so timing it would report several hundred milliseconds of setup
+ *  as though it were the round trip. The second reuses the warm connection.
+ */
+async function probe(endpoint: string): Promise<number | null> {
   try {
-    // Fetch real latency by pinging known endpoints
-    const endpoints = [
-      { region: 'AWS Mumbai', url: 'https://dynamodb.ap-south-1.amazonaws.com/ping' },
-      { region: 'AWS Virginia', url: 'https://dynamodb.us-east-1.amazonaws.com/ping' },
-      { region: 'AWS Frankfurt', url: 'https://dynamodb.eu-central-1.amazonaws.com/ping' },
-    ]
-
-    // Measure latency to various endpoints
-    const latencyPromises = endpoints.map(async (ep) => {
-      const start = performance.now()
-      try {
-        await fetch(ep.url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
-        const latency = Math.round(performance.now() - start)
-        return { region: ep.region, latency }
-      } catch {
-        return { region: ep.region, latency: null }
-      }
-    })
-
-    const latencies = await Promise.all(latencyPromises)
-
-    // Update regions with real latency data
-    latencies.forEach(({ region, latency }) => {
-      const r = regions.find(reg => reg.name === region)
-      if (r && latency) {
-        r.metrics.latency = `${latency}ms`
-      }
-    })
+    await fetch(endpoint, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
+    const start = performance.now()
+    await fetch(endpoint, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
+    return Math.round(performance.now() - start)
   } catch {
-    // Silently fail - will use simulated data
+    return null
   }
+}
 
-  // Simulate realistic metrics based on time of day and region
-  const now = new Date()
-  const hour = now.getUTCHours()
-
-  regions.forEach((region, idx) => {
-    // Base traffic varies by region and time
-    const isBusinessHours = (hours: number, offset: number) => {
-      const localHour = (hours + offset) % 24
-      return localHour >= 9 && localHour <= 18
-    }
-
-    const offsets: Record<string, number> = {
-      'AWS Mumbai': 5.5,
-      'AWS Virginia': -5,
-      'Azure Singapore': 8,
-      'Google Tokyo': 9,
-      'AWS Frankfurt': 1,
-      'GCP London': 0,
-    }
-
-    const offset = offsets[region.name] || 0
-    const busy = isBusinessHours(hour, offset)
-
-    // Generate realistic metrics
-    const baseTraffic = busy ? 3000 + Math.random() * 4000 : 1000 + Math.random() * 2000
-    const traffic = (baseTraffic / 1000).toFixed(1) + 'k/s'
-
-    const services = [24, 48, 18, 32, 42, 36][idx]
-    const health = 99.5 + Math.random() * 0.49
-    const cpu = busy ? 40 + Math.random() * 30 : 20 + Math.random() * 25
-    const memory = busy ? 50 + Math.random() * 25 : 35 + Math.random() * 20
-
-    // If we didn't get real latency, simulate based on distance
-    if (region.metrics.latency === '--') {
-      const baseLatencies = [12, 8, 18, 15, 22, 25]
-      const jitter = Math.random() * 10 - 5
-      region.metrics.latency = `${Math.round(baseLatencies[idx] + jitter)}ms`
-    }
-
-    region.metrics.traffic = traffic
-    region.metrics.services = services
-    region.metrics.health = Math.round(health * 100) / 100
-    region.metrics.cpu = Math.round(cpu)
-    region.metrics.memory = Math.round(memory)
-    region.metrics.status = health > 99.5 ? 'operational' : health > 98 ? 'degraded' : 'outage'
-  })
-
-  return regions
+async function measureRegions(regions: CloudRegion[]): Promise<CloudRegion[]> {
+  return Promise.all(
+    regions.map(async (region) => ({
+      ...region,
+      rttMs: await probe(region.endpoint),
+      probed: true,
+    }))
+  )
 }
 
 function latLngToVector3(lat: number, lng: number, radius: number): THREE.Vector3 {
@@ -233,8 +239,7 @@ function RegionMarker({
   const ringRef = useRef<THREE.Mesh>(null)
   const [hovered, setHovered] = useState(false)
 
-  const statusColor = region.metrics.status === 'operational' ? '#00FFB3' :
-                      region.metrics.status === 'degraded' ? '#FFC247' : '#FF4757'
+  const statusColor = TONE_COLOR[tone(region)]
 
   useFrame((state) => {
     if (markerRef.current) {
@@ -391,6 +396,11 @@ function GlobeScene({
   )
 }
 
+function rttText(region: CloudRegion): string {
+  if (!region.probed) return 'measuring…'
+  return region.rttMs === null ? 'not measured' : `${region.rttMs} ms`
+}
+
 function RegionCard({
   region,
   isActive,
@@ -402,8 +412,7 @@ function RegionCard({
   onHover: () => void
   onLeave: () => void
 }) {
-  const statusColor = region.metrics.status === 'operational' ? '#00FFB3' :
-                      region.metrics.status === 'degraded' ? '#FFC247' : '#FF4757'
+  const t = tone(region)
 
   return (
     <motion.div
@@ -438,17 +447,18 @@ function RegionCard({
         <div className="flex-1 min-w-0">
           <div className="font-medium text-white truncate">{region.name}</div>
           <div className="text-xs text-white/50 flex items-center gap-2">
-            <span className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: statusColor }} />
-              {region.metrics.health}%
-            </span>
-            <span>•</span>
-            <span>{region.metrics.latency}</span>
+            {/* The dot no longer pulses. It used to animate on every card at all
+                times, which reads as a live feed; the probe runs once every
+                thirty seconds and the rest of the time this is a stored number. */}
+            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: TONE_COLOR[t] }} />
+            <span>{TONE_LABEL[t]}</span>
           </div>
         </div>
         <div className="text-right">
-          <div className="text-sm font-semibold" style={{ color: region.color }}>{region.metrics.traffic}</div>
-          <div className="text-xs text-white/40">{region.metrics.services} services</div>
+          <div className="text-sm font-semibold" style={{ color: region.color }}>
+            {rttText(region)}
+          </div>
+          <div className="text-xs text-white/40">round trip</div>
         </div>
       </div>
     </motion.div>
@@ -456,10 +466,7 @@ function RegionCard({
 }
 
 function MetricsPanel({ region, lastUpdated }: { region: CloudRegion; lastUpdated: Date | null }) {
-  const statusColor = region.metrics.status === 'operational' ? '#00FFB3' :
-                      region.metrics.status === 'degraded' ? '#FFC247' : '#FF4757'
-  const statusText = region.metrics.status === 'operational' ? 'Operational' :
-                     region.metrics.status === 'degraded' ? 'Degraded' : 'Outage'
+  const t = tone(region)
 
   return (
     <motion.div
@@ -484,66 +491,31 @@ function MetricsPanel({ region, lastUpdated }: { region: CloudRegion; lastUpdate
           <div>
             <h3 className="font-semibold text-white text-lg">{region.name}</h3>
             <div className="flex items-center gap-1.5 text-sm">
-              <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: statusColor }} />
-              <span style={{ color: statusColor }}>{statusText}</span>
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: TONE_COLOR[t] }} />
+              <span style={{ color: TONE_COLOR[t] }}>{TONE_LABEL[t]}</span>
             </div>
           </div>
         </div>
         {lastUpdated && (
           <div className="text-xs text-white/40">
-            Updated {lastUpdated.toLocaleTimeString()}
+            Measured {lastUpdated.toLocaleTimeString()}
           </div>
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white/5 rounded-lg p-3">
-          <div className="text-white/50 text-xs uppercase tracking-wider mb-1">Latency</div>
-          <div className="text-2xl font-bold text-white">{region.metrics.latency}</div>
+      {/* Four tiles used to sit here: Latency, Traffic, Services and Health.
+          Three of them were invented and one of them — Health — was invented and
+          then used to decide whether to render an outage badge. Only the round
+          trip was ever measured, so only the round trip is shown. */}
+      <div className="bg-white/5 rounded-lg p-4">
+        <div className="text-white/50 text-xs uppercase tracking-wider mb-1">
+          Round trip from your browser
         </div>
-        <div className="bg-white/5 rounded-lg p-3">
-          <div className="text-white/50 text-xs uppercase tracking-wider mb-1">Traffic</div>
-          <div className="text-2xl font-bold" style={{ color: region.color }}>{region.metrics.traffic}</div>
-        </div>
-        <div className="bg-white/5 rounded-lg p-3">
-          <div className="text-white/50 text-xs uppercase tracking-wider mb-1">Services</div>
-          <div className="text-2xl font-bold text-white">{region.metrics.services}</div>
-        </div>
-        <div className="bg-white/5 rounded-lg p-3">
-          <div className="text-white/50 text-xs uppercase tracking-wider mb-1">Health</div>
-          <div className="text-2xl font-bold" style={{ color: statusColor }}>{region.metrics.health}%</div>
-        </div>
-      </div>
-
-      <div className="mt-4 space-y-3">
-        <div>
-          <div className="flex justify-between text-sm mb-1.5">
-            <span className="text-white/60">CPU Usage</span>
-            <span className="text-white font-medium">{region.metrics.cpu}%</span>
-          </div>
-          <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-            <motion.div
-              className="h-full rounded-full"
-              style={{ backgroundColor: region.color }}
-              initial={{ width: 0 }}
-              animate={{ width: `${region.metrics.cpu}%` }}
-              transition={{ duration: 0.8, ease: 'easeOut' }}
-            />
-          </div>
-        </div>
-        <div>
-          <div className="flex justify-between text-sm mb-1.5">
-            <span className="text-white/60">Memory</span>
-            <span className="text-white font-medium">{region.metrics.memory}%</span>
-          </div>
-          <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-            <motion.div
-              className="h-full rounded-full bg-purple-500"
-              initial={{ width: 0 }}
-              animate={{ width: `${region.metrics.memory}%` }}
-              transition={{ duration: 0.8, ease: 'easeOut', delay: 0.1 }}
-            />
-          </div>
+        <div className="text-3xl font-bold text-white">{rttText(region)}</div>
+        <div className="text-xs text-white/40 mt-2 leading-relaxed">
+          {region.probed && region.rttMs === null
+            ? `${region.endpoint.replace('https://', '').replace(/\/$/, '')} did not respond — it may be blocked by your network or by an extension.`
+            : `HEAD ${region.endpoint.replace('https://', '').replace(/\/$/, '')}, connection already warm.`}
         </div>
       </div>
     </motion.div>
@@ -552,40 +524,45 @@ function MetricsPanel({ region, lastUpdated }: { region: CloudRegion; lastUpdate
 
 export function GlobalMap() {
   const [regions, setRegions] = useState<CloudRegion[]>(INITIAL_REGIONS)
-  const [hoveredRegion, setHoveredRegion] = useState<CloudRegion | null>(null)
-  const [selectedRegion, setSelectedRegion] = useState<CloudRegion | null>(null)
+  const [hoveredRegion, setHoveredRegion] = useState<string | null>(null)
+  const [selectedName, setSelectedName] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
-  // Fetch real-time data on mount and every 30 seconds
+  // Re-probe on mount and every 30 seconds.
   useEffect(() => {
-    const fetchData = async () => {
+    let cancelled = false
+
+    const run = async () => {
       setIsLoading(true)
-      const data = await fetchCloudStatus()
+      const data = await measureRegions(INITIAL_REGIONS)
+      // The probes take as long as the slowest network path, and the visitor can
+      // navigate away in the meantime. Without this the interval's late arrival
+      // sets state on an unmounted component.
+      if (cancelled) return
       setRegions(data)
       setLastUpdated(new Date())
       setIsLoading(false)
-      // Set initial selection
-      if (!selectedRegion) {
-        setSelectedRegion(data[0])
-      }
     }
 
-    fetchData()
-    const interval = setInterval(fetchData, 30000) // Refresh every 30 seconds
+    run()
+    const interval = setInterval(run, 30000)
 
-    return () => clearInterval(interval)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [])
 
-  // Update selected region when data refreshes
-  useEffect(() => {
-    if (selectedRegion) {
-      const updated = regions.find(r => r.name === selectedRegion.name)
-      if (updated) setSelectedRegion(updated)
-    }
-  }, [regions])
-
-  const activeRegion = hoveredRegion || selectedRegion
+  // Keep the open panel pointed at the current numbers. Selection is held by
+  // name rather than by object so a refresh does not leave the panel rendering
+  // the previous round's measurement — the old code read `selectedRegion`
+  // inside an effect that did not depend on it.
+  const activeRegion = useMemo(() => {
+    const name = hoveredRegion ?? selectedName
+    const byName = name ? regions.find(r => r.name === name) : undefined
+    return byName ?? regions[0] ?? null
+  }, [hoveredRegion, selectedName, regions])
 
   return (
     <section className="relative py-32 overflow-hidden">
@@ -604,7 +581,7 @@ export function GlobalMap() {
             viewport={{ once: true }}
             transition={{ duration: 0.5 }}
           >
-            Global Infrastructure
+            Global Reach
           </motion.span>
           <motion.h2
             className="font-display text-3xl md:text-4xl lg:text-5xl font-bold text-white mb-4"
@@ -613,7 +590,9 @@ export function GlobalMap() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.1 }}
           >
-            <span className="gradient-text">Real-time</span> cloud monitoring
+            {/* "Real-time cloud monitoring" over six columns of Math.random().
+                The measurement is real; the claim was not. */}
+            The round trip to <span className="gradient-text">every major region</span>
           </motion.h2>
           <motion.p
             className="text-white/60 text-lg max-w-2xl mx-auto"
@@ -622,10 +601,12 @@ export function GlobalMap() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.2 }}
           >
-            Live metrics from AWS, Azure, and GCP regions worldwide
+            Measured from your browser, right now — one HEAD request to each
+            region's public endpoint on AWS, Azure and Google Cloud.
             {lastUpdated && !isLoading && (
               <span className="block text-sm text-white/40 mt-1">
-                Auto-refreshes every 30 seconds
+                Re-measured every 30 seconds. These are network round trips from
+                where you are sitting, not the health of anybody's infrastructure.
               </span>
             )}
           </motion.p>
@@ -642,7 +623,7 @@ export function GlobalMap() {
             <Canvas camera={{ position: [0, 0, 5.5], fov: 45 }}>
               <GlobeScene
                 regions={regions}
-                onRegionHover={setHoveredRegion}
+                onRegionHover={(region) => setHoveredRegion(region.name)}
                 onRegionLeave={() => setHoveredRegion(null)}
               />
             </Canvas>
@@ -668,8 +649,8 @@ export function GlobalMap() {
                   region={region}
                   isActive={activeRegion?.name === region.name}
                   onHover={() => {
-                    setHoveredRegion(region)
-                    setSelectedRegion(region)
+                    setHoveredRegion(region.name)
+                    setSelectedName(region.name)
                   }}
                   onLeave={() => setHoveredRegion(null)}
                 />

@@ -16,12 +16,13 @@ INVITATION_TTL = timedelta(days=7)
 
 
 def _now() -> datetime:
-    """Timezone-aware UTC now.
+    """UTC, timezone-aware.
 
-    These models used `datetime.utcnow()`, which returns a *naive* datetime that
-    merely happens to hold UTC. Now that the rows round-trip through a database
-    that stores an offset, a naive default would compare unequal to what comes
-    back and raise outright when compared against an aware value.
+    These were `datetime.utcnow()`, which returns a *naive* datetime. Once teams
+    are stored in a `DateTime(timezone=True)` column the values read back are
+    aware, and comparing an aware `expires_at` against a naive "now" raises
+    TypeError rather than expiring the invitation. (`utcnow` is also deprecated
+    from 3.12.)
     """
     return datetime.now(timezone.utc)
 

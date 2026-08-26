@@ -1,22 +1,39 @@
 """Runbook execution engine.
 
-Executes runbook steps with approval workflows, rollback support,
-and integration with various systems (Kubernetes, Slack, etc.).
+Executes runbook steps with approval workflows and real integrations
+(subprocess, Kubernetes, HTTP, Slack).
+
+Every step handler here used to return a canned success string — a runbook
+"restarted" a service and "posted to Slack" without touching either, and the
+agent then reported the remediation as done. Each handler now performs the
+action for real, and when the credential or tooling it needs is absent it fails
+with a message naming exactly what is missing. A step never reports success for
+work that did not happen.
+
+Callers that keep their runbooks and their execution history somewhere other
+than this executor's in-process registry — the API router, the worker — pass the
+definition and the execution id in, and hand over an `on_progress` hook that is
+awaited after every step. A run that only reports its result at the end is
+indistinguishable from a hung one.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import shlex
+import shutil
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+import httpx
+
 from app.config import get_settings
 from app.runbooks.models import (
     DEFAULT_RUNBOOKS,
-    ExecutionMode,
     Runbook,
     RunbookExecution,
     RunbookStep,
@@ -49,11 +66,10 @@ async def _report(hook: ProgressHook | None, execution: RunbookExecution) -> Non
 def _refuse(step_kind: str, missing: str) -> tuple[bool, str, str]:
     """Fail-closed (success, output, error) triple for a step with no backend.
 
-    Most step types below have nothing behind them: no shell is spawned, no
-    cluster is contacted, no message is posted. Returning success for those
-    would tell a responder that a mitigation ran when it never did — the one
-    failure mode that is worse than the step erroring out — so they refuse
-    instead unless the operator explicitly asked for a simulation.
+    Every refusal in this module ends in the same sentence so the phrase an
+    operator greps for after an incident — "did this actually do anything?" —
+    is one phrase and not five. `output` is empty because there is nothing to
+    report: no process was spawned, no cluster contacted, no message posted.
     """
     log.warning("Runbook %s step not executed: %s", step_kind, missing)
     return (
@@ -61,6 +77,51 @@ def _refuse(step_kind: str, missing: str) -> tuple[bool, str, str]:
         "",
         f"{missing}; refusing to report success for an action that was not performed",
     )
+
+
+class StepNotConfigured(RuntimeError):
+    """A step cannot run because required config or tooling is absent.
+
+    Raised instead of returning a plausible-looking success: the caller turns it
+    into a failed step whose error names the missing setting.
+    """
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _command_allowlist() -> set[str]:
+    """Binaries this deployment is allowed to run from a runbook command step."""
+    raw = get_settings().runbook_command_allowlist
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _kube_clients() -> tuple[Any, Any]:
+    """Build (CoreV1Api, AppsV1Api) from the configured kubeconfig.
+
+    Raises StepNotConfigured when there is no cluster to talk to, so a
+    Kubernetes step fails loudly rather than pretending it rolled anything out.
+    """
+    s = get_settings()
+    if not s.kube_config_path:
+        raise StepNotConfigured(
+            "Kubernetes steps need a cluster: set KUBE_CONFIG_PATH to a kubeconfig. "
+            "Nothing was changed"
+        )
+    try:
+        from kubernetes import client, config  # lazy: optional dependency
+    except ImportError as e:  # pragma: no cover - depends on the install extras
+        raise StepNotConfigured(
+            "The `kubernetes` client is not installed; install the 'kubernetes' "
+            "extra to run Kubernetes runbook steps. Nothing was changed"
+        ) from e
+
+    config.load_kube_config(config_file=s.kube_config_path)
+    return client.CoreV1Api(), client.AppsV1Api()
 
 
 class RunbookExecutor:
@@ -95,8 +156,47 @@ class RunbookExecutor:
         return False
 
     def get_runbook(self, runbook_id: str) -> Runbook | None:
-        """Get a runbook by ID."""
+        """Get a runbook by ID from the in-process definitions."""
         return self._runbooks.get(runbook_id)
+
+    async def resolve_runbook(self, runbook_id: str) -> Runbook | None:
+        """Find a runbook, preferring the durable store over the built-in copies.
+
+        The API writes runbooks to the database while this executor kept its own
+        dict seeded from DEFAULT_RUNBOOKS, so a runbook created through the API
+        was invisible to everything that went through the executor. The store is
+        authoritative; the in-memory definitions remain a fallback for callers
+        running without a reachable database.
+        """
+        try:
+            from app.runbooks import store
+
+            found = await store.get_runbook(runbook_id)
+        except Exception as e:  # no database configured / not initialised
+            log.warning(
+                "Runbook store unavailable (%s: %s); falling back to built-in definitions",
+                type(e).__name__, e,
+            )
+            return self._runbooks.get(runbook_id)
+        return found or self._runbooks.get(runbook_id)
+
+    async def resolve_runbooks(
+        self,
+        service: str | None = None,
+        trigger: str | None = None,
+    ) -> list[Runbook]:
+        """List runbooks from the store, falling back to the built-in definitions."""
+        try:
+            from app.runbooks import store
+
+            found = await store.list_runbooks(service=service, trigger=trigger, enabled=True)
+        except Exception as e:
+            log.warning(
+                "Runbook store unavailable (%s: %s); falling back to built-in definitions",
+                type(e).__name__, e,
+            )
+            return self.list_runbooks(service=service, trigger=trigger)
+        return found or self.list_runbooks(service=service, trigger=trigger)
 
     def list_runbooks(
         self,
@@ -140,22 +240,44 @@ class RunbookExecutor:
             rollback_step=step.rollback_step,
         )
 
-    async def _execute_step(
+    async def execute_step(
         self,
         step: RunbookStep,
         context: dict[str, Any],
     ) -> tuple[bool, str, str]:
-        """Execute a single step.
+        """Execute a single step for real.
 
-        Returns (success, output, error).
+        Returns (success, output, error). `error` is never empty on failure —
+        it names the config or tooling the step needed and did not have.
+
+        MERGE NOTE: origin/main reached the same fail-closed guarantee from the
+        other direction — it kept every handler a no-op and had them refuse
+        unless COPILOT_DEMO_MODE was set, so that a simulation could never be
+        mistaken for an action. That refusal is subsumed here: the handlers below
+        do the work, and when the backend they need is absent they return the
+        same failure with the missing setting named. What is *not* reinstated is
+        the other half of that switch — demo mode returning "Rolled back api
+        (simulated)" — because the handlers now really do roll a deployment
+        back. Demo mode still has a say, in the only direction that cannot lie:
+        it refuses. A deployment that has declared itself a demo must not patch
+        somebody's cluster because a kubeconfig happened to be readable.
         """
         step = self._substitute_step(step, context)
+
+        # WAIT is exempt: sleeping is inert and it is the one step type whose
+        # output is a true statement in any mode.
+        if get_settings().copilot_demo_mode and step.step_type != StepType.WAIT:
+            return _refuse(
+                step.step_type.value,
+                "COPILOT_DEMO_MODE is on, so this deployment does not act on real "
+                f"systems and the {step.step_type.value} step was not run",
+            )
 
         try:
             if step.step_type == StepType.COMMAND:
                 return await self._exec_command(step)
             elif step.step_type == StepType.KUBERNETES:
-                return await self._exec_kubernetes(step)
+                return await self._exec_kubernetes(step, context)
             elif step.step_type == StepType.SLACK:
                 return await self._exec_slack(step, context)
             elif step.step_type == StepType.WAIT:
@@ -163,136 +285,348 @@ class RunbookExecutor:
             elif step.step_type == StepType.HTTP:
                 return await self._exec_http(step)
             else:
-                return False, "", f"Unsupported step type: {step.step_type}"
+                return _refuse(
+                    step.step_type.value,
+                    f"Step type '{step.step_type.value}' has no executor in this "
+                    f"build; nothing was run",
+                )
         except asyncio.TimeoutError:
             return False, "", f"Step timed out after {step.timeout_seconds}s"
+        except StepNotConfigured as e:
+            return _refuse(step.step_type.value, str(e))
         except Exception as e:
-            return False, "", str(e)
+            return False, "", f"{type(e).__name__}: {e}"
 
     async def _exec_command(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Execute a shell command.
+        """Run the step's command as a real subprocess.
 
-        No command runner is wired into this executor — nothing is ever spawned.
+        No shell is involved (the action is split with shlex and exec'd
+        directly), and the binary must appear in RUNBOOK_COMMAND_ALLOWLIST —
+        a runbook is arbitrary text that reaches production, so an empty
+        allowlist means "this deployment runs no commands" and says so.
         """
-        if not get_settings().copilot_demo_mode:
+        argv = shlex.split(step.action)
+        if not argv:
+            return False, "", "Command step has no action to run"
+
+        allowed = _command_allowlist()
+        if not allowed:
             return _refuse(
                 "command",
-                f"no command executor is configured for runbook COMMAND steps "
-                f"(command was: {step.action!r})",
+                "Command steps are disabled: set RUNBOOK_COMMAND_ALLOWLIST to the "
+                "binaries this deployment may run (e.g. "
+                "RUNBOOK_COMMAND_ALLOWLIST=kubectl,redis-cli); "
+                f"'{argv[0]}' was not run",
+            )
+        binary = os.path.basename(argv[0])
+        if binary not in allowed:
+            return _refuse(
+                "command",
+                f"'{binary}' is not in RUNBOOK_COMMAND_ALLOWLIST "
+                f"({', '.join(sorted(allowed))}); it was not run",
             )
 
-        log.warning("COPILOT_DEMO_MODE=true - SIMULATING command: %s", step.action)
-        return True, f"Command executed: {step.action} (simulated)", ""
+        resolved = shutil.which(argv[0])
+        if resolved is None:
+            return _refuse(
+                "command", f"'{argv[0]}' was not found on PATH; it was not run"
+            )
 
-    async def _exec_kubernetes(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Execute a Kubernetes operation.
+        log.info("Executing command: %s", step.action)
+        proc = await asyncio.create_subprocess_exec(
+            resolved,
+            *argv[1:],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            raw_out, raw_err = await asyncio.wait_for(
+                proc.communicate(), timeout=step.timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
 
-        RunbookExecutor holds no Kubernetes client, so none of these actions
-        ever reach a cluster; the strings below are descriptions of what *would*
-        happen, not observations of what did.
-        """
+        out = raw_out.decode(errors="replace").strip()
+        err = raw_err.decode(errors="replace").strip()
+        if proc.returncode != 0:
+            return False, out, err or f"'{step.action}' exited with code {proc.returncode}"
+        return True, out or f"'{step.action}' exited 0", ""
+
+    def _namespace(self, step: RunbookStep, context: dict[str, Any]) -> str:
+        ns = str(step.params.get("namespace") or context.get("namespace") or "").strip()
+        return ns or get_settings().kube_namespace or "default"
+
+    async def _exec_kubernetes(
+        self,
+        step: RunbookStep,
+        context: dict[str, Any],
+    ) -> tuple[bool, str, str]:
+        """Perform a Kubernetes operation against the configured cluster."""
         action = step.action
         params = step.params
+        ns = self._namespace(step, context)
+        log.info("Kubernetes action: %s namespace=%s params=%s", action, ns, params)
 
-        # Work out the message first so an unknown action is still reported as
-        # such rather than being masked by the not-configured refusal.
+        core, apps = await asyncio.to_thread(_kube_clients)
+
         if action == "rollout_restart":
-            deployment = params.get("deployment", "unknown")
-            output = f"Initiated rollout restart for {deployment}"
+            deployment = self._require(params, "deployment")
+            stamp = datetime.now(timezone.utc).isoformat()
+            patch = {
+                "spec": {
+                    "template": {
+                        "metadata": {
+                            "annotations": {"kubectl.kubernetes.io/restartedAt": stamp}
+                        }
+                    }
+                }
+            }
+            await asyncio.to_thread(apps.patch_namespaced_deployment, deployment, ns, patch)
+            return True, f"Rollout restart triggered for {ns}/{deployment} at {stamp}", ""
 
-        elif action == "wait_rollout":
-            deployment = params.get("deployment", "unknown")
-            output = f"Rollout completed for {deployment}"
+        if action == "wait_rollout":
+            deployment = self._require(params, "deployment")
+            timeout = _as_int(params.get("timeout"), step.timeout_seconds)
+            return await self._wait_rollout(apps, deployment, ns, timeout)
 
-        elif action == "scale":
-            deployment = params.get("deployment", "unknown")
-            replicas = params.get("replicas", "0")
-            output = f"Scaled {deployment} to {replicas} replicas"
-
-        elif action == "get_deployment":
-            deployment = params.get("deployment", "unknown")
-            output = f"Deployment {deployment}: 3 replicas, Ready"
-
-        elif action == "rollout_history":
-            deployment = params.get("deployment", "unknown")
-            output = f"Revision history for {deployment}: rev1, rev2, rev3 (current)"
-
-        elif action == "rollout_undo":
-            deployment = params.get("deployment", "unknown")
-            output = f"Rolled back {deployment} to previous revision"
-
-        elif action == "cordon_node":
-            node = params.get("node", "unknown")
-            output = f"Node {node} cordoned"
-
-        elif action == "drain_node":
-            node = params.get("node", "unknown")
-            output = f"Node {node} drained"
-
-        else:
-            return False, "", f"Unknown Kubernetes action: {action}"
-
-        if not get_settings().copilot_demo_mode:
-            return _refuse(
-                f"kubernetes/{action}",
-                "no Kubernetes client is wired into the runbook executor "
-                "(set KUBE_CONFIG_PATH and inject a client)",
+        if action == "scale":
+            deployment = self._require(params, "deployment")
+            current = await asyncio.to_thread(apps.read_namespaced_deployment, deployment, ns)
+            replicas = self._resolve_replicas(
+                params.get("replicas"), current.spec.replicas or 0
             )
+            await asyncio.to_thread(
+                apps.patch_namespaced_deployment_scale,
+                deployment,
+                ns,
+                {"spec": {"replicas": replicas}},
+            )
+            return True, f"Scaled {ns}/{deployment} to {replicas} replicas", ""
 
-        log.warning(
-            "COPILOT_DEMO_MODE=true - SIMULATING Kubernetes action: %s params=%s",
-            action, params,
+        if action == "get_deployment":
+            deployment = self._require(params, "deployment")
+            dep = await asyncio.to_thread(apps.read_namespaced_deployment, deployment, ns)
+            st = dep.status
+            return True, (
+                f"{ns}/{deployment}: desired={dep.spec.replicas} "
+                f"ready={st.ready_replicas or 0} updated={st.updated_replicas or 0} "
+                f"available={st.available_replicas or 0}"
+            ), ""
+
+        if action == "rollout_history":
+            deployment = self._require(params, "deployment")
+            revisions = await asyncio.to_thread(self._rollout_history, apps, deployment, ns)
+            if not revisions:
+                return False, "", f"No revision history found for {ns}/{deployment}"
+            listed = ", ".join(f"rev{r}: {img}" for r, img in revisions)
+            return True, f"Revision history for {ns}/{deployment}: {listed}", ""
+
+        if action == "rollout_undo":
+            deployment = self._require(params, "deployment")
+            return await asyncio.to_thread(self._rollout_undo, apps, deployment, ns)
+
+        if action == "cordon_node":
+            node = self._require(params, "node")
+            await asyncio.to_thread(
+                core.patch_node, node, {"spec": {"unschedulable": True}}
+            )
+            return True, f"Node {node} cordoned (unschedulable)", ""
+
+        if action == "drain_node":
+            node = self._require(params, "node")
+            grace = _as_int(params.get("grace_period"), 30)
+            return await self._drain_node(core, node, grace)
+
+        return False, "", f"Unknown Kubernetes action: {action}"
+
+    @staticmethod
+    def _require(params: dict[str, Any], key: str) -> str:
+        value = str(params.get(key, "")).strip()
+        if not value or value.startswith("${"):
+            raise StepNotConfigured(
+                f"Step is missing the '{key}' parameter (got {params.get(key)!r}); "
+                f"nothing was run."
+            )
+        return value
+
+    @staticmethod
+    def _resolve_replicas(raw: Any, current: int) -> int:
+        """Resolve a replica count, supporting the relative '+2' / '-1' forms."""
+        text = str(raw if raw is not None else "").strip()
+        if not text:
+            raise StepNotConfigured("Scale step is missing the 'replicas' parameter")
+        if text[0] in "+-":
+            return max(0, current + _as_int(text, 0))
+        value = _as_int(text, -1)
+        if value < 0:
+            raise StepNotConfigured(f"Scale step has a non-numeric replicas value: {raw!r}")
+        return value
+
+    async def _wait_rollout(
+        self, apps: Any, deployment: str, ns: str, timeout: int
+    ) -> tuple[bool, str, str]:
+        """Poll the deployment until its rollout completes or the timeout expires."""
+        deadline = asyncio.get_running_loop().time() + max(1, timeout)
+        last = ""
+        while True:
+            dep = await asyncio.to_thread(apps.read_namespaced_deployment, deployment, ns)
+            desired = dep.spec.replicas or 0
+            st = dep.status
+            updated = st.updated_replicas or 0
+            ready = st.ready_replicas or 0
+            unavailable = st.unavailable_replicas or 0
+            last = (
+                f"{ns}/{deployment}: desired={desired} updated={updated} "
+                f"ready={ready} unavailable={unavailable}"
+            )
+            if updated >= desired and ready >= desired and unavailable == 0:
+                return True, f"Rollout complete for {last}", ""
+            if asyncio.get_running_loop().time() >= deadline:
+                return False, last, (
+                    f"Rollout of {ns}/{deployment} did not complete within {timeout}s"
+                )
+            await asyncio.sleep(2)
+
+    @staticmethod
+    def _rollout_history(apps: Any, deployment: str, ns: str) -> list[tuple[int, str]]:
+        """Revision -> image for each ReplicaSet owned by the deployment."""
+        dep = apps.read_namespaced_deployment(deployment, ns)
+        match = (dep.spec.selector.match_labels or {}) if dep.spec.selector else {}
+        selector = ",".join(f"{k}={v}" for k, v in match.items())
+        sets = apps.list_namespaced_replica_set(ns, label_selector=selector).items
+        out: list[tuple[int, str]] = []
+        for rs in sets:
+            revision = (rs.metadata.annotations or {}).get(
+                "deployment.kubernetes.io/revision"
+            )
+            containers = rs.spec.template.spec.containers if rs.spec.template else []
+            if revision and containers:
+                out.append((_as_int(revision, 0), containers[0].image))
+        return sorted(out)
+
+    def _rollout_undo(self, apps: Any, deployment: str, ns: str) -> tuple[bool, str, str]:
+        """Restore the deployment's previous ReplicaSet pod template.
+
+        This is what `kubectl rollout undo` does; the previous build declined to
+        do it live and returned "Rolled back <x>" anyway.
+        """
+        dep = apps.read_namespaced_deployment(deployment, ns)
+        match = (dep.spec.selector.match_labels or {}) if dep.spec.selector else {}
+        selector = ",".join(f"{k}={v}" for k, v in match.items())
+        sets = apps.list_namespaced_replica_set(ns, label_selector=selector).items
+        ranked = sorted(
+            (
+                (_as_int((rs.metadata.annotations or {}).get(
+                    "deployment.kubernetes.io/revision"), 0), rs)
+                for rs in sets
+                if (rs.metadata.annotations or {}).get("deployment.kubernetes.io/revision")
+            ),
+            key=lambda pair: pair[0],
         )
-        return True, f"{output} (simulated)", ""
+        if len(ranked) < 2:
+            return False, "", (
+                f"{ns}/{deployment} has no previous revision to roll back to "
+                f"({len(ranked)} revision(s) found)"
+            )
+        revision, previous = ranked[-2]
+        apps.patch_namespaced_deployment(
+            deployment, ns, {"spec": {"template": previous.spec.template}}
+        )
+        image = previous.spec.template.spec.containers[0].image
+        return True, f"Rolled {ns}/{deployment} back to revision {revision} ({image})", ""
+
+    async def _drain_node(
+        self, core: Any, node: str, grace_period: int
+    ) -> tuple[bool, str, str]:
+        """Cordon the node and evict every pod it is not required to keep."""
+        await asyncio.to_thread(core.patch_node, node, {"spec": {"unschedulable": True}})
+        pods = await asyncio.to_thread(
+            core.list_pod_for_all_namespaces, field_selector=f"spec.nodeName={node}"
+        )
+
+        evicted: list[str] = []
+        skipped: list[str] = []
+        failures: list[str] = []
+        for pod in pods.items:
+            owners = pod.metadata.owner_references or []
+            if any(o.kind == "DaemonSet" for o in owners):
+                skipped.append(f"{pod.metadata.namespace}/{pod.metadata.name} (DaemonSet)")
+                continue
+            body = {
+                "apiVersion": "policy/v1",
+                "kind": "Eviction",
+                "metadata": {
+                    "name": pod.metadata.name,
+                    "namespace": pod.metadata.namespace,
+                },
+                "deleteOptions": {"gracePeriodSeconds": grace_period},
+            }
+            try:
+                await asyncio.to_thread(
+                    core.create_namespaced_pod_eviction,
+                    pod.metadata.name,
+                    pod.metadata.namespace,
+                    body,
+                )
+                evicted.append(f"{pod.metadata.namespace}/{pod.metadata.name}")
+            except Exception as e:  # one pod's PDB should not hide the rest
+                failures.append(f"{pod.metadata.namespace}/{pod.metadata.name}: {e}")
+
+        summary = (
+            f"Node {node} cordoned; evicted {len(evicted)} pod(s)"
+            + (f", skipped {len(skipped)}" if skipped else "")
+        )
+        if failures:
+            return False, summary, "Could not evict: " + "; ".join(failures)
+        return True, summary, ""
 
     async def _exec_slack(
         self,
         step: RunbookStep,
         context: dict[str, Any],
     ) -> tuple[bool, str, str]:
-        """Post a Slack message.
+        """Post the step's message to Slack."""
+        from app.integrations.slack_notify import is_slack_configured, send_quick_message
 
-        No Slack client is wired into this executor, so nothing is posted. A
-        step that claims it notified the channel when it did not is how an
-        incident goes unannounced.
-        """
-        message = step.params.get("message", "")
-        message = self._substitute_variables(message, context)
+        message = self._substitute_variables(str(step.params.get("message", "")), context)
+        if not message.strip():
+            return False, "", "Slack step has no 'message' parameter; nothing was posted."
 
-        if not get_settings().copilot_demo_mode:
+        if not is_slack_configured():
             return _refuse(
                 "slack",
-                "no Slack client is wired into the runbook executor "
-                "(set SLACK_BOT_TOKEN and inject a client)",
+                "Slack is not configured: set SLACK_WEBHOOK_URL, or SLACK_BOT_TOKEN "
+                "plus SLACK_CHANNEL; the message was not posted",
             )
 
-        log.warning("COPILOT_DEMO_MODE=true - SIMULATING Slack message: %s", message)
-        return True, f"Posted to Slack: {message} (simulated)", ""
+        channel = str(step.params.get("channel", "")).strip() or None
+        result = await send_quick_message(message, channel=channel)
+        if result.get("success"):
+            return True, f"Posted to Slack: {message}", ""
+        return False, "", (
+            f"Slack rejected the message: {result.get('message', 'unknown error')}"
+        )
 
     async def _exec_wait(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Wait for a specified duration.
+        """Wait for the requested duration, or refuse if it will not fit.
 
-        This is the one step type that really does what it says, so it runs in
-        both modes — but the wait is only shortened (and relabelled) for demos;
-        a real run has to actually elapse or the steps after it are checking a
-        system that has not settled yet.
+        MERGE NOTE: this branch capped the sleep at `step.timeout_seconds` and
+        returned SUCCESS, recording the shortfall only in the output string.
+        origin/main's fail-closed version is restored instead. A wait exists so
+        the step after it observes a settled system; a wait that silently
+        returns early hands the next step a cluster that is still rolling, and
+        it reports whatever it finds as the truth. A step that cannot do its job
+        has to say so in the field that stops the run, not in prose.
         """
-        seconds = int(step.params.get("seconds", 10))
-
-        if get_settings().copilot_demo_mode:
-            capped = min(seconds, 5)
-            log.warning(
-                "COPILOT_DEMO_MODE=true - SIMULATING %ds wait as %ds", seconds, capped
-            )
-            await asyncio.sleep(capped)
-            return True, f"Waited {seconds} seconds (simulated: slept {capped}s)", ""
-
-        # Nothing else enforces step.timeout_seconds, so refuse a wait that
-        # would outlive its own step budget instead of blocking the execution.
-        if seconds > step.timeout_seconds:
+        seconds = max(0, _as_int(step.params.get("seconds"), 10))
+        budget = max(0, step.timeout_seconds)
+        if seconds > budget:
             return False, "", (
-                f"wait of {seconds}s exceeds the step timeout of "
-                f"{step.timeout_seconds}s"
+                f"wait of {seconds}s exceeds the step timeout of {budget}s; "
+                f"nothing was waited for, because a shortened wait would let the "
+                f"next step check a system that has not settled"
             )
 
         log.info("Waiting %d seconds", seconds)
@@ -300,22 +634,39 @@ class RunbookExecutor:
         return True, f"Waited {seconds} seconds", ""
 
     async def _exec_http(self, step: RunbookStep) -> tuple[bool, str, str]:
-        """Make an HTTP request.
-
-        No request is issued here; "200 OK" below is a literal, not a response.
-        """
-        url = step.params.get("url", "")
-        method = step.params.get("method", "GET")
-
-        if not get_settings().copilot_demo_mode:
-            return _refuse(
-                "http",
-                f"no HTTP client is wired into the runbook executor "
-                f"(request was: {method} {url})",
+        """Make the step's HTTP request and report what came back."""
+        url = str(step.params.get("url", "")).strip()
+        method = str(step.params.get("method", "GET")).upper()
+        if not url:
+            return False, "", "HTTP step has no 'url' parameter; no request was made."
+        if not url.startswith(("http://", "https://")):
+            return False, "", (
+                f"HTTP step url must be an absolute http(s) URL, got {url!r}; "
+                f"no request was made."
             )
 
-        log.warning("COPILOT_DEMO_MODE=true - SIMULATING HTTP %s %s", method, url)
-        return True, f"HTTP {method} {url}: 200 OK (simulated)", ""
+        headers = step.params.get("headers") or {}
+        body = step.params.get("body")
+        log.info("HTTP %s %s", method, url)
+        try:
+            async with httpx.AsyncClient(
+                timeout=step.timeout_seconds, follow_redirects=True
+            ) as client:
+                resp = await client.request(
+                    method,
+                    url,
+                    headers={str(k): str(v) for k, v in dict(headers).items()},
+                    json=body if isinstance(body, (dict, list)) else None,
+                    content=body if isinstance(body, str) else None,
+                )
+        except httpx.HTTPError as e:
+            return False, "", f"HTTP {method} {url} failed: {type(e).__name__}: {e}"
+
+        excerpt = resp.text[:2000]
+        summary = f"HTTP {method} {url} -> {resp.status_code}"
+        if resp.is_success:
+            return True, f"{summary}\n{excerpt}".rstrip(), ""
+        return False, excerpt, summary
 
     async def execute(
         self,
@@ -336,8 +687,9 @@ class RunbookExecutor:
             skip_approval: Skip approval gates (for testing)
             runbook: The definition to run. Supplied by callers that keep their
                 runbooks somewhere other than this executor's registry — the API
-                router loads them per tenant, and looking them up here would mean
-                one org's edit to a shared id changing what another org runs.
+                router and the worker load them per tenant, and looking them up
+                here would mean one org's edit to a shared id changing what
+                another org runs.
             execution_id: Id to record this run under. Callers that must return
                 the id before the run finishes (the API returns it immediately
                 and the caller polls) generate it up front; otherwise one is
@@ -350,7 +702,7 @@ class RunbookExecutor:
             RunbookExecution record
         """
         if runbook is None:
-            runbook = self._runbooks.get(runbook_id)
+            runbook = await self.resolve_runbook(runbook_id)
         if not runbook:
             raise ValueError(f"Runbook '{runbook_id}' not found")
 
@@ -381,18 +733,21 @@ class RunbookExecutor:
                 started_at=datetime.now(timezone.utc),
             )
 
+            # Whatever the runbook's execution mode. `skip_approval` is the one
+            # opt-out, and it is an explicit argument from the caller rather
+            # than a property of the runbook. See `run_execution` for why the
+            # mode does not get a vote here.
             if step.requires_approval and not skip_approval:
-                if runbook.execution_mode == ExecutionMode.REQUIRES_APPROVAL:
-                    step_exec.status = StepStatus.WAITING_APPROVAL
-                    execution.steps.append(step_exec)
-                    execution.status = StepStatus.WAITING_APPROVAL
-                    self._pending_approvals[execution.id] = (execution, step)
-                    log.info("Step %s waiting for approval", step.name)
-                    await _report(on_progress, execution)
-                    return execution
+                step_exec.status = StepStatus.WAITING_APPROVAL
+                execution.steps.append(step_exec)
+                execution.status = StepStatus.WAITING_APPROVAL
+                self._pending_approvals[execution.id] = (execution, step)
+                log.info("Step %s waiting for approval", step.name)
+                await _report(on_progress, execution)
+                return execution
 
             step_exec.status = StepStatus.RUNNING
-            success, output, error = await self._execute_step(step, context)
+            success, output, error = await self.execute_step(step, context)
 
             step_exec.completed_at = datetime.now(timezone.utc)
             step_exec.output = output
@@ -428,10 +783,13 @@ class RunbookExecutor:
             return None
 
         execution, step = self._pending_approvals.pop(execution_id)
-        runbook = self._runbooks.get(execution.runbook_id)
+        runbook = await self.resolve_runbook(execution.runbook_id)
 
         if not runbook:
             return None
+
+        log.info("Approval granted for execution %s, continuing from step %s",
+                 execution_id, step.name)
 
         return await self.resume(execution, runbook, step.id)
 
@@ -448,7 +806,8 @@ class RunbookExecutor:
         runbook can resume without going through `_pending_approvals`. That dict
         lives in one process, so an approval that landed on a different replica
         than the one that paused the run could never be actioned — the run simply
-        stayed WAITING_APPROVAL forever.
+        stayed WAITING_APPROVAL forever. `run_execution` below does the same job
+        for callers that keep the whole record in the database.
 
         Returns None if `from_step_id` is not a step of this runbook, which means
         the definition was edited between the pause and the approval; resuming at
@@ -464,9 +823,7 @@ class RunbookExecutor:
             )
             return None
 
-        log.info(
-            "Resuming execution %s from step %s", execution.id, from_step_id
-        )
+        log.info("Resuming execution %s from step %s", execution.id, from_step_id)
         execution.status = StepStatus.RUNNING
         # The pause recorded a placeholder StepExecution for the step it stopped
         # at; drop it so the real result replaces it rather than appearing twice.
@@ -483,7 +840,7 @@ class RunbookExecutor:
                 started_at=datetime.now(timezone.utc),
             )
 
-            success, output, error = await self._execute_step(step, execution.context)
+            success, output, error = await self.execute_step(step, execution.context)
 
             step_exec.completed_at = datetime.now(timezone.utc)
             step_exec.output = output
@@ -558,3 +915,130 @@ def get_executor() -> RunbookExecutor:
     if _executor is None:
         _executor = RunbookExecutor()
     return _executor
+
+
+async def run_execution(
+    execution_id: str, approved_through: int = -1, org_id: str | None = None
+) -> None:
+    """Drive a stored execution to a terminal state, persisting every step.
+
+    The API used to create an execution row and return: four declared steps,
+    zero StepExecutions, status stuck on `pending` forever. This is the piece
+    that actually runs it.
+
+    Resumption is derived from the durable record rather than from process
+    memory: the next step to run is `len(execution.steps)`, because a step is
+    appended only once it has finished. So a run that paused for approval can be
+    resumed by a different worker, or after a restart. That offset is checked
+    against the step id the run parked on before anything is run — see below.
+
+    `approved_through` is the index of the last step a human has already
+    approved. Steps after it that carry `requires_approval` park the execution in
+    WAITING_APPROVAL instead of running; without it, approving would re-enter the
+    same gate forever.
+
+    `org_id` is the owner of the row, captured by the caller. A background task
+    can outlive the middleware that set the tenant contextvar, so the org is
+    passed rather than re-read here; None means "resolve it from the context",
+    which is what an in-request caller wants.
+
+    A step's own `requires_approval` is honoured whatever the runbook's
+    execution mode is. The gate used to also require
+    `execution_mode == REQUIRES_APPROVAL`, so on a `manual` or `auto_approved`
+    runbook — both of which start running the moment the route is called — a
+    step marked as needing a human ran without one. `drain node`, `flush cache`
+    and `rollback` are exactly the steps people mark, and the two settings are
+    about different things: the mode decides whether the *run* needs sign-off
+    before it starts, the flag decides whether a *step* does before it fires.
+    Where they disagree the step wins, because it is the more specific
+    statement and because the cost of being wrong is asymmetric — a needless
+    pause costs a click, a needless `kubectl drain` costs an outage.
+    """
+    from app.runbooks import store
+
+    execution = await store.get_execution(execution_id, org_id=org_id)
+    if execution is None:
+        log.warning("run_execution: execution %s no longer exists", execution_id)
+        return
+
+    runbook = await store.get_runbook(execution.runbook_id, org_id=org_id)
+    if runbook is None:
+        log.error(
+            "run_execution: runbook %s for execution %s no longer exists",
+            execution.runbook_id, execution_id,
+        )
+        await store.mark_failed(
+            org_id,
+            execution_id,
+            f"runbook {execution.runbook_id!r} no longer exists",
+        )
+        return
+
+    resume_at = len(execution.steps)
+    parked_on = (await store.execution_notes(execution_id, org_id=org_id)).get(
+        "waiting_on"
+    )
+    if parked_on is not None and (
+        resume_at >= len(runbook.steps) or runbook.steps[resume_at].id != parked_on
+    ):
+        # The definition was edited between the pause and the approval. Running
+        # from the recorded offset would run whatever now occupies it — for a
+        # runbook of scale and drain actions, that is how the wrong thing gets
+        # touched — and shortening the runbook past the offset would end the run
+        # as a success having executed none of the steps that were approved.
+        reason = (
+            f"cannot resume: step {parked_on!r} is no longer part of runbook "
+            f"{runbook.id!r}"
+        )
+        log.error("Execution %s: %s", execution_id, reason)
+        await store.mark_failed(org_id, execution_id, reason)
+        return
+
+    executor = get_executor()
+    context = dict(execution.context)
+    failed = False
+
+    for index in range(resume_at, len(runbook.steps)):
+        step = runbook.steps[index]
+
+        if step.requires_approval and index > approved_through:
+            log.info("Execution %s waiting for approval of step %s", execution_id, step.id)
+            await store.set_execution_status(
+                execution_id,
+                StepStatus.WAITING_APPROVAL,
+                waiting_on=step.id,
+                org_id=org_id,
+            )
+            return
+
+        started = datetime.now(timezone.utc)
+        success, output, error = await executor.execute_step(step, context)
+        record = StepExecution(
+            step_id=step.id,
+            step_name=step.name,
+            status=StepStatus.SUCCESS if success else StepStatus.FAILED,
+            started_at=started,
+            completed_at=datetime.now(timezone.utc),
+            output=output,
+            error=error,
+        )
+        await store.append_step_result(execution_id, record, org_id=org_id)
+
+        if not success:
+            failed = True
+            log.error("Execution %s step %s failed: %s", execution_id, step.id, error)
+            if not step.continue_on_failure:
+                await store.set_execution_status(
+                    execution_id, StepStatus.FAILED, org_id=org_id
+                )
+                return
+
+    # A tolerated failure is still a failure: reporting "success" for a run that
+    # contains a failed step is exactly the false green this engine is here to
+    # stop. `continue_on_failure` decides whether later steps run, not how the
+    # run is recorded.
+    await store.set_execution_status(
+        execution_id,
+        StepStatus.FAILED if failed else StepStatus.SUCCESS,
+        org_id=org_id,
+    )

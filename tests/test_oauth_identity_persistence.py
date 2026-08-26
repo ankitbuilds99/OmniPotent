@@ -33,8 +33,9 @@ from sqlalchemy import func, select, update
 from app import config as cfg
 from app.auth import oauth
 from app.auth.oauth import OAuthUser
+from app.database.auth_models import OAuthAccountDB
 from app.database.engine import close_db, ensure_schema, get_session
-from app.database.models import OAuthAccountRecord, OAuthStateRecord
+from app.database.models import OAuthStateRecord
 
 
 @pytest.fixture(autouse=True)
@@ -44,8 +45,19 @@ def db(tmp_path, monkeypatch):
     The engine is a module global, so it is disposed on the way in as well as
     out -- otherwise a test inherits the previous test's engine, still pointing
     at *that* test's tmp_path.
+
+    COPILOT_SECRET_KEY is set because `_session_signing_key()` now fails closed:
+    there is no development fallback to a literal any more, so anything that
+    mints or verifies a session token (the callback test below) raises
+    RuntimeError without one.
     """
     monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("COPILOT_DATABASE_URL", raising=False)
+    monkeypatch.setenv("COPILOT_SECRET_KEY", "k" * 32)
+    # Single-tenant with no API token and no allowlist is the one shape in which
+    # `_get_or_create_org_for_user` provisions rather than refusing the login.
+    monkeypatch.delenv("COPILOT_MULTI_TENANT", raising=False)
+    monkeypatch.delenv("COPILOT_API_TOKEN", raising=False)
     cfg.get_settings.cache_clear()
     asyncio.run(close_db())
     yield
@@ -79,7 +91,7 @@ async def _row_counts() -> tuple[int, int]:
     await ensure_schema()
     async with get_session() as session:
         accounts = (
-            await session.execute(select(func.count()).select_from(OAuthAccountRecord))
+            await session.execute(select(func.count()).select_from(OAuthAccountDB))
         ).scalar_one()
         states = (
             await session.execute(select(func.count()).select_from(OAuthStateRecord))
@@ -160,8 +172,12 @@ async def test_get_user_accounts_is_derived_not_indexed():
 
     async with get_session() as session:
         await session.execute(
-            update(OAuthAccountRecord)
-            .where(OAuthAccountRecord.id == "google:g_d")
+            # The row is addressed by the identity the IdP asserts rather than by
+            # the primary key: `oauth_accounts.id` is a surrogate uuid here, and
+            # (provider, provider_id) is the unique constraint that stands in for
+            # the natural key `OAuthAccount.id` still reports.
+            update(OAuthAccountDB)
+            .where(OAuthAccountDB.provider == "google", OAuthAccountDB.provider_id == "g_d")
             .values(user_id="somebody_else")
             .execution_options(synchronize_session=False)
         )
@@ -245,8 +261,8 @@ async def test_last_login_is_written_back():
     await oauth.link_oauth_account("user_l", _user(provider_id="g_l"))
     async with get_session() as session:
         await session.execute(
-            update(OAuthAccountRecord)
-            .where(OAuthAccountRecord.id == "google:g_l")
+            update(OAuthAccountDB)
+            .where(OAuthAccountDB.provider == "google", OAuthAccountDB.provider_id == "g_l")
             .values(last_login=datetime.now(timezone.utc) - timedelta(days=2))
             .execution_options(synchronize_session=False)
         )
@@ -407,7 +423,7 @@ async def test_the_callback_issues_a_token_for_the_user_that_won_the_link():
         )
 
     token = response.headers["location"].split("token=", 1)[1]
-    payload = verify_session_token(token)
+    payload = await verify_session_token(token)
     assert payload is not None
     assert payload["sub"] == "user_winner"
 

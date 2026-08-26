@@ -241,23 +241,44 @@ async def stop_drain() -> None:
     await flush()
 
 
-def verify_chain(events: list[dict] | None = None) -> dict:
+def verify_chain(events: list[dict], org_id: str | None = None) -> dict:
     """Recompute the hash chain (oldest→newest) over an explicit list of events
     and report the first broken link — the artifact auditors ask for.
 
-    `events` is required in substance: passing None checks an empty list, since
-    there is no longer a process-local buffer to default to. Use
-    `verify_org_chain` to check what is stored.
+    `events` has no default. It briefly defaulted to None-means-empty, which
+    made a caller that forgot to read the chain get `{"valid": true, "count": 0}`
+    — a tamper-evidence control answering "all clear" about nothing it looked
+    at. Use `verify_org_chain` to check what is stored.
+
+    `org_id` scopes the *report* to one tenant. Each entry's hash folds in the
+    entry before it, whoever produced it, so the walk still has to cover every
+    entry in the list — filtering first would report a false "tampered" the
+    moment two orgs' entries interleave. Only the answer is scoped: `count` is
+    the caller's own events, and a broken link is named only when the entry that
+    broke it is theirs. Without this, a verify over a mixed list returned the
+    fleet-wide event count and could surface another tenant's event name. The
+    stored chains are already per-org (see `app.audit.store`), so this is
+    defence in depth for any caller that hands in a list of its own.
     """
-    items = events if events is not None else []
+
+    def mine(entry: dict) -> bool:
+        return org_id is None or entry.get("org_id", "-") == org_id
+
+    total = sum(1 for e in events if mine(e))
     prev = ""
-    for i, e in enumerate(items):
+    seen = 0
+    for e in events:
         expected = chain_hash(e, prev)
         if e.get("hash") != expected or e.get("prev_hash") != prev:
-            return {"valid": False, "checked": i, "broken_at": i,
-                    "event": e.get("event"), "count": len(items)}
+            theirs = mine(e)
+            return {"valid": False, "checked": seen,
+                    "broken_at": seen if theirs else None,
+                    "event": e.get("event") if theirs else None,
+                    "count": total}
+        if mine(e):
+            seen += 1
         prev = e["hash"]
-    return {"valid": True, "count": len(items)}
+    return {"valid": True, "count": total}
 
 
 async def verify_org_chain(org_id: str) -> dict:
@@ -270,7 +291,9 @@ async def verify_org_chain(org_id: str) -> dict:
     from app.audit import store
 
     await flush()
-    verdict = verify_chain(await store.chain(org_id))
+    # `store.chain` already returns only this org's entries; passing `org_id`
+    # through keeps the report scoped even if that ever stops being true.
+    verdict = verify_chain(await store.chain(org_id), org_id=org_id)
     verdict["org_id"] = org_id
     return verdict
 
@@ -295,19 +318,23 @@ async def verify_all_chains() -> dict:
     }
 
 
-async def recent(limit: int = 100, event_prefix: str = "") -> list[dict]:
+async def recent(
+    limit: int = 100, event_prefix: str = "", org_id: str | None = None
+) -> list[dict]:
     """Return the most recent audit events (newest first), optionally filtered by
     an event-name prefix (e.g. "approval", "security", "feedback").
 
-    Scoped to the calling tenant. The buffer version was not scoped at all: it
-    returned every org's events to whoever asked.
+    Scoped to one org. The buffer version was not scoped at all: it handed any
+    authenticated tenant every other tenant's audit trail — actor email
+    addresses, thread ids, approval decisions and security events. Pass `org_id`
+    to read a specific org's trail; the default is the caller's, which in a
+    single-tenant deployment is '-' for every entry and so changes nothing.
     """
     from app.audit import store
 
     await flush()
-    return await store.recent(
-        tenant_context.tenant_id(), limit=limit, event_prefix=event_prefix
-    )
+    org = tenant_context.tenant_id() if org_id is None else org_id
+    return await store.recent(org, limit=limit, event_prefix=event_prefix)
 
 
 async def clear() -> None:

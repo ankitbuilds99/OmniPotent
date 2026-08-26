@@ -1,13 +1,18 @@
-"""Agent Marketplace — discover, install, and manage third-party agents.
+"""Agent Marketplace — discover, install, and manage add-on agents.
 
-The marketplace provides a plugin system for extending OmniPotent with
-community-contributed agents, tools, and integrations. Agents are packaged
-as MCP servers that can be installed from a registry or local paths.
+Agents are packaged as MCP servers. Installing one records it and, from the next
+session, `app.mcp.client` launches it alongside the built-in servers so its tools
+reach the LLM; disabling it takes them away again.
 
 Key components:
-- Registry: Central catalog of available agents
-- Installer: Download and configure agent packages
-- Manager: Enable, disable, and configure installed agents
+- Registry: catalogue of agents, each declaring the MCP server module it needs
+- Manager: install, enable, disable and configure — persisted under the data dir
+
+There is deliberately no installer/downloader. An agent is installable only when
+its module already resolves in this deployment; fetching and executing code from
+a remote registry is a supply-chain surface we do not open. Catalogue entries
+without an implementation report `available: false` and refuse to install,
+rather than recording a row and reporting success for tools that do not exist.
 """
 
 from __future__ import annotations

@@ -9,14 +9,19 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { API_TOKEN, wsUrl } from "../config";
 import type { StreamEvent } from "../types";
 
-// The http->ws conversion now lives in ../config: the local copy resolved the base
-// URL with `?? "http://localhost:8000"`, which kept the Dockerfile's deliberately
-// empty VITE_API_URL and made `new URL("")` throw at module load — taking this whole
-// hook down in every production image.
-const TOKEN = API_TOKEN;
+// The token rides in the WebSocket subprotocol and is read per connection, so a
+// sign-in takes effect without a reload (see lib/authToken).
+import { wsProtocols } from "../lib/authToken";
+
+// The http->ws conversion lives in lib/apiClient, alongside the base URL every
+// other client call uses. The local copy resolved the base with
+// `?? "http://localhost:8000"`, which kept the Dockerfile's deliberately empty
+// VITE_API_URL and made `new URL("")` throw at module load — taking this whole
+// hook down in every production image — and, when it did not throw, pointed a
+// production browser's socket at the user's own machine.
+import { wsUrl } from "../lib/apiClient";
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
 
@@ -141,10 +146,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     // Use subprotocol for auth token (not logged in access logs)
     // Format: ["copilot-v1", "auth-<token>"] or just ["copilot-v1"] if no token
-    const protocols: string[] = ["copilot-v1"];
-    if (TOKEN) {
-      protocols.push(`auth-${TOKEN}`);
-    }
+    const protocols = wsProtocols();
 
     try {
       const ws = new WebSocket(url, protocols);
@@ -331,10 +333,7 @@ export async function probeWebSocket(threadId: string): Promise<boolean> {
     const url = wsUrl(`/ws/chat/${threadId}`);
 
     // Use subprotocol for auth token (secure - not in URL/logs)
-    const protocols: string[] = ["copilot-v1"];
-    if (TOKEN) {
-      protocols.push(`auth-${TOKEN}`);
-    }
+    const protocols = wsProtocols();
 
     try {
       const ws = new WebSocket(url, protocols);

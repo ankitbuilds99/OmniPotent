@@ -59,6 +59,44 @@ def parse_message(raw: str) -> WsMessage | None:
         return None
 
 
+# The subprotocol the browser client offers on every connection
+# (frontend/src/lib/authToken.ts::wsProtocols).
+WS_SUBPROTOCOL = "copilot-v1"
+
+
+def negotiate_subprotocol(websocket: WebSocket) -> str | None:
+    """Pick the subprotocol to echo back in the handshake response.
+
+    RFC 6455 requires the server to answer a non-empty Sec-WebSocket-Protocol
+    offer with exactly one of the offered values. Browsers enforce this: Chrome
+    fails the connection with "Sent non-empty 'Sec-WebSocket-Protocol' header
+    but no response was received" when the server accepts without one. The SPA
+    always offers ["copilot-v1"] (plus "auth-<token>" when signed in), so
+    accepting with no subprotocol made every real WebSocket chat unusable even
+    though Starlette's TestClient — which does not enforce negotiation — was
+    happy.
+
+    The `auth-<token>` entry is a credential and is never echoed back; it would
+    then appear in response headers and proxy logs.
+    """
+    offered = [
+        p.strip()
+        for p in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if p.strip()
+    ]
+    if not offered:
+        return None
+    if WS_SUBPROTOCOL in offered:
+        return WS_SUBPROTOCOL
+    for proto in offered:
+        if not proto.startswith("auth-"):
+            return proto
+    # Only a credential was offered: there is nothing safe to echo, so the
+    # client will (correctly) fail the handshake.
+    log.warning("WebSocket client offered no usable subprotocol; handshake will fail")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Connection Manager
 # --------------------------------------------------------------------------- #
@@ -102,8 +140,12 @@ class ConnectionManager:
     async def connect(
         self, websocket: WebSocket, thread_id: str, session_id: str = ""
     ) -> ClientConnection:
-        """Accept a new WebSocket connection."""
-        await websocket.accept()
+        """Accept a new WebSocket connection.
+
+        The accept must answer the client's Sec-WebSocket-Protocol offer (see
+        `negotiate_subprotocol`), or every browser client fails the handshake.
+        """
+        await websocket.accept(subprotocol=negotiate_subprotocol(websocket))
         conn = ClientConnection(
             websocket=websocket,
             thread_id=thread_id,
@@ -132,8 +174,16 @@ class ConnectionManager:
         log.info("WebSocket disconnected: thread=%s", conn.thread_id)
 
     async def send(self, conn: ClientConnection, message: dict) -> bool:
-        """Send a message to a specific connection. Returns False if send failed."""
+        """Send a message to a specific connection. Returns False if send failed.
+
+        A failed send on a session-bearing connection is queued for resumption.
+        Nothing used to fill that buffer, so `get_pending` always returned []:
+        the client reconnected with `?session_id=` exactly as
+        frontend/src/hooks/useWebSocket.ts intends, and every event emitted while
+        it was away — the whole investigation, in a long one — was gone.
+        """
         if conn.closed:
+            await self._queue_missed(conn, message)
             return False
         try:
             if conn.websocket.client_state == WebSocketState.CONNECTED:
@@ -141,17 +191,33 @@ class ConnectionManager:
                 return True
         except Exception:
             log.debug("Failed to send to WebSocket", exc_info=True)
+        await self._queue_missed(conn, message)
         return False
 
+    async def _queue_missed(self, conn: ClientConnection, message: dict) -> None:
+        """Buffer a message the client did not receive, if it can resume."""
+        if conn.session_id:
+            await self.queue_for_session(conn.session_id, message)
+
     async def broadcast(self, thread_id: str, message: dict) -> int:
-        """Broadcast a message to all connections on a thread. Returns send count."""
+        """Broadcast a message to all connections on a thread. Returns send count.
+
+        When nobody is connected the message is still buffered for every session
+        known to belong to this thread — the common case is a client that dropped
+        mid-investigation, where "no connections" is precisely when resumption
+        has to work.
+        """
         sent = 0
         async with self._lock:
             conns = self._connections.get(thread_id)
-            if not conns:
-                return 0
-            # Copy to avoid mutation during iteration
-            active = list(conns.values())
+            active = list(conns.values()) if conns else []
+            orphaned = (
+                [sid for sid, tid in self._session_threads.items() if tid == thread_id]
+                if not active
+                else []
+            )
+        for session_id in orphaned:
+            await self.queue_for_session(session_id, message)
         for conn in active:
             if await self.send(conn, message):
                 sent += 1
@@ -163,13 +229,23 @@ class ConnectionManager:
             messages = self._sessions.pop(session_id, [])
             return messages
 
+    # Buffers are only useful until the client gives up reconnecting, and this is
+    # now written to on every failed send, so both dimensions are bounded: at
+    # most _MAX_QUEUED_MESSAGES per session and _MAX_BUFFERED_SESSIONS sessions.
+    _MAX_QUEUED_MESSAGES = 100
+    _MAX_BUFFERED_SESSIONS = 500
+
     async def queue_for_session(self, session_id: str, message: dict) -> None:
         """Queue a message for a disconnected session."""
         async with self._lock:
             if session_id not in self._sessions:
+                if len(self._sessions) >= self._MAX_BUFFERED_SESSIONS:
+                    # Drop the oldest abandoned session rather than the live one.
+                    oldest = next(iter(self._sessions))
+                    del self._sessions[oldest]
+                    self._session_threads.pop(oldest, None)
                 self._sessions[session_id] = []
-            # Bound the queue to prevent memory bloat from abandoned sessions
-            if len(self._sessions[session_id]) < 100:
+            if len(self._sessions[session_id]) < self._MAX_QUEUED_MESSAGES:
                 self._sessions[session_id].append(message)
 
     def connection_count(self, thread_id: str | None = None) -> int:
@@ -234,16 +310,14 @@ async def websocket_chat(websocket: WebSocket, thread_id: str):
         await websocket.close(code=4000, reason="WebSocket disabled")
         return
 
-    # Extract auth token from subprotocol (secure - not logged in access logs)
+    # The token itself was already verified by the app-level require_auth gate,
+    # which reads the same `auth-<token>` subprotocol and closes the handshake with
+    # 1008 on a bad credential. This check only covers the copilot_require_auth
+    # flag, which demands a token even in deployments where auth is otherwise off.
     token = _extract_token_from_subprotocol(websocket)
-
-    # Validate token if required
     if settings.copilot_require_auth and not token:
         await websocket.close(code=4001, reason="Authentication required")
         return
-
-    # TODO: Validate token against tenant auth if multi-tenant
-    # For now, presence of token is sufficient (matches SSE behavior)
 
     # Extract session_id from query params for reconnection support
     query_params = dict(websocket.query_params)
@@ -399,12 +473,13 @@ async def _handle_chat(
         return
 
     tid = _scoped(thread_id)
-    existed = tid in _get_session.__self__._SESSIONS if hasattr(_get_session, '__self__') else False
 
-    # Import _SESSIONS directly
-    from app.api.main import _SESSIONS
+    # Imported here rather than threaded through the argument list, which is
+    # already long; the module-level import is what would be circular, not this.
+    from app.api.main import _SESSIONS, _record_slo_failure
     existed = tid in _SESSIONS
 
+    _t0 = time_mod.monotonic()
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -419,7 +494,6 @@ async def _handle_chat(
                 return
 
             _AWAITING.discard(tid)
-            _t0 = time_mod.monotonic()
 
             async for ev in session.ask_stream(message):
                 t = ev.get("type")
@@ -443,6 +517,7 @@ async def _handle_chat(
 
     except Exception as exc:
         log.exception("WebSocket chat failed: thread=%s", tid)
+        _record_slo_failure(time_mod.monotonic() - _t0)
         if not existed:
             await _evict(tid)
         await manager.send(conn, {
@@ -468,11 +543,17 @@ async def _handle_approval(
     _meter_and_spend,
 ) -> None:
     """Handle an approval response (resume investigation)."""
-    from app.api.main import _SESSIONS
+    import time as time_mod
+
+    from app.api.main import _SESSIONS, _record_slo_failure, _record_slo_fields
 
     tid = _scoped(thread_id)
     existed = tid in _SESSIONS
 
+    # The pause itself is never sampled, so an investigation that went through an
+    # approval gate was missing from /metrics/slo entirely unless it is counted
+    # here. Latency covers the continuation only — not the human's thinking time.
+    _t0 = time_mod.monotonic()
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -496,12 +577,19 @@ async def _handle_approval(
                 elif t == "done":
                     _AWAITING.discard(tid)
                     await _meter_and_spend(ev.get("tokens_used", 0))
+                    _record_slo_fields(
+                        ev.get("report"),
+                        ev.get("final_text", ""),
+                        ev.get("tokens_used", 0),
+                        time_mod.monotonic() - _t0,
+                    )
 
                 payload = _stream_payload(thread_id, ev)
                 await manager.send(conn, payload)
 
     except Exception as exc:
         log.exception("WebSocket approval failed: thread=%s", tid)
+        _record_slo_failure(time_mod.monotonic() - _t0)
         await manager.send(conn, {
             "type": "error",
             "thread_id": thread_id,

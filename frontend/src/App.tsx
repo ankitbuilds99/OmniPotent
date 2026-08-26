@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 
 import { Console } from "./components/Console";
 import { CinematicLanding } from "./components/landing/CinematicLanding";
@@ -23,160 +23,165 @@ import { RunbookBuilder } from "./pages/RunbookBuilder";
 import { IntegrationMarketplace } from "./pages/IntegrationMarketplace";
 import { KnowledgeBase } from "./pages/KnowledgeBase";
 
-type View = "landing" | "login" | "auth-callback" | "console" | "api-docs" | "dashboard" | "billing" | "profile" | "history" | "status" | "team" | "incidents" | "oncall" | "servicemap" | "notifications" | "postmortem" | "analytics" | "slo" | "runbooks" | "onboarding" | "integrations" | "knowledge";
+// Every page used to be a value of a `view` useState, so nothing had a URL:
+// reload dropped you back on the landing page, no screen could be linked to or
+// bookmarked, and the browser Back button left the app entirely.
+//
+// Paths avoid the backend's top-level API segments, which win at the origin —
+// hence `/on-call` (not `/oncall`), `/marketplace` (not `/integrations`) and
+// `/settings/billing` (not `/billing`, and it is also Stripe's default
+// success_url). `/auth/callback` is the one exception: it sits under an API
+// segment, so `app/api/main.py` allows it through to the SPA by name.
 
-export default function App() {
-  const [view, setView] = useState<View>("landing");
+function AppRoutes() {
+  const navigate = useNavigate();
 
-  // Handle URL routing for auth callbacks and billing redirects
-  useEffect(() => {
-    const path = window.location.pathname;
-    const params = new URLSearchParams(window.location.search);
+  // Where a fresh login lands: the wizard until it has been completed once.
+  const afterLogin = () => {
+    const done = localStorage.getItem("onboarding_completed");
+    navigate(done ? "/console" : "/onboarding", { replace: true });
+  };
 
-    // Handle OAuth callback
-    if (path === '/auth/callback' || path.includes('auth/callback')) {
-      setView('auth-callback');
-      return;
-    }
-
-    // Handle billing success/cancel redirects
-    if (params.has('success') || params.has('canceled')) {
-      setView('billing');
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, []);
+  const finishOnboarding = () => {
+    localStorage.setItem("onboarding_completed", "true");
+    navigate("/console", { replace: true });
+  };
 
   return (
-    <>
-      {view === "landing" && (
-        <CinematicLanding
-          onLaunch={() => setView("login")}
-          onDashboard={() => setView("dashboard")}
-          onBilling={() => setView("billing")}
-        />
-      )}
-      {view === "login" && (
-        <Login
-          onBack={() => setView("landing")}
-          onSuccess={() => {
-            const hasCompletedOnboarding = localStorage.getItem('onboarding_completed');
-            if (hasCompletedOnboarding) {
-              setView("console");
-            } else {
-              setView("onboarding");
-            }
-          }}
-        />
-      )}
-      {view === "auth-callback" && (
-        <AuthCallback
-          onSuccess={() => {
-            window.history.replaceState({}, '', '/');
-            setView("console");
-          }}
-          onError={() => {
-            window.history.replaceState({}, '', '/');
-            setView("login");
-          }}
-        />
-      )}
-      {view === "console" && (
-        <Console
-          onHome={() => setView("landing")}
-          onDashboard={() => setView("dashboard")}
-          onBilling={() => setView("billing")}
-          onLogout={() => setView("landing")}
-          onProfile={() => setView("profile")}
-          onHistory={() => setView("history")}
-          onStatus={() => setView("status")}
-          onTeam={() => setView("team")}
-        />
-      )}
-      {view === "api-docs" && (
-        <ApiDocs onBack={() => setView("landing")} />
-      )}
-      {view === "dashboard" && (
-        <Dashboard
-          onBack={() => setView("console")}
-          onBilling={() => setView("billing")}
-          onIncidents={() => setView("incidents")}
-          onOnCall={() => setView("oncall")}
-          onServiceMap={() => setView("servicemap")}
-          onNotifications={() => setView("notifications")}
-          onPostmortem={() => setView("postmortem")}
-          onAnalytics={() => setView("analytics")}
-          onSLO={() => setView("slo")}
-          onRunbooks={() => setView("runbooks")}
-          onIntegrations={() => setView("integrations")}
-          onKnowledge={() => setView("knowledge")}
-        />
-      )}
-      {view === "billing" && (
-        <Billing onBack={() => setView("console")} />
-      )}
-      {view === "profile" && (
-        <Profile
-          onBack={() => setView("console")}
-          onLogout={() => setView("landing")}
-        />
-      )}
-      {view === "history" && (
-        <History
-          onBack={() => setView("console")}
-          onViewInvestigation={(threadId) => {
-            console.log('Continue investigation:', threadId)
-            setView("console")
-          }}
-        />
-      )}
-      {view === "status" && (
-        <StatusPage onBack={() => setView("console")} />
-      )}
-      {view === "team" && (
-        <Team onBack={() => setView("console")} />
-      )}
-      {view === "incidents" && (
-        <Incidents onBack={() => setView("dashboard")} />
-      )}
-      {view === "oncall" && (
-        <OnCall onBack={() => setView("dashboard")} />
-      )}
-      {view === "servicemap" && (
-        <ServiceMap onBack={() => setView("dashboard")} />
-      )}
-      {view === "notifications" && (
-        <NotificationPreferences onBack={() => setView("dashboard")} />
-      )}
-      {view === "postmortem" && (
-        <Postmortem onBack={() => setView("dashboard")} />
-      )}
-      {view === "analytics" && (
-        <Analytics onBack={() => setView("dashboard")} />
-      )}
-      {view === "slo" && (
-        <SLOTracker onBack={() => setView("dashboard")} />
-      )}
-      {view === "runbooks" && (
-        <RunbookBuilder onBack={() => setView("dashboard")} />
-      )}
-      {view === "onboarding" && (
-        <OnboardingWizard
-          onComplete={() => {
-            localStorage.setItem('onboarding_completed', 'true');
-            setView("console");
-          }}
-          onSkip={() => {
-            localStorage.setItem('onboarding_completed', 'true');
-            setView("console");
-          }}
-        />
-      )}
-      {view === "integrations" && (
-        <IntegrationMarketplace onBack={() => setView("dashboard")} />
-      )}
-      {view === "knowledge" && (
-        <KnowledgeBase onBack={() => setView("dashboard")} />
-      )}
-    </>
+    <Routes>
+      <Route
+        path="/"
+        element={
+          <CinematicLanding
+            onLaunch={() => navigate("/login")}
+            onDashboard={() => navigate("/dashboard")}
+            onBilling={() => navigate("/settings/billing")}
+          />
+        }
+      />
+      <Route
+        path="/login"
+        element={<Login onBack={() => navigate("/")} onSuccess={afterLogin} />}
+      />
+      <Route
+        path="/auth/callback"
+        element={
+          <AuthCallback
+            onSuccess={() => navigate("/console", { replace: true })}
+            onError={() => navigate("/login", { replace: true })}
+          />
+        }
+      />
+      <Route
+        path="/onboarding"
+        element={
+          <OnboardingWizard onComplete={finishOnboarding} onSkip={finishOnboarding} />
+        }
+      />
+      <Route
+        path="/console"
+        element={
+          <Console
+            onHome={() => navigate("/")}
+            onDashboard={() => navigate("/dashboard")}
+            onBilling={() => navigate("/settings/billing")}
+            onLogout={() => navigate("/", { replace: true })}
+            onProfile={() => navigate("/profile")}
+            onHistory={() => navigate("/history")}
+            onStatus={() => navigate("/status")}
+            onTeam={() => navigate("/team")}
+          />
+        }
+      />
+      <Route path="/api-docs" element={<ApiDocs onBack={() => navigate("/")} />} />
+      <Route
+        path="/dashboard"
+        element={
+          <Dashboard
+            onBack={() => navigate("/console")}
+            onBilling={() => navigate("/settings/billing")}
+            onIncidents={() => navigate("/incidents")}
+            onOnCall={() => navigate("/on-call")}
+            onServiceMap={() => navigate("/service-map")}
+            onNotifications={() => navigate("/notifications")}
+            onPostmortem={() => navigate("/postmortem")}
+            onAnalytics={() => navigate("/analytics")}
+            onSLO={() => navigate("/slo")}
+            onRunbooks={() => navigate("/runbooks")}
+            onIntegrations={() => navigate("/marketplace")}
+            onKnowledge={() => navigate("/knowledge")}
+          />
+        }
+      />
+      <Route
+        path="/settings/billing"
+        element={<Billing onBack={() => navigate("/console")} />}
+      />
+      <Route
+        path="/profile"
+        element={
+          <Profile
+            onBack={() => navigate("/console")}
+            onLogout={() => navigate("/", { replace: true })}
+          />
+        }
+      />
+      <Route
+        path="/history"
+        element={
+          <History
+            onBack={() => navigate("/console")}
+            onViewInvestigation={(threadId) => navigate(`/console?thread=${threadId}`)}
+          />
+        }
+      />
+      <Route path="/status" element={<StatusPage onBack={() => navigate("/console")} />} />
+      <Route path="/team" element={<Team onBack={() => navigate("/console")} />} />
+      <Route
+        path="/incidents"
+        element={<Incidents onBack={() => navigate("/dashboard")} />}
+      />
+      <Route path="/on-call" element={<OnCall onBack={() => navigate("/dashboard")} />} />
+      <Route
+        path="/service-map"
+        element={<ServiceMap onBack={() => navigate("/dashboard")} />}
+      />
+      <Route
+        path="/notifications"
+        element={<NotificationPreferences onBack={() => navigate("/dashboard")} />}
+      />
+      <Route
+        path="/postmortem"
+        element={<Postmortem onBack={() => navigate("/dashboard")} />}
+      />
+      <Route
+        path="/analytics"
+        element={<Analytics onBack={() => navigate("/dashboard")} />}
+      />
+      <Route path="/slo" element={<SLOTracker onBack={() => navigate("/dashboard")} />} />
+      <Route
+        path="/runbooks"
+        element={<RunbookBuilder onBack={() => navigate("/dashboard")} />}
+      />
+      <Route
+        path="/marketplace"
+        element={<IntegrationMarketplace onBack={() => navigate("/dashboard")} />}
+      />
+      <Route
+        path="/knowledge"
+        element={<KnowledgeBase onBack={() => navigate("/dashboard")} />}
+      />
+      {/* The server serves index.html for any unknown non-API path, so an
+          unrecognised URL arrives here rather than as a 404. Send it home. */}
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppRoutes />
+    </BrowserRouter>
   );
 }

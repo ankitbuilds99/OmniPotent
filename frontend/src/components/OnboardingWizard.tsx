@@ -16,7 +16,7 @@ import {
   Users,
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { chatStream } from "../api";
 
 interface OnboardingStep {
   id: string;
@@ -90,100 +90,60 @@ function WelcomeStep({ onTryPlayground }: { onTryPlayground: () => void }) {
 }
 
 // Step 2: Playground Demo
+const DEMO_PROMPT =
+  "Investigate: High error rate detected in checkout-service. 5xx errors increased 300% in the last 10 minutes.";
+
 function PlaygroundStep({ onNext }: { onNext: () => void }) {
   const [investigating, setInvestigating] = useState(false);
   const [steps, setSteps] = useState<string[]>([]);
+  const [answer, setAnswer] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // This used to POST /api/chat {prompt}, a route that does not exist (405), and
+  // parse event types (tool_start/tool_end/agent/message) the backend never
+  // emits — so every run fell into the catch, which replayed a hardcoded
+  // "Root cause: Database connection pool exhaustion after v2.4.1 deploy /
+  // Confidence: 87%" script. The first thing a new user saw was an invented
+  // root cause presented as a live investigation. It now streams the real
+  // /chat/stream SSE endpoint and, when that fails, says so.
   const runDemo = async () => {
     setInvestigating(true);
     setSteps([]);
+    setAnswer(null);
     setError(null);
 
     abortRef.current = new AbortController();
 
     try {
-      // Try to run a real investigation via the streaming API
-      const demoPrompt = "Investigate: High error rate detected in checkout-service. 5xx errors increased 300% in the last 10 minutes.";
-
-      const response = await fetch(`${API_BASE}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: demoPrompt }),
-        signal: abortRef.current.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`API returned ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response body");
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === "tool_start" && data.tool) {
-                setSteps(prev => [...prev, `Running: ${data.tool}...`]);
-              } else if (data.type === "tool_end" && data.tool) {
-                setSteps(prev => {
-                  const updated = [...prev];
-                  const idx = updated.findIndex(s => s === `Running: ${data.tool}...`);
-                  if (idx >= 0) updated[idx] = `Completed: ${data.tool}`;
-                  return updated;
-                });
-              } else if (data.type === "agent" && data.agent) {
-                setSteps(prev => [...prev, `Agent: ${data.agent} analyzing...`]);
-              } else if (data.type === "message" && data.content) {
-                const preview = data.content.slice(0, 80);
-                if (preview.toLowerCase().includes("root cause") || preview.toLowerCase().includes("recommend")) {
-                  setSteps(prev => [...prev, preview + (data.content.length > 80 ? "..." : "")]);
-                }
-              } else if (data.type === "done") {
-                setSteps(prev => [...prev, "Investigation complete!"]);
-              }
-            } catch {
-              // Skip malformed JSON
-            }
+      await chatStream(
+        `onboarding-${Date.now()}`,
+        DEMO_PROMPT,
+        (ev) => {
+          if (ev.type === "trace" && ev.line) {
+            setSteps((prev) => [...prev, ev.line as string]);
+          } else if (ev.type === "approval") {
+            setSteps((prev) => [
+              ...prev,
+              "Paused — the agent is asking for approval before it acts.",
+            ]);
+          } else if (ev.type === "done") {
+            setSteps((prev) => [...prev, "Investigation complete"]);
+            setAnswer(ev.report?.root_cause || ev.answer || null);
+          } else if (ev.type === "error") {
+            setError(ev.answer || ev.message || "The investigation failed.");
           }
-        }
-      }
+        },
+        abortRef.current.signal
+      );
     } catch (err) {
       if ((err as Error).name === "AbortError") {
-        setSteps(prev => [...prev, "Investigation cancelled"]);
+        setSteps((prev) => [...prev, "Investigation cancelled"]);
       } else {
-        // Fallback to demo mode if API is unavailable
-        console.log("API unavailable, running demo mode:", err);
-        setSteps([]);
-
-        const demoSteps = [
-          "Connecting to observability stack...",
-          "Querying Prometheus for error metrics...",
-          "Fetching recent deployments from GitHub...",
-          "Analyzing logs from checkout-service...",
-          "Correlating with database metrics...",
-          "Running root cause analysis...",
-          "Root cause: Database connection pool exhaustion after v2.4.1 deploy",
-          "Confidence: 87% - Recommended action: Increase pool size or rollback",
-        ];
-
-        for (const step of demoSteps) {
-          await new Promise(r => setTimeout(r, 700));
-          setSteps(prev => [...prev, step]);
-        }
+        setError(
+          `Could not run the investigation: ${(err as Error).message}. ` +
+            "The backend has to be reachable and an LLM provider configured."
+        );
       }
     } finally {
       setInvestigating(false);
@@ -225,7 +185,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
         )}
 
         {error && (
-          <div className="text-center py-4 text-red-400 text-sm">
+          <div role="alert" className="text-center py-4 text-red-400 text-sm">
             {error}
           </div>
         )}
@@ -256,7 +216,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
           )}
         </div>
 
-        {steps.length > 0 && !investigating && steps.some(s => s.includes("complete") || s.includes("Root cause") || s.includes("Confidence")) && (
+        {!investigating && steps.includes("Investigation complete") && (
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -265,18 +225,15 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
           >
             <div className="font-semibold text-green-500 mb-2">Investigation Complete</div>
             <div className="text-sm text-gray-300">
-              {steps.filter(s => s.includes("Root cause") || s.includes("Confidence") || s.includes("Recommend")).map((s, i) => (
-                <div key={i}>{s}</div>
-              ))}
-              {steps.filter(s => s.includes("Root cause") || s.includes("Recommend")).length === 0 && (
-                <div>Analysis completed. Check the console output above for details.</div>
-              )}
+              {answer ?? "The agent finished without a written conclusion."}
             </div>
           </motion.div>
         )}
       </div>
 
-      {steps.length === 8 && (
+      {/* Previously gated on `steps.length === 8` — the length of the canned
+          script — so a real investigation left the user with no way forward. */}
+      {!investigating && (
         <div className="text-center">
           <button
             onClick={onNext}

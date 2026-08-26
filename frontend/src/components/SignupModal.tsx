@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 
 import * as api from "../api";
 import type { SignupResult } from "../api";
+import { setApiKey } from "../lib/authToken";
 import { Icon } from "./Icon";
 
 /** Self-serve onboarding modal: create an organization + owner API key with no
@@ -35,7 +36,12 @@ export function SignupModal({ onClose }: { onClose: () => void }) {
     setError("");
     setBusy(true);
     try {
-      setResult(await api.signup(orgName.trim(), email.trim()));
+      const created = await api.signup(orgName.trim(), email.trim());
+      // Store the key so the app is authenticated immediately. It is still shown
+      // once for the user to save; without this they'd have to paste it back in
+      // to make any authenticated request work.
+      setApiKey(created.api_key);
+      setResult(created);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

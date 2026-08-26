@@ -583,35 +583,86 @@ class TestVerificationAgent:
         assert call_kwargs["incident_id"] == "inc-123"
 
     @pytest.mark.asyncio
-    async def test_record_verification_outcome(self):
-        """Should record outcome to calibrator."""
-        mock_calibration = AsyncMock()
-        agent = VerificationAgent(confidence_calibrator=mock_calibration)
+    async def test_record_verification_outcome_after_a_real_verify(self):
+        """The id returned by verify_claim must be the id /outcomes accepts.
 
-        # First, create a cached result
-        agent._verification_cache["claim-1:Test claim text that is lon"] = VerificationResult(
-            claim_id="claim-1:Test claim text that is lon",
-            status=VerificationStatus.VERIFIED,
-            confidence=0.8,
+        The cache was written under f"{claim.id}:{claim.text[:50]}" and read
+        back with the bare claim id, so no outcome was ever recorded. The old
+        version of this test seeded the composite key by hand and passed that
+        same string in as the claim_id — a value the API can never mint — so it
+        passed while the real flow recorded nothing.
+        """
+        mock_evidence = AsyncMock()
+        mock_evidence.collect_evidence.return_value = []
+        mock_hallucination = AsyncMock()
+        mock_hallucination.check_for_hallucinations.return_value = HallucinationResult(
+            detected=False
+        )
+        mock_calibration = AsyncMock()
+        mock_calibration.calibrate_confidence.return_value = CalibrationResult(
+            original_confidence=0.5,
+            calibrated_confidence=0.5,
+            overconfidence_detected=False,
+            calibration_adjustment=0.0,
+            evidence_strength=0.0,
+            explanation="",
         )
 
-        await agent.record_verification_outcome("claim-1:Test claim text that is lon", was_correct=True)
+        agent = VerificationAgent(
+            evidence_collector=mock_evidence,
+            hallucination_detector=mock_hallucination,
+            confidence_calibrator=mock_calibration,
+        )
 
+        claim = Claim(
+            id="claim-1",
+            text="Test claim text that is longer than fifty characters in total",
+            claim_type="root_cause",
+        )
+        result = await agent.verify_claim(claim)
+
+        recorded = await agent.record_verification_outcome(
+            result.claim_id, was_correct=True
+        )
+
+        assert recorded is True
         mock_calibration.record_outcome.assert_called_once_with(
-            claim_type="general",
-            stated_confidence=0.8,
+            claim_type="root_cause",
+            stated_confidence=result.confidence,
             was_correct=True,
         )
 
     @pytest.mark.asyncio
     async def test_record_verification_outcome_no_cache(self):
-        """Should handle missing cache entry."""
+        """An unknown claim id records nothing and says so."""
         mock_calibration = AsyncMock()
         agent = VerificationAgent(confidence_calibrator=mock_calibration)
 
-        # Should not raise
-        await agent.record_verification_outcome("nonexistent", was_correct=True)
+        recorded = await agent.record_verification_outcome(
+            "nonexistent", was_correct=True
+        )
+
+        assert recorded is False
         mock_calibration.record_outcome.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_verify_action_retains_the_check_for_later_validation(self):
+        """POST /actions/{id}/validate needs the pre-action check to exist."""
+        agent = VerificationAgent()
+
+        check = await agent.verify_action(
+            action_type="scale", target="checkout", params={"replicas": 3}
+        )
+
+        assert agent.get_action_check(check.action_id) is check
+        assert agent.get_action_check("not-an-action-id") is None
+
+    @pytest.mark.asyncio
+    async def test_validate_action_by_id_raises_for_unknown_id(self):
+        agent = VerificationAgent()
+
+        with pytest.raises(KeyError):
+            await agent.validate_action_by_id("never-checked", timeout_seconds=1)
 
     def test_get_calibration_stats(self):
         """Should return calibration statistics."""

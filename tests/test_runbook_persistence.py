@@ -199,7 +199,12 @@ def test_the_execution_record_exists_before_the_run_finishes(client):
     rb = _create(client)
     started = client.post(f"/api/runbooks/{rb['id']}/execute", json={})
     assert started.status_code == 200
-    assert started.json()["status"] == "pending"
+    # `running`, not `pending`: this runbook is auto_approved, so the row is
+    # written and then scheduled, and the body was serialised from the row
+    # before the background task was queued. (origin/main recorded every run
+    # `pending` and let the executor advance it; see
+    # `store.default_execution_status` for why that was not kept.)
+    assert started.json()["status"] == "running"
     assert started.json()["completed_at"] is None
 
 
@@ -372,6 +377,80 @@ async def test_resuming_at_a_step_that_no_longer_exists_refuses(client):
     assert await RunbookExecutor().resume(execution, runbook, "deleted-step") is None
 
 
+def test_shortening_a_runbook_under_a_parked_run_fails_it_rather_than_passing_it(client):
+    """The same guard, on the live path — where it is a false green, not a 404.
+
+    The run resumes at `len(execution.steps)`. Cut the runbook down to the steps
+    that have already finished and that offset falls off the end: the loop over
+    the remaining steps is empty, so the run would be stamped `success` having
+    executed none of the steps the approval was for. An operator reading that
+    record would believe the remediation completed.
+    """
+    rb = _create(
+        client,
+        execution_mode="requires_approval",
+        steps=[
+            {**WAIT_STEP, "id": "a"},
+            {**WAIT_STEP, "id": "b", "requires_approval": True},
+            {**WAIT_STEP, "id": "c"},
+        ],
+    )
+    execution_id = client.post(f"/api/runbooks/{rb['id']}/execute", json={}).json()["id"]
+
+    assert client.post(f"/api/runbooks/executions/{execution_id}/approve").status_code == 200
+    parked = client.get(f"/api/runbooks/executions/{execution_id}").json()
+    assert parked["status"] == "waiting_approval"
+    assert [s["step_id"] for s in parked["steps"]] == ["a"]
+    assert parked["waiting_on"] == "b"
+
+    edited = client.put(
+        f"/api/runbooks/{rb['id']}",
+        json={
+            "name": "Test runbook",
+            "description": "edited mid-run",
+            "service": "*",
+            "trigger": "manual",
+            "execution_mode": "requires_approval",
+            "steps": [{**WAIT_STEP, "id": "a"}],
+            "labels": {},
+        },
+    )
+    assert edited.status_code == 200, edited.text
+
+    assert client.post(f"/api/runbooks/executions/{execution_id}/approve").status_code == 200
+    final = client.get(f"/api/runbooks/executions/{execution_id}").json()
+    assert final["status"] == "failed", final
+    assert [s["step_id"] for s in final["steps"]] == ["a"], (
+        "no step may be invented for steps that never ran"
+    )
+    assert "no longer part of runbook" in final["error"]
+    assert "'b'" in final["error"], "the record must name the step it could not resume at"
+
+
+def test_a_background_run_that_crashes_ends_up_failed_not_running(client, monkeypatch):
+    """A crashed run must reach a terminal state carrying the reason.
+
+    Without a handler on the backgrounded task the record sits in `running`
+    forever, which is the one status an operator reads as "it is still working
+    on my incident".
+    """
+    from app.runbooks import executor as rb_executor
+
+    async def explode(*args, **kwargs):
+        raise RuntimeError("the executor blew up")
+
+    monkeypatch.setattr(rb_executor, "run_execution", explode)
+    monkeypatch.setattr(rb_router, "run_execution", explode)
+
+    rb = _create(client)
+    execution = _run(client, rb["id"])
+
+    assert execution["status"] == "failed"
+    assert execution["completed_at"] is not None
+    assert execution["steps"] == [], "no step result may be invented for a crash"
+    assert "the executor blew up" in execution["error"]
+
+
 # ---------------------------------------------------------------------------
 # Durability
 # ---------------------------------------------------------------------------
@@ -457,6 +536,40 @@ def test_builtins_are_seeded_per_org_so_an_edit_is_not_shared(client, monkeypatc
 
     _as_org(monkeypatch, "org-b")
     assert victim in {rb["id"] for rb in client.get("/api/runbooks").json()}
+
+
+def test_a_tenant_called_default_does_not_share_the_unattributed_rows(db, monkeypatch):
+    """"default" is both the bucket for rows with no tenant and a legal org id.
+
+    Single-tenant, the two have to be the same rows or the worker (which files
+    under DEFAULT_STORAGE_ORG) would write where the API cannot read. Multi
+    tenant, folding them together hands a customer whose org_id happens to be
+    "default" every unattributed row in the database, and hands the deployment's
+    own rows to that customer.
+    """
+    monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
+    cfg.get_settings.cache_clear()
+
+    rb = Runbook(
+        id="rb-shared",
+        name="the tenant's own",
+        description="",
+        service="*",
+        trigger="manual",
+        execution_mode=ExecutionMode.AUTO_APPROVED,
+    )
+
+    async def scenario():
+        await store.save_runbook("default", rb)
+        return (
+            await store.load_runbook("-", "rb-shared"),
+            await store.load_runbook("default", "rb-shared"),
+        )
+
+    unattributed, tenant = asyncio.run(scenario())
+    asyncio.run(close_db())
+    assert tenant is not None, "the tenant must still see its own runbook"
+    assert unattributed is None, "and nobody else may"
 
 
 def test_the_same_runbook_id_can_exist_in_two_orgs(db):
@@ -607,7 +720,13 @@ def test_mark_failed_records_the_reason_without_inventing_steps(db):
 
 
 def test_an_unreadable_row_does_not_take_out_the_listing(db):
-    """One corrupt payload must not hide an operator's other runbooks."""
+    """One corrupt payload must not hide an operator's other runbooks.
+
+    Written against `app.database.models.Runbook` — the table the store reads.
+    origin/main's `RunbookDefinition` model is not wired to anything, so
+    corrupting a row of it proved only that the listing ignores a table nobody
+    queries.
+    """
 
     async def scenario():
         good = Runbook(
@@ -622,16 +741,21 @@ def test_an_unreadable_row_does_not_take_out_the_listing(db):
         await store.save_runbook("org-a", good)  # idempotent update path
         # Corrupt one row's payload behind the store's back.
         from app.database.engine import get_session
-        from app.database.models import RunbookDefinition
+        from app.database.models import Runbook as RunbookRow
+        from app.database.orgs import org_uuid_for
 
         async with get_session() as session:
-            row = RunbookDefinition(
-                id="rb-bad",
-                org_id="org-a",
+            row = RunbookRow(
+                org_id=org_uuid_for("org-a"),
+                runbook_id="rb-bad",
                 name="bad",
+                description="",
                 service="*",
                 trigger="manual",
-                definition={"steps": "not a list"},
+                execution_mode="auto_approved",
+                steps="not a list",
+                labels={},
+                enabled=True,
             )
             session.add(row)
             await session.commit()
@@ -639,7 +763,12 @@ def test_an_unreadable_row_does_not_take_out_the_listing(db):
 
     listed = asyncio.run(scenario())
     asyncio.run(close_db())
-    assert [rb.id for rb in listed] == ["rb-good"]
+    ids = [rb.id for rb in listed]
+    assert "rb-good" in ids
+    assert "rb-bad" not in ids
+    # The listing also seeds this org's built-ins, and those have to survive the
+    # bad row too — the point is that one unreadable payload costs one runbook.
+    assert len(ids) > 1
 
 
 # ---------------------------------------------------------------------------

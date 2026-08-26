@@ -88,14 +88,21 @@ async def save_execution(org_id: str, execution: DAGExecution) -> None:
         await session.commit()
 
 
-async def mark_failed(org_id: str, execution_id: str) -> bool:
-    """Flip an existing row to FAILED without touching its payload.
+async def mark_failed(
+    org_id: str, execution_id: str, error: str | None = None
+) -> bool:
+    """Flip an existing row to FAILED, optionally recording why.
 
     Used when `DAGExecutor.execute()` raises: it re-raises after marking its own
     execution object failed, and that object is created inside `execute()` and
-    never returned, so the caller has no per-task detail to write. Updating the
-    state column alone records the failure without inventing task results that
-    were never observed.
+    never returned, so the caller has no per-task detail to write. Only the
+    outcome and the reason are written — no task results are invented for work
+    nobody observed.
+
+    The payload's own `state`/`error`/`completed_at` are rewritten alongside the
+    lifted columns because `load_execution` reads the payload: leaving it at
+    RUNNING made `GET /executions/{id}` keep reporting a dead run as in flight
+    while `GET /executions` already listed it as failed.
     """
     async with _session() as session:
         row = await session.get(
@@ -103,8 +110,17 @@ async def mark_failed(org_id: str, execution_id: str) -> bool:
         )
         if row is None:
             return False
+        completed_at = datetime.now(timezone.utc)
         row.state = ExecutionState.FAILED.value
-        row.completed_at = datetime.now(timezone.utc)
+        row.completed_at = completed_at
+        # Reassigned, not mutated in place: SQLAlchemy only marks a JSON column
+        # dirty on assignment.
+        payload = dict(row.execution or {})
+        payload["state"] = ExecutionState.FAILED.value
+        payload["completed_at"] = completed_at.isoformat()
+        if error is not None:
+            payload["error"] = error
+        row.execution = payload
         await session.commit()
         return True
 

@@ -3,11 +3,26 @@
 Tracks signups, manages tiers, and provides analytics for
 understanding conversion funnel and user acquisition.
 
-State lives in Postgres (`app/waitlist/store.py`), not in this module. It used
-to live in three module-level globals, which meant every restart, deploy and
-scale-down threw away the leads, and `_position_counter` restarted at 0 so the
-next signup was handed a position an earlier one already held. Every function
-here is therefore async; there is no in-process copy of the waitlist to read.
+State lives in the database (`app/waitlist/store.py`), not in this module. It
+used to live in three module-level globals — `_waitlist_store`, `_email_index`
+and a `_position_counter` integer — which meant every restart, deploy and
+scale-down threw away the leads, and a second uvicorn worker answered from a
+second, empty waitlist: everything a visitor was told on signup (their position,
+their referral code) was true only until the process recycled, and two people
+could be handed position #1. `_position_counter` restarted at 0 so the next
+signup was handed a position an earlier one already held. Positions are now
+allocated from `MAX(position) + 1` under a unique constraint, so a concurrent
+signup cannot duplicate one. Every function here is therefore async; there is no
+in-process copy of the waitlist to read.
+
+The list is global, not per-org: someone joining a waitlist has no account yet.
+
+Merge note: two independent ports of this module to a table landed at once. The
+`waitlist_signups` table behind `store.py` is the one in use — it is the only
+one that resolves a referral *code*, which is what the public signup API
+actually sends. `WaitlistEntryDB` / `waitlist_entries` in
+`app/database/growth_models.py` was the other port's table and no longer has a
+reader.
 """
 
 from __future__ import annotations
@@ -206,20 +221,36 @@ async def _resolve_referrer(referred_by: str) -> WaitlistSignup | None:
     return referrer
 
 
-async def _credit_referrer(referrer: WaitlistSignup) -> None:
-    """Record one more referral, promoting the referrer once they hit the bar."""
-    changes: dict[str, Any] = {"referral_count": referrer.referral_count + 1}
+async def _credit_referrer(referrer: WaitlistSignup) -> bool:
+    """Record one more referral, promoting the referrer once they hit the bar.
 
-    if (
-        changes["referral_count"] >= REFERRALS_FOR_PRIORITY
-        and referrer.tier == WaitlistTier.STANDARD.value
-    ):
+    Returns whether the credit actually landed, and the caller has to look: this
+    runs in its own transaction, after the signup row is already committed, so it
+    can fail on its own and leave a signup attributed to a referrer who was never
+    paid for it. `store.update` reports a vanished row by returning None, which
+    discarded is indistinguishable from success — and an uncredited referral is a
+    promise the landing page already made, invisible in `referral_rate` because
+    that counts the signup's `referred_by`, not the referrer's counter.
+    """
+    expected = referrer.referral_count + 1
+    changes: dict[str, Any] = {"referral_count": expected}
+
+    if expected >= REFERRALS_FOR_PRIORITY and referrer.tier == WaitlistTier.STANDARD.value:
         changes["tier"] = WaitlistTier.PRIORITY.value
         # Reassigned, not appended to: a JSON column is only marked dirty on
         # assignment, so an in-place append would be dropped on commit.
         changes["tags"] = [*(referrer.tags or []), "referral_upgrade"]
 
-    await store.update(referrer.email, **changes)
+    updated = await store.update(referrer.email, **changes)
+    if updated is None or updated.referral_count != expected:
+        log.error(
+            "Referral credit did not land for %s: referral_count is %s, expected %d",
+            _to_entry(referrer)._mask_email(),
+            updated.referral_count if updated is not None else "(row gone)",
+            expected,
+        )
+        return False
+    return True
 
 
 async def add_to_waitlist(
@@ -293,14 +324,21 @@ async def add_to_waitlist(
                 return _to_entry(duplicate), "Already on waitlist"
         return None, "Could not join waitlist, please try again"
 
+    # The insert above committed on its own, so this is a second transaction: a
+    # crash in between leaves a signup whose referrer was never credited. There
+    # is no way to close that window from here — `store.insert` owns its session
+    # — so the outcome is carried into the signup log line instead, which is
+    # what an operator reconciling the two counters has to work from.
+    referral = "none"
     if referrer is not None:
-        await _credit_referrer(referrer)
+        referral = "credited" if await _credit_referrer(referrer) else "UNCREDITED"
 
     log.info(
-        "Waitlist signup: position=%d source=%s company=%s",
+        "Waitlist signup: position=%d source=%s company=%s referral=%s",
         row.position,
         source.value,
         company or "(none)",
+        referral,
     )
 
     return _to_entry(row), "Successfully joined waitlist"
@@ -318,7 +356,11 @@ async def get_waitlist_entries(
     limit: int = 100,
     offset: int = 0,
 ) -> list[WaitlistEntry]:
-    """Get waitlist entries with optional filtering."""
+    """Get waitlist entries with optional filtering.
+
+    Filtering, ordering, limit and offset are the database's job; the dict this
+    replaced loaded every row into memory to sort and slice it.
+    """
     rows = await store.list_entries(
         tier=tier.value if tier else None,
         source=source.value if source else None,

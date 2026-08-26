@@ -14,6 +14,7 @@ import {
   User
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { getAuthToken, setSessionToken } from '../lib/authToken'
 
 type AuthMode = 'login' | 'signup' | 'forgot'
 
@@ -79,21 +80,21 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     const params = new URLSearchParams(window.location.search)
     const token = params.get('token')
     if (token) {
-      localStorage.setItem('session_token', token)
+      setSessionToken(token)
       window.history.replaceState({}, '', window.location.pathname)
       onSuccess()
     }
   }, [onSuccess])
 
-  // Redirect if user is already logged in (Supabase)
+  // Redirect if user is already logged in (Supabase). useSupabaseAuth mirrors the
+  // access token into the shared token store, so the app is authenticated too.
   if (user) {
     onSuccess()
     return null
   }
 
   // Check if user has a session token (backend auth)
-  const sessionToken = localStorage.getItem('session_token')
-  if (sessionToken) {
+  if (getAuthToken()) {
     onSuccess()
     return null
   }

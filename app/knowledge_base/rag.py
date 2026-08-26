@@ -11,6 +11,17 @@ import hashlib
 
 log = logging.getLogger("omnipotent.knowledge_base.rag")
 
+# How much of a document body goes into a list response as a preview.
+EXCERPT_CHARS = 500
+
+
+def _terms(text: str) -> list[str]:
+    """Split text the way the ranker does, so `matched_terms` cannot disagree
+    with `relevance_score`."""
+    from app.incident_memory import tokenize
+
+    return tokenize(text)
+
 
 class DocumentType(str, Enum):
     """Types of knowledge documents."""
@@ -38,14 +49,29 @@ class Document:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """The document as the API returns it.
+
+        `content` is the whole body. It used to be cut to 500 characters with a
+        literal "..." appended, and the Knowledge Base page renders list items
+        directly without ever calling the detail endpoint — so every runbook
+        longer than 500 characters, including the shipped kb-001, was displayed
+        to the reader with its body truncated mid-sentence and no way to see the
+        rest. The preview that truncation was for is `excerpt`.
+        """
         return {
             "id": self.id,
             "title": self.title,
-            "content": self.content[:500] + "..." if len(self.content) > 500 else self.content,
+            "content": self.content,
+            "excerpt": (
+                self.content[:EXCERPT_CHARS] + "..."
+                if len(self.content) > EXCERPT_CHARS
+                else self.content
+            ),
             "doc_type": self.doc_type.value,
             "tags": self.tags,
             "service": self.service,
             "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
             "author": self.author,
         }
 
@@ -87,11 +113,11 @@ class RAGResponse:
 
 
 class KnowledgeBase:
-    """RAG-based knowledge retrieval system.
+    """Knowledge retrieval over a set of documents.
 
     Features:
     - Document ingestion and indexing
-    - Semantic search
+    - BM25 keyword search over title, body, tags and service
     - Context-aware retrieval
     - Answer generation with citations
     - Automatic learning from incidents
@@ -100,8 +126,6 @@ class KnowledgeBase:
     def __init__(self):
         """Initialize the knowledge base."""
         self._documents: dict[str, Document] = {}
-        self._embeddings: dict[str, list[float]] = {}
-        self._index_built = False
         log.info("KnowledgeBase initialized")
 
     def add_document(self, document: Document) -> str:
@@ -117,7 +141,6 @@ class KnowledgeBase:
             document.id = self._generate_id(document.title + document.content)
 
         self._documents[document.id] = document
-        self._embeddings[document.id] = self._generate_embedding(document.content)
 
         log.info("Added document: %s (%s)", document.title, document.doc_type.value)
         return document.id
@@ -126,34 +149,9 @@ class KnowledgeBase:
         """Generate a document ID."""
         return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:12]
 
-    def _generate_embedding(self, text: str) -> list[float]:
-        """Generate text embedding.
-
-        In production, use a proper embedding model (OpenAI, Cohere, etc.)
-        """
-        # Simplified: use word frequency as pseudo-embedding
-        words = text.lower().split()
-        word_freq: dict[str, int] = {}
-        for word in words:
-            word_freq[word] = word_freq.get(word, 0) + 1
-
-        # Create fixed-size vector
-        embedding = [0.0] * 128
-        for i, (word, freq) in enumerate(sorted(word_freq.items())[:128]):
-            embedding[i] = freq / len(words)
-
-        return embedding
-
-    def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
-        """Calculate cosine similarity between two vectors."""
-        dot_product = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x ** 2 for x in a) ** 0.5
-        norm_b = sum(x ** 2 for x in b) ** 0.5
-
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-
-        return dot_product / (norm_a * norm_b)
+    def _indexed_text(self, doc: Document) -> str:
+        """The text a document is matched on: its title and tags count, not just the body."""
+        return "\n".join([doc.title, doc.content, " ".join(doc.tags), doc.service or ""])
 
     async def search(
         self,
@@ -171,44 +169,46 @@ class KnowledgeBase:
             limit: Maximum results
 
         Returns:
-            List of search results
+            List of search results, best first. A query that shares no term with
+            any document returns nothing.
+
+        Ranking is BM25 over the whole corpus (`app.incident_memory`, the same
+        implementation the memory MCP server and the planner use). It used to be
+        0.6 * cosine-similarity-of-a-pseudo-embedding + 0.4 * keyword overlap,
+        where the "embedding" put a word's frequency at the index of its
+        alphabetical rank -- so dimension 7 meant nothing, two documents were
+        similar when their word-frequency *profiles* lined up, and the score
+        carried no information about the query at all. Two different nonsense
+        queries returned every document in the org, identically ranked, with
+        scores up to 0.39 and `matched_terms: []`.
         """
-        query_embedding = self._generate_embedding(query)
-        query_terms = set(query.lower().split())
+        from app.incident_memory import bm25_relevance
+
+        candidates = [
+            doc
+            for doc in self._documents.values()
+            if (not doc_type or doc.doc_type == doc_type)
+            and (not service or doc.service == service)
+        ]
+        if not candidates:
+            return []
+
+        query_terms = set(_terms(query))
+        scores = bm25_relevance(query, [self._indexed_text(doc) for doc in candidates])
 
         results: list[SearchResult] = []
-
-        for doc_id, doc in self._documents.items():
-            # Apply filters
-            if doc_type and doc.doc_type != doc_type:
+        for doc, relevance in zip(candidates, scores):
+            if relevance <= 0:
                 continue
-            if service and doc.service != service:
-                continue
+            matched = sorted(query_terms & set(_terms(self._indexed_text(doc))))
+            results.append(SearchResult(
+                document=doc,
+                relevance_score=round(relevance, 4),
+                snippet=self._extract_snippet(doc.content, query),
+                matched_terms=matched,
+            ))
 
-            # Calculate relevance
-            embedding = self._embeddings.get(doc_id, [])
-            semantic_score = self._cosine_similarity(query_embedding, embedding)
-
-            # Keyword matching
-            doc_terms = set(doc.content.lower().split())
-            matched_terms = query_terms & doc_terms
-            keyword_score = len(matched_terms) / len(query_terms) if query_terms else 0
-
-            # Combined score
-            relevance = (semantic_score * 0.6) + (keyword_score * 0.4)
-
-            if relevance > 0.1:  # Threshold
-                snippet = self._extract_snippet(doc.content, query)
-                results.append(SearchResult(
-                    document=doc,
-                    relevance_score=relevance,
-                    snippet=snippet,
-                    matched_terms=list(matched_terms),
-                ))
-
-        # Sort by relevance
-        results.sort(key=lambda r: r.relevance_score, reverse=True)
-
+        results.sort(key=lambda r: (-r.relevance_score, r.document.id))
         return results[:limit]
 
     def _extract_snippet(self, content: str, query: str, length: int = 200) -> str:

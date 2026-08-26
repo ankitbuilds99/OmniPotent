@@ -5,12 +5,17 @@ REST API and GraphQL endpoint for the knowledge graph.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Request, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
 from pydantic import BaseModel
 
+from app.tenant_context import tenant_id
+from app.tenancy.scoping import scoped
 from app.knowledge_graph.neo4j_backend import (
     Neo4jKnowledgeGraph,
     ServiceNode,
@@ -28,33 +33,113 @@ log = logging.getLogger("omnipotent.knowledge_graph.api")
 
 router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 
-_graph: Neo4jKnowledgeGraph | None = None
-_sync_engine: ContinuousSyncEngine | None = None
 _graphql_app: Any = None
 
 
-async def get_graph() -> Neo4jKnowledgeGraph:
-    """Get or create knowledge graph instance."""
-    global _graph
-    if _graph is None:
+class _OrgGraph:
+    """One graph client and sync engine for one org, connected exactly once.
+
+    With no `copilot_neo4j_uri` — the default deployment — `Neo4jKnowledgeGraph`
+    reads and writes `graph_nodes`/`graph_edges` through
+    `app.knowledge_graph.graph_store`, which scopes every row by the requesting
+    org. This registry keeps one client (and one sync engine) per org so that
+    connect() and the sync engine's state are not shared between tenants either;
+    the row-level scoping is what keeps the data apart.
+
+    A *real* Neo4j connection is a different matter: N clients against one
+    database isolate nothing, because no Cypher query in neo4j_backend.py
+    carries an org filter. `require_isolated()` below refuses to serve a tenant
+    in that configuration rather than leak across orgs.
+    """
+
+    def __init__(self) -> None:
         settings = get_settings()
-        _graph = Neo4jKnowledgeGraph(
-            uri=getattr(settings, "neo4j_uri", "bolt://localhost:7687"),
-            username=getattr(settings, "neo4j_username", "neo4j"),
-            password=getattr(settings, "neo4j_password", ""),
-            database=getattr(settings, "neo4j_database", "neo4j"),
+        # The fields are copilot_neo4j_*; the previous getattr() calls named
+        # settings.neo4j_* — attributes Settings has never had — so every one
+        # fell through to its default. COPILOT_NEO4J_URI/_USERNAME/_PASSWORD/
+        # _DATABASE were dead, and worse, the uri default was a literal
+        # "bolt://localhost:7687": with no Neo4j configured at all, connect()
+        # took the Cypher branch and recorded "Cannot reach the Neo4j server"
+        # instead of using the database-backed graph, which is what an empty
+        # uri selects. Read the real names, with no getattr default to hide a
+        # future rename.
+        self.graph = Neo4jKnowledgeGraph(
+            uri=settings.copilot_neo4j_uri,
+            username=settings.copilot_neo4j_username,
+            password=settings.copilot_neo4j_password,
+            database=settings.copilot_neo4j_database,
         )
-        await _graph.connect()
-    return _graph
+        self.engine = ContinuousSyncEngine(self.graph)
+        # connect() decides which backend this client uses, so it must run once
+        # per instance even if several requests for a new org arrive together.
+        self._lock = asyncio.Lock()
+        self._ready = False
+        self._live_neo4j = False
+
+    async def ready(self) -> _OrgGraph:
+        if not self._ready:
+            async with self._lock:
+                if not self._ready:
+                    self._live_neo4j = await self.graph.connect()
+                    self._ready = True
+        return self
+
+    def require_isolated(self) -> None:
+        org = tenant_id()
+        if self._live_neo4j and org not in ("", "-"):
+            raise HTTPException(
+                503,
+                "The knowledge graph is backed by a shared Neo4j database with no "
+                "per-org partitioning, so it cannot serve a multi-tenant deployment. "
+                "Unset the neo4j settings to use the org-scoped database graph.",
+            )
+
+
+_GRAPHS = scoped(_OrgGraph)
+
+
+async def _org_graph() -> _OrgGraph:
+    holder = await _GRAPHS.get().ready()
+    holder.require_isolated()
+    return holder
+
+
+async def get_graph() -> Neo4jKnowledgeGraph:
+    """The current org's knowledge graph."""
+    return (await _org_graph()).graph
 
 
 async def get_sync_engine() -> ContinuousSyncEngine:
-    """Get or create sync engine instance."""
-    global _sync_engine
-    if _sync_engine is None:
-        graph = await get_graph()
-        _sync_engine = ContinuousSyncEngine(graph)
-    return _sync_engine
+    """The current org's sync engine."""
+    return (await _org_graph()).engine
+
+
+def _check_sync_url(field: str, url: str) -> None:
+    """Reject a sync-source URL the operator has not allow-listed.
+
+    These URLs are fetched server-side from inside the deployment network, so
+    accepting an arbitrary one lets any authenticated user — a viewer included —
+    reach internal services and the cloud metadata endpoint. Blocking private
+    ranges is not an option here: a Prometheus at 10.x or `localhost:9090` is
+    the *normal* configuration. So the allow-list is the control, and it is
+    empty until an operator names their own hosts.
+    """
+    if not url:
+        return
+
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(400, f"{field} must be an http(s) URL")
+
+    allowed = get_settings().sync_allowed_hosts
+    host = parsed.hostname.lower()
+    candidates = {host, f"{host}:{parsed.port}" if parsed.port else host}
+    if not allowed or not (candidates & allowed):
+        raise HTTPException(
+            403,
+            f"{field} host '{host}' is not allowed. Set COPILOT_SYNC_ALLOWED_HOSTS "
+            "to the observability hosts this deployment may fetch from.",
+        )
 
 
 async def get_graphql_context(request: Request) -> dict[str, Any]:
@@ -117,6 +202,15 @@ class IncidentInput(BaseModel):
     affected_services: list[str] = []
     root_cause: str = ""
     impact: str = ""
+    # The lifecycle timestamps. Absent means "has not happened yet", which is
+    # what time-to-detect and time-to-resolve are computed against; there was
+    # previously no way to set any of them, and the reader minted a value for
+    # each on the way out, so every incident looked instantly detected and
+    # instantly resolved. `started_at` defaults to now.
+    started_at: datetime | None = None
+    detected_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    resolved_at: datetime | None = None
 
 
 class ChangeInput(BaseModel):
@@ -183,7 +277,11 @@ async def get_service(
     """Get a service by ID."""
     service = await graph.get_service(service_id)
     if not service:
-        return {"error": "Service not found"}
+        # 404, not a 200 carrying {"error": ...}: a caller doing
+        # `if (res.ok) render(await res.json())` rendered an object with no
+        # id and no name, so a missing service was indistinguishable from a
+        # present one at the HTTP layer.
+        raise HTTPException(404, {"error": "service_not_found", "service_id": service_id})
     return service.to_cypher_properties()
 
 
@@ -201,6 +299,127 @@ async def list_services(
         "services": [s.to_cypher_properties() for s in services],
         "count": len(services),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Topology + live metrics — the two calls the Service Map page needs.
+# --------------------------------------------------------------------------- #
+
+# Built here, not accepted from the caller: these are executed server-side against
+# an operator-configured Prometheus, and taking PromQL from a browser would turn
+# this route into an arbitrary-query proxy for anyone holding a viewer key.
+_SERVICE_METRIC_QUERIES: dict[str, str] = {
+    "requests_per_sec": "sum(rate(http_requests_total[5m])) by (service)",
+    "error_rate": (
+        'sum(rate(http_requests_total{status=~"5.."}[5m])) by (service) '
+        "/ sum(rate(http_requests_total[5m])) by (service) * 100"
+    ),
+    "latency_p99": (
+        "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) "
+        "by (le, service)) * 1000"
+    ),
+}
+
+
+@router.get("/topology")
+async def get_topology(
+    limit: int = 200,
+    graph: Neo4jKnowledgeGraph = Depends(get_graph),
+) -> dict[str, Any]:
+    """Services plus their recorded dependency edges, in one call.
+
+    The Service Map page used to ask for `/api/kubernetes/services` — a route
+    that has never existed — and then drew a topology it made up: a star from
+    whichever node was named "gateway" to every other service, plus an edge from
+    every service to every database. These edges are the graph's own
+    DEPENDS_ON/CALLS relationships and nothing else, so an empty graph renders an
+    empty map rather than an invented one.
+    """
+    services = await graph.list_services(limit=limit)
+    known = {s.id for s in services}
+    edges: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for service in services:
+        # depth=1 keeps this to direct edges; transitive hops would draw
+        # dependencies that do not exist as links.
+        found = await graph.find_dependencies(service.id, depth=1, direction="downstream")
+        for dep in found.get("dependencies", []):
+            target = dep.get("service")
+            target_id = getattr(target, "id", "")
+            if not target_id or target_id == service.id or target_id not in known:
+                continue
+            pair = (service.id, target_id)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            edges.append({"source": service.id, "target": target_id})
+    return {
+        "nodes": [s.to_cypher_properties() for s in services],
+        "edges": edges,
+        "count": len(services),
+    }
+
+
+@router.get("/service-metrics")
+async def get_service_metrics() -> dict[str, Any]:
+    """Live per-service request rate, error rate and p99 latency from Prometheus.
+
+    The Service Map used to run these same three PromQL queries from the
+    *browser* against `http://localhost:9090`. A deployed browser cannot reach a
+    cluster-internal Prometheus and CORS blocks it besides, so every query
+    returned `[]` and the page fell back to inventing an error rate from incident
+    severities. Proxying server-side is the only way the numbers can be real —
+    and when no Prometheus is configured we say so instead of reporting zeros
+    that look like a healthy fleet.
+    """
+    base = get_settings().prometheus_url.strip().rstrip("/")
+    if not base:
+        raise HTTPException(
+            503,
+            "Live service metrics require a Prometheus endpoint. Set PROMETHEUS_URL "
+            "(e.g. http://prometheus:9090) on the API to enable them.",
+        )
+
+    import httpx
+
+    metrics: dict[str, dict[str, float]] = {}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for field, promql in _SERVICE_METRIC_QUERIES.items():
+            try:
+                response = await client.get(
+                    f"{base}/api/v1/query", params={"query": promql}
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    502, f"Prometheus at {base} did not answer the {field} query: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise HTTPException(
+                    502, f"Prometheus at {base} returned a non-JSON {field} response"
+                ) from exc
+            if payload.get("status") != "success":
+                raise HTTPException(
+                    502,
+                    f"Prometheus rejected the {field} query: "
+                    f"{payload.get('error') or 'unknown error'}",
+                )
+            for row in payload.get("data", {}).get("result", []):
+                labels = row.get("metric") or {}
+                name = labels.get("service") or labels.get("job")
+                if not name:
+                    continue
+                try:
+                    value = float(row["value"][1])
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue
+                # Prometheus emits NaN for a 0/0 error ratio; a missing key is the
+                # honest representation, a 0.0 would claim "no errors observed".
+                if value != value:
+                    continue
+                metrics.setdefault(str(name), {})[field] = value
+    return {"source": "prometheus", "url": base, "services": metrics}
 
 
 @router.post("/deployments")
@@ -254,7 +473,12 @@ async def create_incident(
         affected_services=input.affected_services,
         root_cause=input.root_cause,
         impact=input.impact,
+        detected_at=input.detected_at,
+        acknowledged_at=input.acknowledged_at,
+        resolved_at=input.resolved_at,
     )
+    if input.started_at is not None:
+        incident.started_at = input.started_at
     created = await graph.create_incident(incident)
     return created.to_cypher_properties()
 
@@ -267,7 +491,7 @@ async def get_incident(
     """Get an incident by ID."""
     incident = await graph.get_incident(incident_id)
     if not incident:
-        return {"error": "Incident not found"}
+        raise HTTPException(404, {"error": "incident_not_found", "incident_id": incident_id})
     return incident.to_cypher_properties()
 
 
@@ -431,9 +655,13 @@ async def configure_sync_source(
             trail_name=cfg.get("trail_name"),
         )
     elif source == "prometheus":
+        prometheus_url = cfg.get("prometheus_url", "http://localhost:9090")
+        alertmanager_url = cfg.get("alertmanager_url", "http://localhost:9093")
+        _check_sync_url("prometheus_url", prometheus_url)
+        _check_sync_url("alertmanager_url", alertmanager_url)
         engine.add_prometheus(
-            prometheus_url=cfg.get("prometheus_url", "http://localhost:9090"),
-            alertmanager_url=cfg.get("alertmanager_url", "http://localhost:9093"),
+            prometheus_url=prometheus_url,
+            alertmanager_url=alertmanager_url,
         )
     elif source == "kubernetes":
         engine.add_kubernetes(
@@ -442,11 +670,22 @@ async def configure_sync_source(
             namespace=cfg.get("namespace"),
         )
     elif source == "jaeger":
-        engine.add_jaeger(
-            jaeger_url=cfg.get("jaeger_url", "http://localhost:16686"),
-        )
+        jaeger_url = cfg.get("jaeger_url", "http://localhost:16686")
+        _check_sync_url("jaeger_url", jaeger_url)
+        engine.add_jaeger(jaeger_url=jaeger_url)
     else:
-        return {"error": f"Unknown source: {source}"}
+        # A typo'd source used to answer 200, so the caller believed sync was
+        # configured and then wondered why nothing ever synced.
+        raise HTTPException(
+            400,
+            {
+                "error": "unknown_source",
+                "source": source,
+                "valid_sources": [
+                    "github", "cloudtrail", "prometheus", "kubernetes", "jaeger",
+                ],
+            },
+        )
 
     return {
         "status": "configured",

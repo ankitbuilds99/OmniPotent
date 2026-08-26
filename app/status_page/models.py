@@ -92,8 +92,10 @@ class Component:
     display_order: int = 100
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    # Uptime tracking: list of (timestamp, duration_minutes, was_operational)
-    uptime_records: list[tuple[datetime, float, bool]] = field(default_factory=list)
+    # Uptime intervals are not carried on the component: they live in
+    # `status_uptime_records` and are summed by `StatusStore.calculate_uptime`.
+    # This used to be a list of (timestamp, duration, was_operational) tuples
+    # that only the in-memory store ever read.
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to API-friendly dictionary."""

@@ -71,7 +71,7 @@ def upgrade() -> None:
             sa.JSON().with_variant(sa.dialects.postgresql.JSONB(), "postgresql"),
             nullable=False,
         ),
-        sa.Column("prev_hash", sa.String(length=64), nullable=False, server_default=""),
+        sa.Column("prev_hash", sa.String(length=64), nullable=False),
         sa.Column("hash", sa.String(length=64), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         # One event per chain position. This is the invariant the deque had no

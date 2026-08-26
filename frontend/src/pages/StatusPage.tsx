@@ -22,6 +22,7 @@ import {
   Bell,
   Mail
 } from 'lucide-react'
+import { apiFetch } from '../lib/apiClient'
 
 interface ComponentData {
   id: string
@@ -108,7 +109,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/status')
+      const res = await apiFetch('/api/status')
       if (res.ok) {
         const data: StatusSummary = await res.json()
         setStatus(data)
@@ -136,7 +137,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
 
     setSubscribeStatus('loading')
     try {
-      const res = await fetch('/api/status/subscribe', {
+      const res = await apiFetch('/api/status/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: subscribeEmail }),

@@ -26,7 +26,10 @@ class ModelCost:
     model_id: str
     input_cost_per_1k: float  # $ per 1000 input tokens
     output_cost_per_1k: float  # $ per 1000 output tokens
-    cached_input_cost_per_1k: float = 0.0  # $ per 1000 cached input tokens
+    # $ per 1000 cached input tokens. None = we have no verified cache-read rate;
+    # 0.0 would say cached input is free, which is a made-up price like any other.
+    # See estimate_cost() for what an unknown rate is charged at.
+    cached_input_cost_per_1k: float | None = None
     batch_discount: float = 0.5  # Multiplier for batch requests
 
     @property
@@ -56,6 +59,44 @@ class CostEstimate:
         }
 
 
+def evaluate_budget(
+    *,
+    daily_spent: float,
+    monthly_spent: float,
+    daily_limit: float | None,
+    monthly_limit: float | None,
+    additional_cost: float = 0.0,
+) -> dict[str, Any]:
+    """Would `additional_cost` more dollars fit under the caps that are set?
+
+    Pure arithmetic, no storage: the same decision has to be made against the
+    in-process history (`CostOptimizer.check_budget`) and against the persisted
+    ledger (`app.model_router.usage_store.check_budget`), and two copies of a
+    money rule is one copy too many.
+
+    A limit of None is "no cap", which reports a null remaining rather than a
+    made-up one. A cap of 0 is a real cap: `if limit` would have read it as
+    unset and let the spend through.
+    """
+    daily_remaining = None if daily_limit is None else daily_limit - daily_spent
+    monthly_remaining = None if monthly_limit is None else monthly_limit - monthly_spent
+
+    reasons: list[str] = []
+    if daily_remaining is not None and daily_remaining < additional_cost:
+        reasons.append(f"Daily budget exceeded (${daily_remaining:.4f} remaining)")
+    if monthly_remaining is not None and monthly_remaining < additional_cost:
+        reasons.append(f"Monthly budget exceeded (${monthly_remaining:.4f} remaining)")
+
+    return {
+        "can_proceed": not reasons,
+        "reasons": reasons,
+        "daily_spent": daily_spent,
+        "daily_remaining": daily_remaining,
+        "monthly_spent": monthly_spent,
+        "monthly_remaining": monthly_remaining,
+    }
+
+
 @dataclass
 class UsageRecord:
     """Record of model usage."""
@@ -73,13 +114,51 @@ class UsageRecord:
 # retired $5/$15 launch price and Haiku 3.5 at $1/$5 instead of $0.80/$4. The
 # `-latest` spellings are kept because callers and the /model-router API already
 # send those strings; the catalog resolves them to the canonical entry.
+#
+# The second and third groups are the ids that were missing entirely. The table
+# shipped with only `-latest` aliases while the rest of the app passes dated ids
+# and the `app.llm._DEFAULTS` provider defaults to the SDK, so every real call
+# missed the table. Before `_cost_for` that meant every real call was priced at
+# exactly $0.00; after it, the cheap fast model (plan/reflect/report/verify) was
+# billed at the fallback Opus-3 rate, ~15x its real price. Both are wrong, and
+# both are fixed by naming the ids here so the catalog prices them properly.
 _DEFAULT_COST_MODEL_IDS = (
+    # `-latest` spellings the /model-router API already receives.
     "claude-3-5-sonnet-latest",
     "claude-3-5-haiku-latest",
     "claude-3-opus-latest",
     "gpt-4o",
     "gpt-4o-mini",
+    # Dated ids the rest of the app passes to the SDK. The catalog resolves a
+    # dated snapshot suffix to its canonical entry, so these inherit real rates.
+    "claude-opus-4-20250514",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229",
+    "claude-3-haiku-20240307",
+    # The ids `app.llm._DEFAULTS` actually resolves to. COPILOT_MODEL /
+    # COPILOT_FAST_MODEL default to "", so *these* are what every real request
+    # runs on. tests/test_model_router_pricing.py is the drift guard: adding a
+    # provider default without a price fails there.
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "deepseek-chat",
 )
+
+# There is deliberately no local override table here. One used to carry
+# `claude-opus-4-8` and `claude-haiku-4-20250514` at hand-written rates, which
+# gave one deployment two answers for the same id: the observability path read
+# the catalog and reported "unpriced", the budget path read this file and
+# reported dollars. A rate belongs in app/model_catalog.py, where verifying it
+# is a recorded act (`PRICING_LAST_VERIFIED`), or nowhere — an id the catalog
+# does not price is billed at `_cost_for`'s most-expensive-known fallback and
+# warned about, which is a visible gap rather than a confident wrong number.
 
 
 def _catalog_costs() -> dict[str, ModelCost]:
@@ -104,19 +183,28 @@ def _catalog_costs() -> dict[str, ModelCost]:
             model_id=model_id,
             input_cost_per_1k=info.input_per_1k,  # type: ignore[arg-type]
             output_cost_per_1k=info.output_per_1k,  # type: ignore[arg-type]
-            cached_input_cost_per_1k=info.cached_input_per_1k or 0.0,
+            # Passed through as None when the catalog has no cache-read rate:
+            # `or 0.0` quietly priced cached input at free for gemini-1.5-pro,
+            # gemini-1.5-flash and claude-3-haiku.
+            cached_input_cost_per_1k=info.cached_input_per_1k,
         )
     return costs
 
 
 def _warn_unpriced(model_id: str, action: str) -> None:
-    """Say once, loudly, that we are reporting $0 because we don't know the price."""
+    """Say once, loudly, that we do not know this model's price.
+
+    `_cost_for` charges the most expensive rate it knows rather than $0.00, so
+    this is a "the number is a guess, and a high one" warning — not a "the
+    number is zero" one. Deduplicated because it sits on a hot request path.
+    """
     if model_id in _UNPRICED_WARNED:
         return
     _UNPRICED_WARNED.add(model_id)
     log.warning(
-        "no cost entry for model %r; %s reports $0.00 for it. Add the model to "
-        "app/model_catalog.py or register it with add_model_cost().",
+        "no cost entry for model %r; %s charges it at the most expensive known "
+        "rate. Add the model to app/model_catalog.py or register it with "
+        "add_model_cost().",
         model_id,
         action,
     )
@@ -132,8 +220,16 @@ class CostOptimizer:
     - Batch optimization recommendations
     """
 
-    # Rates sourced from app.model_catalog — see _catalog_costs().
+    # Rates sourced from app.model_catalog — see _catalog_costs(). Nothing is
+    # priced here that the catalog does not price there.
     DEFAULT_COSTS = _catalog_costs()
+
+    # What an unknown model is priced at. Deliberately the most expensive
+    # entry in the table rather than zero: this number is what `check_budget`
+    # compares a limit against, so guessing low means a customer whose model
+    # is not listed never hits their cap. Guessing high stops spending that
+    # might have been affordable, which is the recoverable mistake.
+    _FALLBACK_COST_KEY = "claude-3-opus-latest"
 
     def __init__(
         self,
@@ -151,8 +247,48 @@ class CostOptimizer:
         self._customer_usage: dict[str, list[UsageRecord]] = defaultdict(list)
 
     def get_model_cost(self, model_id: str) -> ModelCost | None:
-        """Get cost structure for a model."""
+        """Get cost structure for a model, if it is one we have a price for."""
         return self.model_costs.get(model_id)
+
+    def _cost_for(self, model_id: str, action: str = "pricing") -> ModelCost:
+        """A price for `model_id`, guessing high rather than free.
+
+        A miss used to be worth $0.00: `estimate_cost` returned a zero
+        estimate and `record_usage` filed the call as costing nothing, so
+        `check_budget` summed those zeros and every limit passed. That is not
+        a rare edge — the table shipped with only `-latest` aliases while the
+        rest of the app calls dated ids like `claude-sonnet-4-20250514`, so
+        the models the product actually runs on were all free. A cost tracker
+        that reports zero is worse than one that reports nothing, because the
+        number looks like an answer.
+
+        An unknown model is priced at the most expensive one we know, and
+        logged (once per model id) so the table can be corrected.
+        """
+        cost_info = self.model_costs.get(model_id)
+        if cost_info is not None:
+            return cost_info
+
+        if not self.model_costs:
+            # Nothing to guess from. Raising beats inventing a rate: a caller
+            # that constructed this with an empty table has a configuration
+            # bug, and $0.00 is the answer this whole method exists to avoid.
+            raise ValueError(
+                f"no price for model {model_id!r} and the cost table is empty; "
+                "register a ModelCost with add_model_cost()"
+            )
+
+        fallback = self.model_costs.get(self._FALLBACK_COST_KEY) or max(
+            self.model_costs.values(), key=lambda c: c.avg_cost_per_1k
+        )
+        _warn_unpriced(model_id, action)
+        return ModelCost(
+            model_id=model_id,
+            input_cost_per_1k=fallback.input_cost_per_1k,
+            output_cost_per_1k=fallback.output_cost_per_1k,
+            cached_input_cost_per_1k=fallback.cached_input_cost_per_1k,
+            batch_discount=fallback.batch_discount,
+        )
 
     def add_model_cost(self, cost: ModelCost) -> None:
         """Add or update model cost structure."""
@@ -178,15 +314,9 @@ class CostOptimizer:
         Returns:
             CostEstimate with cost breakdown
         """
-        cost_info = self.model_costs.get(model_id)
-        if not cost_info:
-            _warn_unpriced(model_id, "estimate_cost()")
-            return CostEstimate(
-                model_id=model_id,
-                estimated_input_tokens=input_tokens,
-                estimated_output_tokens=output_tokens or input_tokens * 3,
-                estimated_cost=0.0,
-            )
+        # `_cost_for`, not `.get()`: an unpriced model is charged at the dearest
+        # known rate and warned about once, never returned as a $0.00 estimate.
+        cost_info = self._cost_for(model_id, "estimate_cost()")
 
         if output_tokens is None:
             output_tokens = input_tokens * 3
@@ -196,8 +326,17 @@ class CostOptimizer:
         output_cost = (output_tokens / 1000) * cost_info.output_cost_per_1k
         standard_cost = input_cost + output_cost
 
-        # With caching
-        cached_input_cost = (input_tokens / 1000) * cost_info.cached_input_cost_per_1k
+        # With caching. An unknown cache-read rate bills at the full input rate,
+        # the same rule model_catalog.estimate_cost_usd applies: "we have not
+        # verified a discount" must not be reported as "the discount is 100%",
+        # which is what a 0.0 rate said for every model the catalog leaves
+        # cached_input_per_1m unset on.
+        cached_rate = (
+            cost_info.input_cost_per_1k
+            if cost_info.cached_input_cost_per_1k is None
+            else cost_info.cached_input_cost_per_1k
+        )
+        cached_input_cost = (input_tokens / 1000) * cached_rate
         with_caching = cached_input_cost + output_cost
 
         # With batching
@@ -212,6 +351,25 @@ class CostOptimizer:
             with_batching=with_batching,
         )
 
+    def price(
+        self,
+        model_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        action: str = "price()",
+    ) -> float:
+        """What a call that has already happened cost, in dollars.
+
+        Public because the ledger writers (`usage_ledger`, the API's
+        record-usage endpoint) need the price without also filing the call in
+        this object's in-process history.
+        """
+        cost_info = self._cost_for(model_id, action)
+        return (
+            (input_tokens / 1000) * cost_info.input_cost_per_1k
+            + (output_tokens / 1000) * cost_info.output_cost_per_1k
+        )
+
     def record_usage(
         self,
         model_id: str,
@@ -221,15 +379,7 @@ class CostOptimizer:
         request_type: str = "inference",
     ) -> UsageRecord:
         """Record model usage."""
-        cost_info = self.model_costs.get(model_id)
-        if cost_info:
-            cost = (
-                (input_tokens / 1000) * cost_info.input_cost_per_1k
-                + (output_tokens / 1000) * cost_info.output_cost_per_1k
-            )
-        else:
-            _warn_unpriced(model_id, "record_usage()")
-            cost = 0.0
+        cost = self.price(model_id, input_tokens, output_tokens, "record_usage()")
 
         record = UsageRecord(
             model_id=model_id,
@@ -282,24 +432,15 @@ class CostOptimizer:
         daily = self.get_daily_usage(customer_id)
         monthly = self.get_monthly_usage(customer_id)
 
-        daily_remaining = None
-        monthly_remaining = None
-        can_proceed = True
-        reasons: list[str] = []
-
-        # Check daily limit
-        if self.budget_limit_daily:
-            daily_remaining = self.budget_limit_daily - daily["total_cost"]
-            if daily_remaining < additional_cost:
-                can_proceed = False
-                reasons.append(f"Daily budget exceeded (${daily_remaining:.4f} remaining)")
-
-        # Check monthly limit
-        if self.budget_limit_monthly:
-            monthly_remaining = self.budget_limit_monthly - monthly["total_cost"]
-            if monthly_remaining < additional_cost:
-                can_proceed = False
-                reasons.append(f"Monthly budget exceeded (${monthly_remaining:.4f} remaining)")
+        verdict = evaluate_budget(
+            daily_spent=daily["total_cost"],
+            monthly_spent=monthly["total_cost"],
+            daily_limit=self.budget_limit_daily,
+            monthly_limit=self.budget_limit_monthly,
+            additional_cost=additional_cost,
+        )
+        can_proceed = verdict["can_proceed"]
+        reasons = list(verdict["reasons"])
 
         # Check customer-specific budget
         if customer_id and customer_id in self._customer_budgets:
@@ -313,12 +454,9 @@ class CostOptimizer:
             customer_remaining = None
 
         return {
+            **verdict,
             "can_proceed": can_proceed,
             "reasons": reasons,
-            "daily_spent": daily["total_cost"],
-            "daily_remaining": daily_remaining,
-            "monthly_spent": monthly["total_cost"],
-            "monthly_remaining": monthly_remaining,
             "customer_remaining": customer_remaining,
         }
 

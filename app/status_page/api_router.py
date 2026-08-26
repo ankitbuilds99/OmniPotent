@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from pydantic import BaseModel, Field, EmailStr
 
+from app.config import get_settings
 from app.status_page.models import (
     ComponentStatus,
     IncidentSeverity,
@@ -18,8 +20,14 @@ from app.status_page.models import (
     MaintenanceStatus,
     SubscriptionType,
 )
-from app.status_page.notifications import get_status_notifier
-from app.status_page.store import get_status_store, get_live_status_store
+from app.status_page.notifications import (
+    EMAIL_DELIVERY_REQUIREMENTS,
+    email_delivery_configured,
+    get_status_notifier,
+    send_verification_email,
+)
+from app.status_page.store import get_live_status_store, get_status_store
+from app.url_guard import BlockedURL, assert_public_url
 
 router = APIRouter(prefix="/api/status", tags=["Status Page"])
 
@@ -191,8 +199,8 @@ async def get_status_summary() -> StatusSummaryResponse:
 async def refresh_status() -> dict:
     """Manually trigger a health check refresh.
 
-    Forces an immediate sync of component status from real health checks.
-    Only works when using LiveStatusStore.
+    Forces an immediate sync of component status from real health checks,
+    rather than waiting for the next poll.
     """
     live_store = get_live_status_store()
     if live_store is None:
@@ -286,13 +294,41 @@ async def list_maintenances(
     return [MaintenanceResponse(**m.to_dict()) for m in maintenances]
 
 
+def _verification_link(http_request: Request, subscriber_id: str, token: str) -> str:
+    """Where the verification link in the email points.
+
+    `status_page_url` when an operator has set one, in preference to the host
+    the request arrived on: the Host header is client-controlled, and this link
+    carries a bearer token into somebody's inbox. Unset — the default — it falls
+    back to the request's own base URL, which is correct for a single-origin
+    deployment and is at worst the host the subscriber just used themselves.
+    """
+    query = urlencode({"id": subscriber_id, "token": token})
+    path = router.url_path_for("verify_subscription")
+    configured = (get_settings().status_page_url or "").strip().rstrip("/")
+    base = configured or str(http_request.base_url).rstrip("/")
+    return f"{base}{path}?{query}"
+
+
 @router.post("/subscribe", response_model=SubscribeResponse, status_code=201)
-async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
+async def subscribe_to_updates(
+    request: SubscribeRequest,
+    http_request: Request,
+) -> SubscribeResponse:
     """Subscribe to status page updates.
 
-    Provide either an email address or a webhook URL. For email subscriptions,
-    a verification email will be sent. For webhooks, a verification POST will
-    be sent with a challenge parameter.
+    Provide either an email address or a webhook URL.
+
+    An email subscription is stored unverified and the verification link is
+    mailed to the address; only a verified subscription is ever notified, so an
+    address that never opens the link never hears from us. Email therefore needs
+    a configured email provider — without one this returns 503 rather than
+    accepting an address it could never verify.
+
+    A webhook subscription is verified on creation: possession of the URL is the
+    only credential a webhook has. The URL itself is checked first — see
+    app/url_guard.py for why a subscriber must not be able to point this at the
+    inside of the deployment's network.
     """
     store = get_status_store()
 
@@ -309,11 +345,29 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
         target = request.email
     else:
         subscription_type = SubscriptionType.WEBHOOK
-        target = request.webhook_url  # type: ignore
+        target = request.webhook_url or ""
+        # Anything at all used to be accepted and stored as verified —
+        # `file:///etc/passwd`, `not-a-url`, and `http://169.254.169.254/`, which
+        # the server then really did POST to on the next incident.
+        try:
+            await assert_public_url(target, field="webhook_url")
+        except BlockedURL as blocked:
+            raise HTTPException(400, str(blocked)) from None
 
     # Check for existing subscription
     existing = await store.get_subscriber_by_target(target)
     if existing:
+        if existing.verified:
+            existing_message = "Already subscribed."
+        else:
+            # No second email: this form is public and unauthenticated, so
+            # re-sending on every POST would turn it into a way to mail an
+            # address repeatedly. The link already sent still works, and
+            # DELETE /api/status/subscribe/{id} clears the way for a new one.
+            existing_message = (
+                "Already subscribed, but not verified yet. Open the verification "
+                "link already emailed to this address."
+            )
         return SubscribeResponse(
             id=existing.id,
             subscription_type=existing.subscription_type.value,
@@ -321,7 +375,7 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
             components=existing.components,
             verified=existing.verified,
             created_at=existing.created_at,
-            message="Already subscribed. Check your email for verification if not yet verified.",
+            message=existing_message,
         )
 
     # Validate component IDs if provided
@@ -331,25 +385,55 @@ async def subscribe_to_updates(request: SubscribeRequest) -> SubscribeResponse:
             if not comp:
                 raise HTTPException(400, f"Invalid component ID: {comp_id}")
 
-    # Create subscription
+    is_webhook = subscription_type == SubscriptionType.WEBHOOK
+
+    # Asked before the address is stored. An unverified subscriber is never
+    # notified, and the only way to verify one is the emailed link, so with no
+    # transport the row would be a customer's email address kept forever for
+    # nothing while the response told them to check their inbox.
+    if not is_webhook and not email_delivery_configured():
+        raise HTTPException(
+            503,
+            "Email subscriptions are unavailable: no email provider is configured, "
+            "so the verification link cannot be sent. To enable them, "
+            f"{EMAIL_DELIVERY_REQUIREMENTS}.",
+        )
+
+    # The preferences and the auto-verify go in with the row. They used to be
+    # assigned to the returned object afterwards, which only stored anything
+    # because that object was the one in the dict.
     subscriber = await store.create_subscriber(
         subscription_type=subscription_type,
         target=target,
         components=request.components,
+        verified=is_webhook,
+        notify_on_incidents=request.notify_on_incidents,
+        notify_on_maintenance=request.notify_on_maintenance,
+        notify_on_resolved=request.notify_on_resolved,
     )
 
-    # Update preferences
-    subscriber.notify_on_incidents = request.notify_on_incidents
-    subscriber.notify_on_maintenance = request.notify_on_maintenance
-    subscriber.notify_on_resolved = request.notify_on_resolved
-
-    # TODO: Send verification email/webhook
-    # For now, auto-verify webhooks and mark emails as pending
-    if subscription_type == SubscriptionType.WEBHOOK:
-        subscriber.verified = True
+    if is_webhook:
         message = "Webhook subscription created and verified."
+    elif subscriber.verified or not subscriber.verification_token:
+        # A concurrent request for the same address won the insert and that
+        # subscription is already verified; there is nothing left to mail.
+        message = "Already subscribed."
     else:
-        message = "Subscription created. Please check your email to verify."
+        verify_url = _verification_link(
+            http_request, subscriber.id, subscriber.verification_token
+        )
+        if not await send_verification_email(target, verify_url):
+            # The row would be unverifiable: the token only ever leaves the
+            # server in that email. Rolled back so the address is not kept and
+            # so a retry is a fresh attempt rather than "already subscribed".
+            await store.delete_subscriber(subscriber.id)
+            raise HTTPException(
+                502,
+                f"Subscription not created: the verification email to {target} "
+                "could not be delivered. Check the email provider configuration "
+                "and try again.",
+            )
+        message = "Subscription created. Check your email for the verification link."
 
     return SubscribeResponse(
         id=subscriber.id,
@@ -440,7 +524,11 @@ async def update_component(
                 event_type="component_status_change",
                 title=f"Component Status Change: {component.name}",
                 message=f"{component.name} status changed to {request.status}",
-                severity="warning" if request.status == "degraded_performance" else "critical",
+                # ComponentStatus.DEGRADED is "degraded"; this read
+                # "degraded_performance", which no status ever equals, so a
+                # component dropping to degraded notified subscribers as
+                # critical.
+                severity="warning" if request.status == ComponentStatus.DEGRADED.value else "critical",
                 affected_components=[component.name],
             )
             await notifier.notify_subscribers(subscribers, payload)
@@ -465,8 +553,16 @@ async def delete_component(component_id: str) -> None:
 
 
 @router.post("/incidents", response_model=IncidentResponse, status_code=201)
-async def create_incident(request: IncidentCreateRequest) -> IncidentResponse:
-    """Create a new incident (admin only)."""
+async def create_incident(
+    request: IncidentCreateRequest, background: BackgroundTasks
+) -> IncidentResponse:
+    """Create a new incident (admin only).
+
+    Subscribers are notified after the response goes out. Awaiting delivery
+    inline meant one unreachable subscriber held the request open for the
+    webhook timeout plus its retry backoff — measured at ~11 seconds for a
+    single dead URL, on the endpoint an operator reaches for mid-outage.
+    """
     store = get_status_store()
 
     # Validate severity
@@ -491,7 +587,7 @@ async def create_incident(request: IncidentCreateRequest) -> IncidentResponse:
     # Notify subscribers
     notifier = get_status_notifier()
     subscribers = await store.list_subscribers()
-    await notifier.notify_incident_created(subscribers, incident)
+    background.add_task(notifier.notify_incident_created, subscribers, incident)
 
     return IncidentResponse(**incident.to_dict())
 
@@ -500,8 +596,10 @@ async def create_incident(request: IncidentCreateRequest) -> IncidentResponse:
 async def update_incident(
     incident_id: str,
     request: IncidentUpdateRequest,
+    background: BackgroundTasks,
 ) -> IncidentResponse:
-    """Update an incident (admin only)."""
+    """Update an incident (admin only). Delivery runs after the response —
+    see create_incident."""
     store = get_status_store()
 
     # Validate status if provided
@@ -533,16 +631,23 @@ async def update_incident(
     subscribers = await store.list_subscribers()
 
     if status == IncidentStatus.RESOLVED:
-        await notifier.notify_incident_resolved(subscribers, incident, request.message or "")
+        background.add_task(
+            notifier.notify_incident_resolved, subscribers, incident, request.message or ""
+        )
     elif request.message:
-        await notifier.notify_incident_updated(subscribers, incident, request.message)
+        background.add_task(
+            notifier.notify_incident_updated, subscribers, incident, request.message
+        )
 
     return IncidentResponse(**incident.to_dict())
 
 
 @router.post("/maintenances", response_model=MaintenanceResponse, status_code=201)
-async def create_maintenance(request: MaintenanceCreateRequest) -> MaintenanceResponse:
-    """Create a scheduled maintenance window (admin only)."""
+async def create_maintenance(
+    request: MaintenanceCreateRequest, background: BackgroundTasks
+) -> MaintenanceResponse:
+    """Create a scheduled maintenance window (admin only). Delivery runs after
+    the response — see create_incident."""
     store = get_status_store()
 
     # Validate times
@@ -566,7 +671,7 @@ async def create_maintenance(request: MaintenanceCreateRequest) -> MaintenanceRe
     # Notify subscribers
     notifier = get_status_notifier()
     subscribers = await store.list_subscribers()
-    await notifier.notify_maintenance_scheduled(subscribers, maintenance)
+    background.add_task(notifier.notify_maintenance_scheduled, subscribers, maintenance)
 
     return MaintenanceResponse(**maintenance.to_dict())
 
@@ -575,8 +680,10 @@ async def create_maintenance(request: MaintenanceCreateRequest) -> MaintenanceRe
 async def update_maintenance(
     maintenance_id: str,
     request: MaintenanceUpdateRequest,
+    background: BackgroundTasks,
 ) -> MaintenanceResponse:
-    """Update a maintenance window (admin only)."""
+    """Update a maintenance window (admin only). Delivery runs after the
+    response — see create_incident."""
     store = get_status_store()
 
     # Handle status transitions
@@ -591,13 +698,17 @@ async def update_maintenance(
             if maintenance:
                 notifier = get_status_notifier()
                 subscribers = await store.list_subscribers()
-                await notifier.notify_maintenance_started(subscribers, maintenance)
+                background.add_task(
+                    notifier.notify_maintenance_started, subscribers, maintenance
+                )
         elif status == MaintenanceStatus.COMPLETED:
             maintenance = await store.complete_maintenance(maintenance_id)
             if maintenance:
                 notifier = get_status_notifier()
                 subscribers = await store.list_subscribers()
-                await notifier.notify_maintenance_completed(subscribers, maintenance)
+                background.add_task(
+                    notifier.notify_maintenance_completed, subscribers, maintenance
+                )
         else:
             updates = request.model_dump(exclude_none=True)
             maintenance = await store.update_maintenance(maintenance_id, **updates)

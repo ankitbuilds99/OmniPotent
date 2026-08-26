@@ -27,13 +27,14 @@ from app.status_page.models import (
     Subscriber,
     SubscriptionType,
 )
+# No InMemoryStatusStore / LiveStatusStore / set_status_store: the store is a
+# single durable database-backed StatusStore now, so there is no in-memory
+# variant to subclass and nothing to swap it for. The live health check polling
+# those names carried is still here, as module-level functions over that store.
 from app.status_page.store import (
     StatusStore,
-    InMemoryStatusStore,
-    LiveStatusStore,
     get_status_store,
     get_live_status_store,
-    set_status_store,
     start_live_status_polling,
     stop_live_status_polling,
 )
@@ -92,11 +93,8 @@ __all__ = [
     "Subscriber",
     "SubscriptionType",
     "StatusStore",
-    "InMemoryStatusStore",
-    "LiveStatusStore",
     "get_status_store",
     "get_live_status_store",
-    "set_status_store",
     "start_live_status_polling",
     "stop_live_status_polling",
     "StatusNotifier",

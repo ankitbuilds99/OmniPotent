@@ -6,6 +6,18 @@ metadata:
   labels:
     app.kubernetes.io/name: omnipotent
 data:
+  # Every key here must be the env-var spelling of a field on app/config.py's
+  # Settings model. Settings is declared extra="ignore", so a key it does not
+  # know is dropped without a warning and the knob silently does nothing;
+  # tests/test_deploy_manifests.py pins the mapping.
+  #
+  # COPILOT_ENV drives every fail-closed branch in Settings: without it the pods
+  # ran as "development", which means permissive CORS (localhost origins are
+  # allowed unconditionally), no HSTS, and a /readyz that can never return 503.
+  # In production it also makes Settings refuse to start without
+  # COPILOT_API_TOKEN, and without COPILOT_SECRET_KEY while COPILOT_MULTI_TENANT
+  # is true — both come from secret.yaml.
+  COPILOT_ENV: "production"
   COPILOT_LOG_LEVEL: "INFO"
   COPILOT_LOG_FORMAT: "json"
   COPILOT_MULTI_TENANT: "true"

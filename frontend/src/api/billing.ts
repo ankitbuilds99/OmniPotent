@@ -18,17 +18,27 @@ import type {
   BillingCycle,
   MetricType,
 } from '../types/billing';
-import { API_BASE_URL, authHeaders } from '../config';
 
-// Resolved once in ../config: a blank VITE_API_URL (what the Dockerfile sets) must
-// mean "same origin", which the old `??` fallback silently got wrong.
-const BASE_URL = API_BASE_URL;
+// The credential is read per call (see lib/authToken) so a sign-in takes effect
+// without a reload; ../config's authHeaders is fixed at build time and cannot.
+import { authHeaders } from '../lib/authToken';
+import { API_BASE, describeFailure } from '../lib/apiClient';
 
+// Resolved once in apiClient, so every caller agrees: a blank VITE_API_URL (what
+// the Dockerfile sets) means "same origin", which the old `??` fallback silently
+// got wrong. Defaulting to localhost:8000 sent every Billing call from a
+// production browser to the user's own machine.
+const BASE_URL = API_BASE;
+
+// The thrown message goes straight into the page's error banner, so it has to
+// read as a sentence. It used to be `${status} ${statusText}: ${raw body}`,
+// which on a configuration failure rendered as
+// `503 : {"detail":"The billing portal is not available: ..."}` — statusText is
+// empty over HTTP/2, and the JSON envelope was left in.
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    throw new Error(await describeFailure(res));
   }
   return res.json() as Promise<T>;
 }
@@ -40,8 +50,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    throw new Error(await describeFailure(res));
   }
   return res.json() as Promise<T>;
 }

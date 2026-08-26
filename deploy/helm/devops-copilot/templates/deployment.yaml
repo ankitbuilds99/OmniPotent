@@ -43,7 +43,7 @@ spec:
             - configMapRef:
                 name: {{ include "omnipotent.fullname" . }}-config
             - secretRef:
-                name: {{ include "omnipotent.fullname" . }}-secrets
+                name: {{ include "omnipotent.secretName" . }}
           env:
             # State the app writes locally (SQLite/checkpoints/vectors) — on the
             # `data` volume mounted below, never the read-only image filesystem.
@@ -70,6 +70,10 @@ spec:
                   name: {{ include "omnipotent.fullname" . }}-postgresql
                   key: password
             - name: COPILOT_DATABASE_URL
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
+            # The LangGraph checkpointer is separate from the ORM database; left at
+            # its default it writes SQLite into the state dir rather than Postgres.
+            - name: COPILOT_CHECKPOINT_DB
               value: "postgresql://{{ .Values.postgresql.auth.username }}:$(POSTGRES_PASSWORD)@{{ include "omnipotent.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
             {{- end }}
           livenessProbe:

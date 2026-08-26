@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 # Bump when any price below is checked against the vendor's pricing page.
-PRICING_LAST_VERIFIED = "2026-08-18"
+PRICING_LAST_VERIFIED = "2026-08-26"
 
 # What `resolve()` accepts as a dated snapshot suffix, e.g. the `20250514` in
 # `claude-sonnet-4-20250514`. Deliberately just a date: it is the one suffix
@@ -156,12 +156,20 @@ MODELS: tuple[ModelInfo, ...] = (
         supports_thinking=False,
         aliases=("claude-haiku-4-5-20251001",),
     ),
+    # The id `app.llm` resolves to for every real Anthropic request, so leaving
+    # it unpriced was not a neutral "we don't know": app/model_router priced it
+    # at its most-expensive-known fallback, the Claude 3 Opus rate, and billed
+    # the default model at 3x. Verified against anthropic.com/pricing; the cache
+    # read is the family's published 0.1x of base input.
     ModelInfo(
         id="claude-opus-4-8",
         provider="anthropic",
         display_name="Claude Opus 4.8",
         max_context=200_000,
         max_output=64_000,
+        input_per_1m=5.00,
+        output_per_1m=25.00,
+        cached_input_per_1m=0.50,
         capabilities=_ANTHROPIC_REASONING,
         supports_thinking=True,
         supports_temperature=False,

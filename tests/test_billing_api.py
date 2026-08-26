@@ -6,8 +6,6 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from fastapi import HTTPException
-
 from app import config as cfg
 from app.billing.models import (
     PricingPlan,
@@ -22,7 +20,9 @@ from app.billing.api import (
     PlanResponse,
     SubscriptionResponse,
     UsageResponse,
+    SIMULATED_SUFFIX,
     BillingAPI,
+    BillingUnavailableError,
 )
 from app.billing.store import InMemoryBillingStore, FakeStripeClient
 from app.billing.stripe_integration import StripeBillingService
@@ -389,14 +389,44 @@ class TestBillingAPI:
     # Create checkout tests
 
     @pytest.mark.asyncio
-    async def test_create_checkout_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """Without Stripe, checkout must refuse — not hand out the paid tier free."""
-        with pytest.raises(HTTPException) as exc:
-            await api_no_stripe.create_checkout(org_id, "team")
-        assert exc.value.status_code == 503
+    async def test_create_checkout_no_stripe(self, api_no_stripe: BillingAPI, org_id, store):
+        """create_checkout must fail closed when Stripe is not configured.
 
-        # ...and no subscription was created as a side effect.
-        assert await api_no_stripe._store.get_subscription(org_id) is None
+        It previously activated the requested paid plan and returned a fake session
+        id, so any caller could grant themselves the most expensive plan for free.
+        `BillingUnavailableError` is what `app/api/billing_router.py` turns into
+        the 503 the caller sees.
+        """
+        with pytest.raises(BillingUnavailableError):
+            await api_no_stripe.create_checkout(org_id, "team")
+
+        # The failed checkout must not have granted a subscription.
+        assert await store.get_subscription(org_id) is None
+
+    @pytest.mark.asyncio
+    async def test_checkout_endpoint_reports_503_when_stripe_is_missing(
+        self, api_no_stripe: BillingAPI, org_id, monkeypatch
+    ):
+        """The refusal has to reach the browser as a 503, not a bare 500.
+
+        `BillingUnavailableError` is a domain exception; only the route maps it
+        onto a status code. Asserting on the exception alone leaves that mapping
+        untested, and an unmapped exception is an opaque "unexpected error" on the
+        one screen where the operator most needs to know billing is unconfigured.
+        """
+        from fastapi import HTTPException
+
+        from app.api import billing_router
+
+        monkeypatch.setattr(billing_router, "_get_billing_api", lambda: api_no_stripe)
+        monkeypatch.setattr(billing_router, "_current_org_id", lambda: org_id)
+
+        with pytest.raises(HTTPException) as exc:
+            await billing_router.create_checkout(
+                billing_router.CheckoutRequest(plan_name="team")
+            )
+
+        assert exc.value.status_code == 503
 
     @pytest.mark.asyncio
     async def test_create_checkout_no_stripe_demo_mode(
@@ -407,15 +437,21 @@ class TestBillingAPI:
 
         assert "demo_session" in result["session_id"]
         assert result["simulated"] is True
+        assert result["plan_name"] == "team" + SIMULATED_SUFFIX
 
     # Create portal tests
 
     @pytest.mark.asyncio
     async def test_create_portal_no_stripe(self, api_no_stripe: BillingAPI, org_id):
-        """Without Stripe the "portal" manages nothing, so it must not be offered."""
-        with pytest.raises(HTTPException) as exc:
+        """create_portal must fail loudly when Stripe is not configured.
+
+        It used to return `{"portal_url": <the caller's own return_url>}`, so
+        every "Billing Portal" / "View all in Stripe" / "Add new card" button
+        navigated the browser to the page it was already on: no error, no
+        message, nothing happens, and no way to tell it from a slow page.
+        """
+        with pytest.raises(BillingUnavailableError):
             await api_no_stripe.create_portal(org_id)
-        assert exc.value.status_code == 503
 
     @pytest.mark.asyncio
     async def test_create_portal_no_stripe_demo_mode(
@@ -432,7 +468,7 @@ class TestBillingAPI:
     @pytest.mark.asyncio
     async def test_change_plan_no_stripe(self, api_no_stripe: BillingAPI, org_id):
         """change_plan should raise without Stripe."""
-        with pytest.raises(ValueError, match="Stripe not configured"):
+        with pytest.raises(BillingUnavailableError):
             await api_no_stripe.change_plan(org_id, "growth")
 
     # Calculate proration tests
@@ -470,7 +506,7 @@ class TestBillingAPI:
     @pytest.mark.asyncio
     async def test_cancel_subscription_no_stripe(self, api_no_stripe: BillingAPI, org_id):
         """cancel_subscription should raise without Stripe."""
-        with pytest.raises(ValueError, match="Stripe not configured"):
+        with pytest.raises(BillingUnavailableError):
             await api_no_stripe.cancel_subscription(org_id)
 
     # Reactivate subscription tests
@@ -480,7 +516,7 @@ class TestBillingAPI:
         self, api_no_stripe: BillingAPI, org_id
     ):
         """reactivate_subscription should raise without Stripe."""
-        with pytest.raises(ValueError, match="Stripe not configured"):
+        with pytest.raises(BillingUnavailableError):
             await api_no_stripe.reactivate_subscription(org_id)
 
     # Get invoices tests
@@ -619,7 +655,7 @@ class TestBillingAPI:
     @pytest.mark.asyncio
     async def test_handle_webhook_no_stripe(self, api_no_stripe: BillingAPI):
         """handle_webhook should raise without Stripe."""
-        with pytest.raises(ValueError, match="Stripe not configured"):
+        with pytest.raises(BillingUnavailableError):
             await api_no_stripe.handle_webhook(b'{}', "sig")
 
     # Track usage tests

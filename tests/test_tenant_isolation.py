@@ -75,15 +75,52 @@ async def test_audit_lines_are_tenant_and_actor_stamped(tmp_path, monkeypatch):
         set_actor("-")
     await audit.flush()
 
-    # Read both chains: the trail is stored per org now, so `recent()` shows the
-    # caller's tenant only -- which is the isolation this test is about.
+    # recent() reads one org's trail, so ask for each explicitly: the trail is
+    # stored per org now, so a caller only ever sees its own chain -- which is
+    # the isolation this test is about.
+    untenanted = {e["event"]: e for e in await audit.recent(org_id="-")}
+    acme = {e["event"]: e for e in await audit.recent(org_id="acme")}
+
+    assert untenanted["test.event_no_tenant"]["org_id"] == "-"
+    assert acme["test.event_with_tenant"]["org_id"] == "acme"
+    assert acme["test.event_with_tenant"]["actor"] == "key:ci"
+
+    # The same three facts read straight off the stored chains, so the
+    # assertions above cannot be satisfied by a queue that never reached the
+    # database.
     from app.audit import store
 
-    events = {
+    stored = {
         e["event"]: e
         for org in ("-", "acme")
         for e in await store.chain(org)
     }
-    assert events["test.event_no_tenant"]["org_id"] == "-"
-    assert events["test.event_with_tenant"]["org_id"] == "acme"
-    assert events["test.event_with_tenant"]["actor"] == "key:ci"
+    assert stored["test.event_no_tenant"]["org_id"] == "-"
+    assert stored["test.event_with_tenant"]["org_id"] == "acme"
+    assert stored["test.event_with_tenant"]["actor"] == "key:ci"
+
+
+async def test_audit_trails_do_not_cross_tenants(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path))
+    cfg.get_settings.cache_clear()
+    await close_db()
+    await audit.clear()
+    for org in ("acme", "globex"):
+        token = set_tenant(TenantConfig(org_id=org))
+        set_actor(f"key:{org}")
+        try:
+            audit.record(f"test.{org}_only")
+        finally:
+            reset_tenant(token)
+            set_actor("-")
+    await audit.flush()
+
+    # The trail used to be one process-wide deque, so without scoping GET /audit
+    # handed every tenant every other tenant's trail, actor addresses included.
+    token = set_tenant(TenantConfig(org_id="acme"))
+    try:
+        visible = {e["event"] for e in await audit.recent()}
+    finally:
+        reset_tenant(token)
+
+    assert visible == {"test.acme_only"}

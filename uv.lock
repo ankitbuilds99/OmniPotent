@@ -1100,6 +1100,19 @@ wheels = [
 ]
 
 [[package]]
+name = "fakeredis"
+version = "2.37.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "redis" },
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/95/5e/fce3355d20d37dc18f7f4c422653ac69cabffa019afaaf607e26704fb829/fakeredis-2.37.1.tar.gz", hash = "sha256:9045851b0a9fe56312696aadc82435141aa43a193cab462d372c8fb583a7c087", size = 238182, upload-time = "2026-08-18T15:22:01.676Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/e0/fe1c760abd9e9cb5dfbce057b6582cb1ac36dfd8b5ce202e1445605c922d/fakeredis-2.37.1-py3-none-any.whl", hash = "sha256:f15c41be151c1e9206416dece764369a4dedb6b1341df3734c3c2c000e405508", size = 152738, upload-time = "2026-08-18T15:22:00.1Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.138.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2967,9 +2980,15 @@ dependencies = [
 apm = [
     { name = "ddtrace" },
 ]
+billing = [
+    { name = "stripe" },
+]
 dev = [
+    { name = "aiosqlite" },
+    { name = "alembic" },
     { name = "apscheduler" },
     { name = "dramatiq", extra = ["redis"] },
+    { name = "fakeredis" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -3035,7 +3054,9 @@ vectors-local = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.0" },
+    { name = "aiosqlite", marker = "extra == 'dev'", specifier = ">=0.19.0" },
     { name = "aiosqlite", marker = "extra == 'migrations'", specifier = ">=0.19.0" },
+    { name = "alembic", marker = "extra == 'dev'", specifier = ">=1.13.0" },
     { name = "alembic", marker = "extra == 'migrations'", specifier = ">=1.13.0" },
     { name = "apscheduler", marker = "extra == 'tasks'", specifier = ">=3.10.0" },
     { name = "asyncpg", marker = "extra == 'migrations'", specifier = ">=0.29.0" },
@@ -3048,6 +3069,7 @@ requires-dist = [
     { name = "dramatiq", extras = ["redis"], marker = "extra == 'tasks'", specifier = ">=1.16.0" },
     { name = "email-validator", specifier = ">=2.0.0" },
     { name = "faiss-cpu", marker = "extra == 'vectors-faiss'", specifier = ">=1.7.0" },
+    { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.23.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "icalendar", specifier = ">=6.0.0" },
@@ -3095,10 +3117,11 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'supabase'", specifier = ">=2.0.0" },
     { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "strawberry-graphql", extras = ["fastapi"], marker = "extra == 'knowledge-graph'", specifier = ">=0.220.0" },
+    { name = "stripe", marker = "extra == 'billing'", specifier = ">=11.0" },
     { name = "supabase", marker = "extra == 'supabase'", specifier = ">=2.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
-provides-extras = ["providers", "postgres", "supabase", "secrets", "apm", "migrations", "tasks", "features", "vectors", "vectors-local", "vectors-faiss", "knowledge-graph", "kubernetes", "dev", "test"]
+provides-extras = ["providers", "postgres", "supabase", "secrets", "billing", "apm", "migrations", "tasks", "features", "vectors", "vectors-local", "vectors-faiss", "knowledge-graph", "kubernetes", "dev", "test"]
 
 [[package]]
 name = "onnxruntime"
@@ -4720,6 +4743,15 @@ wheels = [
 ]
 
 [[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
+]
+
+[[package]]
 name = "sqlalchemy"
 version = "2.0.51"
 source = { registry = "https://pypi.org/simple" }
@@ -4854,6 +4886,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/85/ad/430fb60d90e1d112a62ff57bdd1f286ec73a2a0331272febfddd21f330e1/StrEnum-0.4.15.tar.gz", hash = "sha256:878fb5ab705442070e4dd1929bb5e2249511c0bcf2b0eeacf3bcd80875c82eff", size = 23384, upload-time = "2023-06-29T22:02:58.399Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/69/297302c5f5f59c862faa31e6cb9a4cd74721cd1e052b38e464c5b402df8b/StrEnum-0.4.15-py3-none-any.whl", hash = "sha256:a30cda4af7cc6b5bf52c8055bc4bf4b2b6b14a93b574626da33df53cf7740659", size = 8851, upload-time = "2023-06-29T22:02:56.947Z" },
+]
+
+[[package]]
+name = "stripe"
+version = "15.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/22/57/56f7b33b31bba203b6e9cb502a24659206c1dbf64cf8aa00c3268410e831/stripe-15.5.1.tar.gz", hash = "sha256:ee87b696419f4d65a0637c3158393de8a2201de81b589632418517713e4ec8ed", size = 1544797, upload-time = "2026-08-18T23:52:28.921Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/48/8f018d19c6ecaee6881e8cc83484ba6f3b0f42fbf250808a5a1d171a0e77/stripe-15.5.1-py3-none-any.whl", hash = "sha256:5d76a311ae2ba636f3b42fa0766242cc7c9a844c5db73fe0b1702f81b5cdccd5", size = 2201139, upload-time = "2026-08-18T23:52:26.62Z" },
 ]
 
 [[package]]

@@ -8,6 +8,11 @@ returned, so `GET /executions/{id}` answered 404 for the whole run — the exact
 window a caller polls — and only started answering once the answer was stale.
 Here a row is written before the DAG starts and updated when it ends, so a poll
 mid-run sees the real state.
+
+The executor, resource pool and replanner behind those routes are per-org
+(`app/tenancy/scoping.py`) rather than one process-wide singleton: a shared
+ResourcePool let one tenant's parallel DAGs starve everyone else's, and a shared
+handler registry gave every tenant the same executor instance.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import get_settings
 from app.coordinator import store
@@ -36,15 +41,80 @@ from app.coordinator.handlers import (
 )
 from app.coordinator.replanner import DynamicReplanner
 from app.coordinator.resource_pool import ResourcePool
+from app.tenancy.scoping import scoped
 from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.coordinator.api")
 
 router = APIRouter(prefix="/coordinator", tags=["coordinator"])
 
-_executor: DAGExecutor | None = None
-_resource_pool: ResourcePool | None = None
-_replanner: DynamicReplanner | None = None
+
+class _CoordinatorState:
+    """One org's DAG executor, resource pool and replanner.
+
+    Shared across the process these were a cross-tenant channel: a single
+    ResourcePool meant one tenant's parallel DAGs starved everyone else's, and
+    one executor meant one handler registry for every tenant. Execution records
+    are not held here at all — they live in `app/coordinator/store.py`, keyed on
+    (id, org_id), so they survive a restart and a poll mid-run.
+    """
+
+    def __init__(self) -> None:
+        settings = get_settings()
+
+        self.resource_pool = ResourcePool(cpu_cores=8, memory_mb=16384, gpus=0)
+        self.executor = DAGExecutor(
+            handlers={},
+            redis_client=None,
+            max_parallel=10,
+            resource_pool=self.resource_pool,
+        )
+
+        investigation_handlers = create_investigation_handlers(
+            prometheus_url=getattr(settings, "prometheus_url", None),
+            loki_url=getattr(settings, "loki_url", None),
+            knowledge_graph=None,
+            llm_client=None,
+        )
+        remediation_handlers = create_remediation_handlers(
+            k8s_client=None,
+            prometheus_url=getattr(settings, "prometheus_url", None),
+            knowledge_graph=None,
+            llm_client=None,
+        )
+        for name, handler in {**investigation_handlers, **remediation_handlers}.items():
+            self.executor.register_handler(name, handler)
+
+        self.replanner = DynamicReplanner(llm_client=None, knowledge_graph=None)
+
+
+_state = scoped(_CoordinatorState)
+
+
+async def _record_started(
+    org_id: str,
+    execution_id: str,
+    dag: TaskDAG,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """Write the RUNNING placeholder row for a run that is about to begin.
+
+    Called from `_start`, inside the request, so the row exists the moment the
+    route answers with the id; also called at the top of `_run_and_record` so a
+    caller that queues the task directly still gets it. `save_execution` is an
+    upsert, so the second write is the same row.
+    """
+    await store.save_execution(
+        org_id,
+        DAGExecution(
+            id=execution_id,
+            dag_id=dag.id,
+            state=ExecutionState.RUNNING,
+            initial_context=dict(context or {}),
+            accumulated_context=dict(context or {}),
+            execution_levels=dag.get_execution_levels(),
+        ),
+    )
 
 
 async def _run_and_record(
@@ -57,21 +127,17 @@ async def _run_and_record(
 ) -> None:
     """Run a DAG, recording its state before it starts and after it ends.
 
-    The pre-run row is what makes polling work. The `except` is not swallowing a
-    bug: `execute()` re-raises after marking the execution FAILED, and this is a
-    background task with no caller to receive the exception, so the failure has
-    to be written down here or it is lost entirely.
+    The pre-run row is what makes polling work: previously nothing was written
+    until `execute()` returned, so a DAG parked on a human approval — precisely
+    when you need to find it — was invisible for as long as it was blocked.
+
+    The `except` is not swallowing a bug: `execute()` re-raises after marking its
+    own execution object FAILED, and this is a background task with no caller to
+    receive the exception, so the failure has to be written down here or it is
+    lost entirely — which is how `resume_from` against a missing checkpoint
+    looked like a DAG that started and then never did anything at all.
     """
-    await store.save_execution(
-        org_id,
-        DAGExecution(
-            id=execution_id,
-            dag_id=dag.id,
-            state=ExecutionState.RUNNING,
-            initial_context=dict(context or {}),
-            execution_levels=dag.get_execution_levels(),
-        ),
-    )
+    await _record_started(org_id, execution_id, dag, context)
 
     try:
         execution = await executor.execute(
@@ -80,60 +146,37 @@ async def _run_and_record(
             execution_id=execution_id,
             resume_from=resume_from,
         )
-    except Exception:
+    except Exception as exc:
+        # Outcome and reason only: the object `execute()` built is not returned
+        # on the raising path, so there are no observed task results to store.
+        # The message goes onto the record as well as into the log — a log line
+        # on one pod is not something the caller polling this run can read.
         log.exception("DAG execution %s failed", execution_id)
-        await store.mark_failed(org_id, execution_id)
+        await store.mark_failed(org_id, execution_id, str(exc))
         return
 
     await store.save_execution(org_id, execution)
 
 
 async def get_executor() -> DAGExecutor:
-    """Get or create DAG executor."""
-    global _executor, _resource_pool, _replanner
+    """The DAG executor for the org on the current request.
 
-    if _executor is None:
-        settings = get_settings()
+    Redis is attached here rather than in `_CoordinatorState.__init__` because
+    obtaining a pool is async and that constructor is not. It was hardcoded to
+    `None`, so checkpointing was off even where COPILOT_REDIS_URL was set, and
+    `resume_from` could only ever raise `Checkpoint ... not found` — inside a
+    background task, after the route had already answered "started".
 
-        _resource_pool = ResourcePool(
-            cpu_cores=8,
-            memory_mb=16384,
-            gpus=0,
-        )
+    Guarded on the URL on purpose: with none configured `get_redis()` hands back
+    an in-memory stand-in that has no `lpush`, so wiring it in unconditionally
+    would trade a silent no-op for a crash mid-checkpoint.
+    """
+    state = _state.get()
+    if state.executor.redis is None and get_settings().copilot_redis_url:
+        from app.redis_pool import RedisPoolType, get_redis
 
-        _executor = DAGExecutor(
-            handlers={},
-            redis_client=None,
-            max_parallel=10,
-            resource_pool=_resource_pool,
-        )
-
-        investigation_handlers = create_investigation_handlers(
-            prometheus_url=getattr(settings, "prometheus_url", None),
-            loki_url=getattr(settings, "loki_url", None),
-            knowledge_graph=None,
-            llm_client=None,
-        )
-
-        remediation_handlers = create_remediation_handlers(
-            k8s_client=None,
-            prometheus_url=getattr(settings, "prometheus_url", None),
-            knowledge_graph=None,
-            llm_client=None,
-        )
-
-        for name, handler in investigation_handlers.items():
-            _executor.register_handler(name, handler)
-
-        for name, handler in remediation_handlers.items():
-            _executor.register_handler(name, handler)
-
-        _replanner = DynamicReplanner(
-            llm_client=None,
-            knowledge_graph=None,
-        )
-
-    return _executor
+        state.executor.redis = await get_redis(RedisPoolType.CACHE)
+    return state.executor
 
 
 class TaskNodeInput(BaseModel):
@@ -148,12 +191,70 @@ class TaskNodeInput(BaseModel):
     requires_approval: bool = False
     description: str = ""
 
+    @field_validator("priority")
+    @classmethod
+    def _known_priority(cls, value: str) -> str:
+        """Reject an unknown priority here rather than as a KeyError later.
+
+        `TaskPriority[value.upper()]` in the route body raised KeyError, which
+        the app's handler turns into a 500 whose message says the resource was
+        not found — three different wrong answers to one typo.
+        """
+        if value.upper() not in TaskPriority.__members__:
+            raise ValueError(
+                f"unknown priority {value!r}; expected one of "
+                f"{', '.join(TaskPriority.__members__)}"
+            )
+        return value.upper()
+
 
 class DAGInput(BaseModel):
     """Input for creating a DAG."""
     id: str
     name: str
     tasks: list[TaskNodeInput]
+
+
+def _build_dag(dag_input: DAGInput) -> TaskDAG:
+    """A validated `TaskDAG` from request input, or an HTTP 400 saying why.
+
+    Both DAG routes built this inline and neither guarded it, so a duplicate
+    task id — a `ValueError` out of `add_task` — was a 500 rather than the 400
+    it plainly is.
+    """
+    dag = TaskDAG(dag_input.id, dag_input.name)
+
+    for task_input in dag_input.tasks:
+        try:
+            dag.add_task(TaskNode(
+                id=task_input.id,
+                name=task_input.name,
+                handler=task_input.handler,
+                depends_on=task_input.depends_on,
+                input_params=task_input.input_params,
+                timeout_seconds=task_input.timeout_seconds,
+                priority=TaskPriority[task_input.priority.upper()],
+                requires_approval=task_input.requires_approval,
+                description=task_input.description,
+            ))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid DAG: {exc}") from exc
+
+    errors = dag.validate()
+    if errors:
+        raise HTTPException(status_code=400, detail=f"Invalid DAG: {errors}")
+
+    unknown = sorted({t.handler for t in dag.tasks.values()} - set(_state.get().executor.handlers))
+    if unknown:
+        # Otherwise the DAG is accepted, runs, and every task fails at
+        # dispatch — a background failure the caller never sees, for a mistake
+        # that was visible at submission time.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown handler(s): {', '.join(unknown)}. See GET /coordinator/handlers.",
+        )
+
+    return dag
 
 
 class ExecuteDAGInput(BaseModel):
@@ -182,33 +283,43 @@ async def create_dag(
     executor: DAGExecutor = Depends(get_executor),
 ) -> dict[str, Any]:
     """Create a new DAG."""
-    dag = TaskDAG(dag_input.id, dag_input.name)
-
-    for task_input in dag_input.tasks:
-        priority = TaskPriority[task_input.priority.upper()]
-
-        task = TaskNode(
-            id=task_input.id,
-            name=task_input.name,
-            handler=task_input.handler,
-            depends_on=task_input.depends_on,
-            input_params=task_input.input_params,
-            timeout_seconds=task_input.timeout_seconds,
-            priority=priority,
-            requires_approval=task_input.requires_approval,
-            description=task_input.description,
-        )
-        dag.add_task(task)
-
-    errors = dag.validate()
-    if errors:
-        raise HTTPException(status_code=400, detail=f"Invalid DAG: {errors}")
+    dag = _build_dag(dag_input)
 
     return {
         "dag": dag.to_dict(),
         "execution_levels": dag.get_execution_levels(),
         "critical_path": dag.get_critical_path(),
     }
+
+
+async def _start(
+    background_tasks: BackgroundTasks,
+    executor: DAGExecutor,
+    dag: TaskDAG,
+    context: dict[str, Any],
+    resume_from: str | None = None,
+) -> str:
+    """Register an execution, queue the run, and return the id.
+
+    Both routes used to do `execution = await executor.execute(...)` and only
+    then record it, and neither returned an id at all, so there was nothing to
+    poll with. The row is written *here*, in the request, rather than by the
+    background task: a queued task does not start until the response has been
+    sent, so recording it there left a window in which the route had handed out
+    an id that `GET /executions/{id}` answered 404 for.
+
+    `storage_org_id()` is resolved here for the same reason — a FastAPI
+    BackgroundTask can run after the middleware has reset the tenant contextvar,
+    which would file the execution under the wrong org.
+    """
+    org_id = storage_org_id()
+    execution_id = f"exec_{uuid.uuid4().hex[:8]}"
+    await _record_started(org_id, execution_id, dag, context)
+
+    background_tasks.add_task(
+        _run_and_record, executor, dag, org_id, execution_id, context, resume_from
+    )
+    return execution_id
 
 
 @router.post("/dags/{dag_id}/execute")
@@ -220,42 +331,22 @@ async def execute_dag(
     executor: DAGExecutor = Depends(get_executor),
 ) -> dict[str, Any]:
     """Execute a DAG."""
-    dag = TaskDAG(dag_input.id, dag_input.name)
+    dag = _build_dag(dag_input)
 
-    for task_input in dag_input.tasks:
-        priority = TaskPriority[task_input.priority.upper()]
-
-        task = TaskNode(
-            id=task_input.id,
-            name=task_input.name,
-            handler=task_input.handler,
-            depends_on=task_input.depends_on,
-            input_params=task_input.input_params,
-            timeout_seconds=task_input.timeout_seconds,
-            priority=priority,
-            requires_approval=task_input.requires_approval,
-            description=task_input.description,
+    if execute_input.resume_from and not executor.redis:
+        # Checkpoints live in Redis and nowhere else, so without it `execute()`
+        # raises `Checkpoint ... not found` in the background task and the route
+        # has already answered "started". Say so up front instead.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "resume_from needs checkpoint storage, which requires "
+                "COPILOT_REDIS_URL to be configured."
+            ),
         )
-        dag.add_task(task)
 
-    errors = dag.validate()
-    if errors:
-        raise HTTPException(status_code=400, detail=f"Invalid DAG: {errors}")
-
-    # Resolved here, not inside the background task: a BackgroundTask can run
-    # after the middleware has reset the tenant contextvar, which would file the
-    # execution under the wrong org.
-    org_id = storage_org_id()
-    execution_id = f"exec_{uuid.uuid4().hex[:8]}"
-
-    background_tasks.add_task(
-        _run_and_record,
-        executor,
-        dag,
-        org_id,
-        execution_id,
-        execute_input.context,
-        execute_input.resume_from,
+    execution_id = await _start(
+        background_tasks, executor, dag, execute_input.context, execute_input.resume_from
     )
 
     return {
@@ -281,12 +372,7 @@ async def start_investigation(
         severity=input.severity,
     )
 
-    org_id = storage_org_id()
-    execution_id = f"exec_{uuid.uuid4().hex[:8]}"
-
-    background_tasks.add_task(
-        _run_and_record, executor, dag, org_id, execution_id, input.context
-    )
+    execution_id = await _start(background_tasks, executor, dag, input.context)
 
     return {
         "status": "started",
@@ -336,6 +422,16 @@ async def list_executions(limit: int = 100) -> dict[str, Any]:
     }
 
 
+@router.get("/approvals")
+async def list_pending_approvals(
+    execution_id: str | None = None,
+    executor: DAGExecutor = Depends(get_executor),
+) -> dict[str, Any]:
+    """The tasks currently blocked on a human decision."""
+    pending = executor.pending_approvals(execution_id)
+    return {"approvals": pending, "count": len(pending)}
+
+
 @router.post("/executions/{execution_id}/tasks/{task_id}/approve")
 async def approve_task(
     execution_id: str,
@@ -343,24 +439,39 @@ async def approve_task(
     approval: ApprovalInput,
     executor: DAGExecutor = Depends(get_executor),
 ) -> dict[str, Any]:
-    """Approve or reject a pending task.
+    """Approve or reject a pending task in one specific execution.
 
-    Acts on a live asyncio event inside the executor, so it only reaches a run
+    `execution_id` was taken in the path and then never used: the approval was
+    matched on task id alone, so approving `restart_service` in the DAG you were
+    looking at also approved it in every other run of that DAG that happened to
+    be parked on the same task.
+
+    Acts on a live asyncio future inside the executor, so it only reaches a run
     started by *this* process. Approval cannot be delivered by writing a row —
     releasing a task waiting on another replica needs a control channel — which
     is why the executor's pending-approval state stays on the single-replica
     pin list even now that execution records are durable.
     """
-    success = await executor.approve_task(task_id, approval.approved)
+    success = await executor.approve_task(execution_id, task_id, approval.approved)
 
     if not success:
         raise HTTPException(
             status_code=404,
-            detail="Task not found or not waiting for approval",
+            detail=(
+                f"Task {task_id} is not waiting for approval in execution "
+                f"{execution_id}. See GET /coordinator/approvals."
+            ),
         )
 
+    log.info(
+        "Task %s in execution %s %s: %s",
+        task_id, execution_id,
+        "approved" if approval.approved else "rejected",
+        approval.reason or "no reason given",
+    )
     return {
         "status": "approved" if approval.approved else "rejected",
+        "execution_id": execution_id,
         "task_id": task_id,
         "reason": approval.reason,
     }
@@ -368,13 +479,8 @@ async def approve_task(
 
 @router.get("/resources")
 async def get_resource_usage() -> dict[str, Any]:
-    """Get current resource usage."""
-    global _resource_pool
-
-    if _resource_pool is None:
-        return {"error": "Resource pool not initialized"}
-
-    return await _resource_pool.get_usage()
+    """Get current resource usage for the org on the current request."""
+    return await _state.get().resource_pool.get_usage()
 
 
 @router.get("/handlers")

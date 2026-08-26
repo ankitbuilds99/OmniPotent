@@ -3,7 +3,9 @@
 import hashlib
 import hmac
 
-from app.billing import plan_from_stripe_event, verify_stripe_signature
+import pytest
+
+from app.billing import UnknownPlan, plan_from_stripe_event, verify_stripe_signature
 
 
 def _sig(payload: bytes, secret: str, ts: int) -> str:
@@ -44,14 +46,40 @@ def test_plan_mapping_created_updated_deleted():
                                      {"org_id": "o1"})) == ("o1", "free")
 
 
-def test_plan_mapping_ignores_unknown_or_incomplete():
+def test_plan_mapping_translates_catalog_tiers():
+    """Stripe metadata carries a catalog tier; `orgs.plan` holds a quota plan."""
+    def evt(t, meta):
+        return {"type": t, "data": {"object": {"metadata": meta}}}
+
+    assert plan_from_stripe_event(evt("customer.subscription.updated",
+                                      {"org_id": "o1", "plan": "growth"})) == ("o1", "team")
+    assert plan_from_stripe_event(evt("customer.subscription.updated",
+                                      {"org_id": "o1", "plan": "scale"})) == ("o1", "enterprise")
+    assert plan_from_stripe_event(evt("customer.subscription.updated",
+                                      {"org_id": "o1", "plan": "starter"})) == ("o1", "free")
+
+
+def test_plan_mapping_ignores_incomplete_and_unhandled_events():
     def evt(t, meta):
         return {"type": t, "data": {"object": {"metadata": meta}}}
 
     assert plan_from_stripe_event(evt("customer.subscription.updated", {"plan": "team"})) is None  # no org
-    assert plan_from_stripe_event(evt("customer.subscription.updated",
-                                      {"org_id": "o1", "plan": "bogus"})) is None  # bad plan
     assert plan_from_stripe_event(evt("invoice.paid", {"org_id": "o1"})) is None   # unhandled type
+
+
+@pytest.mark.parametrize("plan", ["bogus", "pro_monthly", "starter_yearly", ""])
+def test_plan_mapping_raises_on_a_plan_we_do_not_sell(plan):
+    """This returned None, which the receiver reported as `status: ignored` —
+    indistinguishable from an event type we don't handle. `pro_monthly` was even
+    in the old allowlist, so it reported `applied` and then normalised to `free`.
+    Raising makes the receiver answer 400 so Stripe retries and surfaces it."""
+    event = {
+        "type": "customer.subscription.updated",
+        "data": {"object": {"metadata": {"org_id": "o1", "plan": plan}}},
+    }
+    with pytest.raises(UnknownPlan) as exc:
+        plan_from_stripe_event(event)
+    assert exc.value.plan == plan
 
 
 def test_endpoint_rejects_bad_signature(monkeypatch):

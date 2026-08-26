@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # (needs the `kubernetes` client); otherwise it serves offline pod/event fixtures.
     kube_config_path: str = ""
     kube_namespace: str = "default"
+    # Binaries a runbook `command` step may execute, comma separated (e.g.
+    # "kubectl,redis-cli"). Runbooks are operator-authored text that runs against
+    # production, so the default is empty: command steps then fail with a message
+    # naming this setting instead of running anything.
+    runbook_command_allowlist: str = ""
     # Sentry connector. With an auth token it queries the real API; otherwise it
     # serves offline issue/event fixtures. SENTRY_ORG/SENTRY_PROJECT scope live calls.
     sentry_api_token: str = ""
@@ -76,6 +81,13 @@ class Settings(BaseSettings):
     # Incident-memory corpus (prior RCAs/runbooks for similarity search). Blank =
     # the bundled demo corpus; point at your own JSON to search real postmortems.
     incident_corpus_path: str = ""
+    # Evidence backends for the verification agent (claim verification, action
+    # safety). Blank means the backend is absent: the verification endpoints then
+    # refuse to answer (503) instead of reporting an unverifiable claim as
+    # "refuted". Never point these at a stub.
+    prometheus_url: str = ""   # Prometheus HTTP API base, e.g. http://prom:9090
+    loki_url: str = ""         # Loki HTTP API base, e.g. http://loki:3100
+    elasticsearch_url: str = ""  # Elasticsearch base, e.g. http://es:9200
     # Distributed-traces connector. With a Jaeger-compatible query URL it queries
     # real traces; otherwise it serves offline OpenTelemetry-style span fixtures.
     traces_api_url: str = ""
@@ -99,11 +111,11 @@ class Settings(BaseSettings):
     # GCP credentials for multi-cloud connector. Project ID + service account key.
     gcp_project_id: str = ""
     gcp_region: str = "us-central1"
-    # Azure credentials for multi-cloud connector.
+    # Azure credentials for multi-cloud connector. Only the subscription id and
+    # region are forwarded to the multicloud MCP server (app/mcp/client.py); a
+    # service-principal triple (client id/secret/tenant) was declared here and
+    # read by nothing, so it is gone rather than pretending to authenticate.
     azure_subscription_id: str = ""
-    azure_client_id: str = ""
-    azure_client_secret: str = ""
-    azure_tenant_id: str = ""
     azure_region: str = "eastus"
 
     # --- Trigger / delivery (webhooks → investigate → Slack) ---
@@ -144,6 +156,21 @@ class Settings(BaseSettings):
     # Empty = the project root, which keeps the bundled sample data working while
     # preventing the agent from being aimed at arbitrary host paths.
     copilot_sources_root: str = ""
+    # Comma-separated `host` or `host:port` values that a request may point a
+    # knowledge-graph sync source at (Prometheus, Alertmanager, Jaeger). Empty =
+    # no request may set one, which is the safe default: those URLs are fetched
+    # from inside the deployment network, so accepting an arbitrary one turns
+    # any authenticated user into an SSRF primitive against internal services
+    # and the cloud metadata endpoint. An operator naming their own observability
+    # hosts here is the only thing that should widen it.
+    copilot_sync_allowed_hosts: str = ""
+    # Comma-separated `host` or `host:port` values exempt from the outbound-URL
+    # check in app/url_guard.py, which otherwise refuses to send a status-page
+    # webhook to a loopback, link-local, private or reserved address. Empty is
+    # the right default for a hosted deployment: subscribers are customers, and
+    # their endpoints are external. Name hosts here only for an on-prem install
+    # whose subscribers genuinely are on the internal network.
+    copilot_webhook_allowed_hosts: str = ""
 
     # --- Demo mode ---
     # Several subsystems (runbook execution, remediation handlers, the Slack
@@ -194,13 +221,21 @@ class Settings(BaseSettings):
     copilot_secret_key: str = ""
 
     # --- HTTP Client Settings ---
-    # Default timeout for external HTTP requests (seconds)
+    # Default timeout for external HTTP requests (seconds). Read by the alerting
+    # webhook sender, the background task runner and the OAuth token exchange.
     http_timeout_default: float = 30.0
-    # Timeout for health checks
-    http_timeout_health: float = 5.0
-    # Timeout for GitHub API calls
+    # Timeout for GitHub REST calls. The GitHub MCP server runs as a subprocess
+    # and reads env rather than this model, so app/mcp/client.py forwards this
+    # value to it as HTTP_TIMEOUT_GITHUB.
     http_timeout_github: float = 15.0
-    # Timeout for MCP server calls
+    # Timeout for one component health check. app/health.py also derives the
+    # AGGREGATE check_all deadline from it, so raising this raises both — a fixed
+    # aggregate would otherwise silently cap any value above it.
+    http_timeout_health: float = 5.0
+    # Timeout for MCP server calls. Like HTTP_TIMEOUT_GITHUB this has to cross a
+    # process boundary to matter: app/mcp/client.py forwards it into the stdio
+    # server's env as HTTP_TIMEOUT_MCP, which app/mcp/servers/github/server.py
+    # (_mcp_timeout) reads. Unforwarded it was inert whatever the operator set.
     http_timeout_mcp: float = 20.0
 
     # --- Redis Connection Pool ---
@@ -215,38 +250,32 @@ class Settings(BaseSettings):
     redis_connection_timeout: float = 2.0
     redis_socket_timeout: float = 1.0
 
-    # --- Safety Gates Thresholds ---
-    # Confidence gate threshold (0.0 - 1.0)
+    # --- Safety gate ---
+    # The single bar for "confident enough to change production" (0.0 - 1.0).
+    # Read by the remediation decision gate (app/coordinator/handlers/
+    # remediation.py) and the verification consistency checker, which each used to
+    # carry their own literal 0.8 and could therefore drift apart.
     safety_confidence_threshold: float = 0.80
-    # Action-specific confidence thresholds (JSON string)
-    safety_action_thresholds: str = '{"rollback": 0.75, "scale_up": 0.70, "scale_down": 0.85, "restart": 0.80, "deploy_fix": 0.90, "run_command": 0.85, "create_pr": 0.70}'
-    # Max blast radius per action type (JSON string)
-    safety_max_blast_radius: str = '{"scale_down": 3, "rollback": 5, "restart": 2, "deploy_fix": 10, "run_command": 1, "scale_up": 10}'
-    # Protected services (comma-separated)
-    safety_protected_services: str = "payments,auth,database"
-
-    # --- Cost Optimization Thresholds ---
-    cost_underutilized_threshold: float = 20.0  # percentage
-    cost_idle_threshold: float = 5.0  # percentage
-    cost_anomaly_threshold: float = 1.5  # multiplier (50% increase)
-    cost_budget_alert_threshold: float = 0.8  # percentage of budget
-
-    # --- Anomaly Detection ---
-    anomaly_z_threshold: float = 3.0
-    anomaly_trend_threshold: float = 0.1
-    anomaly_pattern_threshold: float = 0.8
-
-    # --- Semantic Cache ---
-    cache_similarity_threshold_high: float = 0.95
-    cache_similarity_threshold_medium: float = 0.92
-    cache_similarity_threshold_low: float = 0.90
-    cache_max_entries_small: int = 1000
-    cache_max_entries_medium: int = 5000
-    cache_max_entries_large: int = 20000
-
-    # --- Log Clustering ---
-    log_similarity_threshold: float = 0.6
-    similar_incident_threshold: float = 0.7
+    #
+    # Deliberately absent (deleted rather than left as decoration): a knob in
+    # this file that no code reads is indistinguishable, from the operator's
+    # side, from one that is silently ignored — Settings is extra="ignore", so
+    # setting it produces no error and no effect. Removed because nothing in the
+    # tree consumes them:
+    #   SAFETY_ACTION_THRESHOLDS / SAFETY_MAX_BLAST_RADIUS /
+    #     SAFETY_PROTECTED_SERVICES — parsed only by the get_* helpers that also
+    #     lived here and had no callers (see the note at the end of this class);
+    #   COST_UNDERUTILIZED/IDLE/ANOMALY/BUDGET_ALERT_THRESHOLD — their only
+    #     reader was app/cost_optimization/analyzer.py, deleted in this branch;
+    #   ANOMALY_Z/TREND/PATTERN_THRESHOLD — app/monitoring/ambient.py, likewise
+    #     deleted (app/event_intelligence/noise_reduction.py carries its own
+    #     NoiseReductionConfig and never read these);
+    #   the CACHE_SIMILARITY_*/CACHE_MAX_ENTRIES_* sextet —
+    #     app/llm_advanced/semantic_cache.py, deleted;
+    #   LOG_SIMILARITY_THRESHOLD — app/log_intelligence/clustering.py, deleted;
+    #   SIMILAR_INCIDENT_THRESHOLD — app/similar_search/*, deleted.
+    # Re-add one only together with the line that reads it (and if one of those
+    # modules comes back, its setting comes back with it).
 
     # --- Observability ---
     langchain_tracing_v2: bool = False
@@ -274,6 +303,12 @@ class Settings(BaseSettings):
     # Stripe webhook signing secret — verifies inbound subscription events at
     # /webhooks/stripe (event → store.set_plan). Empty = the endpoint rejects (fails closed).
     stripe_webhook_secret: str = ""
+    # Stripe Price IDs for the self-serve checkout, as
+    # "team:monthly=price_123,team:annual=price_456,growth:monthly=price_789".
+    # Prices are created inside a Stripe account, so they cannot ship in the plan
+    # catalog (every PricingPlan.stripe_*_price_id is ""); without this mapping
+    # POST /billing/checkout has no price to sell and fails.
+    stripe_price_ids: str = ""
     # Supabase Auth SSO (optional). When SUPABASE_JWKS_URL is set, a Supabase-issued
     # JWT (Bearer) authenticates to the multi-tenant API, mapped to the user's org/
     # role membership. Verification uses only the PUBLIC JWKS — no Supabase secret.
@@ -291,12 +326,26 @@ class Settings(BaseSettings):
     # provisions the free plan (upgrades go through billing). Disable in locked-down
     # deployments to require admin-side provisioning (CLI / /admin).
     copilot_signup_enabled: bool = True
+    # Who may complete OAuth/SSO login. OAuth authenticates against the *provider*,
+    # not against this deployment: with GitHub login switched on and no allowlist,
+    # every GitHub account on the internet can finish the flow and be issued a
+    # session token. Comma-separated addresses and/or domains ("acme.com" matches
+    # anyone @acme.com). Empty means no allowlist — see app/auth/endpoints.py
+    # `_authorize_oauth_login` for what that permits in each mode.
+    copilot_oauth_allowed_emails: str = ""
+    copilot_oauth_allowed_domains: str = ""
     # SCIM 2.0 provisioning (enterprise SSO): a bearer token the IdP presents to the
     # /scim/v2/Users endpoints, scoped to one org. Empty = SCIM disabled (403).
     # Authentication itself is OIDC/JWT via supabase_jwks_url (app/tenancy/supabase_auth.py).
     copilot_scim_token: str = ""
     copilot_scim_org: str = ""
     copilot_scim_default_role: str = "responder"
+    # Deployment-level operator token for billing-controlled mutations (PATCH
+    # /admin/plan). This is deliberately NOT a tenant role: every self-serve signup
+    # is an org owner, so gating the plan tier on the owner role would let anyone
+    # grant themselves an enterprise plan for free. Empty = the endpoint is disabled
+    # and the plan can only change through the Stripe webhook.
+    copilot_operator_token: str = ""
 
     # --- Agent behavior ---
     # Max agent (LLM) calls per turn — bounds the agent<->tools loop.
@@ -324,13 +373,16 @@ class Settings(BaseSettings):
     # Response cache backend: "memory" (default), "redis", or "none" (disabled).
     # Redis uses COPILOT_REDIS_URL; falls back to memory if unavailable.
     copilot_cache_backend: str = "memory"
-    # Default cache TTL in seconds. Individual operations may override.
-    copilot_cache_ttl_default: int = 300
-    # Max entries in the in-memory cache (LRU eviction past this).
+    # Max entries in the in-memory cache (LRU eviction past this). Read by
+    # app/cache.py:get_cache.
     copilot_cache_max_size: int = 1000
-    # Data governance: purge usage/metering rows older than this many days (0 = keep
-    # forever). GDPR erasure + audit export are on-demand (see app/governance.py).
-    copilot_retention_days: int = 0
+    # COPILOT_CACHE_TTL_DEFAULT used to live here. The only things that would
+    # have honoured it are app/cache.py's @cached/@cached_async decorators,
+    # which nothing in app/ applies, so it was a knob with no reachable effect.
+    # COPILOT_RETENTION_DAYS likewise: app/governance.apply_retention() is
+    # never scheduled by the app, so a retention window set here would have
+    # purged nothing while promising GDPR-style pruning. Both are removed;
+    # re-add whichever one gets a caller.
     # Prompt caching (Anthropic): cache the stable system prompt + bound tool
     # schemas so the agent's many loop iterations re-read them at ~0.1x cost
     # instead of re-paying full input price each turn. No-op for other providers.
@@ -385,6 +437,12 @@ class Settings(BaseSettings):
     # before it will re-open an investigation for a still-burning service.
     copilot_slo_poll_interval_s: int = 300
     copilot_slo_cooldown_s: int = 3600
+    # How often the on-call sweeper looks for alerts whose next escalation step
+    # has come due. This is the resolution of every `delay_minutes` in every
+    # escalation policy, so it wants to be well under the shortest delay a team
+    # would configure. Not a feature flag: an on-call system that does not
+    # escalate is not on-call, so there is no "off".
+    copilot_escalation_sweep_interval_s: int = 30
     # Parallel multi-hypothesis probe: when the RCA has 2+ competing hypotheses,
     # score each concurrently against the observed evidence and re-rank them, so a
     # weakly-supported top hypothesis can't win by ordering alone. true (default).
@@ -439,6 +497,26 @@ class Settings(BaseSettings):
     # project root.
     copilot_vector_persist_dir: str = ""
 
+    # --- Knowledge graph (Neo4j) ---
+    # Bolt URI of a Neo4j server, e.g. bolt://neo4j:7687. Empty (the default)
+    # means the knowledge graph is served from the `graph_nodes`/`graph_edges`
+    # tables in `copilot_database_url` instead — durable and org-scoped, but
+    # without Cypher. When this IS set and the server cannot be reached, the
+    # knowledge-graph routes return 503 rather than silently writing somewhere
+    # else, because "the graph looks empty" is indistinguishable from "the graph
+    # says nothing depends on this service" to the person reading a blast radius.
+    copilot_neo4j_uri: str = ""
+    copilot_neo4j_username: str = "neo4j"
+    copilot_neo4j_password: str = ""
+    copilot_neo4j_database: str = "neo4j"
+
+    # --- Agent marketplace ---
+    # Where installed marketplace agents are recorded. Empty = data/marketplace-installed.json
+    # under the project root. This deliberately does NOT live in app/marketplace/:
+    # that directory is part of the image, so every install was erased by the next
+    # deploy, and a read-only rootfs made the write fail outright.
+    copilot_marketplace_state_path: str = ""
+
     # --- Database (production persistence) ---
     # Database URL: postgresql://user:pass@host:5432/db or sqlite:///path.db
     # Empty = SQLite under COPILOT_STATE_DIR (dev default).
@@ -461,22 +539,29 @@ class Settings(BaseSettings):
     # --- Logging ---
     # Log level: DEBUG | INFO | WARNING | ERROR | CRITICAL
     copilot_log_level: str = "INFO"
-    # Log format: json (production) | human (dev)
-    copilot_log_format: str = "human"
-    # Log file path (optional, stdout by default)
+    # Log format: json | text (aliases: "human" == "text"). Empty (the default)
+    # means "decide from the environment": json in production, text elsewhere.
+    # It has to be empty rather than "human", otherwise a production deployment
+    # that never set the variable would be pushed off JSON logs.
+    # Read by app/observability_core.configure_logging.
+    copilot_log_format: str = ""
+    # Log file path. Empty (the default) = stdout only; when set, records go to
+    # BOTH stdout and this file. Read by configure_logging, which creates the
+    # parent directory.
     copilot_log_file: str = ""
 
     # --- Service Metadata ---
+    # Reported to Datadog (DD_SERVICE/DD_VERSION) and Sentry (release=) by
+    # app/observability_core.py so traces and errors are grouped per deploy.
     service_name: str = "omnipotent"
     service_version: str = "1.0.0"
 
-    # --- Deployment Strategy Defaults ---
-    deployment_canary_steps: str = "10,25,50,75,100"  # percentage steps
-    deployment_max_error_rate: float = 0.05
-    deployment_max_latency_p99_ms: float = 2000.0
-    deployment_min_success_rate: float = 0.95
-    deployment_health_check_interval_s: int = 10
-    deployment_rollback_on_failure: bool = True
+    # DEPLOYMENT_* (canary steps, max error rate, max p99 latency, min success
+    # rate, health-check interval, rollback-on-failure) used to be declared here
+    # with a get_canary_steps() helper. Nothing progressive-delivery related read
+    # any of them — the canary rollout the names imply is ArgoCD's, configured in
+    # deploy/argocd/, not by this process — so they promised control the app
+    # never had. Removed rather than left as decoration.
 
     # --- Email Notifications ---
     # Email provider: smtp | ses | sendgrid | resend
@@ -571,12 +656,78 @@ class Settings(BaseSettings):
         return base + extra
 
     @property
+    def stripe_prices(self) -> dict[str, str]:
+        """`{"<plan>:<cycle>": "price_…"}` parsed from STRIPE_PRICE_IDS.
+
+        Malformed entries are dropped rather than raising: a typo in one price
+        should leave the other plans sellable, and the caller already reports
+        "no price configured for <plan> <cycle>" for whatever is missing.
+        """
+        prices: dict[str, str] = {}
+        for item in self.stripe_price_ids.split(","):
+            key, sep, value = item.partition("=")
+            if sep and key.strip() and value.strip():
+                prices[key.strip().lower()] = value.strip()
+        return prices
+
+    @property
+    def oauth_allowed_emails(self) -> set[str]:
+        """Explicit addresses permitted to log in through OAuth (lowercased)."""
+        return {
+            e.strip().lower()
+            for e in self.copilot_oauth_allowed_emails.split(",")
+            if e.strip()
+        }
+
+    @property
+    def oauth_allowed_domains(self) -> set[str]:
+        """Email domains permitted to log in through OAuth (lowercased, no '@')."""
+        return {
+            d.strip().lower().lstrip("@")
+            for d in self.copilot_oauth_allowed_domains.split(",")
+            if d.strip()
+        }
+
+    @property
+    def oauth_allowlist_configured(self) -> bool:
+        return bool(self.oauth_allowed_emails or self.oauth_allowed_domains)
+
+    def oauth_email_allowed(self, email: str) -> bool:
+        """Whether this address matches the configured allowlist.
+
+        Meaningless unless `oauth_allowlist_configured` — an empty allowlist
+        matches nothing, and callers must decide what "unconfigured" means for
+        their deployment mode rather than reading it as "deny everyone".
+        """
+        addr = (email or "").strip().lower()
+        if not addr:
+            return False
+        domain = addr.split("@")[-1] if "@" in addr else ""
+        return addr in self.oauth_allowed_emails or domain in self.oauth_allowed_domains
+
+    @property
+    def sync_allowed_hosts(self) -> set[str]:
+        """Hosts a sync-source URL may name, as lowercase `host` or `host:port`."""
+        return {
+            h.strip().lower()
+            for h in self.copilot_sync_allowed_hosts.split(",")
+            if h.strip()
+        }
+
+    @property
     def repo_path(self) -> Path:
         return (ROOT / self.target_repo_path).resolve()
 
     @property
     def logs_path(self) -> Path:
         return (ROOT / self.logs_data_path).resolve()
+
+    @property
+    def marketplace_state_path(self) -> Path:
+        raw = self.copilot_marketplace_state_path.strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+        return ROOT / "data" / "marketplace-installed.json"
 
     @property
     def sources_root(self) -> Path:
@@ -617,47 +768,15 @@ class Settings(BaseSettings):
         local demo fixtures instead of the real API."""
         return not self.github_token
 
-    def get_action_confidence_thresholds(self) -> dict[str, float]:
-        """Parse action-specific confidence thresholds from JSON string."""
-        import json
-        try:
-            return json.loads(self.safety_action_thresholds)
-        except (json.JSONDecodeError, TypeError):
-            return {
-                "rollback": 0.75,
-                "scale_up": 0.70,
-                "scale_down": 0.85,
-                "restart": 0.80,
-                "deploy_fix": 0.90,
-                "run_command": 0.85,
-                "create_pr": 0.70,
-            }
-
-    def get_max_blast_radius(self) -> dict[str, int]:
-        """Parse max blast radius per action from JSON string."""
-        import json
-        try:
-            return json.loads(self.safety_max_blast_radius)
-        except (json.JSONDecodeError, TypeError):
-            return {
-                "scale_down": 3,
-                "rollback": 5,
-                "restart": 2,
-                "deploy_fix": 10,
-                "run_command": 1,
-                "scale_up": 10,
-            }
-
-    def get_protected_services(self) -> list[str]:
-        """Parse protected services from comma-separated string."""
-        return [s.strip() for s in self.safety_protected_services.split(",") if s.strip()]
-
-    def get_canary_steps(self) -> list[int]:
-        """Parse canary deployment steps from comma-separated string."""
-        try:
-            return [int(s.strip()) for s in self.deployment_canary_steps.split(",") if s.strip()]
-        except ValueError:
-            return [10, 25, 50, 75, 100]
+    # get_action_confidence_thresholds / get_max_blast_radius /
+    # get_protected_services / get_canary_steps lived here and had no callers —
+    # they parsed SAFETY_ACTION_THRESHOLDS / SAFETY_MAX_BLAST_RADIUS /
+    # SAFETY_PROTECTED_SERVICES / DEPLOYMENT_CANARY_STEPS, settings that were
+    # themselves read by nothing, so the per-action safety gate and the canary
+    # rollout they appeared to configure did not exist. They are removed along
+    # with those fields. (SAFETY_CONFIDENCE_THRESHOLD is a different thing and
+    # survives: it is read directly by the remediation decision gate and the
+    # verification consistency checker.)
 
 
 @lru_cache

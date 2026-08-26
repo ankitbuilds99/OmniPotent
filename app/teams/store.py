@@ -1,20 +1,26 @@
-"""Database-backed storage for teams, memberships and invitations.
+"""Durable team store.
 
-Replaces `TeamStore`, whose four dicts (`_teams`, `_members`, `_invitations`,
-`_user_teams`) lived on a module-level singleton behind a router that has been
-wired into the API all along. A team created on one pod did not exist on any
-other, and everything — the team, who was in it, who had been invited — was
-destroyed on every restart, deploy and scale-down. The invitations were the
-worst of it: an invitation is a promise made to somebody outside the system,
-who has already been handed a link that then stops resolving.
+This was "In-memory store for teams (swap for database in production)" —
+four dicts on a `TeamStore` instance. Every team a customer created, every
+member they added and every invitation they sent was lost on the next restart or
+deploy, and the API gave no sign of it: create returned 200, the roster read back
+correctly, and then the process recycled. The invitations were the sharpest edge:
+an invitation is a promise made to somebody outside the system, who has already
+been handed a link that then stops resolving.
 
-Two things are now enforced by the schema rather than by a read-then-write
-check that concurrency defeats:
+`scoped(TeamStore)` gave each org its own dict, which stopped one tenant reading
+another's roster but did nothing about the loss. It is now the `teams` /
+`team_members` / `team_invitations` tables, and the isolation is an `org_id`
+filter on every statement rather than a matter of which in-process instance the
+caller happened to be handed.
 
-  A slug identifies exactly one team. The dict version de-duplicated
-  auto-generated slugs by scanning, but took a caller-supplied slug verbatim,
-  so two teams could share one and `get_team_by_slug` returned whichever the
-  scan reached first.
+Two invariants the dicts could not enforce are now the schema's job rather than
+a read-then-write check that concurrency defeats:
+
+  A slug identifies exactly one team *within an org*. The dict version
+  de-duplicated slugs it generated itself by scanning, but took a
+  caller-supplied slug verbatim, so two teams could share one and the other was
+  unreachable by its own URL.
 
   A user is in a team at most once. `(team_id, user_id)` is unique, so two
   invitation accepts racing each other cannot both add the same person.
@@ -22,28 +28,32 @@ check that concurrency defeats:
 `_user_teams` has no replacement table on purpose. It was an index from user to
 team ids maintained by hand at four call sites, which is the sort of bookkeeping
 that drifts out of step with the thing it indexes; "which teams is this user in"
-is now a query over `team_members`.
+is a query over `team_members`.
 
-Not tenant-scoped by `org_id`: a team *is* the tenant boundary this package
-offers, and its id is the scope. The store deals in the Pydantic models from
-`app/teams/models.py`, so callers see the same shapes they did before.
+Every method is async and opens its own session; there is no per-org instance to
+keep, so `get_team_store()` returns one stateless object.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import AsyncGenerator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Iterable, Sequence, cast
-from uuid import uuid4
+from typing import Any
+from uuid import UUID, uuid4
 
-from sqlalchemy import CursorResult, ColumnElement, delete, func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.database.engine import ensure_schema, get_session
-from app.database.models import TeamInvitationRecord, TeamMemberRecord, TeamRecord
+from app.database.orgs import ensure_org_row, org_uuid
+
+# `INVITATION_TTL` is how long an invitation stays redeemable. It lives next to
+# the model default it mirrors (`TeamInvitation.expires_at`), which is what the
+# API documents, and is imported rather than restated so the row written here
+# cannot drift from it.
 from app.teams.models import (
     INVITATION_TTL,
     InvitationStatus,
@@ -65,41 +75,46 @@ _SLUG_RETRIES = 4
 _UPDATABLE_TEAM_FIELDS = frozenset({"name", "settings"})
 
 
-class SlugTaken(RuntimeError):
-    """A slug the caller asked for already belongs to another team."""
+class SlugTaken(ValueError):
+    """The caller asked for a slug another team in this org already holds."""
 
     def __init__(self, slug: str) -> None:
-        super().__init__(f"Slug already in use: {slug}")
+        super().__init__(f"A team with the slug {slug!r} already exists.")
         self.slug = slug
 
 
 @asynccontextmanager
-async def _session() -> AsyncGenerator[AsyncSession, None]:
+async def _session() -> AsyncGenerator[Any, None]:
     """A session against a schema that is guaranteed to exist.
 
     Callers reach this outside the API lifespan (a worker, a script, a test), so
-    the schema check cannot be assumed to have happened at startup.
+    the startup schema check cannot be assumed to have run. `ensure_schema()` is
+    a no-op after the first call.
     """
+    from app.database.engine import ensure_schema, get_session
+
     await ensure_schema()
     async with get_session() as session:
         yield session
 
 
-def _utc(value: datetime | None) -> datetime | None:
-    """Re-attach UTC to a datetime read back from SQLite.
-
-    SQLite has no timezone type, so a value written as aware comes back naive
-    and would serialize without an offset — which a client reads as local time.
-    """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _utc(value: datetime | None) -> Any:
+    """Read a timestamp back as UTC-aware.
+
+    SQLite, the default database, has no timezone type: a
+    `DateTime(timezone=True)` column round trips to a naive datetime. Everything
+    written here is UTC, but without this an `expires_at` read from SQLite
+    cannot be compared against `_now()` at all — naive-vs-aware raises TypeError
+    — and it would serialize without an offset, which a client reads as local
+    time.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
 
 
 def _slugify(value: str) -> str:
@@ -112,17 +127,13 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
-# --------------------------------------------------------------------------
-# Row -> model
-# --------------------------------------------------------------------------
-
-
 def _to_role(value: str, *, context: str) -> TeamRole:
     """Read a role back, degrading to the least privilege we can grant.
 
     A role we cannot parse is a row somebody wrote by hand or a value from a
     future revision. Treating it as VIEWER shows the member in listings without
-    letting an unreadable string authorize anything.
+    letting an unreadable string authorize anything — and without raising
+    ValueError out of a plain listing, which is a 500.
     """
     try:
         return TeamRole(value)
@@ -142,7 +153,7 @@ def _to_status(value: str, *, context: str) -> InvitationStatus:
         return InvitationStatus.EXPIRED
 
 
-def _to_team(row: TeamRecord) -> Team:
+def _to_team(row: Any) -> Team:
     created = _utc(row.created_at) or _now()
     return Team(
         id=row.id,
@@ -155,7 +166,7 @@ def _to_team(row: TeamRecord) -> Team:
     )
 
 
-def _to_member(row: TeamMemberRecord) -> TeamMember:
+def _to_member(row: Any) -> TeamMember:
     return TeamMember(
         id=row.id,
         team_id=row.team_id,
@@ -167,7 +178,7 @@ def _to_member(row: TeamMemberRecord) -> TeamMember:
     )
 
 
-def _to_invitation(row: TeamInvitationRecord) -> TeamInvitation:
+def _to_invitation(row: Any) -> TeamInvitation:
     return TeamInvitation(
         id=row.id,
         team_id=row.team_id,
@@ -181,546 +192,667 @@ def _to_invitation(row: TeamInvitationRecord) -> TeamInvitation:
     )
 
 
-# --------------------------------------------------------------------------
-# Teams
-# --------------------------------------------------------------------------
+class TeamStore:
+    """Team persistence for the org on the current request.
 
-
-async def _free_slug(session: AsyncSession, base: str) -> str:
-    """The first of `base`, `base-1`, `base-2`, ... that no team holds.
-
-    Only slugs sharing the prefix are read, rather than every team's, which is
-    what the dict version scanned. `base` comes out of `_slugify`, so it holds
-    no LIKE wildcards to escape.
+    Stateless: every method opens its own session and filters on `org_uuid()`.
     """
-    taken = set(
-        (
-            await session.execute(
-                select(TeamRecord.slug).where(
-                    (TeamRecord.slug == base) | (TeamRecord.slug.startswith(f"{base}-"))
+
+    # --- teams ------------------------------------------------------------ #
+
+    async def _generate_slug(self, session: Any, org: UUID, base: str) -> str:
+        """The first of `base`, `base-1`, `base-2`, … no team in this org holds.
+
+        Only slugs sharing the prefix are read, rather than every team's, which
+        is what the dict version scanned. `base` comes out of `_slugify`, so it
+        holds no LIKE wildcards to escape.
+        """
+        from app.database.team_models import TeamDB
+
+        taken = set(
+            (
+                await session.execute(
+                    select(TeamDB.slug).where(
+                        TeamDB.org_id == org,
+                        (TeamDB.slug == base) | (TeamDB.slug.startswith(f"{base}-")),
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    if base not in taken:
-        return base
-    counter = 1
-    while f"{base}-{counter}" in taken:
-        counter += 1
-    return f"{base}-{counter}"
+        if base not in taken:
+            return base
+        counter = 1
+        while f"{base}-{counter}" in taken:
+            counter += 1
+        return f"{base}-{counter}"
 
+    async def create_team(
+        self, name: str, owner_id: str, owner_email: str, slug: str | None = None
+    ) -> Team:
+        """Create a team with the caller as its owner.
 
-async def create_team(
-    name: str, owner_id: str, owner_email: str, slug: str | None = None
-) -> Team:
-    """Create a team with its owner as the first member, in one transaction.
+        A caller-supplied slug is normalised but never disambiguated: it raises
+        `SlugTaken` if another team in this org holds it, because handing back a
+        different slug than the one asked for silently breaks whatever link the
+        caller was about to publish. The in-memory version only de-duplicated
+        slugs it generated itself, so a caller-supplied duplicate was accepted
+        and produced two teams sharing a URL.
 
-    A caller-supplied slug is normalised but never disambiguated: raises
-    `SlugTaken` if it belongs to another team, because handing back a different
-    slug than the one asked for silently breaks whatever link the caller was
-    about to publish. A slug we generate ourselves *is* disambiguated, with a
-    counted suffix, and the whole insert is retried if another writer claims it
-    first.
-    """
-    requested = _slugify(slug) if slug else ""
-    # A name of pure punctuation slugifies to nothing; "team-1", "team-2" is a
-    # worse URL than the name deserved but a better one than "".
-    base = _slugify(name) or "team"
+        A slug we generate ourselves *is* disambiguated with a counted suffix,
+        and the whole insert is retried if another writer claims it first —
+        nobody is holding a link to it yet.
+        """
+        from app.database.team_models import TeamDB, TeamMemberDB
 
-    for attempt in range(_SLUG_RETRIES):
-        async with _session() as session:
-            if requested:
-                chosen = requested
-            elif attempt < _SLUG_RETRIES - 1:
-                chosen = await _free_slug(session, base)
-            else:
-                # Every counted suffix was claimed before we could write it.
-                # Stop competing for a tidy slug and take one nobody is racing.
-                chosen = f"{base}-{uuid4().hex[:8]}"
+        requested = _slugify(slug) if slug else ""
+        # A name of pure punctuation slugifies to nothing; "team-1", "team-2" is
+        # a worse URL than the name deserved but a better one than "".
+        base = _slugify(name) or "team"
 
-            now = _now()
-            team_id = str(uuid4())
-            session.add(
-                TeamRecord(
+        for attempt in range(_SLUG_RETRIES):
+            async with _session() as session:
+                org = await ensure_org_row(session)
+                if requested:
+                    chosen = requested
+                elif attempt < _SLUG_RETRIES - 1:
+                    chosen = await self._generate_slug(session, org, base)
+                else:
+                    # Every counted suffix was claimed before we could write it.
+                    # Stop competing for a tidy slug and take one nobody races.
+                    chosen = f"{base}-{uuid4().hex[:8]}"
+
+                team_id = str(uuid4())
+                team = TeamDB(
                     id=team_id,
+                    org_id=org,
                     name=name,
                     slug=chosen,
                     owner_id=owner_id,
                     settings={},
-                    created_at=now,
-                    updated_at=now,
+                )
+                session.add(team)
+                session.add(
+                    TeamMemberDB(
+                        org_id=org,
+                        team_id=team_id,
+                        user_id=owner_id,
+                        email=owner_email or "",
+                        role=TeamRole.OWNER.value,
+                    )
+                )
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    await session.rollback()
+                    if requested:
+                        raise SlugTaken(requested) from None
+                    log.info(
+                        "Team slug %r was claimed concurrently; retrying (%d/%d)",
+                        chosen,
+                        attempt + 1,
+                        _SLUG_RETRIES,
+                    )
+                    continue
+                await session.refresh(team)
+                return _to_team(team)
+
+        log.error(
+            "Gave up assigning a team slug for %r after %d attempts", name, _SLUG_RETRIES
+        )
+        raise SlugTaken(base)
+
+    async def get_team(self, team_id: str) -> Team | None:
+        async with _session() as session:
+            row = await self._team_row(session, team_id)
+            return _to_team(row) if row else None
+
+    async def get_team_by_slug(self, slug: str) -> Team | None:
+        """The team holding a slug in this org.
+
+        The dict version scanned every team and returned whichever one it
+        reached first when two shared a slug; `uq_team_org_slug` makes that
+        ambiguity impossible.
+        """
+        from app.database.team_models import TeamDB
+
+        if not slug:
+            return None
+        async with _session() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(TeamDB).where(
+                            TeamDB.slug == slug, TeamDB.org_id == org_uuid()
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            return _to_team(row) if row else None
+
+    async def _team_row(self, session: Any, team_id: str) -> Any:
+        from app.database.team_models import TeamDB
+
+        if not _looks_like_uuid(team_id):
+            # The id is a UUID column; a non-UUID path parameter is a 404, not a
+            # DataError that surfaces as a 500.
+            return None
+        return (
+            await session.execute(
+                select(TeamDB).where(TeamDB.id == team_id, TeamDB.org_id == org_uuid())
+            )
+        ).scalar_one_or_none()
+
+    async def update_team(self, team_id: str, updates: dict[str, Any]) -> Team | None:
+        """Update a team's name and/or settings. Other keys are ignored."""
+        async with _session() as session:
+            row = await self._team_row(session, team_id)
+            if row is None:
+                return None
+            for key, value in updates.items():
+                if value is not None and key in _UPDATABLE_TEAM_FIELDS:
+                    # Reassigned rather than mutated: SQLAlchemy only marks a
+                    # JSON column dirty on assignment, so an in-place edit of
+                    # `settings` is dropped on commit.
+                    setattr(row, key, dict(value) if key == "settings" else value)
+            row.updated_at = _now()
+            await session.commit()
+            await session.refresh(row)
+            return _to_team(row)
+
+    async def delete_team(self, team_id: str) -> bool:
+        """Delete a team along with its roster and invitations."""
+        from app.database.team_models import TeamDB
+
+        async with _session() as session:
+            if not _looks_like_uuid(team_id):
+                return False
+            row = (
+                await session.execute(
+                    select(TeamDB)
+                    .options(selectinload(TeamDB.members), selectinload(TeamDB.invitations))
+                    .where(TeamDB.id == team_id, TeamDB.org_id == org_uuid())
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            # Deleting through the ORM rather than issuing a bare DELETE: the FK
+            # is ON DELETE CASCADE, but SQLite does not enforce foreign keys
+            # unless PRAGMA foreign_keys is on, so on the default database the
+            # children would be orphaned rather than removed.
+            await session.delete(row)
+            await session.commit()
+            return True
+
+    async def get_user_teams(self, user_id: str) -> list[tuple[Team, TeamRole, int]]:
+        """Every team the user belongs to, with their role and the member count.
+
+        The count comes back in the same query. The router used to call
+        `get_members()` once per team purely to call `len()` on it, which is a
+        query per row on the team list page.
+        """
+        from app.database.team_models import TeamDB, TeamMemberDB
+
+        org = org_uuid()
+        counts = (
+            select(TeamMemberDB.team_id, func.count().label("n"))
+            .where(TeamMemberDB.org_id == org)
+            .group_by(TeamMemberDB.team_id)
+            .subquery()
+        )
+        async with _session() as session:
+            rows = (
+                await session.execute(
+                    select(TeamDB, TeamMemberDB.role, func.coalesce(counts.c.n, 0))
+                    .join(TeamMemberDB, TeamMemberDB.team_id == TeamDB.id)
+                    .outerjoin(counts, counts.c.team_id == TeamDB.id)
+                    .where(
+                        TeamDB.org_id == org,
+                        TeamMemberDB.org_id == org,
+                        TeamMemberDB.user_id == user_id,
+                    )
+                    .order_by(TeamDB.created_at)
+                )
+            ).all()
+            return [
+                (_to_team(team), _to_role(role, context=f"team {team.id}"), int(count))
+                for team, role, count in rows
+            ]
+
+    # --- members ----------------------------------------------------------- #
+
+    async def member_counts(self, team_ids: Sequence[str]) -> dict[str, int]:
+        """Member counts for several teams at once, as one grouped query.
+
+        `get_user_teams` already carries the count for the listing it returns;
+        this is for a caller holding ids from somewhere else, and exists because
+        asking for a count one team at a time makes a listing of N teams cost
+        N+1 round trips. Ids that cannot be a UUID count zero rather than
+        reaching the database.
+        """
+        from app.database.team_models import TeamMemberDB
+
+        ids = list(team_ids)
+        usable = [team_id for team_id in ids if _looks_like_uuid(team_id)]
+        counted: dict[str, int] = {}
+        if usable:
+            async with _session() as session:
+                rows = (
+                    await session.execute(
+                        select(TeamMemberDB.team_id, func.count())
+                        .where(
+                            TeamMemberDB.team_id.in_(usable),
+                            TeamMemberDB.org_id == org_uuid(),
+                        )
+                        .group_by(TeamMemberDB.team_id)
+                    )
+                ).all()
+            counted = {str(team_id): int(total) for team_id, total in rows}
+        return {team_id: counted.get(team_id, 0) for team_id in ids}
+
+    async def count_members(self, team_id: str) -> int:
+        from app.database.team_models import TeamMemberDB
+
+        if not _looks_like_uuid(team_id):
+            return 0
+        async with _session() as session:
+            return int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(TeamMemberDB)
+                        .where(
+                            TeamMemberDB.team_id == team_id,
+                            TeamMemberDB.org_id == org_uuid(),
+                        )
+                    )
+                ).scalar_one()
+            )
+
+    async def get_members(self, team_id: str) -> list[TeamMember]:
+        from app.database.team_models import TeamMemberDB
+
+        if not _looks_like_uuid(team_id):
+            return []
+        async with _session() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(TeamMemberDB)
+                        .where(
+                            TeamMemberDB.team_id == team_id,
+                            TeamMemberDB.org_id == org_uuid(),
+                        )
+                        # `id` breaks the tie: two members added in the same
+                        # transaction share a `joined_at` to the microsecond,
+                        # and an unordered pair makes the roster shuffle
+                        # between requests.
+                        .order_by(TeamMemberDB.joined_at, TeamMemberDB.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [_to_member(row) for row in rows]
+
+    async def get_member(self, team_id: str, user_id: str) -> TeamMember | None:
+        async with _session() as session:
+            row = await self._member_row(session, team_id, user_id)
+            return _to_member(row) if row else None
+
+    async def _member_row(self, session: Any, team_id: str, user_id: str) -> Any:
+        from app.database.team_models import TeamMemberDB
+
+        if not _looks_like_uuid(team_id):
+            return None
+        return (
+            await session.execute(
+                select(TeamMemberDB).where(
+                    TeamMemberDB.team_id == team_id,
+                    TeamMemberDB.user_id == user_id,
+                    TeamMemberDB.org_id == org_uuid(),
                 )
             )
-            session.add(
-                TeamMemberRecord(
-                    id=str(uuid4()),
-                    team_id=team_id,
-                    user_id=owner_id,
-                    email=owner_email,
-                    role=TeamRole.OWNER.value,
-                    joined_at=now,
+        ).scalar_one_or_none()
+
+    async def get_member_by_email(self, team_id: str, email: str) -> TeamMember | None:
+        from app.database.team_models import TeamMemberDB
+
+        if not _looks_like_uuid(team_id):
+            return None
+        async with _session() as session:
+            row = (
+                await session.execute(
+                    select(TeamMemberDB).where(
+                        TeamMemberDB.team_id == team_id,
+                        func.lower(TeamMemberDB.email) == email.strip().lower(),
+                        TeamMemberDB.org_id == org_uuid(),
+                    )
                 )
+            ).scalar_one_or_none()
+            return _to_member(row) if row else None
+
+    async def add_member(
+        self, team_id: str, user_id: str, email: str, role: TeamRole = TeamRole.MEMBER
+    ) -> TeamMember | None:
+        from app.database.team_models import TeamMemberDB
+
+        async with _session() as session:
+            team = await self._team_row(session, team_id)
+            if team is None:
+                return None
+            if await self._member_row(session, team_id, user_id) is not None:
+                return None
+            row = TeamMemberDB(
+                org_id=team.org_id,
+                team_id=team_id,
+                user_id=user_id,
+                email=email or "",
+                role=role.value,
+                # Set explicitly, though NULL is what it would be anyway: a
+                # column left out of the INSERT is not loaded on the instance
+                # afterwards, and reading it back to build the response would
+                # emit a lazy SELECT that raises under asyncio.
+                last_active=None,
             )
+            session.add(row)
             try:
                 await session.commit()
             except IntegrityError:
+                # Two accepts of the same invitation raced; uq_team_member won.
                 await session.rollback()
-                if requested:
-                    raise SlugTaken(requested) from None
-                log.info(
-                    "Team slug %r was claimed concurrently; retrying (%d/%d)",
-                    chosen,
-                    attempt + 1,
-                    _SLUG_RETRIES,
-                )
-                continue
+                return None
+            await session.refresh(row)
+            return _to_member(row)
 
-            return Team(
-                id=team_id,
-                name=name,
-                slug=chosen,
-                owner_id=owner_id,
-                created_at=now,
-                updated_at=now,
-                settings={},
-            )
-
-    log.error("Gave up assigning a team slug for %r after %d attempts", name, _SLUG_RETRIES)
-    raise SlugTaken(base)
-
-
-async def get_team(team_id: str) -> Team | None:
-    """Get team by ID."""
-    async with _session() as session:
-        row = await session.get(TeamRecord, team_id)
-        return _to_team(row) if row is not None else None
-
-
-async def get_team_by_slug(slug: str) -> Team | None:
-    """Get team by slug. Unique, so this can no longer return an arbitrary one."""
-    async with _session() as session:
-        row = (
-            await session.execute(select(TeamRecord).where(TeamRecord.slug == slug))
-        ).scalars().first()
-        return _to_team(row) if row is not None else None
-
-
-async def update_team(team_id: str, updates: dict[str, Any]) -> Team | None:
-    """Update a team's name and/or settings. Other keys are ignored."""
-    async with _session() as session:
-        row = await session.get(TeamRecord, team_id)
-        if row is None:
-            return None
-        for key, value in updates.items():
-            if key in _UPDATABLE_TEAM_FIELDS and value is not None:
-                # Reassigned rather than mutated: SQLAlchemy only marks a JSON
-                # column dirty on assignment, so an in-place edit is dropped.
-                setattr(row, key, dict(value) if key == "settings" else value)
-        row.updated_at = _now()
-        await session.commit()
-        return _to_team(row)
-
-
-async def delete_team(team_id: str) -> bool:
-    """Delete a team with its members and invitations, in one transaction."""
-    async with _session() as session:
-        row = await session.get(TeamRecord, team_id)
-        if row is None:
-            return False
-        await session.execute(
-            delete(TeamMemberRecord).where(TeamMemberRecord.team_id == team_id)
-        )
-        await session.execute(
-            delete(TeamInvitationRecord).where(TeamInvitationRecord.team_id == team_id)
-        )
-        await session.delete(row)
-        await session.commit()
-        return True
-
-
-async def get_user_teams(user_id: str) -> list[tuple[Team, TeamRole]]:
-    """Every team this user belongs to, with their role, oldest membership first.
-
-    Derived from `team_members` rather than from a parallel user→teams index, so
-    it cannot disagree with the membership rows themselves.
-    """
-    stmt = (
-        select(TeamRecord, TeamMemberRecord.role)
-        .join(TeamMemberRecord, TeamMemberRecord.team_id == TeamRecord.id)
-        .where(TeamMemberRecord.user_id == user_id)
-        .order_by(TeamMemberRecord.joined_at.asc(), TeamRecord.id.asc())
-    )
-    async with _session() as session:
-        rows = (await session.execute(stmt)).all()
-
-    return [
-        (_to_team(team), _to_role(role, context=f"team {team.id}")) for team, role in rows
-    ]
-
-
-async def member_counts(team_ids: Sequence[str]) -> dict[str, int]:
-    """Member counts for several teams at once, as one grouped query.
-
-    Exists because the team listing shows a count per team, and asking for it
-    one team at a time makes a listing of N teams cost N+1 round trips.
-    """
-    ids = list(team_ids)
-    if not ids:
-        return {}
-    stmt = (
-        select(TeamMemberRecord.team_id, func.count())
-        .where(TeamMemberRecord.team_id.in_(ids))
-        .group_by(TeamMemberRecord.team_id)
-    )
-    async with _session() as session:
-        counted = {team_id: int(n) for team_id, n in (await session.execute(stmt)).all()}
-    return {team_id: counted.get(team_id, 0) for team_id in ids}
-
-
-async def count_members(team_id: str) -> int:
-    """How many members a team has, without loading them."""
-    async with _session() as session:
-        total = (
-            await session.execute(
-                select(func.count())
-                .select_from(TeamMemberRecord)
-                .where(TeamMemberRecord.team_id == team_id)
-            )
-        ).scalar()
-        return int(total or 0)
-
-
-# --------------------------------------------------------------------------
-# Members
-# --------------------------------------------------------------------------
-
-
-async def get_members(team_id: str) -> list[TeamMember]:
-    """All members of a team, in the order they joined — owner first."""
-    stmt = (
-        select(TeamMemberRecord)
-        .where(TeamMemberRecord.team_id == team_id)
-        .order_by(TeamMemberRecord.joined_at.asc(), TeamMemberRecord.id.asc())
-    )
-    async with _session() as session:
-        rows = (await session.execute(stmt)).scalars().all()
-    return [_to_member(row) for row in rows]
-
-
-async def get_member(team_id: str, user_id: str) -> TeamMember | None:
-    """Get a specific member."""
-    async with _session() as session:
-        row = await _member_row(session, team_id, user_id)
-        return _to_member(row) if row is not None else None
-
-
-async def _member_row(
-    session: AsyncSession, team_id: str, user_id: str
-) -> TeamMemberRecord | None:
-    return (
-        await session.execute(
-            select(TeamMemberRecord).where(
-                TeamMemberRecord.team_id == team_id,
-                TeamMemberRecord.user_id == user_id,
-            )
-        )
-    ).scalars().first()
-
-
-async def get_member_by_email(team_id: str, email: str) -> TeamMember | None:
-    """Get member by email, matched case-insensitively as addresses are."""
-    async with _session() as session:
-        row = (
-            await session.execute(
-                select(TeamMemberRecord).where(
-                    TeamMemberRecord.team_id == team_id,
-                    func.lower(TeamMemberRecord.email) == email.lower(),
-                )
-            )
-        ).scalars().first()
-        return _to_member(row) if row is not None else None
-
-
-async def add_member(
-    team_id: str, user_id: str, email: str, role: TeamRole = TeamRole.MEMBER
-) -> TeamMember | None:
-    """Add a member to a team. None if the team is gone or they are already in it.
-
-    "Already a member" is answered by the unique constraint rather than by a
-    prior SELECT, so two accepts racing each other produce one membership and
-    one None instead of two rows.
-    """
-    now = _now()
-    row = TeamMemberRecord(
-        id=str(uuid4()),
-        team_id=team_id,
-        user_id=user_id,
-        email=email,
-        role=role.value,
-        joined_at=now,
-        # Set explicitly, though NULL is what it would be anyway: a column left
-        # out of the INSERT is not loaded on the instance afterwards, and
-        # reading it back to build the response would emit a lazy SELECT that
-        # raises under asyncio.
-        last_active=None,
-    )
-    async with _session() as session:
-        if await session.get(TeamRecord, team_id) is None:
-            return None
-        session.add(row)
-        try:
+    async def update_member_role(
+        self, team_id: str, user_id: str, role: TeamRole
+    ) -> TeamMember | None:
+        async with _session() as session:
+            row = await self._member_row(session, team_id, user_id)
+            if row is None or row.role == TeamRole.OWNER.value:
+                return None  # the owner's role is not changeable
+            row.role = role.value
             await session.commit()
-        except IntegrityError:
-            await session.rollback()
-            return None
-        return _to_member(row)
+            await session.refresh(row)
+            return _to_member(row)
 
+    async def remove_member(self, team_id: str, user_id: str) -> bool:
+        async with _session() as session:
+            row = await self._member_row(session, team_id, user_id)
+            if row is None or row.role == TeamRole.OWNER.value:
+                return False  # the owner cannot be removed
+            await session.delete(row)
+            await session.commit()
+            return True
 
-async def update_member_role(
-    team_id: str, user_id: str, role: TeamRole
-) -> TeamMember | None:
-    """Update a member's role. The owner's role cannot be changed."""
-    async with _session() as session:
-        row = await _member_row(session, team_id, user_id)
-        if row is None or row.role == TeamRole.OWNER.value:
-            return None
-        row.role = role.value
-        await session.commit()
-        return _to_member(row)
+    async def update_member_activity(self, team_id: str, user_id: str) -> None:
+        """Stamp a member's last-active time. Silent if they are not a member."""
+        async with _session() as session:
+            row = await self._member_row(session, team_id, user_id)
+            if row is not None:
+                row.last_active = _now()
+                await session.commit()
 
+    # --- invitations ------------------------------------------------------- #
 
-async def remove_member(team_id: str, user_id: str) -> bool:
-    """Remove a member. The owner cannot be removed; delete the team instead."""
-    async with _session() as session:
-        row = await _member_row(session, team_id, user_id)
-        if row is None or row.role == TeamRole.OWNER.value:
-            return False
-        await session.delete(row)
-        await session.commit()
-        return True
+    async def _expire_stale(self, session: Any) -> None:
+        """Flip pending invitations that have run out of time.
 
+        The in-memory store did this on read by mutating the object it was about
+        to return, so an invitation only expired if somebody happened to list
+        it, and it was never written down. Doing it as one UPDATE means
+        `accept_invitation` sees the same truth as `get_invitations`.
+        """
+        from app.database.team_models import TeamInvitationDB
 
-async def update_member_activity(team_id: str, user_id: str) -> None:
-    """Stamp a member's last-active time. Silent if they are not a member."""
-    async with _session() as session:
         await session.execute(
-            update(TeamMemberRecord)
+            update(TeamInvitationDB)
             .where(
-                TeamMemberRecord.team_id == team_id,
-                TeamMemberRecord.user_id == user_id,
+                TeamInvitationDB.org_id == org_uuid(),
+                TeamInvitationDB.status == InvitationStatus.PENDING.value,
+                TeamInvitationDB.expires_at < _now(),
             )
-            .values(last_active=_now())
+            .values(status=InvitationStatus.EXPIRED.value)
+            # Nothing is loaded in this session yet, so there is no in-memory
+            # state to reconcile.
             .execution_options(synchronize_session=False)
         )
         await session.commit()
 
+    async def get_invitations(self, team_id: str) -> list[TeamInvitation]:
+        """Pending invitations for a team, oldest first."""
+        from app.database.team_models import TeamInvitationDB
 
-# --------------------------------------------------------------------------
-# Invitations
-# --------------------------------------------------------------------------
-
-
-async def _expire_stale(
-    session: AsyncSession, *where: ColumnElement[bool]
-) -> None:
-    """Flip pending invitations past their expiry to EXPIRED, and persist it.
-
-    Expiry is evaluated on read, as it was in memory: nothing sweeps this table
-    on a timer, so a row becomes EXPIRED the first time somebody looks at it.
-    `accept_invitation` re-checks `expires_at` regardless of status, so an
-    invitation nobody has looked at is still not acceptable.
-    """
-    await session.execute(
-        update(TeamInvitationRecord)
-        .where(
-            TeamInvitationRecord.status == InvitationStatus.PENDING.value,
-            TeamInvitationRecord.expires_at < _now(),
-            *where,
-        )
-        .values(status=InvitationStatus.EXPIRED.value)
-        # Nothing is loaded in this session yet, so there is no in-memory state
-        # to reconcile — and the criteria here are not all Python-evaluable.
-        .execution_options(synchronize_session=False)
-    )
-
-
-async def get_invitations(team_id: str) -> list[TeamInvitation]:
-    """Pending invitations for a team, oldest first."""
-    async with _session() as session:
-        await _expire_stale(session, TeamInvitationRecord.team_id == team_id)
-        rows = (
-            await session.execute(
-                select(TeamInvitationRecord)
-                .where(
-                    TeamInvitationRecord.team_id == team_id,
-                    TeamInvitationRecord.status == InvitationStatus.PENDING.value,
+        if not _looks_like_uuid(team_id):
+            return []
+        async with _session() as session:
+            await self._expire_stale(session)
+            rows = (
+                (
+                    await session.execute(
+                        select(TeamInvitationDB)
+                        .where(
+                            TeamInvitationDB.team_id == team_id,
+                            TeamInvitationDB.org_id == org_uuid(),
+                            TeamInvitationDB.status == InvitationStatus.PENDING.value,
+                        )
+                        .order_by(TeamInvitationDB.created_at, TeamInvitationDB.id)
+                    )
                 )
-                .order_by(
-                    TeamInvitationRecord.created_at.asc(),
-                    TeamInvitationRecord.id.asc(),
-                )
+                .scalars()
+                .all()
             )
-        ).scalars().all()
-        await session.commit()
-    return [_to_invitation(row) for row in rows]
+            return [_to_invitation(row) for row in rows]
 
+    async def get_invitation(self, invitation_id: str) -> TeamInvitation | None:
+        async with _session() as session:
+            row = await self._invitation_row(session, invitation_id)
+            return _to_invitation(row) if row else None
 
-async def get_invitation(invitation_id: str) -> TeamInvitation | None:
-    """Get invitation by ID, whatever its status."""
-    async with _session() as session:
-        row = await session.get(TeamInvitationRecord, invitation_id)
-        return _to_invitation(row) if row is not None else None
+    async def _invitation_row(self, session: Any, invitation_id: str) -> Any:
+        from app.database.team_models import TeamInvitationDB
 
-
-async def get_invitation_by_email(team_id: str, email: str) -> TeamInvitation | None:
-    """Get a team's pending invitation for one address."""
-    async with _session() as session:
-        await _expire_stale(session, TeamInvitationRecord.team_id == team_id)
-        row = (
-            await session.execute(
-                select(TeamInvitationRecord).where(
-                    TeamInvitationRecord.team_id == team_id,
-                    func.lower(TeamInvitationRecord.email) == email.lower(),
-                    TeamInvitationRecord.status == InvitationStatus.PENDING.value,
-                )
-            )
-        ).scalars().first()
-        await session.commit()
-        return _to_invitation(row) if row is not None else None
-
-
-async def create_invitation(
-    team_id: str, email: str, role: TeamRole, invited_by: str
-) -> TeamInvitation | None:
-    """Invite an address to a team.
-
-    None if the team is gone, the address is already a member, or it already has
-    a pending invitation. Those last two are read-then-write checks, as they were
-    before: a duplicate invitation is not enforceable by a unique constraint
-    without forbidding a second invitation after a first was cancelled. Losing
-    that race sends one person two emails; whichever they accept, the other stays
-    pending and expires.
-    """
-    if await get_member_by_email(team_id, email) is not None:
-        return None
-    if await get_invitation_by_email(team_id, email) is not None:
-        return None
-
-    now = _now()
-    row = TeamInvitationRecord(
-        id=str(uuid4()),
-        team_id=team_id,
-        email=email,
-        role=role.value,
-        invited_by=invited_by,
-        status=InvitationStatus.PENDING.value,
-        created_at=now,
-        expires_at=now + INVITATION_TTL,
-        accepted_at=None,
-    )
-    async with _session() as session:
-        if await session.get(TeamRecord, team_id) is None:
+        if not _looks_like_uuid(invitation_id):
             return None
-        session.add(row)
-        await session.commit()
-        return _to_invitation(row)
-
-
-async def accept_invitation(
-    invitation_id: str, user_id: str
-) -> tuple[TeamInvitation | None, TeamMember | None]:
-    """Accept an invitation and join the team.
-
-    Returns the invitation alongside the membership it produced, or `(inv, None)`
-    when it cannot be accepted — expired, already resolved, or the user is
-    already in the team — so the caller can say which.
-    """
-    async with _session() as session:
-        row = await session.get(TeamInvitationRecord, invitation_id)
-        if row is None:
-            return None, None
-
-        if row.status != InvitationStatus.PENDING.value:
-            return _to_invitation(row), None
-
-        # Checked against the timestamp, not the status: expiry is only written
-        # when somebody reads the invitation, and this may be the first read.
-        if (_utc(row.expires_at) or _now()) < _now():
-            row.status = InvitationStatus.EXPIRED.value
-            await session.commit()
-            return _to_invitation(row), None
-
-        team_id, email, role = row.team_id, row.email, row.role
-
-    member = await add_member(
-        team_id, user_id, email, _to_role(role, context=f"invitation {invitation_id}")
-    )
-
-    async with _session() as session:
-        row = await session.get(TeamInvitationRecord, invitation_id)
-        if row is None:
-            return None, member
-        if member is not None:
-            row.status = InvitationStatus.ACCEPTED.value
-            row.accepted_at = _now()
-            await session.commit()
-        return _to_invitation(row), member
-
-
-async def cancel_invitation(invitation_id: str) -> bool:
-    """Cancel a pending invitation. False if it was already resolved."""
-    async with _session() as session:
-        result = await session.execute(
-            update(TeamInvitationRecord)
-            .where(
-                TeamInvitationRecord.id == invitation_id,
-                TeamInvitationRecord.status == InvitationStatus.PENDING.value,
-            )
-            .values(status=InvitationStatus.CANCELLED.value)
-            .execution_options(synchronize_session=False)
-        )
-        await session.commit()
-        return cast("CursorResult[Any]", result).rowcount > 0
-
-
-async def get_user_pending_invitations(email: str) -> list[tuple[TeamInvitation, Team]]:
-    """Every team currently waiting on this address, newest invitation first."""
-    async with _session() as session:
-        await _expire_stale(
-            session, func.lower(TeamInvitationRecord.email) == email.lower()
-        )
-        rows = (
+        return (
             await session.execute(
-                select(TeamInvitationRecord, TeamRecord)
-                .join(TeamRecord, TeamRecord.id == TeamInvitationRecord.team_id)
-                .where(
-                    func.lower(TeamInvitationRecord.email) == email.lower(),
-                    TeamInvitationRecord.status == InvitationStatus.PENDING.value,
-                )
-                .order_by(
-                    TeamInvitationRecord.created_at.desc(),
-                    TeamInvitationRecord.id.asc(),
+                select(TeamInvitationDB).where(
+                    TeamInvitationDB.id == invitation_id,
+                    TeamInvitationDB.org_id == org_uuid(),
                 )
             )
-        ).all()
-        await session.commit()
-    return [(_to_invitation(inv), _to_team(team)) for inv, team in rows]
+        ).scalar_one_or_none()
+
+    async def get_invitation_by_email(self, team_id: str, email: str) -> TeamInvitation | None:
+        from app.database.team_models import TeamInvitationDB
+
+        if not _looks_like_uuid(team_id):
+            return None
+        async with _session() as session:
+            row = (
+                await session.execute(
+                    select(TeamInvitationDB).where(
+                        TeamInvitationDB.team_id == team_id,
+                        func.lower(TeamInvitationDB.email) == email.strip().lower(),
+                        TeamInvitationDB.org_id == org_uuid(),
+                        TeamInvitationDB.status == InvitationStatus.PENDING.value,
+                    )
+                )
+            ).scalar_one_or_none()
+            return _to_invitation(row) if row else None
+
+    async def create_invitation(
+        self, team_id: str, email: str, role: TeamRole, invited_by: str
+    ) -> TeamInvitation | None:
+        """Invite an address to a team.
+
+        None if the team is gone, the address is already a member, or it already
+        has a pending invitation. Those last two are read-then-write checks, as
+        they were before: a duplicate invitation is not enforceable by a unique
+        constraint without forbidding a second invitation after a first was
+        cancelled. Losing that race sends one person two emails; whichever they
+        accept, the other stays pending and expires.
+        """
+        from app.database.team_models import TeamInvitationDB
+
+        if await self.get_member_by_email(team_id, email) is not None:
+            return None
+        if await self.get_invitation_by_email(team_id, email) is not None:
+            return None
+
+        async with _session() as session:
+            team = await self._team_row(session, team_id)
+            if team is None:
+                return None
+            row = TeamInvitationDB(
+                org_id=team.org_id,
+                team_id=team_id,
+                email=email,
+                role=role.value,
+                status=InvitationStatus.PENDING.value,
+                invited_by=invited_by,
+                expires_at=_now() + INVITATION_TTL,
+                accepted_at=None,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return _to_invitation(row)
+
+    async def accept_invitation(
+        self, invitation_id: str, user_id: str
+    ) -> tuple[TeamInvitation | None, TeamMember | None]:
+        """Redeem an invitation and add the user to the team.
+
+        Returns the invitation alongside the membership it produced, or
+        `(inv, None)` when it cannot be accepted — expired, already resolved, or
+        the user is already in the team — so the caller can say which.
+        """
+        async with _session() as session:
+            # Expiry is evaluated on read: nothing sweeps this table on a timer,
+            # so this may be the first look at a row that is already stale.
+            await self._expire_stale(session)
+            row = await self._invitation_row(session, invitation_id)
+            if row is None:
+                return None, None
+            invitation = _to_invitation(row)
+
+        if invitation.status != InvitationStatus.PENDING:
+            return invitation, None
+
+        member = await self.add_member(
+            invitation.team_id, user_id, invitation.email, invitation.role
+        )
+        if member is None:
+            return invitation, None
+
+        async with _session() as session:
+            fresh = await self._invitation_row(session, invitation_id)
+            if fresh is None:
+                return invitation, member
+            fresh.status = InvitationStatus.ACCEPTED.value
+            fresh.accepted_at = _now()
+            await session.commit()
+            return _to_invitation(fresh), member
+
+    async def cancel_invitation(self, invitation_id: str) -> bool:
+        """Cancel a pending invitation. False if it was already resolved."""
+        async with _session() as session:
+            row = await self._invitation_row(session, invitation_id)
+            if row is None or row.status != InvitationStatus.PENDING.value:
+                return False
+            row.status = InvitationStatus.CANCELLED.value
+            await session.commit()
+            return True
+
+    async def get_user_pending_invitations(
+        self, email: str
+    ) -> list[tuple[TeamInvitation, Team]]:
+        """Every pending invitation addressed to an email, with its team."""
+        from app.database.team_models import TeamDB, TeamInvitationDB
+
+        if not email:
+            return []
+        async with _session() as session:
+            await self._expire_stale(session)
+            org = org_uuid()
+            rows = (
+                await session.execute(
+                    select(TeamInvitationDB, TeamDB)
+                    .join(TeamDB, TeamDB.id == TeamInvitationDB.team_id)
+                    .where(
+                        TeamInvitationDB.org_id == org,
+                        TeamDB.org_id == org,
+                        func.lower(TeamInvitationDB.email) == email.strip().lower(),
+                        TeamInvitationDB.status == InvitationStatus.PENDING.value,
+                    )
+                    .order_by(TeamInvitationDB.created_at, TeamInvitationDB.id)
+                )
+            ).all()
+            return [(_to_invitation(inv), _to_team(team)) for inv, team in rows]
+
+    # --- teardown ---------------------------------------------------------- #
+
+    async def clear(self, team_ids: Iterable[str] | None = None) -> None:
+        """Delete teams — the named ones, or all of them. For tests and teardown.
+
+        Scoped to the current org like every other statement here, so it cannot
+        reach another tenant's rows.
+        """
+        from app.database.team_models import TeamDB, TeamInvitationDB, TeamMemberDB
+
+        org = org_uuid()
+        ids = (
+            None
+            if team_ids is None
+            else [team_id for team_id in team_ids if _looks_like_uuid(team_id)]
+        )
+        async with _session() as session:
+            invitations = delete(TeamInvitationDB).where(TeamInvitationDB.org_id == org)
+            members = delete(TeamMemberDB).where(TeamMemberDB.org_id == org)
+            teams = delete(TeamDB).where(TeamDB.org_id == org)
+            if ids is not None:
+                invitations = invitations.where(TeamInvitationDB.team_id.in_(ids))
+                members = members.where(TeamMemberDB.team_id.in_(ids))
+                teams = teams.where(TeamDB.id.in_(ids))
+            await session.execute(invitations)
+            await session.execute(members)
+            await session.execute(teams)
+            await session.commit()
 
 
-async def clear(team_ids: Iterable[str] | None = None) -> None:
-    """Delete teams — the named ones, or all of them. For tests and teardown."""
-    ids = None if team_ids is None else list(team_ids)
-    async with _session() as session:
-        invitations = delete(TeamInvitationRecord)
-        members = delete(TeamMemberRecord)
-        teams = delete(TeamRecord)
-        if ids is not None:
-            invitations = invitations.where(TeamInvitationRecord.team_id.in_(ids))
-            members = members.where(TeamMemberRecord.team_id.in_(ids))
-            teams = teams.where(TeamRecord.id.in_(ids))
-        await session.execute(invitations)
-        await session.execute(members)
-        await session.execute(teams)
-        await session.commit()
+def _looks_like_uuid(value: str) -> bool:
+    """Whether a path parameter can be compared against a UUID column at all.
+
+    Postgres raises `invalid input syntax for type uuid` on a malformed literal,
+    which reaches the client as a 500. The id came from the URL, so a caller can
+    trigger that with any string.
+    """
+    try:
+        UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
+_STORE = TeamStore()
+
+
+def get_team_store() -> TeamStore:
+    """The team store.
+
+    Stateless and shared: the org comes from `org_uuid()` inside each method, so
+    there is no per-org instance to hand out any more.
+
+    origin/main (#33/#34) made the same move to tables but exposed it as
+    module-level functions and dropped this accessor. The class is kept because
+    the org scoping and `app/teams/router.py` hang off the instance; the
+    behaviours that PR added — fail-closed role/status parsing, slug
+    normalisation and retry, `get_team_by_slug`, `member_counts`, `clear` — are
+    all above.
+    """
+    return _STORE

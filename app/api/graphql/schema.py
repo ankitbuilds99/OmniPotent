@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import strawberry
 from strawberry.fastapi import GraphQLRouter
+from strawberry.scalars import JSON
 
 from app.api.graphql.types import (
     Investigation,
@@ -205,7 +206,7 @@ class Query:
         return Metric(
             name=input.name,
             service=input.service or "unknown",
-            labels={"job": input.service or "unknown"},
+            labels=JSON({"job": input.service or "unknown"}),
             values=values,
             unit="ms",
         )
@@ -444,7 +445,7 @@ class Subscription:
             yield InvestigationUpdate(
                 investigation_id=thread_id,
                 event_type=event_type,
-                data=data,
+                data=JSON(data),
                 timestamp=datetime.now(timezone.utc),
             )
 
@@ -466,8 +467,8 @@ class Subscription:
                     state=AlertState.FIRING,
                     service=service or "api-server",
                     description="P99 latency above threshold",
-                    labels={},
-                    annotations={},
+                    labels=JSON({}),
+                    annotations=JSON({}),
                     starts_at=datetime.now(timezone.utc),
                     ends_at=None,
                 ),

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -56,7 +57,80 @@ class ActionSafetyCheck:
             "rollback_plan": self.rollback_plan,
             "is_reversible": self.is_reversible,
             "checked_at": self.checked_at.isoformat(),
+            "pre_action_state": self.pre_action_state,
+            "expected_post_state": self.expected_post_state,
         }
+
+
+@dataclass
+class PostActionValidation:
+    """Outcome of comparing observed state against a check's expected state.
+
+    `validated` is deliberately tri-state. None means "could not be
+    determined" - no expected post-state was recorded, or the cluster could not
+    be observed at all - which is not the same as "the action succeeded". The
+    endpoint that used to answer `{"validation": "pending"}` to every request
+    now reports one of these.
+    """
+
+    action_id: str
+    action_type: str
+    target: str
+    validated: bool | None
+    reason: str
+    expected_post_state: dict[str, Any] | None = None
+    observed_state: dict[str, Any] | None = None
+    waited_seconds: float = 0.0
+    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_id": self.action_id,
+            "action_type": self.action_type,
+            "target": self.target,
+            "validated": self.validated,
+            "reason": self.reason,
+            "expected_post_state": self.expected_post_state,
+            "observed_state": self.observed_state,
+            "waited_seconds": round(self.waited_seconds, 3),
+            "checked_at": self.checked_at.isoformat(),
+        }
+
+
+# Verbs that destroy state. Matched as whole tokens anywhere in the action
+# name, so `delete_deployment`, `terraform_destroy` and `drop_database` all land
+# on the delete checker instead of sliding past an exact-string lookup.
+DESTRUCTIVE_VERBS = frozenset({
+    "delete", "destroy", "drop", "remove", "terminate", "purge",
+    "truncate", "wipe", "uninstall", "prune", "evict",
+})
+
+# Action names this checker actually knows how to reason about. Anything else
+# is refused rather than waved through a permissive generic check.
+KNOWN_ACTIONS = frozenset({"scale", "restart", "rollback", "config_update", "delete"})
+
+
+def normalize_action_type(action_type: str) -> str:
+    """Map a raw action name onto a checker key, or "" if unrecognised.
+
+    Fail-closed: an unknown verb returns "" so the caller refuses the action.
+    """
+    normalized = action_type.strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return ""
+
+    tokens = [t for t in normalized.split("_") if t]
+    if any(t in DESTRUCTIVE_VERBS for t in tokens):
+        return "delete"
+
+    if normalized in KNOWN_ACTIONS:
+        return normalized
+    if normalized.startswith("config_update") or normalized.startswith("update_config"):
+        return "config_update"
+    if tokens and tokens[0] in KNOWN_ACTIONS:
+        return tokens[0]
+
+    return ""
 
 
 class DataConsistencyChecker:
@@ -82,7 +156,12 @@ class DataConsistencyChecker:
         params: dict[str, Any],
     ) -> ActionSafetyCheck:
         """Perform pre-action safety checks."""
-        action_id = f"check_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        # Second-resolution timestamps collide, and the id is what callers hand
+        # back to POST /actions/{id}/validate, so make it unique.
+        action_id = (
+            f"check_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+            f"_{uuid.uuid4().hex[:8]}"
+        )
 
         check = ActionSafetyCheck(
             action_id=action_id,
@@ -98,8 +177,11 @@ class DataConsistencyChecker:
             "delete": self._check_delete_action,
         }
 
-        checker = checkers.get(action_type, self._check_generic_action)
-        await checker(check, target, params)
+        checker = checkers.get(normalize_action_type(action_type))
+        if checker is None:
+            await self._refuse_unrecognized_action(check, target, params)
+        else:
+            await checker(check, target, params)
 
         check.safety_score = self._calculate_safety_score(check)
         # One safety bar for the whole product: this is the same gate the
@@ -112,6 +194,8 @@ class DataConsistencyChecker:
             check.preconditions_met
             and check.safety_score >= get_settings().safety_confidence_threshold
             and len(check.failed_preconditions) == 0
+            # Nothing irreversible without a way back is ever auto-cleared.
+            and (check.is_reversible or bool(check.rollback_plan))
         )
 
         return check
@@ -121,21 +205,109 @@ class DataConsistencyChecker:
         check: ActionSafetyCheck,
         timeout_seconds: int = 60,
     ) -> bool:
-        """Validate post-action state matches expected."""
+        """Validate post-action state matches expected.
+
+        True only when the cluster was actually observed to reach the expected
+        state (or there was nothing to check). "Could not observe" is False.
+        """
+        result = await self.post_action_validate_detailed(check, timeout_seconds)
+        if result.validated is None:
+            # Nothing to compare against: the caller asked a yes/no question, so
+            # answer the only safe way and keep the reason in the log.
+            return check.expected_post_state is None or not check.expected_post_state
+        return result.validated
+
+    async def post_action_validate_detailed(
+        self,
+        check: ActionSafetyCheck,
+        timeout_seconds: int = 60,
+    ) -> PostActionValidation:
+        """Validate post-action state, reporting what was actually observed."""
+        started = datetime.now(timezone.utc)
+
+        def _elapsed() -> float:
+            return (datetime.now(timezone.utc) - started).total_seconds()
+
         if not check.expected_post_state:
-            return True
+            return PostActionValidation(
+                action_id=check.action_id,
+                action_type=check.action_type,
+                target=check.target,
+                validated=None,
+                reason=(
+                    f"The pre-action check for '{check.action_type}' recorded no "
+                    "expected post-action state, so there is nothing to compare "
+                    "the cluster against."
+                ),
+                waited_seconds=_elapsed(),
+            )
 
-        deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+        if not self.k8s:
+            # Without a client, _capture_state returns None forever; polling
+            # until the deadline would just be an expensive way to say "no".
+            log.warning(
+                "post_action_validate(%s): no Kubernetes client configured, cannot "
+                "observe the result of the action",
+                check.action_id,
+            )
+            return PostActionValidation(
+                action_id=check.action_id,
+                action_type=check.action_type,
+                target=check.target,
+                validated=None,
+                reason=(
+                    "No Kubernetes client is configured, so the state of "
+                    f"'{check.target}' cannot be observed and the action's result "
+                    "cannot be validated."
+                ),
+                expected_post_state=check.expected_post_state,
+                waited_seconds=_elapsed(),
+            )
 
-        while datetime.now(timezone.utc) < deadline:
+        deadline = started + timedelta(seconds=timeout_seconds)
+        current_state: dict[str, Any] | None = None
+
+        while True:
             current_state = await self._capture_state(check.target)
 
             if current_state and self._states_match(current_state, check.expected_post_state):
-                return True
+                return PostActionValidation(
+                    action_id=check.action_id,
+                    action_type=check.action_type,
+                    target=check.target,
+                    validated=True,
+                    reason="Observed state matches the expected post-action state.",
+                    expected_post_state=check.expected_post_state,
+                    observed_state=current_state,
+                    waited_seconds=_elapsed(),
+                )
 
-            await asyncio.sleep(5)
+            if datetime.now(timezone.utc) >= deadline:
+                break
 
-        return False
+            await asyncio.sleep(min(5, max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())))
+
+        if current_state is None:
+            reason = (
+                f"'{check.target}' could not be read from the cluster within "
+                f"{timeout_seconds}s, so the action's result is unknown."
+            )
+        else:
+            reason = (
+                f"Observed state did not reach the expected post-action state "
+                f"within {timeout_seconds}s."
+            )
+
+        return PostActionValidation(
+            action_id=check.action_id,
+            action_type=check.action_type,
+            target=check.target,
+            validated=False if current_state is not None else None,
+            reason=reason,
+            expected_post_state=check.expected_post_state,
+            observed_state=current_state,
+            waited_seconds=_elapsed(),
+        )
 
     async def _check_scale_action(
         self,
@@ -147,19 +319,28 @@ class DataConsistencyChecker:
         desired_replicas = params.get("replicas", 0)
         namespace = params.get("namespace", "default")
 
-        check.pre_action_state = await self._capture_state(target, namespace)
-
-        if not check.pre_action_state:
-            check.failed_preconditions.append(f"Deployment {target} not found")
-            return
-
-        current_replicas = check.pre_action_state.get("replicas", 0)
-
+        # Parameter-level rules do not depend on cluster state, so they are
+        # evaluated even when the state cannot be read.
         if desired_replicas == 0 and not params.get("allow_zero", False):
             check.failed_preconditions.append(
                 "Scaling to 0 replicas requires explicit allow_zero=true"
             )
             check.identified_risks.append("Service will be completely unavailable")
+
+        check.expected_post_state = {
+            "replicas": desired_replicas,
+            "available_replicas": desired_replicas,
+        }
+        check.is_reversible = True
+
+        check.pre_action_state = await self._capture_state(target, namespace)
+
+        if not check.pre_action_state:
+            check.failed_preconditions.append(self._state_unavailable_reason(target))
+            check.preconditions_met = False
+            return
+
+        current_replicas = check.pre_action_state.get("replicas", 0)
 
         if desired_replicas > current_replicas * 3:
             check.identified_risks.append(
@@ -183,15 +364,9 @@ class DataConsistencyChecker:
                     "HPA exists - manual scaling may be overridden"
                 )
 
-        check.expected_post_state = {
-            "replicas": desired_replicas,
-            "available_replicas": desired_replicas,
-        }
-
         check.rollback_plan = (
             f"kubectl scale deployment {target} -n {namespace} --replicas={current_replicas}"
         )
-        check.is_reversible = True
         check.preconditions_met = len(check.failed_preconditions) == 0
 
     async def _check_restart_action(
@@ -206,7 +381,8 @@ class DataConsistencyChecker:
         check.pre_action_state = await self._capture_state(target, namespace)
 
         if not check.pre_action_state:
-            check.failed_preconditions.append(f"Deployment {target} not found")
+            check.failed_preconditions.append(self._state_unavailable_reason(target))
+            check.preconditions_met = False
             return
 
         replicas = check.pre_action_state.get("replicas", 0)
@@ -243,7 +419,8 @@ class DataConsistencyChecker:
         check.pre_action_state = await self._capture_state(target, namespace)
 
         if not check.pre_action_state:
-            check.failed_preconditions.append(f"Deployment {target} not found")
+            check.failed_preconditions.append(self._state_unavailable_reason(target))
+            check.preconditions_met = False
             return
 
         if self.graph:
@@ -289,9 +466,13 @@ class DataConsistencyChecker:
         config_key = params.get("key", "")
         namespace = params.get("namespace", "default")
 
+        check.is_reversible = True
+
         if not self.k8s:
-            check.preconditions_met = True
-            check.is_reversible = True
+            # Nothing was read, so nothing was verified. Reporting
+            # preconditions_met=True here claimed a check that never happened.
+            check.failed_preconditions.append(self._state_unavailable_reason(target))
+            check.preconditions_met = False
             return
 
         try:
@@ -306,6 +487,7 @@ class DataConsistencyChecker:
 
         except Exception:
             check.failed_preconditions.append(f"ConfigMap {target} not found")
+            check.preconditions_met = False
             return
 
         sensitive_keys = ["password", "secret", "key", "token", "credential", "api_key"]
@@ -322,46 +504,76 @@ class DataConsistencyChecker:
         target: str,
         params: dict[str, Any],
     ) -> None:
-        """Check safety of a delete action."""
-        # Delete actions are high-risk and require explicit confirmation
-        # regardless of namespace or resource type
+        """Check safety of a destructive action (delete/destroy/drop/...)."""
+        # Destructive actions are high-risk regardless of namespace or resource
+        # type. They are refused unless the caller passes confirmed=true, which
+        # is what "require explicit confirmation" has to mean to be true.
         _ = params.get("namespace", "default")
         _ = params.get("resource_type", "deployment")
 
-        check.failed_preconditions.append(
-            "Delete actions require explicit confirmation"
-        )
+        confirmed = bool(params.get("confirmed") or params.get("confirm"))
+
+        if not confirmed:
+            check.failed_preconditions.append(
+                "Delete actions require explicit confirmation (params.confirmed=true)"
+            )
+
         check.identified_risks.append("Data loss - ensure backups exist")
         check.identified_risks.append("Dependent services may be affected")
 
         check.is_reversible = False
-        check.preconditions_met = False
+        check.preconditions_met = len(check.failed_preconditions) == 0
 
-    async def _check_generic_action(
+    async def _refuse_unrecognized_action(
         self,
         check: ActionSafetyCheck,
         target: str,
         params: dict[str, Any],
     ) -> None:
-        """Generic action check."""
-        namespace = params.get("namespace", "default")
+        """Refuse an action this checker has no rules for.
 
-        check.pre_action_state = await self._capture_state(target, namespace)
-        check.preconditions_met = check.pre_action_state is not None
+        The previous behaviour routed anything unknown through a permissive
+        generic check that only asked "can I read some state?", so
+        `drop_database` and `terraform_destroy` came back is_safe=True with an
+        empty risk list. An action nobody wrote a safety rule for is not known
+        to be safe.
+        """
+        check.failed_preconditions.append(
+            f"Unrecognized action type '{check.action_type}' - no safety rules are "
+            f"defined for it, so it cannot be cleared automatically. "
+            f"Known types: {', '.join(sorted(KNOWN_ACTIONS))}. Manual review required."
+        )
+        check.identified_risks.append(
+            "Unknown blast radius: effects and reversibility have not been assessed"
+        )
+        check.is_reversible = False
+        check.preconditions_met = False
 
-        if not check.preconditions_met:
-            check.failed_preconditions.append(f"Could not verify state of {target}")
-
-        check.is_reversible = True
+    def _state_unavailable_reason(self, target: str) -> str:
+        """Why pre-action state could not be read (config gap vs missing object)."""
+        if not self.k8s:
+            return (
+                "No Kubernetes client is configured, so the current state of "
+                f"'{target}' could not be read and preconditions cannot be verified"
+            )
+        return f"Deployment {target} not found"
 
     async def _capture_state(
         self,
         target: str,
         namespace: str = "default",
     ) -> dict[str, Any] | None:
-        """Capture current state of a target."""
+        """Capture current state of a target, or None if it cannot be read.
+
+        Returns None (not a placeholder) when there is no Kubernetes client:
+        this value is compared against expected post-action state, and inventing
+        `{"replicas": 2, ...}` made every caller believe it had read the cluster.
+        """
         if not self.k8s:
-            return {"replicas": 2, "available_replicas": 2, "updating": False}
+            log.debug(
+                "No Kubernetes client configured; cannot capture state for %s", target
+            )
+            return None
 
         try:
             deployment = await self.k8s.read_namespaced_deployment(
@@ -492,15 +704,22 @@ class DataConsistencyChecker:
         return True
 
     def _calculate_safety_score(self, check: ActionSafetyCheck) -> float:
-        """Calculate overall safety score."""
+        """Calculate overall safety score.
+
+        A flagged risk has to move the number. The old weights subtracted 0.1
+        per risk and then handed 0.1 straight back for is_reversible, so an
+        action with an identified risk still scored a clean 1.0. Mitigations can
+        only offset risks that were actually identified, never push a risky
+        action above a clean one.
+        """
         score = 1.0
 
-        score -= len(check.failed_preconditions) * 0.3
-        score -= len(check.identified_risks) * 0.1
-        score += len(check.risk_mitigations) * 0.05
+        score -= len(check.failed_preconditions) * 0.5
+        score -= len(check.identified_risks) * 0.25
+        score += min(len(check.risk_mitigations), len(check.identified_risks)) * 0.05
 
-        if check.is_reversible:
-            score += 0.1
+        if not check.is_reversible:
+            score -= 0.3
 
         if check.rollback_plan:
             score += 0.05

@@ -155,12 +155,23 @@ class TenantStore:
                 row = await cur.fetchone()
         return Org(*row) if row else None
 
-    async def set_plan(self, org_id: str, plan: str) -> None:
+    async def set_plan(self, org_id: str, plan: str) -> bool:
+        """Set an org's plan. False when no such org — the caller must not
+        report success.
+
+        The Stripe webhook UPDATE'd zero rows for an org_id that does not exist
+        and still answered `{"status": "applied"}`, so a subscription whose
+        metadata carried a stale or mistyped org id looked like it had taken
+        effect and Stripe never retried it.
+        """
         import aiosqlite
 
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE orgs SET plan=? WHERE id=?", (normalize_plan(plan), org_id))
+            cursor = await db.execute(
+                "UPDATE orgs SET plan=? WHERE id=?", (normalize_plan(plan), org_id)
+            )
             await db.commit()
+            return cursor.rowcount > 0
 
     async def create_user(self, email: str) -> User:
         import aiosqlite
@@ -370,6 +381,19 @@ class TenantStore:
         if not row:
             return None
         return self._dec(dek, row[0])
+
+    async def delete_integration_secret(self, org_id: str, name: str) -> bool:
+        """Remove one of an org's integration secrets. Returns True if one was
+        removed. This is what "Disconnect" in the integration marketplace needs;
+        without it a credential could be stored but never withdrawn."""
+        import aiosqlite
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "DELETE FROM integration_secrets WHERE org_id=? AND name=?", (org_id, name)
+            )
+            await db.commit()
+            return cur.rowcount > 0
 
     async def get_integration_secrets(self, org_id: str) -> dict[str, str]:
         """All of an org's integration secrets, decrypted (for building a session)."""

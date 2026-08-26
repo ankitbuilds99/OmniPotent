@@ -53,11 +53,11 @@ def upgrade() -> None:
         sa.Column("id", sa.String(128), nullable=False),
         sa.Column("org_id", sa.String(128), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("service", sa.String(255), nullable=False, server_default="*"),
-        sa.Column("trigger", sa.String(64), nullable=False, server_default="manual"),
-        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column("is_builtin", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("definition", JSONType, nullable=False, server_default="{}"),
+        sa.Column("service", sa.String(255), nullable=False),
+        sa.Column("trigger", sa.String(64), nullable=False),
+        sa.Column("enabled", sa.Boolean(), nullable=False),
+        sa.Column("is_builtin", sa.Boolean(), nullable=False),
+        sa.Column("definition", JSONType, nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -83,11 +83,11 @@ def upgrade() -> None:
         sa.Column("org_id", sa.String(128), nullable=False),
         sa.Column("runbook_id", sa.String(128), nullable=False),
         sa.Column("runbook_name", sa.String(255), nullable=False),
-        sa.Column("status", sa.String(32), nullable=False, server_default="pending"),
+        sa.Column("status", sa.String(32), nullable=False),
         sa.Column(
-            "triggered_by", sa.String(128), nullable=False, server_default="manual"
+            "triggered_by", sa.String(128), nullable=False
         ),
-        sa.Column("execution", JSONType, nullable=False, server_default="{}"),
+        sa.Column("execution", JSONType, nullable=False),
         sa.Column(
             "started_at",
             sa.DateTime(timezone=True),

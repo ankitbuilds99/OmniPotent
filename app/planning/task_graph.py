@@ -210,6 +210,11 @@ class ExecutionResult:
     errors: list[dict[str, str]]
     started_at: datetime
     completed_at: datetime
+    # Tasks that finished without doing any real work — every tool they needed
+    # reported itself unconfigured, or they needed none. `status: "completed"`
+    # with five of five tasks listed here is a very different result from
+    # `status: "completed"` with none, and the caller could not tell them apart.
+    simulated_tasks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -223,6 +228,9 @@ class ExecutionResult:
             "errors": self.errors,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat(),
+            "simulated_tasks": self.simulated_tasks,
+            "all_simulated": bool(self.completed_tasks)
+            and len(self.simulated_tasks) == self.completed_tasks,
         }
 
 

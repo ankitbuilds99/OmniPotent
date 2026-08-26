@@ -17,8 +17,11 @@ import {
   Activity,
   ArrowLeft
 } from 'lucide-react'
-// Shown to the user as "your API base URL", so it must be the same value the rest
-// of the app actually calls — resolved once in ../config.
+// Shown to the user as "your API base URL" and pasted into copyable curl
+// examples, so it has to be an absolute URL and the same value the rest of the
+// app actually calls. ../config resolves it once: the page's own origin in a
+// deployed build rather than the reader's own localhost:8000, which was the old
+// hardcoded default.
 import { API_BASE_URL } from '../config'
 
 interface EndpointGroup {

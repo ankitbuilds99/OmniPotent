@@ -82,7 +82,7 @@ COMPLETED = TurnResult(
 
 def test_dashboard_routes_respond_without_a_server_error(client):
     """A 500 here is what an un-awaited coroutine looks like."""
-    for path in ("/dashboard/metrics", "/dashboard/trends"):
+    for path in ("/api/dashboard/metrics", "/api/dashboard/trends"):
         response = client.get(path)
         assert response.status_code == 200, f"{path}: {response.text}"
         # JSON, not the SPA's index.html — proves the route is matched ahead of
@@ -92,7 +92,7 @@ def test_dashboard_routes_respond_without_a_server_error(client):
 
 def test_empty_dashboard_reports_zeroes_and_no_invented_baseline(client):
     """A deployment that has investigated nothing gets nothing, not a sample."""
-    body = client.get("/dashboard/metrics").json()
+    body = client.get("/api/dashboard/metrics").json()
 
     assert body["summary"]["total"] == 0
     assert body["usage"]["total_investigations"] == 0
@@ -112,7 +112,7 @@ def test_a_completed_chat_turn_lands_on_the_dashboard(client, monkeypatch):
     assert chat.status_code == 200
     assert chat.json()["status"] == "completed"
 
-    body = client.get("/dashboard/metrics").json()
+    body = client.get("/api/dashboard/metrics").json()
 
     assert body["summary"]["total"] == 1
     assert body["usage"]["total_investigations"] == 1
@@ -136,7 +136,7 @@ def test_a_multi_turn_conversation_is_one_investigation(client, monkeypatch):
             "/chat", json={"thread_id": "inv-dash-2", "message": "and now?"}
         ).status_code == 200
 
-    body = client.get("/dashboard/metrics").json()
+    body = client.get("/api/dashboard/metrics").json()
 
     assert body["summary"]["total"] == 1
     # Tokens still accumulate across the turns; only the count is deduplicated.
@@ -159,7 +159,7 @@ def test_an_abstention_is_recorded_as_an_abstention(client, monkeypatch):
         "/chat", json={"thread_id": "inv-abstained", "message": "why?"}
     ).status_code == 200
 
-    body = client.get("/dashboard/metrics").json()
+    body = client.get("/api/dashboard/metrics").json()
     assert body["usage"]["investigations_by_outcome"] == {"abstained": 1}
     assert body["summary"]["abstained"] == 1
     assert body["summary"]["abstention_rate"] == 1.0
@@ -181,7 +181,7 @@ def test_a_turn_without_a_root_cause_is_only_a_partial_diagnosis(client, monkeyp
         "/chat", json={"thread_id": "inv-partial", "message": "why?"}
     ).status_code == 200
 
-    body = client.get("/dashboard/metrics").json()
+    body = client.get("/api/dashboard/metrics").json()
     assert body["usage"]["investigations_by_outcome"] == {"partial_diagnosis": 1}
     # RESOLVED is never emitted: nothing observes whether anything got fixed, so
     # "incidents auto-resolved" stays honest at zero.
@@ -193,7 +193,7 @@ def test_reported_roi_is_zero_until_something_measures_time_saved(client, monkey
     _stub_turn(monkeypatch, COMPLETED)
     client.post("/chat", json={"thread_id": "inv-roi", "message": "why 500s?"})
 
-    roi = client.get("/dashboard/metrics").json()["roi"]
+    roi = client.get("/api/dashboard/metrics").json()["roi"]
 
     assert roi["investigations_completed"] == 1
     assert roi["time_saved_hours"] == 0
@@ -209,7 +209,7 @@ def test_dashboard_history_outlives_the_process(client, monkeypatch, tmp_path):
     # and cleared the session pool, so nothing is carried in memory.
     runtime.reset()
     with TestClient(api.app) as second:
-        body = second.get("/dashboard/metrics").json()
+        body = second.get("/api/dashboard/metrics").json()
 
     assert body["summary"]["total"] == 1
     assert body["summary"]["recent_investigations"][0]["id"] == "inv-durable"
@@ -241,7 +241,7 @@ def test_trends_report_direction_in_terms_of_health(client, monkeypatch):
     asyncio.run(_seed())
     asyncio.run(close_db())
 
-    body = client.get("/dashboard/trends").json()
+    body = client.get("/api/dashboard/trends").json()
     trends = body["trends"]
 
     assert trends["tokens_per_day"]["polarity"] == "lower_is_better"
@@ -252,7 +252,7 @@ def test_trends_report_direction_in_terms_of_health(client, monkeypatch):
     assert body["summary"]["total_metrics"] == 3
 
 
-@pytest.mark.parametrize("path", ["/dashboard/metrics", "/dashboard/trends"])
+@pytest.mark.parametrize("path", ["/api/dashboard/metrics", "/api/dashboard/trends"])
 @pytest.mark.parametrize("period_days", [0, -1, 366])
 def test_period_days_is_bounded(client, path, period_days):
     """An unbounded period is an unbounded scan of one org's whole history."""

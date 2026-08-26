@@ -28,7 +28,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch, describeFailure } from "../lib/apiClient";
 
 interface KnowledgeArticle {
   id: string;
@@ -102,12 +102,16 @@ function ArticleCard({
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {/* Both of these are icon-only, so without a label a screen reader
+              announces "button" twice on every card in the grid. */}
           <button
             onClick={(e) => {
               e.stopPropagation();
               onToggleStar();
             }}
             className="p-1 hover:bg-white/10 rounded"
+            title={article.starred ? "Unstar" : "Star"}
+            aria-label={`${article.starred ? "Unstar" : "Star"} ${article.title}`}
           >
             {article.starred ? (
               <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />
@@ -121,6 +125,8 @@ function ArticleCard({
               onDelete();
             }}
             className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
+            title="Delete"
+            aria-label={`Delete ${article.title}`}
           >
             <Trash2 className="w-4 h-4" />
           </button>
@@ -452,6 +458,7 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [starredIds, setStarredIds] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   // Fetch articles from API
   const fetchArticles = useCallback(async () => {
@@ -460,20 +467,29 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
       if (category !== "all") params.set("doc_type", category);
       if (search) params.set("search", search);
 
-      const res = await fetch(`${API_BASE}/api/knowledge/documents?${params}`, {
+      const res = await apiFetch(`/api/knowledge/documents?${params}`, {
         credentials: "include",
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        const docs = (data.documents || []).map((doc: KnowledgeArticle) => ({
+      // `if (res.ok) { ... }` with no else. A 401, a 403 from the feature gate
+      // or a 500 left `articles` at whatever it already was — [] on first load —
+      // and the page rendered its "No articles found" empty state. An operator
+      // searching the knowledge base during an incident was told the runbook
+      // does not exist when the truth was that their session had expired.
+      if (!res.ok) throw new Error(await describeFailure(res));
+
+      const data = await res.json();
+      setArticles(
+        (data.documents || []).map((doc: KnowledgeArticle) => ({
           ...doc,
           starred: starredIds.has(doc.id),
-        }));
-        setArticles(docs);
-      }
+        }))
+      );
+      setError(null);
     } catch (err) {
       console.error("Failed to fetch articles:", err);
+      setArticles([]);
+      setError(err instanceof Error ? err.message : "Failed to load the knowledge base");
     } finally {
       setLoading(false);
     }
@@ -521,18 +537,16 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
   }) => {
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/api/knowledge/documents`, {
+      const res = await apiFetch(`/api/knowledge/documents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify(newArticle),
       });
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to create article");
-      }
+      if (!res.ok) throw new Error(await describeFailure(res));
 
+      setError(null);
       await fetchArticles();
     } finally {
       setSaving(false);
@@ -543,16 +557,24 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
     if (!confirm("Are you sure you want to delete this article?")) return;
 
     try {
-      const res = await fetch(`${API_BASE}/api/knowledge/documents/${id}`, {
+      const res = await apiFetch(`/api/knowledge/documents/${id}`, {
         method: "DELETE",
         credentials: "include",
       });
 
-      if (res.ok) {
-        setArticles((prev) => prev.filter((a) => a.id !== id));
-      }
+      // The old code removed the row from local state only `if (res.ok)`, and
+      // said nothing at all otherwise — so a failed delete left the article on
+      // screen and looked to the operator like a mis-click. Worse in the other
+      // direction: nothing here told them the document is still in the index and
+      // will come back on the next search.
+      if (!res.ok) throw new Error(await describeFailure(res));
+
+      setArticles((prev) => prev.filter((a) => a.id !== id));
+      setSelectedArticle((prev) => (prev?.id === id ? null : prev));
+      setError(null);
     } catch (err) {
       console.error("Failed to delete article:", err);
+      setError(`Could not delete this article: ${err instanceof Error ? err.message : "request failed"}`);
     }
   };
 
@@ -640,6 +662,23 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
           ))}
         </div>
 
+        {error && (
+          <div
+            role="alert"
+            className="mb-6 rounded-xl px-4 py-3 flex items-start justify-between gap-4"
+            style={{ border: "1px solid var(--bad)", backgroundColor: "rgba(239,68,68,0.08)" }}
+          >
+            <span className="text-sm" style={{ color: "var(--bad)" }}>{error}</span>
+            <button
+              onClick={() => { setError(null); fetchArticles(); }}
+              className="text-sm underline shrink-0"
+              style={{ color: "var(--bad)" }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Loading State */}
         {loading && (
           <div className="flex items-center justify-center py-12">
@@ -662,11 +701,17 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
           </div>
         )}
 
-        {!loading && filteredArticles.length === 0 && (
+        {/* Suppressed while `error` is set: "No articles found — try a different
+            search" is the wrong advice when the request never succeeded. */}
+        {!loading && !error && filteredArticles.length === 0 && (
           <div className="text-center py-12">
             <Book className="w-12 h-12 mx-auto text-gray-600 mb-4" />
             <p className="text-gray-400">No articles found</p>
-            <p className="text-sm text-gray-500">Try a different search or category</p>
+            <p className="text-sm text-gray-500">
+              {showStarredOnly
+                ? "Nothing starred yet."
+                : "Try a different search or category"}
+            </p>
           </div>
         )}
       </div>

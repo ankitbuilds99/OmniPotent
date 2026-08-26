@@ -66,6 +66,10 @@ supabase = [
     "sqlalchemy[asyncio]>=2.0.0",            # Async SQLAlchemy ORM
 ]
 secrets = ["cryptography>=50.0"]                     # per-tenant secret vault
+# Self-serve payments. The SDK is imported lazily (app/billing/stripe_client.py):
+# without it, and without STRIPE_API_KEY, every /billing/* write reports 503
+# rather than pretending the payment happened.
+billing = ["stripe>=11.0"]
 apm = ["ddtrace>=4.0"]                               # Datadog APM (DD_TRACE_ENABLED=true)
 # Database migrations
 migrations = [
@@ -111,9 +115,20 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.7.0",
     "mypy>=1.11.0",
-    # CI installs only this extra before running the suite, so anything with tests
-    # has to be reachable from here. The task queue is shipped (the worker runs from
-    # the app image) and tests/test_tasks_deployed.py imports it.
+    # CI installs only this extra (`uv sync --extra dev`) and then runs the whole
+    # suite, so anything with tests has to be reachable from here.
+    # tests/test_alembic_migrations.py imports alembic at module scope and
+    # migrates a temporary aiosqlite database, so both belong here as well as in
+    # the `migrations` extra.
+    "alembic>=1.13.0",
+    "aiosqlite>=0.19.0",
+    # A real in-process Redis implementation, used by the tests that cover the
+    # Redis-backed persistence paths (event-intelligence feature store,
+    # verification calibration). Without it those paths are only ever exercised
+    # with redis_client=None, i.e. never.
+    "fakeredis>=2.23.0",
+    # The task queue is shipped (the worker runs from the app image) and
+    # tests/test_tasks_deployed.py imports it.
     "omnipotent[tasks]",
 ]
 test = [
@@ -149,6 +164,7 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 markers = [
     "contract: marks tests as contract tests (may require external services)",
+    "integration: needs a real Postgres and Redis (COPILOT_DATABASE_URL + REDIS_URL); skipped otherwise",
 ]
 
 [tool.coverage.run]

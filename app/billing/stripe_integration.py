@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -64,6 +61,22 @@ class BillingStore(Protocol):
     async def get_payment_methods(self, org_id: UUID) -> list[PaymentMethod]: ...
     async def save_payment_method(self, pm: PaymentMethod) -> None: ...
     async def delete_payment_method(self, pm_id: UUID) -> None: ...
+
+
+def configured_price_id(plan_name: str, cycle: BillingCycle) -> str:
+    """The Stripe Price for a catalog plan and cycle, from STRIPE_PRICE_IDS.
+
+    Prices live inside a Stripe account, so they cannot ship in the catalog —
+    every `PricingPlan.stripe_monthly_price_id` / `stripe_annual_price_id` in
+    app/billing/plans.py is the empty string, and nothing ever assigned one. That
+    empty string reached the "No Stripe price configured" guard below, so
+    checkout failed for every plan in every deployment, however Stripe was set
+    up. The deployment supplies the mapping instead.
+    """
+    from app.config import get_settings
+
+    key = f"{(plan_name or '').strip().lower()}:{cycle.value}"
+    return get_settings().stripe_prices.get(key, "")
 
 
 @dataclass
@@ -140,6 +153,26 @@ class StripeBillingService:
             return org.stripe_customer_id
         return await self.create_customer(org, email)
 
+    async def ensure_organization(self, org_id: UUID) -> Organization:
+        """The billing organization row, created on first use.
+
+        `billing_organizations` has exactly one writer — this service — so the
+        row does not exist until the org's first Stripe interaction. Checkout
+        used to raise "Organization not found" for any org that had never checked
+        out before, which is every org: the very first checkout could never
+        succeed. Creating the row here makes the first one the one that creates
+        it.
+        """
+        org = await self._store.get_organization(org_id)
+        if org is not None:
+            return org
+
+        slug = str(org_id)
+        org = Organization(org_id=org_id, name=slug, slug=slug)
+        await self._store.save_organization(org)
+        log.info("Created billing organization row for org %s", org_id)
+        return org
+
     async def create_checkout_session(
         self,
         org_id: UUID,
@@ -152,9 +185,7 @@ class StripeBillingService:
         promotion_code: str | None = None,
     ) -> CheckoutResult:
         """Create a Stripe Checkout session for subscription."""
-        org = await self._store.get_organization(org_id)
-        if not org:
-            raise ValueError(f"Organization not found: {org_id}")
+        org = await self.ensure_organization(org_id)
 
         plan = self._plan_manager.get_plan(plan_name)
         if not plan:
@@ -169,6 +200,7 @@ class StripeBillingService:
             price_id = plan.stripe_annual_price_id
         else:
             price_id = plan.stripe_monthly_price_id
+        price_id = price_id or configured_price_id(plan_name, billing_cycle)
 
         if not price_id:
             raise ValueError(
@@ -227,12 +259,15 @@ class StripeBillingService:
         return_url: str | None = None,
     ) -> PortalResult:
         """Create a Stripe Customer Portal session."""
-        org = await self._store.get_organization(org_id)
-        if not org:
-            raise ValueError(f"Organization not found: {org_id}")
+        org = await self.ensure_organization(org_id)
 
         if not org.stripe_customer_id:
-            raise ValueError("Organization has no Stripe customer")
+            # There is nothing to manage until the org has bought something; the
+            # portal is a view onto a Stripe customer, not a way to become one.
+            raise ValueError(
+                "This organization has no Stripe customer yet — start a "
+                "subscription before opening the billing portal."
+            )
 
         session = self._stripe.create_billing_portal_session(
             customer=org.stripe_customer_id,
@@ -262,6 +297,7 @@ class StripeBillingService:
             price_id = new_plan.stripe_annual_price_id
         else:
             price_id = new_plan.stripe_monthly_price_id
+        price_id = price_id or configured_price_id(new_plan_name, cycle)
 
         if not price_id:
             raise ValueError(f"No price for {new_plan_name} {cycle.value}")
@@ -652,32 +688,9 @@ class StripeBillingService:
         return mapping.get(stripe_status, InvoiceStatus.DRAFT)
 
 
-def verify_stripe_signature(
-    payload: bytes,
-    signature: str,
-    secret: str,
-    tolerance: int = 300,
-) -> bool:
-    """Verify Stripe webhook signature manually."""
-    if not signature:
-        return False
-
-    parts = dict(item.split("=", 1) for item in signature.split(","))
-    timestamp = parts.get("t")
-    v1_signature = parts.get("v1")
-
-    if not timestamp or not v1_signature:
-        return False
-
-    timestamp_int = int(timestamp)
-    if abs(time.time() - timestamp_int) > tolerance:
-        return False
-
-    signed_payload = f"{timestamp}.{payload.decode('utf-8')}"
-    expected_sig = hmac.new(
-        secret.encode("utf-8"),
-        signed_payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(v1_signature, expected_sig)
+# `verify_stripe_signature` used to live here, a second implementation of the
+# Stripe-Signature check with no callers: `app.billing.__init__` exports the one
+# in app/billing/webhooks.py, which is what POST /webhooks/stripe uses. This copy
+# raised ValueError instead of returning False on a header Stripe did not send
+# (`dict(item.split("=", 1) ...)` on 'garbage', `int()` on a non-numeric `t`), so
+# whichever caller found it first would have turned a forged header into a 500.

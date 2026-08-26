@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import app.api.main as api
 import app.config as cfg
 from app import runtime, tenant_context
+from app.database import engine as db_engine
 from app.tenancy import auth as tenant_auth
 
 
@@ -32,19 +33,27 @@ async def _provision(store):
 def mt(tmp_path, monkeypatch):
     monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
     monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
+    # Incidents are a real table now, so these need a real database. `with`
+    # TestClient runs the lifespan, which is what creates the schema.
+    monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/app.db")
     cfg.get_settings.cache_clear()
     tenant_auth.reset_store_cache()
     tenant_context.current_tenant.set(None)
     api._RL.clear()
     runtime.reset()
+    db_engine._engine = None
+    db_engine._session_factory = None
     data = asyncio.run(_provision(tenant_auth.get_store()))
-    data["client"] = TestClient(api.app)
-    yield data
+    with TestClient(api.app) as client:
+        data["client"] = client
+        yield data
     cfg.get_settings.cache_clear()
     tenant_auth.reset_store_cache()
     tenant_context.current_tenant.set(None)
     api._RL.clear()
     runtime.reset()
+    db_engine._engine = None
+    db_engine._session_factory = None
 
 
 def _auth(key: str) -> dict:
@@ -204,10 +213,102 @@ def test_signup_disabled_returns_403(mt, monkeypatch):
     assert mt["client"].post("/signup", json={"org_name": "X", "email": "a@b.com"}).status_code == 403
 
 
-def test_billing_requires_owner(mt):
+def test_plan_change_requires_operator_not_tenant(mt, monkeypatch):
+    """No tenant key may set its own plan tier — not even the org owner.
+
+    `manage_billing` resolves to the owner role and every self-serve signup issues
+    an owner key, so a role check here would let any free account grant itself the
+    most expensive plan. Plan changes are operator/back-office only; customers move
+    tiers through Stripe checkout and the webhook.
+    """
     c = mt["client"]
-    # admin cannot change plan (manage_billing => owner)
-    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["admin"])).status_code == 403
-    # owner can
-    r = c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"]))
+    monkeypatch.setenv("COPILOT_OPERATOR_TOKEN", "op-token")
+    cfg.get_settings.cache_clear()
+
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["admin"])).status_code == 401
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"])).status_code == 401
+
+    r = c.patch(
+        f"/admin/plan?org_id={mt['org_a']}",
+        json={"plan": "enterprise"},
+        headers=_auth("op-token"),
+    )
     assert r.status_code == 200 and r.json()["plan"] == "enterprise"
+
+
+def test_plan_change_disabled_without_operator_token(mt):
+    """With COPILOT_OPERATOR_TOKEN unset the endpoint is closed, not open."""
+    c = mt["client"]
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}, headers=_auth(mt["owner"])).status_code == 403
+    assert c.patch("/admin/plan", json={"plan": "enterprise"}).status_code == 403
+
+
+def test_feature_data_does_not_cross_tenants(mt):
+    """Org A's runbooks, planning graphs and incidents are invisible to org B.
+
+    Runbooks and incidents are org-filtered in SQL now; planning graphs are
+    still a per-org store in process memory. This asserts the isolation from
+    outside either way — over HTTP, through the real auth path, rather than at
+    the registry level.
+    """
+    c, a, b = mt["client"], _auth(mt["owner"]), _auth(mt["b"])
+
+    created = c.post("/api/runbooks", headers=a, json={
+        "name": "acme-rollback", "description": "internal", "service": "pay"})
+    assert created.status_code == 200
+    rb_id = created.json()["id"]
+
+    assert rb_id in {r["id"] for r in c.get("/api/runbooks", headers=a).json()}
+    assert rb_id not in {r["id"] for r in c.get("/api/runbooks", headers=b).json()}
+    assert c.get(f"/api/runbooks/{rb_id}", headers=b).status_code == 404
+    # B cannot delete what it cannot see, and A's copy is untouched by the attempt.
+    assert c.delete(f"/api/runbooks/{rb_id}", headers=b).status_code == 404
+    assert c.get(f"/api/runbooks/{rb_id}", headers=a).status_code == 200
+
+    assert c.post("/api/planning/graphs", headers=a,
+                  json={"graph_id": "acme-plan"}).status_code == 200
+    assert c.get("/api/planning/graphs/acme-plan", headers=a).status_code == 200
+    assert c.get("/api/planning/graphs/acme-plan", headers=b).status_code == 404
+
+    # Incidents are persisted and org-filtered in SQL, so a new org starts empty
+    # rather than with a copy of the seeded demo rows.
+    assert c.get("/api/incidents", headers=b).json() == []
+    declared = c.post("/api/incidents", headers=a, json={
+        "title": "checkout down", "severity": "critical", "service": "pay"})
+    assert declared.status_code == 200
+    inc_id = declared.json()["id"]
+
+    assert inc_id in {i["id"] for i in c.get("/api/incidents", headers=a).json()}
+    assert c.get("/api/incidents", headers=b).json() == []
+    assert c.get(f"/api/incidents/{inc_id}", headers=b).status_code == 404
+    # B cannot resolve what it cannot see, and A's incident is untouched.
+    assert c.post(f"/api/incidents/{inc_id}/resolve?user=mallory",
+                  headers=b).status_code == 404
+    assert c.get(f"/api/incidents/{inc_id}", headers=a).json()[
+        "incident"]["status"] == "triggered"
+
+
+def test_slo_org_id_cannot_be_chosen_by_the_caller(mt):
+    """`/api/slos` used to take `?org_id=` and trust it.
+
+    SLOTracker does filter its store by org, but the org came from a query
+    parameter defaulting to "default" — so any tenant could read, edit and delete
+    another's SLOs by naming them in the URL. The org comes from the credential
+    now, and the parameter is gone rather than ignored.
+    """
+    c, a, b = mt["client"], _auth(mt["owner"]), _auth(mt["b"])
+
+    created = c.post("/api/slos", headers=a, json={
+        "name": "acme-checkout", "service": "checkout", "target": 0.999})
+    assert created.status_code == 201
+    slo_id = created.json()["id"]
+
+    assert [s["name"] for s in c.get("/api/slos", headers=a).json()] == ["acme-checkout"]
+    assert c.get("/api/slos", headers=b).json() == []
+
+    assert c.get(f"/api/slos/{slo_id}", headers=b).status_code == 404
+    # …including when B names A's org explicitly, the old way in.
+    assert c.get(f"/api/slos/{slo_id}?org_id={mt['org_a']}", headers=b).status_code == 404
+    assert c.delete(f"/api/slos/{slo_id}?org_id={mt['org_a']}", headers=b).status_code == 404
+
+    assert c.get(f"/api/slos/{slo_id}", headers=a).status_code == 200

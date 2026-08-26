@@ -12,19 +12,33 @@ import asyncio
 import logging
 import os
 from logging.config import fileConfig
-from pathlib import Path
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from app.database.engine import _ensure_sqlite_directory
 from app.database.models import Base
+
+# Importing the model modules is what puts their tables on Base.metadata;
+# autogenerate only sees what has been imported. Without this the 17 oncall_*
+# tables were absent from every generated revision — and would have been
+# dropped by one, since autogenerate reads absence as "delete this table".
+import app.database.auth_models  # noqa: E402,F401
+import app.database.team_models  # noqa: E402,F401
+import app.database.growth_models  # noqa: E402,F401
+import app.oncall.models  # noqa: E402,F401
+import app.model_router.models  # noqa: E402,F401
+import app.notifications.models  # noqa: E402,F401
 
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which silences every logger
+    # already configured — including the app's own. That is invisible from the
+    # `alembic` CLI and very visible anywhere env.py is imported in-process.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 log = logging.getLogger("alembic.env")
 
@@ -38,28 +52,6 @@ def _redact(url: str) -> str:
         return url
     _, at, hostpart = rest.rpartition("@")
     return f"{scheme}://{hostpart}" if at else url
-
-
-def _ensure_sqlite_parent(url: str) -> None:
-    """Create the directory a SQLite file lives in, if it is missing.
-
-    `app/database/engine.py` learned this in 2717e94: a relative
-    `sqlite:///data/copilot.db` fails with the singularly unhelpful "unable to
-    open database file" when `data/` is absent -- which it is in every fresh
-    clone and every CI checkout, because `data/` is gitignored and was never
-    tracked.
-    """
-    prefix = "sqlite+aiosqlite:///"
-    if not url.startswith(prefix):
-        return
-
-    parent = Path(url[len(prefix) :]).parent
-    if parent in (Path(""), Path(".")):
-        return
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        log.warning("Cannot create %s for the SQLite database", parent)
 
 
 def get_url() -> str:
@@ -93,7 +85,17 @@ def get_url() -> str:
     elif url.startswith("sqlite://") and "+aiosqlite" not in url:
         url = url.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
-    _ensure_sqlite_parent(url)
+    if url.startswith("sqlite"):
+        # SQLite does not create the directory holding the database file; it just
+        # fails with "unable to open database file". The documented default is
+        # `sqlite:///data/copilot.db` and `data/` is untracked, so on a fresh
+        # clone `alembic upgrade head` died before running a single revision.
+        # The app's own startup path already does this (app/database/engine.py);
+        # reuse it so the two agree on how a URL maps to a filesystem path — and
+        # so a directory that genuinely cannot be created raises here rather
+        # than being logged and then failing obscurely one line later.
+        _ensure_sqlite_directory(url)
+
     # Say out loud what is about to be migrated. A migration run against the
     # wrong database is the failure this module is most able to cause and least
     # able to undo, so it should never be something you have to infer.

@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.tenant_context import tenant_id
 from app.slo.tracker import (
     SLIType,
     SLOWindow,
@@ -86,6 +87,22 @@ class ErrorBudgetResponse(BaseModel):
     status: str
     window_start: datetime
     window_end: datetime
+    #: The measured success ratio over the window, 0..1. `SLOTracker` has always
+    #: computed it and the dataclass has always carried it; this model dropped
+    #: it, so the only number the page could show for "current" was one it made
+    #: up from `100 - remaining_percent`, which is a budget figure and not an SLI
+    #: at all — a 99.9% SLO with half its budget gone rendered as "50% current"
+    #: next to a "99.9% target".
+    current_sli: float = 0.0
+    #: The sample counts behind `current_sli`, so a reader can tell a genuine
+    #: 100% from one measured over four requests.
+    good_count: int = 0
+    total_count: int = 0
+    #: Minutes of downtime the budget allows over the whole window, derived from
+    #: the SLO's own target and window. The page hardcoded 43.2 — the figure for
+    #: a 99.9% monthly SLO — and printed it for every SLO regardless of either.
+    budget_minutes_total: float = 0.0
+    budget_minutes_remaining: float = 0.0
 
 
 class SLIResponse(BaseModel):
@@ -112,9 +129,17 @@ class BurnRateResponse(BaseModel):
     message: str
 
 
-def _get_tracker(org_id: str = "default") -> SLOTracker:
-    """Get SLO tracker for organization."""
-    return SLOTracker(org_id=org_id)
+def _get_tracker() -> SLOTracker:
+    """SLO tracker bound to the org on the current request.
+
+    The org used to arrive as an `?org_id=` query parameter defaulting to
+    "default". SLOTracker does filter its store by org, but the caller chose
+    which org to be: any tenant could read, edit and delete another's SLOs by
+    naming them in the URL. It comes from the authenticated request now, and
+    the query parameter is gone rather than ignored, so a client sending the
+    old one fails loudly instead of silently operating on its own data.
+    """
+    return SLOTracker(org_id=tenant_id())
 
 
 def _slo_to_response(slo: Any) -> SLOResponse:
@@ -140,21 +165,19 @@ def _slo_to_response(slo: Any) -> SLOResponse:
 async def list_slos(
     service: str | None = Query(None, description="Filter by service"),
     team_id: str | None = Query(None, description="Filter by team"),
-    org_id: str = Query("default", description="Organization ID"),
 ) -> list[SLOResponse]:
     """List all SLOs."""
-    tracker = _get_tracker(org_id)
-    slos = tracker.list_slos(service=service, team_id=team_id)
+    tracker = _get_tracker()
+    slos = await tracker.list_slos(service=service, team_id=team_id)
     return [_slo_to_response(s) for s in slos]
 
 
 @router.post("", response_model=SLOResponse, status_code=201)
 async def create_slo(
     request: SLOCreateRequest,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> SLOResponse:
     """Create a new SLO."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
     try:
         sli_type = SLIType(request.sli_type)
@@ -166,7 +189,7 @@ async def create_slo(
     except ValueError:
         raise HTTPException(400, f"Invalid window: {request.window}")
 
-    slo = tracker.create_slo(
+    slo = await tracker.create_slo(
         name=request.name,
         description=request.description,
         service=request.service,
@@ -185,11 +208,10 @@ async def create_slo(
 @router.get("/{slo_id}", response_model=SLOResponse)
 async def get_slo(
     slo_id: str,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> SLOResponse:
     """Get an SLO by ID."""
-    tracker = _get_tracker(org_id)
-    slo = tracker.get_slo(slo_id)
+    tracker = _get_tracker()
+    slo = await tracker.get_slo(slo_id)
 
     if not slo:
         raise HTTPException(404, f"SLO not found: {slo_id}")
@@ -201,13 +223,12 @@ async def get_slo(
 async def update_slo(
     slo_id: str,
     request: SLOUpdateRequest,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> SLOResponse:
     """Update an existing SLO."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
     updates = request.model_dump(exclude_none=True)
-    slo = tracker.update_slo(slo_id, **updates)
+    slo = await tracker.update_slo(slo_id, **updates)
 
     if not slo:
         raise HTTPException(404, f"SLO not found: {slo_id}")
@@ -218,12 +239,11 @@ async def update_slo(
 @router.delete("/{slo_id}", status_code=204)
 async def delete_slo(
     slo_id: str,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> None:
     """Delete an SLO."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
-    if not tracker.delete_slo(slo_id):
+    if not await tracker.delete_slo(slo_id):
         raise HTTPException(404, f"SLO not found: {slo_id}")
 
 
@@ -231,12 +251,11 @@ async def delete_slo(
 async def record_sli(
     slo_id: str,
     request: SLIRecordRequest,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> SLIResponse:
     """Record an SLI measurement."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
-    sli = tracker.record_sli(
+    sli = await tracker.record_sli(
         slo_id=slo_id,
         good_count=request.good_count,
         total_count=request.total_count,
@@ -262,12 +281,11 @@ async def get_sli_data(
     slo_id: str,
     start_time: datetime | None = Query(None, description="Start of time range"),
     end_time: datetime | None = Query(None, description="End of time range"),
-    org_id: str = Query("default", description="Organization ID"),
 ) -> list[SLIResponse]:
     """Get SLI measurements for an SLO."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
-    data = tracker.get_sli_data(slo_id, start_time=start_time, end_time=end_time)
+    data = await tracker.get_sli_data(slo_id, start_time=start_time, end_time=end_time)
 
     return [
         SLIResponse(
@@ -285,15 +303,20 @@ async def get_sli_data(
 @router.get("/{slo_id}/budget", response_model=ErrorBudgetResponse)
 async def get_error_budget(
     slo_id: str,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> ErrorBudgetResponse:
     """Get error budget status for an SLO."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
-    budget = tracker.calculate_error_budget(slo_id)
+    budget = await tracker.calculate_error_budget(slo_id)
 
     if not budget:
         raise HTTPException(404, f"SLO not found: {slo_id}")
+
+    # Budget expressed in minutes of the SLO's own window, which is the unit an
+    # on-call engineer reasons in ("we have 12 minutes left this month"). Derived
+    # here rather than in the tracker because it is a presentation of
+    # `total_budget` over `window`, and both are already on the response.
+    window_minutes = (budget.window_end - budget.window_start).total_seconds() / 60
 
     return ErrorBudgetResponse(
         slo_id=budget.slo_id,
@@ -306,18 +329,22 @@ async def get_error_budget(
         status=budget.status.value,
         window_start=budget.window_start,
         window_end=budget.window_end,
+        current_sli=budget.current_sli,
+        good_count=budget.good_count,
+        total_count=budget.total_count,
+        budget_minutes_total=round(budget.total_budget * window_minutes, 2),
+        budget_minutes_remaining=round(budget.remaining * window_minutes, 2),
     )
 
 
 @router.get("/{slo_id}/burn-rate", response_model=BurnRateResponse)
 async def get_burn_rate(
     slo_id: str,
-    org_id: str = Query("default", description="Organization ID"),
 ) -> BurnRateResponse:
     """Get multi-window burn rate for an SLO."""
-    tracker = _get_tracker(org_id)
+    tracker = _get_tracker()
 
-    burn_rates = tracker.calculate_burn_rate(slo_id)
+    burn_rates = await tracker.calculate_burn_rate(slo_id)
 
     if not burn_rates:
         raise HTTPException(404, f"SLO not found: {slo_id}")

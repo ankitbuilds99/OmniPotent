@@ -203,3 +203,123 @@ def test_session_queue_limit():
         assert len(pending) == 100
 
     asyncio.run(test())
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end handshake. The app-level require_auth dependency used to ask for a
+# Request, which FastAPI cannot supply to a websocket route, so every /ws/chat
+# handshake died with `TypeError: require_auth() missing 1 required positional
+# argument: 'request'` before the handler was ever reached.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def ws_client(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.config import get_settings
+
+    monkeypatch.delenv("COPILOT_API_TOKEN", raising=False)
+    monkeypatch.setenv("COPILOT_MULTI_TENANT", "false")
+    get_settings.cache_clear()
+    yield TestClient(app, raise_server_exceptions=False)
+    get_settings.cache_clear()
+
+
+def test_websocket_handshake_succeeds(ws_client):
+    with ws_client.websocket_connect("/ws/chat/t1") as ws:
+        frame = ws.receive_json()
+    assert frame["type"] == "connected"
+    assert frame["thread_id"] == "t1"
+
+
+def test_websocket_rejects_bad_token(ws_client, monkeypatch):
+    """The token in the subprotocol is verified, not merely present."""
+    from starlette.websockets import WebSocketDisconnect
+    from app.config import get_settings
+
+    monkeypatch.setenv("COPILOT_API_TOKEN", "right-token")
+    get_settings.cache_clear()
+
+    with pytest.raises(WebSocketDisconnect):
+        with ws_client.websocket_connect(
+            "/ws/chat/t1", subprotocols=["copilot-v1", "auth-wrong-token"]
+        ) as ws:
+            ws.receive_json()
+
+    with ws_client.websocket_connect(
+        "/ws/chat/t1", subprotocols=["copilot-v1", "auth-right-token"]
+    ) as ws:
+        assert ws.receive_json()["type"] == "connected"
+
+
+# --------------------------------------------------------------------------- #
+# Subprotocol negotiation (RFC 6455 §4.2.2). The server used to accept with no
+# subprotocol while the SPA always offers one, so Chrome killed every handshake:
+#   "Error during WebSocket handshake: Sent non-empty 'Sec-WebSocket-Protocol'
+#    header but no response was received".
+# Starlette's TestClient does not enforce the rule, but it does record what the
+# server selected, which is exactly the value the browser checks.
+# --------------------------------------------------------------------------- #
+class _Headers:
+    """Minimal stand-in for Starlette's case-insensitive header mapping."""
+
+    def __init__(self, value: str = ""):
+        self._value = value
+
+    def get(self, key: str, default: str = "") -> str:
+        return self._value if key == "sec-websocket-protocol" else default
+
+
+def _fake_ws(offer: str):
+    ws = MagicMock()
+    ws.headers = _Headers(offer)
+    return ws
+
+
+def test_negotiate_subprotocol_picks_the_client_protocol():
+    from app.api.websocket import negotiate_subprotocol
+
+    assert negotiate_subprotocol(_fake_ws("copilot-v1")) == "copilot-v1"
+    assert negotiate_subprotocol(_fake_ws("copilot-v1, auth-abc123")) == "copilot-v1"
+    # Order in the offer must not matter.
+    assert negotiate_subprotocol(_fake_ws("auth-abc123,copilot-v1")) == "copilot-v1"
+
+
+def test_negotiate_subprotocol_never_echoes_the_credential():
+    """Echoing `auth-<token>` would publish the session token in a response header."""
+    from app.api.websocket import negotiate_subprotocol
+
+    assert negotiate_subprotocol(_fake_ws("auth-secret-token")) is None
+
+
+def test_negotiate_subprotocol_none_offered():
+    from app.api.websocket import negotiate_subprotocol
+
+    assert negotiate_subprotocol(_fake_ws("")) is None
+
+
+def test_websocket_handshake_answers_the_subprotocol_offer(ws_client):
+    """A browser fails the connection unless the accept echoes an offered protocol."""
+    with ws_client.websocket_connect("/ws/chat/t1", subprotocols=["copilot-v1"]) as ws:
+        assert ws.accepted_subprotocol == "copilot-v1"
+        assert ws.receive_json()["type"] == "connected"
+
+
+def test_websocket_handshake_does_not_echo_the_token(ws_client, monkeypatch):
+    """With a token in the offer the negotiated protocol is still `copilot-v1`."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("COPILOT_API_TOKEN", "right-token")
+    get_settings.cache_clear()
+
+    with ws_client.websocket_connect(
+        "/ws/chat/t1", subprotocols=["copilot-v1", "auth-right-token"]
+    ) as ws:
+        assert ws.accepted_subprotocol == "copilot-v1"
+        assert ws.receive_json()["type"] == "connected"
+
+
+def test_websocket_handshake_without_an_offer_selects_nothing(ws_client):
+    """A client that offers no subprotocol must not get one back (RFC 6455)."""
+    with ws_client.websocket_connect("/ws/chat/t1") as ws:
+        assert ws.accepted_subprotocol is None
+        assert ws.receive_json()["type"] == "connected"

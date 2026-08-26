@@ -1,0 +1,43 @@
+# Staging overlay for the omnipotent chart.
+#
+# Referenced by deploy/argocd/applicationset.yaml (`valueFiles`). Replicas,
+# autoscaling bounds and resources are supplied there as Helm `parameters`, so
+# this file only carries what a --set cannot express cleanly: the hostnames and
+# the environment-specific behaviour switches.
+#
+# Credentials are NOT in here. Point `secrets.existingSecret` at a Secret managed
+# by the external-secrets operator, or pass `--set secrets.apiToken=...`.
+
+environment: staging
+
+image:
+  tag: latest
+  pullPolicy: Always
+
+config:
+  logLevel: DEBUG
+  logFormat: json
+  multiTenant: true
+  corsOrigins: "https://staging.omnipotent.example.com"
+
+ingress:
+  hosts:
+    - host: staging-api.omnipotent.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: omnipotent-staging-tls
+      hosts:
+        - staging-api.omnipotent.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+
+secrets:
+  existingSecret: omnipotent-secrets
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException
-
 from app.billing.models import (
     BillingCycle,
     MetricType,
@@ -26,6 +24,38 @@ log = logging.getLogger("omnipotent.billing.api")
 # Marker for values produced without a payment processor, so a simulated
 # subscription can never be read as a paid one.
 SIMULATED_SUFFIX = " (simulated)"
+
+
+class BillingUnavailableError(RuntimeError):
+    """Raised when an operation needs Stripe but billing is not configured.
+
+    Callers must surface this as 503 rather than silently succeeding: an
+    unconfigured payment processor means the payment did not happen.
+    """
+
+
+class UnknownMetricError(ValueError):
+    """Raised for a metric name that is not a `MetricType`.
+
+    `MetricType(metric_type)` was constructed straight from a query parameter, so
+    `?metric=ai_investigations` (plural — the name the response body itself uses)
+    raised ValueError out of the handler and the client got a 500 "An unexpected
+    error occurred", which reads as an outage rather than as a typo.
+    """
+
+    def __init__(self, metric_type: str):
+        self.metric_type = metric_type
+        self.valid = [m.value for m in MetricType]
+        super().__init__(
+            f"unknown metric {metric_type!r}; expected one of {', '.join(self.valid)}"
+        )
+
+
+def _parse_metric(metric_type: str) -> MetricType:
+    try:
+        return MetricType(metric_type)
+    except ValueError:
+        raise UnknownMetricError(metric_type) from None
 
 
 @dataclass
@@ -259,19 +289,20 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe checkout session."""
         if not self._stripe:
-            # Without a payment processor there is no way to charge anyone, so
-            # activating a paid plan here would hand out the paid tier for free
-            # to whoever asks. Refuse outright unless this is an explicit demo.
+            # Fail closed. This previously activated the requested paid plan in the
+            # store and returned a fake session id, i.e. any caller could grant
+            # themselves the most expensive plan without paying. The simulated
+            # path survives only behind an explicit COPILOT_DEMO_MODE=true, and
+            # everything it hands back is labelled as simulated.
             if not get_settings().copilot_demo_mode:
-                log.warning(
+                log.error(
                     "Checkout requested for plan %s but Stripe is not configured "
                     "(set STRIPE_API_KEY); refusing to activate a paid subscription "
                     "that was never paid for",
                     plan_name,
                 )
-                raise HTTPException(
-                    status_code=503,
-                    detail="billing is not configured",
+                raise BillingUnavailableError(
+                    "Payments are not available: billing is not configured on this deployment."
                 )
 
             log.warning(
@@ -321,18 +352,24 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Create a Stripe customer portal session."""
         if not self._stripe:
-            # The "portal" below is just a redirect back into the app: no invoice,
-            # card or cancellation control exists behind it. Sending a customer
-            # there as if it were their billing portal is a dead end.
+            # Fail closed, like create_checkout above. The "demo portal" returned
+            # the caller's own URL, and the frontend does
+            # `window.location.href = result.portal_url` — so all four buttons
+            # wired to it ("Billing Portal", "Manage via Stripe", "View all in
+            # Stripe", "Add new card") reloaded the page the user was already on.
+            # No error, no message: the customer clicks, nothing happens, and
+            # there is no way to tell it apart from a slow page. Behind an
+            # explicit COPILOT_DEMO_MODE=true that redirect is still available,
+            # flagged as simulated so nothing reads it as a real portal.
             if not get_settings().copilot_demo_mode:
-                log.warning(
+                log.error(
                     "Billing portal requested but Stripe is not configured "
                     "(set STRIPE_API_KEY); refusing to return a portal URL that "
                     "manages nothing"
                 )
-                raise HTTPException(
-                    status_code=503,
-                    detail="billing is not configured",
+                raise BillingUnavailableError(
+                    "The billing portal is not available: billing is not configured "
+                    "on this deployment."
                 )
 
             log.warning("COPILOT_DEMO_MODE=true - returning a SIMULATED billing portal URL")
@@ -349,7 +386,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Change subscription plan."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         cycle = None
         if billing_cycle:
@@ -393,7 +430,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Cancel subscription."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         subscription = await self._stripe.cancel_subscription(
             org_id=org_id,
@@ -410,7 +447,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Reactivate canceled subscription."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         subscription = await self._stripe.reactivate_subscription(org_id)
         return subscription.to_dict()
@@ -464,7 +501,7 @@ class BillingAPI:
         increment: int = 1,
     ) -> dict[str, Any]:
         """Check if within usage limits."""
-        mt = MetricType(metric_type)
+        mt = _parse_metric(metric_type)
         result = await self._feature_gate.check_usage_limit(org_id, mt, increment)
 
         return {
@@ -502,7 +539,7 @@ class BillingAPI:
     ) -> dict[str, Any]:
         """Handle Stripe webhook."""
         if not self._stripe:
-            raise ValueError("Stripe not configured")
+            raise BillingUnavailableError("Billing is not configured on this deployment.")
 
         result = await self._stripe.handle_webhook(payload, signature)
         return {
@@ -517,7 +554,7 @@ class BillingAPI:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Track a usage event."""
-        mt = MetricType(metric_type)
+        mt = _parse_metric(metric_type)
 
         if mt == MetricType.AI_INVESTIGATION:
             await self._usage_tracker.track_ai_investigation(

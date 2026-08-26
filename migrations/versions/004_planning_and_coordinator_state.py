@@ -54,8 +54,8 @@ def upgrade() -> None:
         "planning_graphs",
         sa.Column("id", sa.String(128), nullable=False),
         sa.Column("org_id", sa.String(128), nullable=False),
-        sa.Column("state", JSONType, nullable=False, server_default="{}"),
-        sa.Column("task_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("state", JSONType, nullable=False),
+        sa.Column("task_count", sa.Integer(), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -80,9 +80,9 @@ def upgrade() -> None:
         sa.Column("id", sa.String(128), nullable=False),
         sa.Column("org_id", sa.String(128), nullable=False),
         sa.Column("dag_id", sa.String(128), nullable=False),
-        sa.Column("state", sa.String(32), nullable=False, server_default="pending"),
-        sa.Column("current_level", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("execution", JSONType, nullable=False, server_default="{}"),
+        sa.Column("state", sa.String(32), nullable=False),
+        sa.Column("current_level", sa.Integer(), nullable=False),
+        sa.Column("execution", JSONType, nullable=False),
         sa.Column(
             "started_at",
             sa.DateTime(timezone=True),

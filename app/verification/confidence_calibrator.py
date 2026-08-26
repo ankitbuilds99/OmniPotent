@@ -16,6 +16,14 @@ from typing import Any
 
 log = logging.getLogger("omnipotent.verification.confidence_calibrator")
 
+# Bin set that accumulates every recorded outcome regardless of claim type, so
+# the calibration endpoint can report overall Brier/ECE.
+OVERALL_CLAIM_TYPE = "default"
+
+# Redis set recording which claim types have persisted bins, so a restarted
+# process can restore all of them instead of only the ones it happens to ask for.
+CLAIM_TYPES_KEY = "calibration:claim_types"
+
 
 @dataclass
 class CalibrationBin:
@@ -27,9 +35,16 @@ class CalibrationBin:
     correct: int = 0
 
     @property
-    def accuracy(self) -> float:
+    def accuracy(self) -> float | None:
+        """Observed accuracy, or None when nothing has been recorded.
+
+        Returning the bin midpoint for an empty bin made every reliability
+        diagram draw a perfect 45-degree line over zero samples, which reads as
+        "this system is perfectly calibrated" when the truth is "no outcome has
+        ever been recorded".
+        """
         if self.predictions == 0:
-            return (self.lower_bound + self.upper_bound) / 2
+            return None
         return self.correct / self.predictions
 
     @property
@@ -82,7 +97,44 @@ class ConfidenceCalibrator:
         self.redis = redis_client
         self.num_bins = num_bins
         self._bins: dict[str, list[CalibrationBin]] = {}
-        self._initialize_bins("default")
+        self._loaded = False
+        self._initialize_bins(OVERALL_CLAIM_TYPE)
+
+    @property
+    def is_persistent(self) -> bool:
+        """Whether recorded outcomes survive a restart / are shared by workers."""
+        return self.redis is not None
+
+    @property
+    def storage_description(self) -> str:
+        """Where recorded outcomes live, in words a reader can act on."""
+        if self.redis is not None:
+            return "redis (keys: calibration:<claim_type>:bin:<n>)"
+        return (
+            "process memory: recorded outcomes are lost on restart and are not "
+            "shared between workers. Set COPILOT_REDIS_URL to persist them."
+        )
+
+    async def ensure_loaded(self) -> None:
+        """Restore persisted bins from Redis, once, if Redis is configured."""
+        if self.redis is None or self._loaded:
+            return
+        self._loaded = True
+
+        claim_types = {OVERALL_CLAIM_TYPE}
+        try:
+            members = await self.redis.smembers(CLAIM_TYPES_KEY)
+            for member in members or []:
+                claim_types.add(
+                    member.decode() if isinstance(member, bytes) else str(member)
+                )
+        except Exception as e:
+            log.debug("Failed to list persisted calibration claim types: %s", e)
+
+        for claim_type in sorted(claim_types):
+            if claim_type not in self._bins:
+                self._initialize_bins(claim_type)
+            await self._load_calibration_data(claim_type)
 
     def _initialize_bins(self, claim_type: str) -> None:
         """Initialize calibration bins for a claim type."""
@@ -116,6 +168,8 @@ class ConfidenceCalibrator:
         stated_confidence = max(0.0, min(1.0, stated_confidence))
         evidence_strength = max(0.0, min(1.0, evidence_strength))
 
+        await self.ensure_loaded()
+
         if claim_type not in self._bins:
             self._initialize_bins(claim_type)
             await self._load_calibration_data(claim_type)
@@ -123,6 +177,23 @@ class ConfidenceCalibrator:
         bin_idx = min(int(stated_confidence * self.num_bins), self.num_bins - 1)
         calibration_bin = self._bins[claim_type][bin_idx]
         historical_accuracy = calibration_bin.accuracy
+
+        if historical_accuracy is None:
+            # No outcome has ever been recorded in this band. Blending in a
+            # made-up "historical accuracy" would dress a guess up as evidence,
+            # so the historical term is dropped and its weight redistributed.
+            calibrated = max(0.0, min(1.0, stated_confidence * 0.55 + evidence_strength * 0.45))
+            return CalibrationResult(
+                original_confidence=stated_confidence,
+                calibrated_confidence=calibrated,
+                overconfidence_detected=False,
+                calibration_adjustment=calibrated - stated_confidence,
+                evidence_strength=evidence_strength,
+                explanation=(
+                    "No recorded outcomes for this confidence band yet; calibrated "
+                    "from evidence strength alone (no historical accuracy available)"
+                ),
+            )
 
         calibrated = (
             stated_confidence * 0.4 +
@@ -169,6 +240,30 @@ class ConfidenceCalibrator:
             stated_confidence: The confidence that was stated
             was_correct: Whether the prediction was correct
         """
+        stated_confidence = max(0.0, min(1.0, stated_confidence))
+
+        # Load before incrementing: otherwise the first outcome after a restart
+        # would write predictions=1 over whatever Redis already held.
+        await self.ensure_loaded()
+
+        self._record_in_bins(claim_type, stated_confidence, was_correct)
+        if self.redis:
+            await self._save_calibration_data(claim_type)
+
+        # OVERALL_CLAIM_TYPE doubles as the cross-type aggregate so that
+        # GET /calibration has something truthful to report without the caller
+        # having to know every claim_type the agent has ever seen.
+        if claim_type != OVERALL_CLAIM_TYPE:
+            self._record_in_bins(OVERALL_CLAIM_TYPE, stated_confidence, was_correct)
+            if self.redis:
+                await self._save_calibration_data(OVERALL_CLAIM_TYPE)
+
+    def _record_in_bins(
+        self,
+        claim_type: str,
+        stated_confidence: float,
+        was_correct: bool,
+    ) -> None:
         if claim_type not in self._bins:
             self._initialize_bins(claim_type)
 
@@ -179,8 +274,13 @@ class ConfidenceCalibrator:
         if was_correct:
             calibration_bin.correct += 1
 
-        if self.redis:
-            await self._save_calibration_data(claim_type)
+    def total_predictions(self, claim_type: str = OVERALL_CLAIM_TYPE) -> int:
+        """How many outcomes have actually been recorded for a claim type."""
+        return sum(b.predictions for b in self._bins.get(claim_type, []))
+
+    def known_claim_types(self) -> list[str]:
+        """Claim types that have at least one bin (recorded or calibrated)."""
+        return sorted(self._bins)
 
     async def _load_calibration_data(self, claim_type: str) -> None:
         """Load calibration data from Redis."""
@@ -192,8 +292,13 @@ class ConfidenceCalibrator:
             try:
                 data = await self.redis.hgetall(key)
                 if data:
-                    self._bins[claim_type][i].predictions = int(data.get(b"predictions", 0))
-                    self._bins[claim_type][i].correct = int(data.get(b"correct", 0))
+                    # Clients differ on decode_responses, so accept either.
+                    fields = {
+                        (k.decode() if isinstance(k, bytes) else str(k)): v
+                        for k, v in data.items()
+                    }
+                    self._bins[claim_type][i].predictions = int(fields.get("predictions", 0))
+                    self._bins[claim_type][i].correct = int(fields.get("correct", 0))
             except Exception as e:
                 log.debug("Failed to load calibration data: %s", e)
 
@@ -201,6 +306,11 @@ class ConfidenceCalibrator:
         """Save calibration data to Redis."""
         if not self.redis:
             return
+
+        try:
+            await self.redis.sadd(CLAIM_TYPES_KEY, claim_type)
+        except Exception as e:
+            log.debug("Failed to register calibration claim type: %s", e)
 
         for i, cal_bin in enumerate(self._bins[claim_type]):
             key = f"calibration:{claim_type}:bin:{i}"
@@ -236,6 +346,8 @@ class ConfidenceCalibrator:
 
             mean_confidence = cal_bin.mean_confidence
             accuracy = cal_bin.accuracy
+            if accuracy is None:
+                continue
 
             brier_sum += cal_bin.predictions * (mean_confidence - accuracy) ** 2
             total_predictions += cal_bin.predictions
@@ -262,8 +374,12 @@ class ConfidenceCalibrator:
             if cal_bin.predictions == 0:
                 continue
 
+            accuracy = cal_bin.accuracy
+            if accuracy is None:
+                continue
+
             weight = cal_bin.predictions / total_predictions
-            calibration_error = abs(cal_bin.accuracy - cal_bin.mean_confidence)
+            calibration_error = abs(accuracy - cal_bin.mean_confidence)
             ece += weight * calibration_error
 
         return ece
@@ -286,6 +402,9 @@ class ConfidenceCalibrator:
 
         return {
             "bins": bins_data,
+            # Only meaningful once something has been recorded; a client that
+            # plots this against zero-sample bins is drawing a line over no data.
+            "total_samples": sum(b["samples"] for b in bins_data),
             "perfect_calibration": [{"x": i / 10, "y": i / 10} for i in range(11)],
             "brier_score": self.calculate_brier_score(claim_type),
             "ece": self.calculate_ece(claim_type),

@@ -2,6 +2,10 @@
 
 Tools for browsing the agent registry, installing/uninstalling agents,
 and managing agent configurations.
+
+Only catalogue entries whose MCP server module is present in this deployment can
+be installed; the rest are listings with `available: false` and installing one
+returns `status: "unavailable"`. Nothing here downloads or executes remote code.
 """
 
 from __future__ import annotations
@@ -18,13 +22,18 @@ def list_marketplace_agents(
     category: str = "",
     verified_only: bool = False,
     search: str = "",
+    available_only: bool = False,
 ) -> str:
-    """List agents available in the marketplace.
+    """List agents catalogued in the marketplace.
+
+    Each result carries `available`: false means the listing is metadata only and
+    the agent cannot be installed or used in this deployment.
 
     Args:
         category: Filter by category (e.g., monitoring, cicd, security)
         verified_only: Only show verified agents
         search: Search term to filter agents by name, description, or tools
+        available_only: Only show agents that can actually be installed here
     """
     from app.marketplace.registry import get_registry
 
@@ -33,6 +42,7 @@ def list_marketplace_agents(
         category=category or None,
         verified_only=verified_only,
         search=search or None,
+        available_only=available_only,
     )
 
     return json.dumps(
@@ -76,6 +86,10 @@ def get_agent_details(agent_id: str) -> str:
 @mcp.tool()
 def install_agent(agent_id: str, config: str = "") -> str:
     """Install an agent from the marketplace.
+
+    Succeeds only for agents whose implementation ships with this deployment.
+    Anything else returns status "unavailable" and installs nothing — do not
+    report such an agent as installed or try to use its tools.
 
     Args:
         agent_id: The ID of the agent to install
@@ -175,6 +189,7 @@ def list_installed_agents(enabled_only: bool = False) -> str:
         {
             "agents": [a.to_dict() for a in agents],
             "total": len(agents),
+            "state_path": str(manager.data_path),
         },
         indent=2,
     )

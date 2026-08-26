@@ -85,6 +85,11 @@ export function Billing({ onBack }: BillingProps) {
     loadData();
   }, [loadData]);
 
+  // `setActionLoading(false)` belongs in `finally`, not only in `catch`. On the
+  // success path these hand off to `window.location.href`, and a navigation that
+  // does not actually leave the page — the URL the server hands back being the
+  // one already open, say — leaves the spinner running with no way to clear it.
+  // Resetting unconditionally costs nothing when the browser really does leave.
   const handleSelectPlan = async (plan: PricingPlan) => {
     setActionLoading(true);
     try {
@@ -98,6 +103,7 @@ export function Billing({ onBack }: BillingProps) {
       window.location.href = result.checkout_url;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create checkout');
+    } finally {
       setActionLoading(false);
     }
   };
@@ -109,6 +115,7 @@ export function Billing({ onBack }: BillingProps) {
       window.location.href = result.portal_url;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to open portal');
+    } finally {
       setActionLoading(false);
     }
   };

@@ -63,6 +63,19 @@ def tenant_id() -> str:
     return cfg.org_id if cfg else "-"
 
 
+def integration_secret(name: str, fallback: str = "") -> str:
+    """An integration credential for whoever is on the current request.
+
+    Multi-tenant: the tenant's own decrypted value, and never the host's — a
+    missing key resolves to "" so the caller degrades instead of quietly acting
+    as the operator. Single-tenant: the .env fallback the caller passes in.
+    """
+    cfg = current_tenant.get()
+    if cfg is not None:
+        return cfg.integration_secrets.get(name, "")
+    return fallback
+
+
 # Owner recorded on stored rows when no tenant is resolved. Distinct from
 # tenant_id()'s "-": that is a log placeholder meaning "unknown", while this is a
 # real key that single-tenant deployments read back by.

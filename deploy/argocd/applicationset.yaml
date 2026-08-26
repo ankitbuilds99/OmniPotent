@@ -25,6 +25,8 @@ spec:
                 - env: staging
                   cluster: https://staging.k8s.example.com
                   namespace: omnipotent-staging
+                  targetRevision: main
+                  imageTag: latest
                   replicaCount: "1"
                   autoscaling: "false"
                   minReplicas: "1"
@@ -36,6 +38,8 @@ spec:
                 - env: production
                   cluster: https://production.k8s.example.com
                   namespace: omnipotent-production
+                  targetRevision: HEAD
+                  imageTag: v1.0.0
                   replicaCount: "1"
                   autoscaling: "false"
                   minReplicas: "1"
@@ -44,14 +48,22 @@ spec:
                   memoryRequest: "1Gi"
                   cpuLimit: "4000m"
                   memoryLimit: "4Gi"
-          # Component generator
+          # Component generator.
+          #
+          # Only `api` exists. A `worker` element used to be listed here pointing
+          # at a values-worker.yaml that was never written, which made ArgoCD fail
+          # the whole Application. The runtime image now carries the `tasks` extra
+          # (the Dockerfile installs `.[postgres,migrations,tasks]`, so the
+          # Dramatiq worker can start from it — docker-compose runs it that way),
+          # but deploy/helm/devops-copilot — the chart this generator deploys —
+          # still has no worker Deployment template and no values-worker.yaml.
+          # (deploy/helm/copilot has templates/worker-deployment.yaml; this
+          # generator does not point at that chart.) Add the template and the
+          # values file before re-adding the component.
           - list:
               elements:
                 - component: api
                   path: deploy/helm/devops-copilot
-                - component: worker
-                  path: deploy/helm/devops-copilot
-                  valuesFile: values-worker.yaml
 
   # Sync policy for progressive delivery
   strategy:
@@ -91,7 +103,10 @@ spec:
       # Source configuration
       source:
         repoURL: https://github.com/ankit25bcs10610/OmniPotent.git
-        targetRevision: '{{#if (eq env "production")}}HEAD{{else}}main{{/if}}'
+        # ApplicationSet templating here is fasttemplate, not handlebars: block
+        # helpers are copied through verbatim and end up as the revision string.
+        # Per-environment revisions come from the list generator instead.
+        targetRevision: '{{targetRevision}}'
         path: '{{path}}'
         helm:
           releaseName: 'omnipotent-{{component}}-{{env}}'
@@ -118,7 +133,7 @@ spec:
             - name: environment
               value: '{{env}}'
             - name: image.tag
-              value: '{{revision}}'
+              value: '{{imageTag}}'
 
       # Destination cluster and namespace
       destination:

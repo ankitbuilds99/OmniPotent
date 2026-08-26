@@ -2,8 +2,15 @@
 
 Two dicts in app/auth/oauth.py become tables:
 
-    _OAUTH_ACCOUNTS  ->  oauth_accounts
+    _OAUTH_ACCOUNTS  ->  oauth_accounts   (created downstream, see below)
     _OAUTH_STATES    ->  oauth_states
+
+Only `oauth_states` is created here. The other branch creates `oauth_accounts`
+in revision 014_auth, in the shape app/database/auth_models.py declares, and
+that branch's ORM models are the ones the application now imports. 014_auth sits
+downstream of this revision after the merge, so `upgrade head` still ends with
+oauth_accounts present — do not "restore" the create_table here, the second
+CREATE would simply fail.
 
 `_USER_ACCOUNTS` (user id -> list of account ids) gets no table. It was a
 hand-maintained index over the same records, so it is now a query against
@@ -45,32 +52,6 @@ depends_on = None
 
 def upgrade() -> None:
     op.create_table(
-        "oauth_accounts",
-        sa.Column("id", sa.String(length=320), nullable=False),
-        sa.Column("user_id", sa.String(length=128), nullable=False),
-        sa.Column("provider", sa.String(length=32), nullable=False),
-        sa.Column("provider_id", sa.String(length=255), nullable=False),
-        sa.Column("email", sa.String(length=320), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False, server_default=""),
-        sa.Column("avatar_url", sa.Text(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.Column(
-            "last_login",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_oauth_accounts_user", "oauth_accounts", ["user_id"])
-    op.create_index("ix_oauth_accounts_email", "oauth_accounts", ["email"])
-
-    op.create_table(
         "oauth_states",
         sa.Column("state", sa.String(length=128), nullable=False),
         sa.Column("provider", sa.String(length=32), nullable=False),
@@ -86,15 +67,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drops both tables.
+    """Drops oauth_states, which only invalidates logins that are mid-flight.
 
-    Dropping oauth_accounts unlinks every provider identity, so the next sign-in
-    by an existing user mints them a new user id and orphans whatever is keyed
-    to the old one -- the exact failure this revision was written to stop.
-    Dropping oauth_states only invalidates logins that are mid-flight.
+    oauth_accounts is 014_auth's to drop; by the time this runs it is already
+    gone, and unlinking every provider identity there is the destructive half.
     """
     op.drop_index("ix_oauth_states_created", table_name="oauth_states")
     op.drop_table("oauth_states")
-    op.drop_index("ix_oauth_accounts_email", table_name="oauth_accounts")
-    op.drop_index("ix_oauth_accounts_user", table_name="oauth_accounts")
-    op.drop_table("oauth_accounts")

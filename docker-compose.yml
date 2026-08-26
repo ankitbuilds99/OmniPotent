@@ -1,7 +1,9 @@
 # DevOps Copilot — full local development stack
 #
 # Run: docker compose up -d
-# Access: http://localhost:8000 (API) | http://localhost:5173 (Frontend)
+# Access: http://localhost:8000 — the image bakes in the built SPA and FastAPI
+# serves it at /, so there is no separate frontend container here. For the Vite
+# dev server with hot reload, run `npm run dev` in frontend/ (http://localhost:5173).
 #
 # Optional services for production-like setup:
 #   docker compose --profile monitoring up -d
@@ -20,10 +22,14 @@ services:
       COPILOT_RATE_LIMIT_PER_MIN: ${COPILOT_RATE_LIMIT_PER_MIN:-120}
       COPILOT_MAX_SESSIONS: ${COPILOT_MAX_SESSIONS:-50}
       # --- database ---
-      # The app accepts the bare DATABASE_URL/REDIS_URL that managed platforms
-      # inject, but inject the COPILOT_-prefixed names here so the container's
-      # config is unambiguous. The ${DATABASE_URL:-...} on the right is the
-      # HOST-side override (docker compose interpolation), not what the app reads.
+      # The keys handed to the container MUST carry the COPILOT_ prefix: Settings
+      # is extra="ignore", so before this the bare DATABASE_URL/REDIS_URL were
+      # silently dropped and the app fell back to SQLite and an in-process rate
+      # limiter while postgres and redis idled beside it. (The app now also
+      # accepts the bare names managed platforms inject, but be explicit here.)
+      # The ${DATABASE_URL:-...} on the right is the HOST-side override — docker
+      # compose interpolation, not what the app reads — and is the same name the
+      # worker service below interpolates, so one host export moves both.
       COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
       COPILOT_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # --- LLM provider + keys ---
@@ -56,7 +62,10 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # /healthz is the API's liveness route. /health is not a route at all: the
+      # SPA catch-all answers it with index.html, so the container stayed
+      # "healthy" no matter what the API was doing.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3

@@ -5,24 +5,23 @@ on:
     branches: [main]
     paths:
       # `alembic/` and `app/db/` do not exist in this repo: alembic.ini sets
-      # `script_location = migrations`, and the models are `app/database/`.
-      # Both were dead entries, so the one change this workflow exists to
-      # guard -- editing a model without writing a migration -- never
-      # triggered it.
+      # `script_location = migrations`, and the models autogenerate compares
+      # against are app/database/ plus app/oncall/models.py (both imported by
+      # migrations/env.py). Both old entries were dead, so the one change this
+      # workflow exists to guard -- editing a model without writing a migration
+      # -- never triggered it.
       - 'migrations/**'
       - 'alembic.ini'
       - 'app/database/**'
+      - 'app/oncall/models.py'
   pull_request:
     branches: [main]
     paths:
-      # `alembic/` and `app/db/` do not exist in this repo: alembic.ini sets
-      # `script_location = migrations`, and the models are `app/database/`.
-      # Both were dead entries, so the one change this workflow exists to
-      # guard -- editing a model without writing a migration -- never
-      # triggered it.
+      # Same list as the push trigger above; keep them in step.
       - 'migrations/**'
       - 'alembic.ini'
       - 'app/database/**'
+      - 'app/oncall/models.py'
   workflow_dispatch:
     inputs:
       environment:
@@ -154,33 +153,22 @@ jobs:
         run: |
           echo "Checking for unmigrated model changes..."
 
-          # alembic.ini sets `script_location = migrations`; there is no
-          # `alembic/` directory in this repo and never has been. The old
-          # `ls -t alembic/versions/*.py` therefore always came back empty, the
-          # `if` never ran, and this step reported success having inspected
-          # nothing. Pin the revision id so the generated file is found by name
-          # instead of guessed at by mtime -- with the path merely corrected,
-          # a failed autogenerate would leave `ls -t` pointing at a real
-          # migration, which the branch below would warn about and then delete.
-          uv run alembic revision --autogenerate \
-            --rev-id ci_consistency_check -m "check_consistency" || {
-            echo "::error::alembic autogenerate failed; consistency is unknown"
-            exit 1
-          }
-
-          GENERATED=$(ls migrations/versions/ci_consistency_check_*.py 2>/dev/null | head -1)
-          if [ -z "$GENERATED" ]; then
-            echo "::error::autogenerate wrote no revision file; consistency is unknown"
+          # `alembic check` diffs the ORM metadata against the migrated database
+          # and exits non-zero when a revision is missing. It replaces a
+          # hand-rolled `revision --autogenerate` + glob of alembic/versions/ --
+          # a directory alembic.ini never pointed at (`script_location =
+          # migrations`), so `ls -t` always came back empty, the `if` never ran
+          # and this step reported success having inspected nothing, leaving the
+          # generated file behind in migrations/versions/. `check` writes no
+          # file, so there is nothing to clean up and nothing to mistake a real
+          # migration for. Drift now FAILS the job rather than emitting a
+          # ::warning:: nobody reads.
+          if ! uv run alembic check; then
+            echo "::error::Model changes have no corresponding migration."
+            echo "Run: uv run alembic revision --autogenerate -m '<description>'"
             exit 1
           fi
-
-          if grep -qE '^[[:space:]]+op\.' "$GENERATED"; then
-            echo "::warning::Detected model changes without corresponding migrations"
-            cat "$GENERATED"
-          else
-            echo "Models and migrations are in sync"
-          fi
-          rm -f "$GENERATED"
+          echo "Models and migrations are in sync"
 
       - name: Migration summary
         run: |
@@ -205,11 +193,15 @@ jobs:
 
       - name: Check for new migrations
         id: new-migrations
+        env:
+          # Via env rather than ${{ }} interpolation: a branch name is attacker
+          # controlled and would otherwise be spliced into the shell command.
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          # Find new migration files in this PR. Same wrong prefix as above:
-          # migrations live in `migrations/versions/`, so this matched nothing
-          # and the review checklist below was never once posted to a PR.
-          NEW_MIGRATIONS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '^migrations/versions/.*\.py$' || true)
+          # Find new migration files in this PR. Revisions live in
+          # migrations/versions/ — the old '^alembic/versions/' pattern could
+          # never match, so this job always reported "no new migrations".
+          NEW_MIGRATIONS=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep -E '^migrations/versions/.*\.py$' || true)
 
           if [ -n "$NEW_MIGRATIONS" ]; then
             echo "has_new=true" >> $GITHUB_OUTPUT

@@ -19,36 +19,34 @@ from app.model_router.adaptive_router import (
 )
 from app.model_router.complexity_analyzer import ComplexityAnalyzer
 from app.model_router.cost_optimizer import CostOptimizer
+from app.model_router import usage_store
+from app.tenancy.scoping import scoped
 
 log = logging.getLogger("omnipotent.model_router.api")
 
 router = APIRouter(prefix="/model-router", tags=["model-router"])
 
-# Global instances
-_router: AdaptiveModelRouter | None = None
-_complexity_analyzer: ComplexityAnalyzer | None = None
-_cost_optimizer: CostOptimizer | None = None
+# One instance per org. The router accumulates routing decisions per tenant and
+# /stats reads them back: shared, one customer's query volume was visible to
+# every other customer. Spend and budgets are no longer in these objects at all
+# — they are rows in `llm_usage_records` / `llm_customer_budgets`, scoped by the
+# org_id on the request, so they survive a restart and a second worker agrees.
+# `CostOptimizer` is kept for what it is good at: pricing a call.
+_routers = scoped(AdaptiveModelRouter)
+_complexity_analyzers = scoped(ComplexityAnalyzer)
+_cost_optimizers = scoped(CostOptimizer)
 
 
 def get_router() -> AdaptiveModelRouter:
-    global _router
-    if _router is None:
-        _router = AdaptiveModelRouter()
-    return _router
+    return _routers.get()
 
 
 def get_complexity_analyzer() -> ComplexityAnalyzer:
-    global _complexity_analyzer
-    if _complexity_analyzer is None:
-        _complexity_analyzer = ComplexityAnalyzer()
-    return _complexity_analyzer
+    return _complexity_analyzers.get()
 
 
 def get_cost_optimizer() -> CostOptimizer:
-    global _cost_optimizer
-    if _cost_optimizer is None:
-        _cost_optimizer = CostOptimizer()
-    return _cost_optimizer
+    return _cost_optimizers.get()
 
 
 class RouteRequest(BaseModel):
@@ -80,13 +78,20 @@ class RecordUsageRequest(BaseModel):
     model_id: str
     input_tokens: int
     output_tokens: int
+    # Optional sub-label *inside* the caller's own org. The org that owns the
+    # row comes from the authenticated request, never from this body, so no
+    # value here can write or read another tenant's spend.
     customer_id: str | None = None
     request_type: str = "inference"
 
 
 class SetBudgetRequest(BaseModel):
-    customer_id: str
-    monthly_budget: float
+    customer_id: str | None = None
+    # Both caps are optional and independently settable; omitting one clears
+    # it. `monthly_budget` was the only settable limit, which is why
+    # /budget/check answered `daily_remaining: null` forever.
+    monthly_budget: float | None = None
+    daily_budget: float | None = None
 
 
 class RecommendModelRequest(BaseModel):
@@ -176,13 +181,19 @@ async def estimate_cost(req: EstimateCostRequest) -> dict[str, Any]:
 
 @router.post("/record-usage")
 async def record_usage(req: RecordUsageRequest) -> dict[str, Any]:
-    """Record model usage for cost tracking."""
+    """Record model usage for cost tracking.
+
+    Priced by the cost table and written to `llm_usage_records`, so it is still
+    there after a restart and every worker sees it.
+    """
     optimizer = get_cost_optimizer()
 
-    record = optimizer.record_usage(
+    cost = optimizer.price(req.model_id, req.input_tokens, req.output_tokens)
+    record = await usage_store.record(
         model_id=req.model_id,
         input_tokens=req.input_tokens,
         output_tokens=req.output_tokens,
+        cost=cost,
         customer_id=req.customer_id,
         request_type=req.request_type,
     )
@@ -190,22 +201,20 @@ async def record_usage(req: RecordUsageRequest) -> dict[str, Any]:
     return {
         "recorded": True,
         "cost": record.cost,
-        "timestamp": record.timestamp.isoformat(),
+        "timestamp": record.at.isoformat(),
     }
 
 
 @router.get("/usage/daily")
 async def get_daily_usage(customer_id: str | None = None) -> dict[str, Any]:
     """Get daily usage statistics."""
-    optimizer = get_cost_optimizer()
-    return optimizer.get_daily_usage(customer_id)
+    return await usage_store.daily_usage(customer_id)
 
 
 @router.get("/usage/monthly")
 async def get_monthly_usage(customer_id: str | None = None) -> dict[str, Any]:
     """Get monthly usage statistics."""
-    optimizer = get_cost_optimizer()
-    return optimizer.get_monthly_usage(customer_id)
+    return await usage_store.monthly_usage(customer_id)
 
 
 @router.get("/budget/check")
@@ -214,20 +223,22 @@ async def check_budget(
     additional_cost: float = 0.0,
 ) -> dict[str, Any]:
     """Check if budget allows for additional spending."""
-    optimizer = get_cost_optimizer()
-    return optimizer.check_budget(customer_id, additional_cost)
+    return await usage_store.check_budget(customer_id, additional_cost)
 
 
 @router.post("/budget/set")
 async def set_customer_budget(req: SetBudgetRequest) -> dict[str, Any]:
-    """Set monthly budget for a customer."""
-    optimizer = get_cost_optimizer()
-    optimizer.set_customer_budget(req.customer_id, req.monthly_budget)
-    return {
-        "status": "set",
-        "customer_id": req.customer_id,
-        "monthly_budget": req.monthly_budget,
-    }
+    """Set the daily and/or monthly spend caps for a customer.
+
+    Omitting `customer_id` sets the cap for the whole org, which is the one
+    `budget_gate` enforces on every new investigation.
+    """
+    budget = await usage_store.set_budget(
+        req.customer_id,
+        daily_limit=req.daily_budget,
+        monthly_limit=req.monthly_budget,
+    )
+    return {"status": "set", **budget, "monthly_budget": req.monthly_budget}
 
 
 @router.post("/recommend")
@@ -256,11 +267,10 @@ async def set_model_availability(req: SetAvailabilityRequest) -> dict[str, Any]:
 async def get_stats() -> dict[str, Any]:
     """Get routing and cost statistics."""
     model_router = get_router()
-    optimizer = get_cost_optimizer()
 
     return {
         "routing": model_router.get_routing_stats(),
-        "cost_analytics": optimizer.get_cost_analytics(days=7),
+        "cost_analytics": await usage_store.cost_analytics(days=7),
     }
 
 

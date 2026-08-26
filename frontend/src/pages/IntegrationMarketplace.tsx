@@ -6,7 +6,19 @@
 import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+import { apiFetch } from "../lib/apiClient";
+
+/** Surface the backend's own explanation for a failed call rather than hiding it. */
+async function errorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    const detail = (body as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail) return detail;
+  } catch {
+    // Non-JSON body.
+  }
+  return `${fallback} (HTTP ${res.status})`;
+}
 
 interface Integration {
   id: string;
@@ -492,21 +504,30 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
   const [connectedIntegrations, setConnectedIntegrations] = useState<Set<string>>(new Set());
   const [integrationStatus, setIntegrationStatus] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+  // The backend refuses /admin/integrations outright on a single-tenant
+  // deployment ("Admin endpoints require multi-tenant mode + a tenant API key.")
+  // and 401s when the caller is unauthenticated. Both were swallowed, leaving a
+  // page that looked like "you have no integrations" — say what actually happened.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Fetch connected integrations from API
   const fetchIntegrations = useCallback(async () => {
     try {
       // Fetch from /admin/integrations (list of connected integration names)
-      const adminRes = await fetch(`${API_BASE}/admin/integrations`, {
+      const adminRes = await apiFetch(`/admin/integrations`, {
         credentials: "include",
       });
       if (adminRes.ok) {
         const data = await adminRes.json();
         setConnectedIntegrations(new Set(data.integrations || []));
+        setLoadError(null);
+      } else {
+        setConnectedIntegrations(new Set());
+        setLoadError(await errorDetail(adminRes, "Could not list integrations"));
       }
 
       // Fetch from /integrations/status (individual status per integration)
-      const statusRes = await fetch(`${API_BASE}/integrations/status`, {
+      const statusRes = await apiFetch(`/integrations/status`, {
         credentials: "include",
       });
       if (statusRes.ok) {
@@ -515,6 +536,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
       }
     } catch (err) {
       console.error("Failed to fetch integrations:", err);
+      setLoadError(err instanceof Error ? err.message : "Could not list integrations");
     } finally {
       setLoading(false);
     }
@@ -545,7 +567,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
 
   // Save integration to API
   const handleSaveIntegration = async (name: string, value: string) => {
-    const res = await fetch(`${API_BASE}/admin/integrations`, {
+    const res = await apiFetch(`/admin/integrations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -566,16 +588,23 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     if (!confirm(`Are you sure you want to disconnect ${integrationId}?`)) return;
 
     try {
-      const res = await fetch(`${API_BASE}/admin/integrations/${integrationId}`, {
+      const res = await apiFetch(`/admin/integrations/${encodeURIComponent(integrationId)}`, {
         method: "DELETE",
         credentials: "include",
       });
 
-      if (res.ok) {
-        await fetchIntegrations();
+      if (!res.ok) {
+        // This used to only act on res.ok, so the 405 from the missing DELETE
+        // route left the card showing "Connected" with no explanation.
+        setLoadError(await errorDetail(res, `Could not disconnect ${integrationId}`));
+        return;
       }
+      await fetchIntegrations();
     } catch (err) {
       console.error("Failed to disconnect:", err);
+      setLoadError(
+        err instanceof Error ? err.message : `Could not disconnect ${integrationId}`
+      );
     }
   };
 
@@ -620,6 +649,27 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {loadError && (
+          <div
+            role="alert"
+            className="mb-6 rounded-lg border px-4 py-3 flex items-start gap-3"
+            style={{ borderColor: "var(--bad, #ef4444)", backgroundColor: "var(--shell)" }}
+          >
+            <Icon name="alert-triangle" size={18} />
+            <div className="flex-1">
+              <p className="font-medium">Integrations unavailable</p>
+              <p className="text-sm text-gray-400">{loadError}</p>
+            </div>
+            <button
+              onClick={() => setLoadError(null)}
+              aria-label="Dismiss"
+              className="text-gray-400 hover:text-white"
+            >
+              <Icon name="x-circle" size={16} />
+            </button>
+          </div>
+        )}
+
         {/* Categories */}
         <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2">
           {CATEGORIES.map((cat) => (

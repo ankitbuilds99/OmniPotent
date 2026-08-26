@@ -379,3 +379,134 @@ class TestBackwardsCompatibility:
         assert "pending_action" in annotations
         assert "status" in annotations
         assert "report" in annotations
+
+
+# --------------------------------------------------------------------------- #
+# The graph, actually executed.
+#
+# Everything above this line builds objects and asserts on their shape; nothing
+# ran the multi-agent graph. It did not work: the tools node returned only
+# {"messages": ...} and never cleared `pending_tool_calls`, while the clearing
+# lived in `route_after_tools_multi` — a routing function, which LangGraph calls
+# for its return value and whose mutations of the state dict are discarded. So
+# the queue stayed set, every agent node routed straight back to `tools`, and
+# the run died with GraphRecursionError having never reached `report`:
+#
+#   ['orchestrator', 'tools', 'investigator', 'tools', 'investigator', ... x15]
+# --------------------------------------------------------------------------- #
+class _ScriptedModel:
+    """Chat model stub: asks for one tool call, then states a root cause."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def with_structured_output(self, *a, **kw):
+        raise NotImplementedError("stub model has no structured-output support")
+
+    def invoke(self, messages, *args, **kwargs):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_logs", "args": {"q": "err"}, "id": "call_1",
+                     "type": "tool_call"}
+                ],
+            )
+        return AIMessage(
+            content="Root cause: the checkout deploy at 12:00 introduced a null "
+                    "pointer.\nhigh confidence, SEV2."
+        )
+
+
+def _fake_tool():
+    from langchain_core.tools import tool
+
+    @tool
+    def search_logs(q: str) -> str:
+        """Search logs for a query."""
+        return "ERROR NullPointerException at checkout.applyDiscount"
+
+    return search_logs
+
+
+class TestGuardedToolNodeState:
+    async def test_the_tools_node_clears_the_pending_tool_queue(self):
+        """A node writes state; the router that used to `pop` it could not.
+
+        Runs the node inside a one-node graph because ToolNode needs the
+        LangGraph runtime — which is also the point: it only ever runs there.
+        """
+        from langchain_core.messages import AIMessage
+        from langgraph.graph import END, START, StateGraph
+
+        from app.graph.builder import make_guarded_tool_node
+        from app.graph.state import AgentState
+
+        g = StateGraph(AgentState)
+        g.add_node("tools", make_guarded_tool_node([_fake_tool()]))
+        g.add_edge(START, "tools")
+        g.add_edge("tools", END)
+
+        call = {"name": "search_logs", "args": {"q": "err"}, "id": "call_1",
+                "type": "tool_call"}
+        out = await g.compile().ainvoke({
+            "messages": [AIMessage(content="", tool_calls=[call])],
+            "pending_tool_calls": [call],
+        })
+
+        assert any(getattr(m, "name", None) == "search_logs" for m in out["messages"])
+        assert out.get("pending_tool_calls") is None, "the queue is never cleared"
+
+
+class TestMultiAgentGraphRuns:
+    """End-to-end execution of the multi-agent graph with a stubbed model."""
+
+    async def _run(self, monkeypatch):
+        from langchain_core.messages import HumanMessage
+        from langgraph.checkpoint.memory import MemorySaver
+
+        import app.agents.base as agents_base
+        import app.config as cfg
+        import app.graph.nodes as nodes
+        from app.graph.builder import build_graph
+
+        monkeypatch.setenv("COPILOT_MAX_ITERATIONS", "5")
+        cfg.get_settings.cache_clear()
+        model = _ScriptedModel()
+        monkeypatch.setattr(agents_base, "get_llm", lambda *a, **kw: model)
+        monkeypatch.setattr(nodes, "get_llm", lambda *a, **kw: model)
+
+        graph = build_graph([_fake_tool()], MemorySaver(), multi_agent=True)
+        config = {"configurable": {"thread_id": "multi-e2e"}, "recursion_limit": 30}
+
+        seen: list[str] = []
+        async for event in graph.astream(
+            {"messages": [HumanMessage(content="checkout is 500ing")]},
+            config,
+            stream_mode="updates",
+        ):
+            seen.extend(event)
+        state = await graph.aget_state(config)
+        cfg.get_settings.cache_clear()
+        return seen, state
+
+    async def test_the_graph_reaches_report_instead_of_looping_on_tools(self, monkeypatch):
+        seen, state = await self._run(monkeypatch)
+
+        assert "report" in seen, f"never reached the report node: {seen}"
+        assert state.values.get("report"), "no RCA deliverable produced"
+
+    async def test_tools_hand_back_to_the_agent_that_asked_for_them(self, monkeypatch):
+        seen, state = await self._run(monkeypatch)
+
+        # tools ran once and control returned to the investigator, rather than
+        # bouncing investigator -> tools -> investigator forever.
+        assert seen.count("tools") == 1, seen
+        assert seen[seen.index("tools") + 1] == "investigator", seen
+        assert state.values.get("pending_tool_calls") is None
