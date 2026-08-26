@@ -313,6 +313,8 @@ export async function isWebSocketEnabled(): Promise<boolean> {
 // Integrations
 // --------------------------------------------------------------------------- //
 
+/** Per-connector: true when credentials are configured and it queries the real
+ *  service, false when it falls back to the bundled offline fixtures. */
 export interface IntegrationStatus {
   slack: boolean;
   github: boolean;
@@ -320,6 +322,13 @@ export interface IntegrationStatus {
   datadog: boolean;
   sentry: boolean;
   kubernetes: boolean;
+  traces: boolean;
+  deploys: boolean;
+  argocd: boolean;
+  terraform: boolean;
+  /** A catalog entry this endpoint says nothing about reads `undefined`, and is
+   *  shown as unknown rather than guessed at in either direction. */
+  [server: string]: boolean | undefined;
 }
 
 /** Get status of configured integrations. */
