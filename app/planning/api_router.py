@@ -11,6 +11,8 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
+from app.config import get_settings
+from app.tenant_context import integration_secret
 from app.planning.task_graph import (
     TaskGraph,
     TaskPriority,
@@ -34,10 +36,60 @@ router = APIRouter(prefix="/planning", tags=["planning"])
 
 
 def _build_execution_engine() -> ExecutionEngine:
+    """An engine whose default tools point at whatever this deployment has.
+
+    The tools were built with no arguments, which meant every one of them was a
+    stub returning a constant success dict. They now take the same backend URLs
+    the rest of the app uses, and the ones with nothing behind them say so.
+    """
+    settings = get_settings()
     engine = ExecutionEngine()
-    for name, handler in create_default_tools().items():
+    tools = create_default_tools(
+        prometheus_url=settings.prometheus_url or None,
+        loki_url=settings.loki_url or None,
+        elasticsearch_url=settings.elasticsearch_url or None,
+        traces_api_url=settings.traces_api_url or None,
+        slack_token=integration_secret("SLACK_BOT_TOKEN", settings.slack_bot_token),
+        slack_channel=integration_secret("SLACK_CHANNEL", settings.slack_channel),
+    )
+    for name, handler in tools.items():
         engine.register_tool(name, handler)
     return engine
+
+
+class _LLMTextClient:
+    """The `generate(prompt) -> str` interface `GoalDecomposer` expects, over the
+    app's configured chat model.
+
+    The decomposer was only ever constructed without one, so its LLM path could
+    not be reached: every category without a built-in template produced the same
+    four-step placeholder regardless of what the goal said.
+    """
+
+    async def generate(self, prompt: str) -> str:
+        from app.llm import get_llm
+
+        message = await get_llm(fast=True).ainvoke(prompt)
+        content = getattr(message, "content", message)
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        return str(content)
+
+
+def _build_goal_decomposer() -> GoalDecomposer:
+    """Templates for the categories that have one, the LLM for the rest.
+
+    `llm_client` stays None when no provider key is configured; the decomposer
+    then reports its `generic` strategy and a confidence to match, rather than
+    presenting the placeholder as a template it does not have.
+    """
+    from app.llm import active_api_key
+
+    client = _LLMTextClient() if active_api_key() else None
+    return GoalDecomposer(llm_client=client, use_templates=True)
 
 
 # One set per org. Task graphs describe a tenant's services and the remediation
@@ -45,7 +97,7 @@ def _build_execution_engine() -> ExecutionEngine:
 # a shared process global let any tenant read, edit and run another's plans.
 _graph_stores: ScopedRegistry[dict[str, Any]] = scoped(dict)
 _engines = scoped(_build_execution_engine)
-_decomposers = scoped(lambda: GoalDecomposer(use_templates=True))
+_decomposers = scoped(_build_goal_decomposer)
 
 
 def _graphs() -> dict[str, TaskGraph]:

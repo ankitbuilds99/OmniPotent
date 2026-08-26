@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.config import get_settings
 from app.coordinator.dag_executor import TaskNode
 
 log = logging.getLogger("omnipotent.coordinator.handlers.remediation")
@@ -717,13 +718,74 @@ class DecisionGateHandler:
             }
 
 
+def build_k8s_client() -> Any | None:
+    """An async Kubernetes AppsV1/CoreV1 facade, or None if there is no cluster.
+
+    These handlers `await` their client, so they need `kubernetes_asyncio`
+    rather than the synchronous `kubernetes` package the runbook executor uses;
+    awaiting a sync client's return value is a TypeError, not a remediation.
+    Both the SDK and a kubeconfig are optional, and when either is missing the
+    handlers fall back to simulating — which is fine as long as the caller is
+    told, which is what `simulated` in the task output is for.
+
+    The coordinator hardcoded `k8s_client=None`, so there was no setting,
+    request field or environment in which remediation was anything but a
+    simulation that reported success.
+    """
+    settings = get_settings()
+    if not settings.kube_config_path:
+        return None
+    try:
+        from kubernetes_asyncio import client, config  # lazy: optional dependency
+    except ImportError:
+        log.warning(
+            "KUBE_CONFIG_PATH is set but `kubernetes_asyncio` is not installed; "
+            "remediation tasks will be simulated"
+        )
+        return None
+
+    try:
+        config.load_kube_config(config_file=settings.kube_config_path)
+    except Exception:
+        log.exception("Could not load kubeconfig %s; remediation tasks will be simulated",
+                      settings.kube_config_path)
+        return None
+
+    return _K8sFacade(client.AppsV1Api(), client.CoreV1Api())
+
+
+class _K8sFacade:
+    """One object exposing both AppsV1 and CoreV1, which is what the handlers assume.
+
+    They call `read_namespaced_deployment` and `list_namespaced_pod` on the same
+    attribute; the SDK splits those across two API classes.
+    """
+
+    def __init__(self, apps: Any, core: Any) -> None:
+        self._apps = apps
+        self._core = core
+
+    def __getattr__(self, name: str) -> Any:
+        for api in (self._apps, self._core):
+            attr = getattr(api, name, None)
+            if attr is not None:
+                return attr
+        raise AttributeError(name)
+
+
 def create_remediation_handlers(
     k8s_client: Any = None,
     prometheus_url: str | None = None,
     knowledge_graph: Any = None,
     llm_client: Any = None,
 ) -> dict[str, Any]:
-    """Create all remediation handlers with configured clients."""
+    """Create all remediation handlers with configured clients.
+
+    `k8s_client=None` means "work it out from settings", not "simulate": pass a
+    client explicitly to override, which is what the tests do.
+    """
+    if k8s_client is None:
+        k8s_client = build_k8s_client()
     return {
         "scale_deployment": ScaleHandler(k8s_client=k8s_client),
         "restart_pods": RestartHandler(k8s_client=k8s_client),

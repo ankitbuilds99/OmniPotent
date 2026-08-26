@@ -35,10 +35,7 @@ _SERVERS = (
 def _isecret(name: str, fallback: str) -> str:
     """Resolve an integration secret: the request's tenant when multi-tenant
     (their decrypted creds, never the host's), else the .env fallback."""
-    t = tenant_context.get_tenant()
-    if t is not None:
-        return t.integration_secrets.get(name, "")
-    return fallback
+    return tenant_context.integration_secret(name, fallback)
 
 
 def _server_config() -> dict:
@@ -236,7 +233,22 @@ def _server_config() -> dict:
             "command": py,
             "args": ["-m", "app.mcp.servers.runbooks.server"],
             "transport": "stdio",
-            "env": {},
+            # This server reads and writes the same runbook tables as the HTTP
+            # API, so it has to be pointed at the same database. A stdio server
+            # is started with `get_default_environment()` plus whatever is in
+            # this dict — HOME, PATH, SHELL, TERM, USER and nothing else — so
+            # none of this is inherited implicitly. With the dict empty the
+            # subprocess fell back to the local sqlite default, which meant the
+            # agent listed the built-in runbooks only (never the customer's) and
+            # wrote its executions somewhere the UI does not read.
+            "env": {
+                "COPILOT_DATABASE_URL": s.copilot_database_url,
+                # Executed steps shell out to the cluster; without these the
+                # server would run every remediation against a different
+                # cluster, or none, from the one the app is configured with.
+                "KUBE_CONFIG_PATH": _isecret("KUBE_CONFIG_PATH", s.kube_config_path),
+                "KUBE_NAMESPACE": _isecret("KUBE_NAMESPACE", s.kube_namespace),
+            },
         },
     }
 

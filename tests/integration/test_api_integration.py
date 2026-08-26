@@ -223,10 +223,16 @@ class TestConcurrentOperations:
         `column "action" ... does not exist`, and the blanket
         `if "does not exist" in str(e): skip` caught it. A test that skips on
         any schema mismatch can never fail, which is why this survived.
+
+        The writes are scoped to an actor unique to this run. `test_org` reuses
+        the `test-org` row when it already exists and `audit_logs` is append-only,
+        so selecting on `org_id` alone returned every earlier run's rows too and
+        the test failed the second time it was ever run against a given database.
         """
         import uuid
 
         org_id = uuid.UUID(test_org["id"])
+        actor = f"integration_test:{uuid.uuid4()}"
         prev = "0" * 64
         for i in range(3):
             entry = hashlib.sha256(f"{prev}:test_action_{i}".encode()).hexdigest()
@@ -236,7 +242,7 @@ class TestConcurrentOperations:
                 VALUES ($1, $2, $3, $4, $5, $6)
                 """,
                 org_id,
-                "integration_test",
+                actor,
                 f"test_action_{i}",
                 "{}",
                 prev,
@@ -246,8 +252,9 @@ class TestConcurrentOperations:
 
         rows = await db_conn.fetch(
             "SELECT event_type, prev_hash, entry_hash FROM audit_logs "
-            "WHERE org_id = $1 ORDER BY id",
+            "WHERE org_id = $1 AND actor = $2 ORDER BY id",
             org_id,
+            actor,
         )
         assert [r["event_type"] for r in rows] == [f"test_action_{i}" for i in range(3)]
         # The chain is what makes the log tamper-evident: each entry commits to

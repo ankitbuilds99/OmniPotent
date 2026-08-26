@@ -28,7 +28,6 @@ import httpx
 from app.config import get_settings
 from app.runbooks.models import (
     DEFAULT_RUNBOOKS,
-    ExecutionMode,
     Runbook,
     RunbookExecution,
     RunbookStep,
@@ -640,14 +639,17 @@ class RunbookExecutor:
                 started_at=datetime.now(),
             )
 
+            # Whatever the runbook's execution mode. `skip_approval` is the one
+            # opt-out, and it is an explicit argument from the caller rather
+            # than a property of the runbook. See `run_execution` for why the
+            # mode does not get a vote here.
             if step.requires_approval and not skip_approval:
-                if runbook.execution_mode == ExecutionMode.REQUIRES_APPROVAL:
-                    step_exec.status = StepStatus.WAITING_APPROVAL
-                    execution.steps.append(step_exec)
-                    execution.status = StepStatus.WAITING_APPROVAL
-                    self._pending_approvals[execution.id] = (execution, step)
-                    log.info("Step %s waiting for approval", step.name)
-                    return execution
+                step_exec.status = StepStatus.WAITING_APPROVAL
+                execution.steps.append(step_exec)
+                execution.status = StepStatus.WAITING_APPROVAL
+                self._pending_approvals[execution.id] = (execution, step)
+                log.info("Step %s waiting for approval", step.name)
+                return execution
 
             step_exec.status = StepStatus.RUNNING
             success, output, error = await self.execute_step(step, context)
@@ -800,6 +802,18 @@ async def run_execution(execution_id: str, approved_through: int = -1) -> None:
     approved. Steps after it that carry `requires_approval` park the execution in
     WAITING_APPROVAL instead of running; without it, approving would re-enter the
     same gate forever.
+
+    A step's own `requires_approval` is honoured whatever the runbook's
+    execution mode is. The gate used to also require
+    `execution_mode == REQUIRES_APPROVAL`, so on a `manual` or `auto_approved`
+    runbook — both of which start running the moment the route is called — a
+    step marked as needing a human ran without one. `drain node`, `flush cache`
+    and `rollback` are exactly the steps people mark, and the two settings are
+    about different things: the mode decides whether the *run* needs sign-off
+    before it starts, the flag decides whether a *step* does before it fires.
+    Where they disagree the step wins, because it is the more specific
+    statement and because the cost of being wrong is asymmetric — a needless
+    pause costs a click, a needless `kubectl drain` costs an outage.
     """
     from app.runbooks import store
 
@@ -824,11 +838,7 @@ async def run_execution(execution_id: str, approved_through: int = -1) -> None:
     for index in range(len(execution.steps), len(runbook.steps)):
         step = runbook.steps[index]
 
-        if (
-            step.requires_approval
-            and index > approved_through
-            and runbook.execution_mode == ExecutionMode.REQUIRES_APPROVAL
-        ):
+        if step.requires_approval and index > approved_through:
             log.info("Execution %s waiting for approval of step %s", execution_id, step.id)
             await store.set_execution_status(execution_id, StepStatus.WAITING_APPROVAL)
             return
