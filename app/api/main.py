@@ -954,8 +954,14 @@ app.include_router(model_router_api, prefix="/api")
 # Include knowledge graph router for Neo4j-backed infrastructure knowledge.
 from app.knowledge_graph.api_router import router as knowledge_graph_router  # noqa: E402
 from app.knowledge_graph.api_router import include_graphql_router  # noqa: E402
-app.include_router(knowledge_graph_router, prefix="/api")
+# GraphQL is attached to the router BEFORE the router is mounted on the app.
+# `include_router` copies the routes it finds at the time it is called, so with
+# these two lines the other way round the GraphQL sub-router was added to an
+# object nothing was reading any more: /graphql/status happily reported
+# "available" and handed callers a URL that 404'd, leaving the whole schema in
+# app/knowledge_graph/graphql_schema.py unreachable.
 include_graphql_router(knowledge_graph_router)  # Add GraphQL if strawberry is installed
+app.include_router(knowledge_graph_router, prefix="/api")
 
 # Include planning layer router for task graph management and execution.
 from app.planning.api_router import router as planning_router  # noqa: E402

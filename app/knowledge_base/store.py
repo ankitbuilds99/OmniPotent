@@ -5,16 +5,16 @@ held in process memory. Runbook write-ups, postmortems and architecture notes
 are the text customers put the most work into, and a restart deleted all of
 them; with more than one worker, whether a document existed depended on which
 process answered the request. The API router made it worse by reaching into
-`_documents` and `_embeddings` directly from six of its eight handlers.
+`_documents` directly from six of its eight handlers.
 
 Documents live in `knowledge_documents` now, filtered by `org_uuid()`. The
 built-ins are seeded per org on first read and then owned by that org, so
 deleting one makes it stay deleted.
 
 `KnowledgeBase` is still the search engine: `search()` loads this org's rows and
-builds a throwaway index from them. Its embeddings are a word-frequency
-placeholder computed from `content`, so there is nothing worth persisting — see
-the note on `KnowledgeDocument`.
+ranks them with BM25, which needs corpus-wide term statistics rather than a
+per-row vector, so there is nothing worth persisting — see the note on
+`KnowledgeDocument`.
 """
 
 from __future__ import annotations

@@ -675,11 +675,10 @@ class KnowledgeDocument(Base):
     ids ("kb-001") in every org, so the primary key is a surrogate and the
     identity is (org_id, doc_id).
 
-    There is no embedding column on purpose. `KnowledgeBase._generate_embedding`
-    is a word-frequency placeholder derived entirely from `content` — storing it
-    would persist a value that has to be invalidated on every edit and that a
-    real embedding model would replace anyway. The search index is rebuilt from
-    `content` on each query instead.
+    There is no embedding column on purpose. Search is BM25 over the org's rows
+    (`KnowledgeBase.search`), which needs term frequencies for the corpus as it
+    stands at query time, not a per-row vector that would have to be invalidated
+    on every edit. The index is rebuilt from `content` on each query instead.
     """
 
     __tablename__ = "knowledge_documents"

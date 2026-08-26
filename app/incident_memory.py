@@ -56,8 +56,17 @@ def load_corpus(explicit: str = "") -> list[dict]:
     return base + learned
 
 
-def _tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
+    """Split text into the terms BM25 scores on.
+
+    Public because callers that report *which* terms matched have to split the
+    same way the scorer does, or they end up claiming a match the score does not
+    reflect.
+    """
     return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+_tokenize = tokenize
 
 
 def _doc_text(rec: dict) -> str:
@@ -67,23 +76,40 @@ def _doc_text(rec: dict) -> str:
     ])
 
 
-def bm25_rank(query: str, records: list[dict], k1: float = 1.5, b: float = 0.75) -> list[dict]:
-    """Rank records against a query with BM25. Pure + deterministic. Returns records
-    annotated with a `score` (best first)."""
-    docs = [_tokenize(_doc_text(r)) for r in records]
+def _bm25_scores(
+    query: str, texts: list[str], k1: float = 1.5, b: float = 0.75
+) -> tuple[list[float], float]:
+    """BM25 score per text, plus the score an ideal answer to the query would earn.
+
+    That second number is what lets a caller turn raw BM25 into a bounded
+    relevance. "Ideal" is a document of average length containing each query
+    term exactly once: its per-term contribution is
+    `idf * (k1+1) / (1 + k1)`, which is just `idf`, so the ceiling is
+    `sum(idf[t] for t in query)`. Saturating on `f -> infinity` instead would put
+    the ceiling at `(k1+1)` times that and cap a genuinely full keyword match at
+    0.4, which reads as a bad hit.
+
+    A query term that appears in no document still counts towards the ceiling, at
+    the idf it would have with a document frequency of zero — otherwise a query
+    of one known word and nine unknown ones would look like a perfect match.
+    """
+    docs = [_tokenize(t) for t in texts]
     n = len(docs)
     if n == 0:
-        return []
+        return [], 0.0
     df: Counter[str] = Counter()
     for d in docs:
         for t in set(d):
             df[t] += 1
     idf = {t: math.log(1 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
+    idf_unseen = math.log(1 + (n + 0.5) / 0.5)
     avgdl = sum(len(d) for d in docs) / n or 1.0
     q_tokens = _tokenize(query)
 
-    scored = []
-    for rec, doc in zip(records, docs):
+    best = sum(idf.get(t, idf_unseen) for t in q_tokens)
+
+    scores = []
+    for doc in docs:
         tf = Counter(doc)
         dl = len(doc)
         score = 0.0
@@ -92,8 +118,30 @@ def bm25_rank(query: str, records: list[dict], k1: float = 1.5, b: float = 0.75)
             if not f or t not in idf:
                 continue
             score += idf[t] * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
-        scored.append((score, rec))
-    scored.sort(key=lambda sr: sr[0], reverse=True)
+        scores.append(score)
+    return scores, best
+
+
+def bm25_relevance(
+    query: str, texts: list[str], k1: float = 1.5, b: float = 0.75
+) -> list[float]:
+    """BM25 relevance in [0, 1] — each text's score over the best a text could do.
+
+    Bounded and comparable across queries, unlike a raw BM25 score, and exactly
+    0.0 when the text shares no term with the query. Callers that want the raw
+    score for ranking alone should use `bm25_rank`.
+    """
+    scores, best = _bm25_scores(query, texts, k1=k1, b=b)
+    if best <= 0:
+        return [0.0] * len(scores)
+    return [min(1.0, s / best) for s in scores]
+
+
+def bm25_rank(query: str, records: list[dict], k1: float = 1.5, b: float = 0.75) -> list[dict]:
+    """Rank records against a query with BM25. Pure + deterministic. Returns records
+    annotated with a `score` (best first)."""
+    scores, _ = _bm25_scores(query, [_doc_text(r) for r in records], k1=k1, b=b)
+    scored = sorted(zip(scores, records), key=lambda sr: sr[0], reverse=True)
     return [{**rec, "score": round(score, 3)} for score, rec in scored]
 
 

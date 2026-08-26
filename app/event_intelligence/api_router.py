@@ -176,6 +176,14 @@ class SeverityPredictRequest(BaseModel):
     latency_p99: float | None = None
     affected_endpoints: list[str] = []
     related_alerts_count: int = 0
+    # Two of the predictor's inputs had no way in. Left unset they fall back to
+    # neutral priors (0.3 and False), and with the blast radius pinned at 0.3
+    # the score could not clear the 0.85 SEV1 threshold no matter what else the
+    # caller sent -- the top severity was unreachable through this API. Omitting
+    # blast_radius now means "work it out from the knowledge graph", not
+    # "assume moderate".
+    blast_radius: dict[str, Any] | None = None
+    slo_status: dict[str, Any] | None = None
 
 
 class RecordMetricRequest(BaseModel):
@@ -278,14 +286,53 @@ async def check_noise(req: NoiseCheckRequest) -> dict[str, Any]:
     }
 
 
+async def _blast_radius_from_graph(service: str) -> dict[str, Any] | None:
+    """This org's blast radius for `service`, in the shape the predictor scores.
+
+    The knowledge graph already walks the dependency edges; it reports affected
+    services, and the predictor wants a fraction plus two flags. Returns None
+    when the graph has never heard of the service, so the predictor keeps its
+    "unknown, assume moderate" prior rather than being handed a confident zero.
+    """
+    try:
+        from app.knowledge_graph.api_router import get_graph
+
+        graph = await get_graph()
+        result = await graph.find_blast_radius(service)
+        known = await graph.list_services(limit=1000)
+    except Exception:  # graph unavailable, unconfigured, or not isolated
+        log.debug("blast radius unavailable for %s", service, exc_info=True)
+        return None
+
+    if not known or not any(s.id == service or s.name == service for s in known):
+        return None
+
+    affected = result.get("affected_services", [])
+    names = [a["service"].name for a in affected] + [a["service"].id for a in affected]
+
+    predictor = get_severity_predictor()
+    return {
+        "affected_percentage": len(affected) / len(known),
+        "revenue_path_affected": any(predictor.is_revenue_path(n) for n in names),
+        "customer_facing_impact": any(predictor.is_customer_facing(n) for n in names),
+        "affected_count": len(affected),
+        "known_service_count": len(known),
+    }
+
+
 @router.post("/severity/predict")
 async def predict_severity(req: SeverityPredictRequest) -> dict[str, Any]:
     """Predict the severity of an incident.
 
-    Uses ML-based scoring considering service criticality,
-    blast radius, time sensitivity, and historical patterns.
+    Scores service criticality, blast radius, alert type, time sensitivity and
+    historical patterns. The blast radius comes from the request when supplied
+    and from this org's knowledge graph otherwise.
     """
     predictor = get_severity_predictor()
+
+    blast_radius = req.blast_radius
+    if blast_radius is None:
+        blast_radius = await _blast_radius_from_graph(req.service)
 
     context = IncidentContext(
         incident_id=req.incident_id,
@@ -295,11 +342,27 @@ async def predict_severity(req: SeverityPredictRequest) -> dict[str, Any]:
         latency_p99=req.latency_p99,
         affected_endpoints=req.affected_endpoints,
         related_alerts_count=req.related_alerts_count,
+        blast_radius=blast_radius,
+        current_slo_status=req.slo_status,
     )
 
     prediction = await predictor.predict(context)
 
-    return prediction.to_dict()
+    return {
+        **prediction.to_dict(),
+        # Which of the two optional inputs the score actually had, so a caller
+        # can tell a judgement backed by a dependency graph from one made
+        # against the default prior.
+        "inputs": {
+            "blast_radius": blast_radius,
+            "blast_radius_source": (
+                "request" if req.blast_radius is not None
+                else "knowledge_graph" if blast_radius is not None
+                else "unknown"
+            ),
+            "slo_status_provided": req.slo_status is not None,
+        },
+    }
 
 
 @router.post("/features/record-metric")

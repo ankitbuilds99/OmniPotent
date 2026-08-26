@@ -1227,9 +1227,9 @@ class Neo4jKnowledgeGraph:
             severity=props.get("severity", "P3"),
             status=props.get("status", "open"),
             started_at=self._parse_datetime(props.get("started_at")),
-            resolved_at=self._parse_datetime(props.get("resolved_at")),
-            detected_at=self._parse_datetime(props.get("detected_at")),
-            acknowledged_at=self._parse_datetime(props.get("acknowledged_at")),
+            resolved_at=self._parse_optional_datetime(props.get("resolved_at")),
+            detected_at=self._parse_optional_datetime(props.get("detected_at")),
+            acknowledged_at=self._parse_optional_datetime(props.get("acknowledged_at")),
             affected_services=props.get("affected_services", []),
             root_cause=props.get("root_cause", ""),
             impact=props.get("impact", ""),
@@ -1245,9 +1245,9 @@ class Neo4jKnowledgeGraph:
             severity=d.get("severity", "P3"),
             status=d.get("status", "open"),
             started_at=self._parse_datetime(d.get("started_at")),
-            resolved_at=self._parse_datetime(d.get("resolved_at")),
-            detected_at=self._parse_datetime(d.get("detected_at")),
-            acknowledged_at=self._parse_datetime(d.get("acknowledged_at")),
+            resolved_at=self._parse_optional_datetime(d.get("resolved_at")),
+            detected_at=self._parse_optional_datetime(d.get("detected_at")),
+            acknowledged_at=self._parse_optional_datetime(d.get("acknowledged_at")),
             affected_services=d.get("affected_services", []),
             root_cause=d.get("root_cause", ""),
             impact=d.get("impact", ""),
@@ -1300,24 +1300,43 @@ class Neo4jKnowledgeGraph:
             source=props.get("source", ""),
             service=props.get("service", ""),
             fired_at=self._parse_datetime(props.get("fired_at")),
-            resolved_at=self._parse_datetime(props.get("resolved_at")),
+            resolved_at=self._parse_optional_datetime(props.get("resolved_at")),
             fingerprint=props.get("fingerprint", ""),
             value=props.get("value", 0.0),
             threshold=props.get("threshold", 0.0),
         )
 
     def _parse_datetime(self, value: Any) -> datetime:
-        """Parse datetime from various formats."""
+        """Parse a required timestamp, falling back to now.
+
+        Only for fields that are never null -- started_at, fired_at, created_at
+        and friends. For anything typed `datetime | None`, use
+        `_parse_optional_datetime`: the now() fallback there turned "this has
+        not happened yet" into "this happened just now".
+        """
+        parsed = self._parse_optional_datetime(value)
+        return parsed if parsed is not None else datetime.now(timezone.utc)
+
+    def _parse_optional_datetime(self, value: Any) -> datetime | None:
+        """Parse a timestamp that is allowed to be absent.
+
+        A missing value means the event has not happened, so it stays None. It
+        used to come back as now(), which made every open incident read as
+        resolved the moment it was fetched -- with a fresh resolved_at on each
+        request, a time-to-detect of zero and a time-to-resolve of zero.
+        """
         if value is None:
-            return datetime.now(timezone.utc)
+            return None
         if isinstance(value, datetime):
             return value
         if isinstance(value, str):
+            if not value.strip():
+                return None
             try:
                 return datetime.fromisoformat(value.replace("Z", "+00:00"))
             except ValueError:
-                return datetime.now(timezone.utc)
-        return datetime.now(timezone.utc)
+                return None
+        return None
 
     async def get_stats(self) -> dict[str, Any]:
         """Get graph statistics."""

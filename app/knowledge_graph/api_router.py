@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -201,6 +202,15 @@ class IncidentInput(BaseModel):
     affected_services: list[str] = []
     root_cause: str = ""
     impact: str = ""
+    # The lifecycle timestamps. Absent means "has not happened yet", which is
+    # what time-to-detect and time-to-resolve are computed against; there was
+    # previously no way to set any of them, and the reader minted a value for
+    # each on the way out, so every incident looked instantly detected and
+    # instantly resolved. `started_at` defaults to now.
+    started_at: datetime | None = None
+    detected_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    resolved_at: datetime | None = None
 
 
 class ChangeInput(BaseModel):
@@ -267,7 +277,11 @@ async def get_service(
     """Get a service by ID."""
     service = await graph.get_service(service_id)
     if not service:
-        return {"error": "Service not found"}
+        # 404, not a 200 carrying {"error": ...}: a caller doing
+        # `if (res.ok) render(await res.json())` rendered an object with no
+        # id and no name, so a missing service was indistinguishable from a
+        # present one at the HTTP layer.
+        raise HTTPException(404, {"error": "service_not_found", "service_id": service_id})
     return service.to_cypher_properties()
 
 
@@ -459,7 +473,12 @@ async def create_incident(
         affected_services=input.affected_services,
         root_cause=input.root_cause,
         impact=input.impact,
+        detected_at=input.detected_at,
+        acknowledged_at=input.acknowledged_at,
+        resolved_at=input.resolved_at,
     )
+    if input.started_at is not None:
+        incident.started_at = input.started_at
     created = await graph.create_incident(incident)
     return created.to_cypher_properties()
 
@@ -472,7 +491,7 @@ async def get_incident(
     """Get an incident by ID."""
     incident = await graph.get_incident(incident_id)
     if not incident:
-        return {"error": "Incident not found"}
+        raise HTTPException(404, {"error": "incident_not_found", "incident_id": incident_id})
     return incident.to_cypher_properties()
 
 
@@ -655,7 +674,18 @@ async def configure_sync_source(
         _check_sync_url("jaeger_url", jaeger_url)
         engine.add_jaeger(jaeger_url=jaeger_url)
     else:
-        return {"error": f"Unknown source: {source}"}
+        # A typo'd source used to answer 200, so the caller believed sync was
+        # configured and then wondered why nothing ever synced.
+        raise HTTPException(
+            400,
+            {
+                "error": "unknown_source",
+                "source": source,
+                "valid_sources": [
+                    "github", "cloudtrail", "prometheus", "kubernetes", "jaeger",
+                ],
+            },
+        )
 
     return {
         "status": "configured",
