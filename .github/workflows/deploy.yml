@@ -23,7 +23,12 @@ permissions:
   id-token: write
 
 env:
-  PYTHON_VERSION: "3.11"
+  # Matches `FROM python:3.12-slim` in the Dockerfile this job goes on to build
+  # and push. At 3.11 the gate in front of a production deploy was exercising an
+  # interpreter the product is never run on, and passing or failing on
+  # differences that say nothing about the image — asyncio.wait_for alone
+  # schedules differently between the two.
+  PYTHON_VERSION: "3.12"
   AWS_REGION: us-east-1
   ECR_REPOSITORY: omnipotent-api
 

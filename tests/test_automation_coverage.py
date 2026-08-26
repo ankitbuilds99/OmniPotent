@@ -401,13 +401,26 @@ def test_approving_one_run_does_not_release_another_parked_on_the_same_task():
         await asyncio.sleep(0)
 
         assert await executor.approve_task("exec_aaaa", "restart_service", True)
-        await asyncio.sleep(0)
 
-        assert first.done(), "the approved run is still parked"
+        # Awaited, not yielded to a fixed number of times. `asyncio.wait_for`
+        # takes one more trip through the event loop on 3.11 than on 3.12 —
+        # 3.11 releases an internal waiter from a done-callback, 3.12 awaits the
+        # future directly — so a single `await asyncio.sleep(0)` here was really
+        # asserting how the interpreter schedules, not what the executor does.
+        # It passed on the 3.12 every test job resolves and failed on the 3.11
+        # the deploy job pins.
+        try:
+            approved = await asyncio.wait_for(first, timeout=5)
+        except asyncio.TimeoutError:
+            raise AssertionError("the approved run is still parked") from None
+
+        # Still parked, and still parked on a *live* future: the rejection below
+        # returns False if anything already resolved it, so that call is the
+        # real guard against one approval releasing both runs.
         assert not second.done(), "one approval released two production restarts"
 
         assert await executor.approve_task("exec_bbbb", "restart_service", False)
-        return await first, await second
+        return approved, await second
 
     approved, rejected = asyncio.run(scenario())
     assert approved is True

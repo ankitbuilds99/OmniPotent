@@ -24,12 +24,13 @@ strictly serial chain at once.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections import deque
 from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app import audit_legacy as audit
 from app import config as cfg, tenant_context
@@ -335,6 +336,85 @@ async def test_exhausting_retries_hands_the_events_back_rather_than_dropping(mon
 
     assert raised.value.written == []
     assert [e["event"] for e in raised.value.unwritten] == ["never.lands"]
+
+
+async def test_a_writer_that_loses_the_write_lock_retries_instead_of_raising(monkeypatch):
+    """The other way a writer loses a race, and the one that was not caught.
+
+    SQLite serialises writers behind one database-wide write lock, so a writer
+    that cannot take it before the busy timeout gets `OperationalError:
+    database is locked` rather than the `IntegrityError` that a lost `(org_id,
+    seq)` race produces. Only the latter was retried, so this escaped
+    `append()` uncaught -- past the `ContendedAppend` requeue path, taking the
+    unwritten remainder of the batch with it. Six concurrent writers hit it in
+    roughly a quarter of runs.
+    """
+    await audit.clear()
+    monkeypatch.setattr(store, "_BACKOFF_BASE_SECONDS", 0.0)
+
+    real_session = store._session
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def locked_for_the_first_two_attempts():
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+
+            class _Locked:
+                async def execute(self, *args, **kwargs):
+                    raise OperationalError(
+                        "INSERT", (), sqlite3.OperationalError("database is locked")
+                    )
+
+            yield _Locked()
+            return
+        async with real_session() as session:
+            yield session
+
+    monkeypatch.setattr(store, "_session", locked_for_the_first_two_attempts)
+
+    written = await store.append(
+        [{"ts": "t", "event": "waited.its.turn", "org_id": "-", "actor": None,
+          "request_id": None}]
+    )
+
+    assert [e["event"] for e in written] == ["waited.its.turn"]
+    assert attempts["n"] == 3, "the two locked attempts must have been retried, not swallowed"
+    assert await store.count("-") == 1
+
+
+async def test_a_broken_database_fails_immediately_rather_than_retrying(monkeypatch):
+    """The retry is for contention, not for every OperationalError.
+
+    A missing table is not going to appear on the third attempt. Blanket-
+    retrying would turn an instant, legible failure into twenty-five rounds of
+    backoff ending in a `ContendedAppend` that names the wrong problem.
+    """
+    await audit.clear()
+    monkeypatch.setattr(store, "_BACKOFF_BASE_SECONDS", 0.0)
+
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def no_such_table():
+        attempts["n"] += 1
+
+        class _Broken:
+            async def execute(self, *args, **kwargs):
+                raise OperationalError(
+                    "SELECT", (), sqlite3.OperationalError("no such table: audit_events")
+                )
+
+        yield _Broken()
+
+    monkeypatch.setattr(store, "_session", no_such_table)
+
+    with pytest.raises(OperationalError):
+        await store.append(
+            [{"ts": "t", "event": "never", "org_id": "-", "actor": None, "request_id": None}]
+        )
+
+    assert attempts["n"] == 1
 
 
 async def test_a_partial_append_requeues_only_what_did_not_land(monkeypatch):

@@ -122,6 +122,13 @@ dev = [
     # the `migrations` extra.
     "alembic>=1.13.0",
     "aiosqlite>=0.19.0",
+    # tests/integration/ runs against the job's Postgres service container, and
+    # both the Alembic migration and the app's engine open it over asyncpg. It
+    # is in the `postgres`/`migrations` extras, neither of which this job syncs,
+    # so all 20 db-backed tests errored at fixture setup with
+    # ModuleNotFoundError. That was invisible for as long as the pytest step
+    # above it failed first and the integration step never ran.
+    "asyncpg>=0.29.0",
     # A real in-process Redis implementation, used by the tests that cover the
     # Redis-backed persistence paths (event-intelligence feature store,
     # verification calibration). Without it those paths are only ever exercised
