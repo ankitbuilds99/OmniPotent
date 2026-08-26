@@ -26,7 +26,11 @@ from app.postmortems import (
     PostmortemUnavailable,
     generate_postmortem,
 )
-from app.postmortems.store import ACTION_STATUSES, get_postmortem_store
+from app.postmortems.store import (
+    ACTION_STATUSES,
+    DOCUMENT_STATUSES,
+    get_postmortem_store,
+)
 from app.tenant_context import get_actor, tenant_id
 
 log = logging.getLogger("omnipotent.incidents.api")
@@ -481,6 +485,77 @@ async def update_postmortem_action_item(
         raise HTTPException(
             status_code=404, detail=f"This postmortem has no action item {item_id!r}."
         ) from None
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No postmortem has been generated for this incident yet.",
+        )
+    return document
+
+
+class NewActionItem(BaseModel):
+    """A follow-up agreed in the postmortem review."""
+
+    title: str
+    owner: str = ""
+    priority: str = "P2"
+    type: str = "prevent"
+    due_date: str | None = None
+
+
+@router.post(
+    "/{incident_id}/postmortem/action-items",
+    summary="Add an action item to a postmortem",
+    description=(
+        "Appends a follow-up to the stored document. The two `+ Add Item` "
+        "buttons on the postmortem page had no handler and no endpoint behind "
+        "them, so the only action items a postmortem could ever have were the "
+        "ones the model proposed when the draft was written."
+    ),
+)
+async def add_postmortem_action_item(incident_id: UUID, item: NewActionItem) -> dict:
+    try:
+        document = await get_postmortem_store().add_action_item(
+            incident_id,
+            title=item.title,
+            owner=item.owner,
+            priority=item.priority,
+            item_type=item.type,
+            due_date=item.due_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No postmortem has been generated for this incident yet.",
+        )
+    return document
+
+
+class PostmortemStatusUpdate(BaseModel):
+    """Where the document is in its life."""
+
+    status: str
+
+
+@router.patch(
+    "/{incident_id}/postmortem",
+    summary="Publish a postmortem, or send it back for review",
+    description=(
+        "Sets the document's status. Accepted: "
+        + ", ".join(f"`{s}`" for s in DOCUMENT_STATUSES)
+        + ". The page's Publish button had no handler, so the status badge on "
+        "every postmortem read `draft` forever."
+    ),
+)
+async def set_postmortem_status(
+    incident_id: UUID, update: PostmortemStatusUpdate
+) -> dict:
+    try:
+        document = await get_postmortem_store().set_status(incident_id, update.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if document is None:
         raise HTTPException(
             status_code=404,

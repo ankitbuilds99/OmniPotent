@@ -272,3 +272,162 @@ def test_one_row_per_incident(client, stub_llm):
     body = client.get(f"/api/incidents/{incident_id}/postmortem").json()
     assert [s["id"] for s in body["sections"]] == ["summary", "impact", "root_cause", "lessons"]
     assert len(body["action_items"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Publish, and adding a follow-up
+#
+# A postmortem review's whole output is the action items nobody thought of when
+# the draft was written, and the "+ Add Item" buttons had no handler and no
+# endpoint. Publish had neither either, so every document's status badge read
+# "draft" forever, however finished it was.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_added_action_item_survives_a_reload(client, stub_llm):
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+
+    added = client.post(
+        f"/api/incidents/{incident_id}/postmortem/action-items",
+        json={"title": "Run a game day", "owner": "carol", "priority": "P1", "type": "mitigate"},
+    )
+    assert added.status_code == 200, added.text
+
+    body = client.get(f"/api/incidents/{incident_id}/postmortem").json()
+    titles = [i["title"] for i in body["action_items"]]
+    assert titles == ["Alert on pool saturation", "Cap transaction lifetime", "Run a game day"]
+
+    new_item = body["action_items"][-1]
+    assert new_item["owner"] == "carol"
+    assert new_item["priority"] == "P1"
+    assert new_item["type"] == "mitigate"
+    # Open, and with no due date invented for it.
+    assert new_item["status"] == "open"
+    assert new_item["due_date"] is None
+
+
+def test_an_added_item_gets_an_id_the_others_do_not_have(client, stub_llm):
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+
+    for title in ("One", "Two"):
+        res = client.post(f"/api/incidents/{incident_id}/postmortem/action-items",
+                          json={"title": title})
+        assert res.status_code == 200, res.text
+
+    body = client.get(f"/api/incidents/{incident_id}/postmortem").json()
+    ids = [i["id"] for i in body["action_items"]]
+    # The two generated items plus the two just added — a collision would show
+    # up as an id the status PATCH then routes to the wrong row.
+    assert len(ids) == 4
+    assert len(set(ids)) == len(ids), f"duplicate action item ids: {ids}"
+
+
+def test_an_added_item_can_then_be_marked_done(client, stub_llm):
+    """The id it is given has to be one PATCH accepts."""
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+    added = client.post(f"/api/incidents/{incident_id}/postmortem/action-items",
+                        json={"title": "Run a game day"}).json()
+    item_id = added["action_items"][-1]["id"]
+
+    patched = client.patch(
+        f"/api/incidents/{incident_id}/postmortem/action-items/{item_id}",
+        json={"status": "completed"},
+    )
+
+    assert patched.status_code == 200, patched.text
+    body = client.get(f"/api/incidents/{incident_id}/postmortem").json()
+    assert body["action_items"][-1]["status"] == "completed"
+
+
+def test_a_blank_action_item_is_rejected(client, stub_llm):
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+
+    res = client.post(f"/api/incidents/{incident_id}/postmortem/action-items",
+                      json={"title": "   "})
+
+    assert res.status_code == 422
+    body = client.get(f"/api/incidents/{incident_id}/postmortem").json()
+    assert len(body["action_items"]) == 2
+
+
+def test_an_unknown_priority_is_rejected(client, stub_llm):
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+
+    res = client.post(f"/api/incidents/{incident_id}/postmortem/action-items",
+                      json={"title": "Something", "priority": "URGENT"})
+
+    assert res.status_code == 422
+    assert "P0" in res.json()["detail"]
+
+
+def test_adding_before_anything_is_generated_is_a_404(client):
+    incident_id = _incident(client)
+
+    res = client.post(f"/api/incidents/{incident_id}/postmortem/action-items",
+                      json={"title": "Something"})
+
+    assert res.status_code == 404
+
+
+def test_publishing_survives_a_reload(client, stub_llm):
+    incident_id = _incident(client)
+    generated = client.post(f"/api/incidents/{incident_id}/postmortem", json={}).json()
+    assert generated["status"] == "draft"
+
+    published = client.patch(f"/api/incidents/{incident_id}/postmortem",
+                             json={"status": "published"})
+
+    assert published.status_code == 200, published.text
+    assert published.json()["status"] == "published"
+    assert client.get(f"/api/incidents/{incident_id}/postmortem").json()["status"] == "published"
+
+
+def test_publishing_does_not_disturb_the_document(client, stub_llm):
+    incident_id = _incident(client)
+    before = client.post(f"/api/incidents/{incident_id}/postmortem", json={}).json()
+
+    res = client.patch(f"/api/incidents/{incident_id}/postmortem",
+                       json={"status": "published"})
+    assert res.status_code == 200, res.text
+    after = client.get(f"/api/incidents/{incident_id}/postmortem").json()
+
+    assert after["status"] == "published"
+    assert _sections(after) == _sections(before)
+    assert after["action_items"] == before["action_items"]
+    assert len(stub_llm.calls) == 1, "publishing re-ran the model"
+
+
+def test_a_published_postmortem_can_go_back_to_draft(client, stub_llm):
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+    up = client.patch(f"/api/incidents/{incident_id}/postmortem", json={"status": "published"})
+    assert up.json()["status"] == "published", up.text
+
+    down = client.patch(f"/api/incidents/{incident_id}/postmortem", json={"status": "draft"})
+
+    assert down.status_code == 200, down.text
+    assert client.get(f"/api/incidents/{incident_id}/postmortem").json()["status"] == "draft"
+
+
+def test_an_unknown_document_status_is_rejected(client, stub_llm):
+    incident_id = _incident(client)
+    client.post(f"/api/incidents/{incident_id}/postmortem", json={})
+
+    res = client.patch(f"/api/incidents/{incident_id}/postmortem", json={"status": "shipped"})
+
+    assert res.status_code == 422
+    assert "published" in res.json()["detail"]
+    assert client.get(f"/api/incidents/{incident_id}/postmortem").json()["status"] == "draft"
+
+
+def test_publishing_before_anything_is_generated_is_a_404(client):
+    incident_id = _incident(client)
+
+    res = client.patch(f"/api/incidents/{incident_id}/postmortem", json={"status": "published"})
+
+    assert res.status_code == 404

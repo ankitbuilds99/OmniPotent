@@ -238,7 +238,117 @@ function TimelineView({ events }: { events: TimelineEvent[] }) {
   );
 }
 
-function ActionItemsTable({ items, onUpdate }: { items: ActionItem[]; onUpdate: (id: string, status: ActionItem["status"]) => void }) {
+/** The "+ Add Item" form.
+ *
+ *  Both copies of that button — the one over the empty state and the one over
+ *  the table — were `<button>`s with no onClick. A postmortem review's whole
+ *  output is the follow-ups nobody thought of when the draft was written, and
+ *  there was no way to record one. */
+function AddActionItem({ onAdd, busy }: {
+  onAdd: (item: { title: string; owner: string; priority: ActionItem["priority"]; type: ActionItem["type"]; due_date: string | null }) => void;
+  busy: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [owner, setOwner] = useState("");
+  const [priority, setPriority] = useState<ActionItem["priority"]>("P2");
+  const [type, setType] = useState<ActionItem["type"]>("prevent");
+  const [dueDate, setDueDate] = useState("");
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+      >
+        + Add Item
+      </button>
+    );
+  }
+
+  const submit = () => {
+    if (!title.trim()) return;
+    onAdd({
+      title: title.trim(),
+      owner: owner.trim(),
+      priority,
+      type,
+      // Empty stays null: an unset due date is not the same as one agreed today.
+      due_date: dueDate ? new Date(dueDate).toISOString() : null,
+    });
+    setTitle("");
+    setOwner("");
+    setDueDate("");
+    setOpen(false);
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input
+        aria-label="Action"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+        placeholder="What needs doing"
+        className="px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+      />
+      <input
+        aria-label="Owner"
+        value={owner}
+        onChange={(e) => setOwner(e.target.value)}
+        placeholder="Owner"
+        className="px-2 py-1 text-sm w-28 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+      />
+      <select
+        aria-label="Priority"
+        value={priority}
+        onChange={(e) => setPriority(e.target.value as ActionItem["priority"])}
+        className="px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+      >
+        {(["P0", "P1", "P2", "P3"] as const).map((p) => (
+          <option key={p} value={p}>{p}</option>
+        ))}
+      </select>
+      <select
+        aria-label="Type"
+        value={type}
+        onChange={(e) => setType(e.target.value as ActionItem["type"])}
+        className="px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+      >
+        {(["prevent", "detect", "mitigate"] as const).map((t) => (
+          <option key={t} value={t}>{t}</option>
+        ))}
+      </select>
+      <input
+        aria-label="Due date"
+        type="date"
+        value={dueDate}
+        onChange={(e) => setDueDate(e.target.value)}
+        className="px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+      />
+      <button
+        onClick={submit}
+        disabled={!title.trim() || busy}
+        className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+      >
+        {busy ? "Adding..." : "Add"}
+      </button>
+      <button
+        onClick={() => setOpen(false)}
+        className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+function ActionItemsTable({ items, onUpdate, onAdd, adding }: {
+  items: ActionItem[];
+  onUpdate: (id: string, status: ActionItem["status"]) => void;
+  onAdd: (item: { title: string; owner: string; priority: ActionItem["priority"]; type: ActionItem["type"]; due_date: string | null }) => void;
+  adding: boolean;
+}) {
   const priorityColors = {
     P0: "bg-red-500 text-white",
     P1: "bg-orange-500 text-white",
@@ -255,11 +365,9 @@ function ActionItemsTable({ items, onUpdate }: { items: ActionItem[]; onUpdate: 
   if (items.length === 0) {
     return (
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-        <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+        <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-2">
           <h3 className="font-semibold">Action Items</h3>
-          <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">
-            + Add Item
-          </button>
+          <AddActionItem onAdd={onAdd} busy={adding} />
         </div>
         <div className="text-center text-gray-500 py-8">No action items yet</div>
       </div>
@@ -268,11 +376,9 @@ function ActionItemsTable({ items, onUpdate }: { items: ActionItem[]; onUpdate: 
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-2">
         <h3 className="font-semibold">Action Items</h3>
-        <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">
-          + Add Item
-        </button>
+        <AddActionItem onAdd={onAdd} busy={adding} />
       </div>
       <table className="w-full">
         <thead className="bg-gray-50 dark:bg-gray-900">
@@ -380,6 +486,8 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
   /** The id of the section currently being regenerated, or null. */
   const [generating, setGenerating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [activeTab, setActiveTab] = useState<"content" | "timeline" | "actions">("content");
 
   /** A server document into page state. `editing` is presentation-only and is
@@ -532,6 +640,58 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
     }
   };
 
+  /** Record a follow-up agreed in the review. */
+  const addActionItem = async (item: {
+    title: string;
+    owner: string;
+    priority: ActionItem["priority"];
+    type: ActionItem["type"];
+    due_date: string | null;
+  }) => {
+    if (!postmortem) return;
+    setAdding(true);
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/incidents/${postmortem.incident_id}/postmortem/action-items`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(item),
+        }
+      );
+      if (!res.ok) throw new Error(await errorDetail(res));
+      applyDocument(await res.json());
+    } catch (err) {
+      setError(`Could not add this action item: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  /** Publish the document, or send it back to draft.
+   *
+   *  The button had no onClick, so the status badge on every postmortem read
+   *  "draft" no matter how finished the document was. */
+  const setStatus = async (status: PostmortemData["status"]) => {
+    if (!postmortem) return;
+    setPublishing(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/incidents/${postmortem.incident_id}/postmortem`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error(await errorDetail(res));
+      applyDocument(await res.json());
+    } catch (err) {
+      setError(`Could not publish this postmortem: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   /** Re-run the model for one section. This used to be a 2000ms sleep. */
   const regenerateSection = async (sectionId: string) => {
     if (!postmortem) return;
@@ -619,9 +779,24 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
                   <Icon name="download" size={14} />
                   Export
                 </button>
-                <button className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
-                  Publish
-                </button>
+                {postmortem.status === "published" ? (
+                  <button
+                    onClick={() => setStatus("draft")}
+                    disabled={publishing}
+                    className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                    title="Move this back to a draft so it can be reworked."
+                  >
+                    {publishing ? "Working..." : "Unpublish"}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setStatus("published")}
+                    disabled={publishing}
+                    className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {publishing ? "Publishing..." : "Publish"}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -753,6 +928,8 @@ export function Postmortem({ onBack }: { onBack: () => void }) {
               <ActionItemsTable
                 items={postmortem.action_items}
                 onUpdate={updateActionItem}
+                onAdd={addActionItem}
+                adding={adding}
               />
             )}
           </>
