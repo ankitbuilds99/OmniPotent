@@ -182,3 +182,132 @@ describe('OnCall', () => {
     await waitFor(() => expect(screen.getAllByText('—')).toHaveLength(6))
   })
 })
+
+// `OncallEscalationStep.targets` is a JSON array of objects. The page typed it
+// `string[]` and rendered `targets.join(", ")`, so the one line that tells you
+// who gets paged read "Notify [object Object]".
+describe('OnCall escalation policy', () => {
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const POLICY = {
+    id: 'pol-1',
+    name: 'Severity 1',
+    steps: [
+      {
+        step_number: 1,
+        delay_minutes: 0,
+        targets: [{ target_type: 'user', target_id: 'u-1', target_name: 'Ada Lovelace' }],
+        notification_channels: ['slack', 'sms'],
+      },
+      {
+        step_number: 2,
+        delay_minutes: 15,
+        targets: [
+          { target_type: 'schedule', target_id: SCHEDULE_ID, target_name: 'Primary rotation' },
+          { target_type: 'team', target_id: 'team-1' },
+        ],
+        notification_channels: ['voice'],
+      },
+    ],
+  }
+
+  function withPolicy() {
+    installFetch({
+      'GET /oncall/teams/team-1/escalation-policies': () => json([{ id: 'pol-1' }]),
+      'GET /oncall/escalation-policies/pol-1': () => json(POLICY),
+    })
+  }
+
+  it('names the people and rotations a step notifies', async () => {
+    withPolicy()
+    render(<OnCall onBack={() => {}} />)
+
+    expect(await screen.findByText('Notify Ada Lovelace')).toBeInTheDocument()
+    expect(
+      screen.getByText('Notify Primary rotation (schedule), team-1 (team)')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument()
+  })
+
+  it('numbers steps the way the server does', async () => {
+    withPolicy()
+    render(<OnCall onBack={() => {}} />)
+
+    await screen.findByText('Severity 1')
+    expect(screen.getByText('after 15min')).toBeInTheDocument()
+  })
+
+  it('says a step notifies nobody rather than inventing an "on-call" target', async () => {
+    installFetch({
+      'GET /oncall/teams/team-1/escalation-policies': () => json([{ id: 'pol-1' }]),
+      'GET /oncall/escalation-policies/pol-1': () =>
+        json({ ...POLICY, steps: [{ step_number: 1, delay_minutes: 0, targets: [], notification_channels: [] }] }),
+    })
+    render(<OnCall onBack={() => {}} />)
+
+    expect(await screen.findByText('No targets configured')).toBeInTheDocument()
+    expect(screen.queryByText('Notify on-call')).not.toBeInTheDocument()
+  })
+})
+
+// Both arrows beside "This Week" were <button>s with no onClick, and the shifts
+// effect depended on a useMemo with an empty dep array, so the grid was frozen
+// on the current week even if the handlers had existed.
+describe('OnCall week navigation', () => {
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  function windowsRequested(): string[] {
+    return calls
+      .filter((c) => c.url.includes('/shifts?'))
+      .map((c) => new URL(c.url, 'http://x').searchParams.get('start_date')!)
+  }
+
+  it('fetches the following week when the forward arrow is clicked', async () => {
+    installFetch()
+    render(<OnCall onBack={() => {}} />)
+    await screen.findByText('This Week')
+    await waitFor(() => expect(windowsRequested()).toHaveLength(1))
+    const thisWeek = windowsRequested()[0]
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next week' }))
+
+    expect(await screen.findByText('Next Week')).toBeInTheDocument()
+    await waitFor(() => expect(windowsRequested().length).toBeGreaterThan(1))
+    const requested = windowsRequested()
+    const nextWeek = requested[requested.length - 1]
+    const days = (Date.parse(nextWeek) - Date.parse(thisWeek)) / 86_400_000
+    expect(days).toBe(7)
+  })
+
+  it('goes back a week and returns with Today', async () => {
+    installFetch()
+    render(<OnCall onBack={() => {}} />)
+    await screen.findByText('This Week')
+    await waitFor(() => expect(windowsRequested()).toHaveLength(1))
+    const thisWeek = windowsRequested()[0]
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous week' }))
+    expect(await screen.findByText('Last Week')).toBeInTheDocument()
+    await waitFor(() => expect(windowsRequested().length).toBeGreaterThan(1))
+    const requested = windowsRequested()
+    const lastWeek = requested[requested.length - 1]
+    expect((Date.parse(lastWeek) - Date.parse(thisWeek)) / 86_400_000).toBe(-7)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Today' }))
+    expect(await screen.findByText('This Week')).toBeInTheDocument()
+  })
+})

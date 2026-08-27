@@ -24,6 +24,14 @@ from app.database.orgs import ensure_org_row, org_uuid
 # render as an unstyled badge forever after.
 ACTION_STATUSES = ("open", "in_progress", "completed")
 
+# Where a document is in its life. The page badges all three; "published" is the
+# one that matters, because it is the difference between a draft somebody is
+# still arguing with and the account of the outage the team stands behind.
+DOCUMENT_STATUSES = ("draft", "in_review", "published")
+
+ACTION_PRIORITIES = ("P0", "P1", "P2", "P3")
+ACTION_TYPES = ("prevent", "detect", "mitigate")
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -200,6 +208,88 @@ class PostmortemStore:
 
             items[index] = {**items[index], "status": status}
             row.action_items = items
+            row.updated_at = _now()
+            await session.commit()
+            await session.refresh(row)
+            return _to_document(row)
+
+    async def add_action_item(
+        self,
+        incident_id: UUID,
+        *,
+        title: str,
+        owner: str = "",
+        priority: str = "P2",
+        item_type: str = "prevent",
+        due_date: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append a follow-up somebody agreed to in the review.
+
+        The two "+ Add Item" buttons on the page had no handler and no endpoint
+        behind them, so the only action items a postmortem could ever have were
+        the ones the model proposed when the draft was written — and a review
+        meeting's whole output is the items nobody thought of beforehand.
+        """
+        from app.database.engine import get_session
+
+        title = title.strip()
+        if not title:
+            raise ValueError("an action item needs a title")
+        if priority not in ACTION_PRIORITIES:
+            raise ValueError(
+                f"unknown priority {priority!r}; supported: {', '.join(ACTION_PRIORITIES)}"
+            )
+        if item_type not in ACTION_TYPES:
+            raise ValueError(
+                f"unknown type {item_type!r}; supported: {', '.join(ACTION_TYPES)}"
+            )
+
+        async with get_session() as session:
+            row = await self._fetch(session, incident_id)
+            if row is None:
+                return None
+
+            items = list(row.action_items or [])
+            # Ids are positional (`<incident>-action-N`), so this counts from the
+            # highest existing suffix rather than the length: deleting item 2 of
+            # 3 and adding one must not reuse id 3.
+            used = {str(it.get("id")) for it in items}
+            n = len(items) + 1
+            while f"{incident_id}-action-{n}" in used:
+                n += 1
+
+            items.append({
+                "id": f"{incident_id}-action-{n}",
+                "title": title,
+                "owner": owner.strip(),
+                "priority": priority,
+                "status": "open",
+                # Null unless a date was actually agreed. The page used to stamp
+                # now+7d on every item as if one had been.
+                "due_date": due_date,
+                "type": item_type,
+            })
+            row.action_items = items
+            row.updated_at = _now()
+            await session.commit()
+            await session.refresh(row)
+            return _to_document(row)
+
+    async def set_status(self, incident_id: UUID, status: str) -> dict[str, Any] | None:
+        """Move the document between draft, in_review and published."""
+        from app.database.engine import get_session
+
+        if status not in DOCUMENT_STATUSES:
+            raise ValueError(
+                f"unknown status {status!r}; supported: {', '.join(DOCUMENT_STATUSES)}"
+            )
+
+        async with get_session() as session:
+            row = await self._fetch(session, incident_id)
+            if row is None:
+                return None
+
+            row.status = status
             row.updated_at = _now()
             await session.commit()
             await session.refresh(row)

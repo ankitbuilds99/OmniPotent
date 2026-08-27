@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { Check, Sparkles, Zap, Building2, Rocket, Crown, Star, Shield } from 'lucide-react';
 import type { PricingPlan, BillingCycle } from '../../types/billing';
+import { describeUserLimit } from '../../lib/planLimits';
 
 const TIER_ICONS: Record<string, typeof Sparkles> = {
   community: Sparkles,
@@ -47,7 +48,7 @@ export function PlanCard({
   const price = billingCycle === 'annual' ? plan.annual_monthly_price : plan.monthly_price;
 
   const featureList = [
-    plan.max_users === -1 ? 'Unlimited users' : `${plan.max_users} users`,
+    describeUserLimit(plan.max_users),
     plan.max_ai_investigations_monthly === null
       ? 'Unlimited AI investigations'
       : `${plan.max_ai_investigations_monthly} AI investigations/mo`,

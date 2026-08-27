@@ -96,6 +96,27 @@ async def _owned_schedule(db: Any, schedule_id: UUID):
     return schedule
 
 
+def _overlaps(start_date: date, end_date: date) -> tuple[Any, Any]:
+    """Filter clauses for shifts that overlap [start_date, end_date] at all.
+
+    Every shift query here used to ask for *containment* — `start_time >= from`
+    AND `end_time <= to` — which silently drops the shift you are most likely to
+    care about: the one that is in progress at the edge of the window. A weekly
+    rotation running Mon→Mon can never be contained in a Sun–Sat week, so the
+    calendar rendered an empty row for a week that was fully covered, the gap
+    analyser reported a gap where somebody was on call, and the iCal feed
+    exported nothing for the current shift. Callers papered over it by padding
+    the window by a day, which works only for daily rotations.
+
+    Overlap is what "shifts between these dates" means: the shift starts before
+    the window ends and ends after the window begins.
+    """
+    return (
+        OncallShift.start_time <= datetime.combine(end_date, datetime.max.time()),
+        OncallShift.end_time >= datetime.combine(start_date, datetime.min.time()),
+    )
+
+
 async def _owned_shift(db: Any, shift_id: UUID) -> OncallShift:
     """Load a shift via schedule → team, 404ing if it belongs to another org."""
     from sqlalchemy import select
@@ -561,8 +582,7 @@ async def list_schedule_shifts(
         select(OncallShift)
         .where(
             OncallShift.schedule_id == schedule_id,
-            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
-            OncallShift.end_time <= datetime.combine(end_date, datetime.max.time()),
+            *_overlaps(start_date, end_date),
         )
         .order_by(OncallShift.start_time)
     )
@@ -1485,8 +1505,7 @@ async def analyze_schedule_gaps(
         .where(
             OncallShift.schedule_id == schedule.id,
             OncallShift.status.in_(["scheduled", "active"]),
-            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
-            OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+            *_overlaps(start_date, end_date),
         )
         .order_by(OncallShift.start_time)
     )
@@ -1648,8 +1667,7 @@ async def view_schedule_in_timezone(
         .where(
             OncallShift.schedule_id == schedule.id,
             OncallShift.status.in_(["scheduled", "active"]),
-            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
-            OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+            *_overlaps(start_date, end_date),
         )
         .order_by(OncallShift.start_time)
     )
@@ -1737,8 +1755,7 @@ async def get_schedule_ical_feed(
     query = select(OncallShift).where(
         OncallShift.schedule_id == schedule.id,
         OncallShift.status.in_(["scheduled", "active"]),
-        OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
-        OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+        *_overlaps(start_date, end_date),
     )
 
     if user_id:
@@ -1846,8 +1863,7 @@ async def analyze_schedule_workload(
         .where(
             OncallShift.schedule_id == schedule.id,
             OncallShift.status.in_(["scheduled", "active", "completed"]),
-            OncallShift.start_time >= datetime.combine(start_date, datetime.min.time()),
-            OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), datetime.max.time()),
+            *_overlaps(start_date, end_date),
         )
     )
     shifts_db = result.scalars().all()

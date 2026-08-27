@@ -309,3 +309,162 @@ describe('Postmortem', () => {
     expect(patch.body).toEqual({ status: 'completed' })
   })
 })
+
+// Both "+ Add Item" buttons and the header's Publish were `<button>`s with no
+// onClick — the two things a review meeting actually produces, a decision to
+// sign off and the follow-ups nobody thought of beforehand.
+describe('Postmortem review actions', () => {
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const ADDED = {
+    id: 'a2',
+    title: 'Run a game day',
+    owner: 'carol',
+    priority: 'P1',
+    status: 'open',
+    due_date: null,
+    type: 'mitigate',
+  }
+
+  it('adding an item POSTs what was typed and shows it in the table', async () => {
+    installFetch({
+      [`POST /api/incidents/${INCIDENT.id}/postmortem/action-items`]: () =>
+        json({ ...DOCUMENT, action_items: [...DOCUMENT.action_items, ADDED] }),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+    fireEvent.click(screen.getByText('Actions'))
+    await screen.findByText('Alert on pool saturation')
+
+    fireEvent.click(screen.getByText('+ Add Item'))
+    fireEvent.change(screen.getByLabelText('Action'), { target: { value: 'Run a game day' } })
+    fireEvent.change(screen.getByLabelText('Owner'), { target: { value: 'carol' } })
+    fireEvent.change(screen.getByLabelText('Priority'), { target: { value: 'P1' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'mitigate' } })
+    fireEvent.click(screen.getByText('Add'))
+
+    expect(await screen.findByText('Run a game day')).toBeInTheDocument()
+    const post = calls.find(c => c.url.endsWith('/postmortem/action-items'))
+    expect(post?.method).toBe('POST')
+    expect(post?.body).toEqual({
+      title: 'Run a game day',
+      owner: 'carol',
+      priority: 'P1',
+      type: 'mitigate',
+      // Nothing was entered, so nothing is claimed to have been agreed.
+      due_date: null,
+    })
+  })
+
+  it('sends a due date only when one was entered', async () => {
+    installFetch({
+      [`POST /api/incidents/${INCIDENT.id}/postmortem/action-items`]: () =>
+        json({ ...DOCUMENT, action_items: [...DOCUMENT.action_items, ADDED] }),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+    fireEvent.click(screen.getByText('Actions'))
+    await screen.findByText('Alert on pool saturation')
+
+    fireEvent.click(screen.getByText('+ Add Item'))
+    fireEvent.change(screen.getByLabelText('Action'), { target: { value: 'Cap pool size' } })
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-03-01' } })
+    fireEvent.click(screen.getByText('Add'))
+
+    await vi.waitFor(() =>
+      expect(calls.some(c => c.url.endsWith('/postmortem/action-items'))).toBe(true)
+    )
+    const post = calls.find(c => c.url.endsWith('/postmortem/action-items'))!
+    const body = post.body as { due_date: string | null }
+    expect(body.due_date).not.toBeNull()
+    expect(body.due_date!.startsWith('2026-03-01')).toBe(true)
+  })
+
+  it('refuses to add an item with no title', async () => {
+    installFetch()
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+    fireEvent.click(screen.getByText('Actions'))
+    await screen.findByText('Alert on pool saturation')
+
+    fireEvent.click(screen.getByText('+ Add Item'))
+    expect(screen.getByText('Add')).toBeDisabled()
+    fireEvent.click(screen.getByText('Add'))
+
+    expect(calls.some(c => c.url.endsWith('/postmortem/action-items'))).toBe(false)
+  })
+
+  it('says why an item could not be added instead of dropping it silently', async () => {
+    installFetch({
+      [`POST /api/incidents/${INCIDENT.id}/postmortem/action-items`]: () =>
+        json({ detail: 'an action item needs a title' }, 422),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+    fireEvent.click(screen.getByText('Actions'))
+    await screen.findByText('Alert on pool saturation')
+
+    fireEvent.click(screen.getByText('+ Add Item'))
+    fireEvent.change(screen.getByLabelText('Action'), { target: { value: 'Something' } })
+    fireEvent.click(screen.getByText('Add'))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/an action item needs a title/)
+    expect(screen.queryByText('Something')).not.toBeInTheDocument()
+  })
+
+  it('publishing PATCHes the status and re-badges the document', async () => {
+    installFetch({
+      [`PATCH /api/incidents/${INCIDENT.id}/postmortem`]: () =>
+        json({ ...DOCUMENT, status: 'published' }),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+    expect(screen.getByText('draft')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Publish'))
+
+    // The badge follows the server's answer, and the button becomes the way back.
+    expect(await screen.findByText('published')).toBeInTheDocument()
+    expect(await screen.findByText('Unpublish')).toBeInTheDocument()
+    const patch = calls.find(c => c.method === 'PATCH')
+    expect(patch?.url).toBe(`/api/incidents/${INCIDENT.id}/postmortem`)
+    expect(patch?.body).toEqual({ status: 'published' })
+  })
+
+  it('a published document can be sent back to draft', async () => {
+    installFetch({
+      [`GET /api/incidents/${INCIDENT.id}/postmortem`]: () =>
+        json({ ...DOCUMENT, status: 'published' }),
+      [`PATCH /api/incidents/${INCIDENT.id}/postmortem`]: () => json(DOCUMENT),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+
+    fireEvent.click(await screen.findByText('Unpublish'))
+
+    expect(await screen.findByText('Publish')).toBeInTheDocument()
+    expect(calls.find(c => c.method === 'PATCH')?.body).toEqual({ status: 'draft' })
+  })
+
+  it('a failed publish leaves the badge alone and says so', async () => {
+    installFetch({
+      [`PATCH /api/incidents/${INCIDENT.id}/postmortem`]: () =>
+        json({ detail: 'No postmortem has been generated for this incident yet.' }, 404),
+    })
+    render(<Postmortem onBack={() => {}} />)
+    await screen.findByText('Checkout was down.')
+
+    fireEvent.click(screen.getByText('Publish'))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/No postmortem has been generated/)
+    expect(screen.getByText('draft')).toBeInTheDocument()
+    expect(screen.getByText('Publish')).toBeInTheDocument()
+  })
+})

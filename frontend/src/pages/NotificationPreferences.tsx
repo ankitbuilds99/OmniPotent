@@ -54,12 +54,17 @@ interface ChannelConfig {
   icon: string;
   enabled: boolean;
   configured: boolean;
+  /** Why this build cannot deliver on this channel at all; "" when it can.
+   *  Distinct from `configured: false`, which the org can go and fix. */
+  unavailable: string;
   fields: FieldSpec[];
 }
 
 interface NotificationRule {
   event: string;
   description: string;
+  /** Why nothing in this build raises this event; "" when something does. */
+  unproduced: string;
   channels: Record<string, boolean>;
 }
 
@@ -112,6 +117,11 @@ function ChannelCard({
   onConfigure: () => void;
 }) {
   const Icon = iconFor(channel.icon);
+  // "Credentials missing" is an instruction: go and fill them in. For a channel
+  // this build cannot deliver on there is nothing to fill in — push has no
+  // fields at all, so the card offered no Configure button and the yellow
+  // warning could never be cleared by anything the reader could do.
+  const unavailable = Boolean(channel.unavailable);
 
   return (
     <motion.div
@@ -135,10 +145,17 @@ function ChannelCard({
         <div>
           <div className="flex items-center gap-2">
             <span className="font-medium" style={{ color: "var(--text)" }}>{channel.name}</span>
-            {channel.configured && channel.enabled && (
+            {unavailable && (
+              <AlertTriangle
+                size={14}
+                aria-label={`${channel.name} cannot deliver in this build`}
+                style={{ color: "var(--text-2)" }}
+              />
+            )}
+            {!unavailable && channel.configured && channel.enabled && (
               <Check size={14} aria-label={`${channel.name} configured`} style={{ color: "var(--ok)" }} />
             )}
-            {!channel.configured && channel.enabled && (
+            {!unavailable && !channel.configured && channel.enabled && (
               <AlertTriangle
                 size={14}
                 aria-label={`${channel.name} enabled but not configured`}
@@ -147,9 +164,11 @@ function ChannelCard({
             )}
           </div>
           <span className="text-sm" style={{ color: "var(--text-2)" }}>
-            {channel.enabled && !channel.configured
-              ? `${channel.description} — credentials missing`
-              : channel.description}
+            {unavailable
+              ? channel.unavailable
+              : channel.enabled && !channel.configured
+                ? `${channel.description} — credentials missing`
+                : channel.description}
           </span>
         </div>
       </div>
@@ -197,21 +216,33 @@ function RuleRow({
         <div>
           <div className="font-medium" style={{ color: "var(--text)" }}>{rule.event}</div>
           <div className="text-sm" style={{ color: "var(--text-2)" }}>{rule.description}</div>
+          {rule.unproduced && (
+            <div className="text-xs mt-1" style={{ color: "#eab308" }}>{rule.unproduced}</div>
+          )}
         </div>
       </td>
       {channels.filter(c => c.enabled).map((channel) => {
         const isEnabled = rule.channels[channel.id] ?? false;
+        // A switch here is an offer to deliver this event on this channel. When
+        // either half of that is impossible the offer is withdrawn — but the
+        // saved state stays on screen, because "you asked for this and it never
+        // arrived" is exactly what the reader came to find out.
+        const blocked = rule.unproduced || channel.unavailable || "";
 
         return (
           <td key={channel.id} className="py-3 px-2 text-center">
             <button
               onClick={() => onToggleChannel(channel.id)}
+              disabled={Boolean(blocked)}
+              title={blocked || undefined}
               aria-label={`${rule.event} via ${channel.name}`}
               aria-pressed={isEnabled}
               className="w-8 h-8 rounded-lg flex items-center justify-center mx-auto transition-colors"
               style={{
                 backgroundColor: isEnabled ? "var(--accent)" : "var(--bg)",
                 border: isEnabled ? "none" : "1px solid var(--border)",
+                opacity: blocked ? 0.4 : 1,
+                cursor: blocked ? "not-allowed" : "pointer",
               }}
             >
               {isEnabled && <Check size={16} color="var(--bg)" />}
@@ -589,6 +620,15 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
                                 <span className="text-xs font-medium" style={{ color: "var(--text-2)" }}>
                                   {channel.name}
                                 </span>
+                                {channel.unavailable && (
+                                  <span
+                                    className="text-xs font-normal"
+                                    title={channel.unavailable}
+                                    style={{ color: "#eab308" }}
+                                  >
+                                    cannot deliver
+                                  </span>
+                                )}
                               </div>
                             </th>
                           );

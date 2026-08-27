@@ -170,15 +170,62 @@ function ArticleCard({
   );
 }
 
+/** The article viewer, with the editor the pencil used to only pretend to open.
+ *
+ *  `onEdit` was `() => setSelectedArticle(null)`: clicking the pencil closed the
+ *  modal and did nothing else, so an operator who spotted a wrong command in a
+ *  runbook had no way to correct it short of deleting the document and writing
+ *  it again. PUT /api/knowledge/documents/{doc_id} had been there all along. */
 function ArticleViewer({
   article,
   onClose,
-  onEdit,
+  onSave,
+  saving,
 }: {
   article: KnowledgeArticle;
   onClose: () => void;
-  onEdit: () => void;
+  onSave: (patch: { title: string; content: string; tags: string[]; service: string | null }) => Promise<void>;
+  saving: boolean;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(article.title);
+  const [content, setContent] = useState(article.content);
+  const [tags, setTags] = useState(article.tags.join(", "));
+  const [service, setService] = useState(article.service ?? "");
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const startEditing = () => {
+    // Always from what is currently stored, so re-opening the editor after a
+    // failed save does not resurrect a stale draft.
+    setTitle(article.title);
+    setContent(article.content);
+    setTags(article.tags.join(", "));
+    setService(article.service ?? "");
+    setEditError(null);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    if (!title.trim() || !content.trim()) {
+      setEditError("An article needs a title and content.");
+      return;
+    }
+    setEditError(null);
+    try {
+      await onSave({
+        title: title.trim(),
+        content: content.trim(),
+        tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
+        service: service.trim() || null,
+      });
+      setEditing(false);
+    } catch (err) {
+      // Stay in the editor with the text still in it — the operator's rewrite is
+      // the only copy, and closing over it would lose the work.
+      setEditError(err instanceof Error ? err.message : "Could not save this article");
+    }
+  };
+
   const formatDate = (dateStr: string) => {
     try {
       return new Date(dateStr).toLocaleDateString();
@@ -197,8 +244,18 @@ function ArticleViewer({
         style={{ backgroundColor: "var(--panel)", border: "1px solid var(--border)" }}
       >
         <div className="flex items-center justify-between p-6 border-b" style={{ borderColor: "var(--border)" }}>
-          <div>
-            <h2 className="text-xl font-semibold">{article.title}</h2>
+          <div className="flex-1 min-w-0 mr-4">
+            {editing ? (
+              <input
+                aria-label="Title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                className="w-full px-3 py-2 text-xl font-semibold rounded-lg border"
+                style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
+              />
+            ) : (
+              <h2 className="text-xl font-semibold">{article.title}</h2>
+            )}
             <div className="flex items-center gap-4 mt-2 text-sm text-gray-400">
               <span className="flex items-center gap-1">
                 <User className="w-4 h-4" />
@@ -211,23 +268,95 @@ function ArticleViewer({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={onEdit}
-              className="p-2 rounded-lg hover:bg-white/10"
-              title="Edit"
-            >
-              <Edit3 className="w-5 h-5" />
-            </button>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-lg hover:bg-white/10"
-            >
-              <span className="text-xl">&times;</span>
-            </button>
+            {editing ? (
+              <>
+                <button
+                  onClick={save}
+                  disabled={saving || !title.trim() || !content.trim()}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {saving ? "Saving..." : "Save"}
+                </button>
+                <button
+                  onClick={() => { setEditing(false); setEditError(null); }}
+                  className="px-4 py-2 rounded-lg hover:bg-white/10"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={startEditing}
+                  className="p-2 rounded-lg hover:bg-white/10"
+                  title="Edit"
+                  aria-label="Edit article"
+                >
+                  <Edit3 className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={onClose}
+                  className="p-2 rounded-lg hover:bg-white/10"
+                  aria-label="Close"
+                >
+                  <span className="text-xl">&times;</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          {editing ? (
+            <div className="space-y-4">
+              {editError && (
+                <div role="alert" className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                  {editError}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Tags (comma-separated)</label>
+                  <input
+                    aria-label="Tags"
+                    value={tags}
+                    onChange={(e) => setTags(e.target.value)}
+                    className="w-full px-4 py-2 rounded-lg border"
+                    style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2">Service</label>
+                  <input
+                    aria-label="Service"
+                    value={service}
+                    onChange={(e) => setService(e.target.value)}
+                    className="w-full px-4 py-2 rounded-lg border"
+                    style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Content (Markdown)</label>
+                <textarea
+                  aria-label="Content"
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  rows={16}
+                  className="w-full px-4 py-2 rounded-lg border font-mono text-sm"
+                  style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
+                />
+              </div>
+              {/* Not offered: the update endpoint takes title, content, tags and
+                  service, and nothing else. A document type control here would
+                  be a field the server discards. */}
+              <p className="text-xs text-gray-500">
+                Document type ({article.doc_type.replace("_", " ")}) cannot be changed after creation.
+              </p>
+            </div>
+          ) : (
+          <>
           <div className="flex flex-wrap gap-2 mb-6">
             {article.tags.map((tag) => (
               <span
@@ -292,6 +421,8 @@ function ArticleViewer({
               return null;
             })}
           </div>
+          </>
+          )}
         </div>
       </motion.div>
     </div>
@@ -448,8 +579,18 @@ function CreateArticleModal({
   );
 }
 
+/** What the API will return in one page. Its own default is 50 and its ceiling
+ *  is 100; the page used to send neither and then report the truncated result
+ *  as the whole knowledge base. */
+const PAGE_SIZE = 50;
+
 export function KnowledgeBase({ onBack }: { onBack: () => void }) {
   const [articles, setArticles] = useState<KnowledgeArticle[]>([]);
+  // How many documents match, which is not how many are on screen. The header
+  // reported `articles.length` — so a base of 55 documents said "50 articles"
+  // and the other five were unreachable, with no control to page to them.
+  const [total, setTotal] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [selectedArticle, setSelectedArticle] = useState<KnowledgeArticle | null>(null);
@@ -466,6 +607,8 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
       const params = new URLSearchParams();
       if (category !== "all") params.set("doc_type", category);
       if (search) params.set("search", search);
+      params.set("limit", String(PAGE_SIZE));
+      params.set("offset", String(offset));
 
       const res = await apiFetch(`/api/knowledge/documents?${params}`, {
         credentials: "include",
@@ -479,25 +622,36 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
       if (!res.ok) throw new Error(await describeFailure(res));
 
       const data = await res.json();
+      const documents: KnowledgeArticle[] = data.documents || [];
       setArticles(
-        (data.documents || []).map((doc: KnowledgeArticle) => ({
+        documents.map((doc: KnowledgeArticle) => ({
           ...doc,
           starred: starredIds.has(doc.id),
         }))
       );
+      // The server's count of everything that matches. Falls back to what came
+      // back rather than to 0: an unknown total is not an empty knowledge base.
+      setTotal(typeof data.total === "number" ? data.total : documents.length);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch articles:", err);
       setArticles([]);
+      setTotal(null);
       setError(err instanceof Error ? err.message : "Failed to load the knowledge base");
     } finally {
       setLoading(false);
     }
-  }, [category, search, starredIds]);
+  }, [category, search, starredIds, offset]);
 
   useEffect(() => {
     fetchArticles();
   }, [fetchArticles]);
+
+  // A new search or category is a new result set, so page 2 of the old one is
+  // meaningless — and landing on an empty page would read as "no matches".
+  useEffect(() => {
+    setOffset(0);
+  }, [category, search]);
 
   // Load starred IDs from localStorage
   useEffect(() => {
@@ -553,6 +707,39 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
     }
   };
 
+  /** Save an operator's correction to an existing article. */
+  const handleUpdateArticle = async (
+    id: string,
+    patch: { title: string; content: string; tags: string[]; service: string | null }
+  ) => {
+    setSaving(true);
+    try {
+      const res = await apiFetch(`/api/knowledge/documents/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(await describeFailure(res));
+
+      // PUT answers `{"message": "Document updated"}` and nothing else, so read
+      // the document back: what goes on screen is then what the server kept,
+      // not what this page hoped it kept.
+      const reread = await apiFetch(`/api/knowledge/documents/${id}`, {
+        credentials: "include",
+      });
+      if (!reread.ok) throw new Error(await describeFailure(reread));
+      const stored: KnowledgeArticle = await reread.json();
+      const fresh = { ...stored, starred: starredIds.has(stored.id) };
+
+      setArticles((prev) => prev.map((a) => (a.id === id ? fresh : a)));
+      setSelectedArticle((prev) => (prev?.id === id ? fresh : prev));
+      setError(null);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleDeleteArticle = async (id: string) => {
     if (!confirm("Are you sure you want to delete this article?")) return;
 
@@ -597,7 +784,11 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
                 <div>
                   <h1 className="text-xl font-semibold">Knowledge Base</h1>
                   <p className="text-sm text-gray-400">
-                    {loading ? "Loading..." : `${articles.length} articles`}
+                    {loading
+                      ? "Loading..."
+                      : total === null
+                        ? "article count unavailable"
+                        : `${total} article${total === 1 ? "" : "s"}`}
                   </p>
                 </div>
               </div>
@@ -701,6 +892,37 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
           </div>
         )}
 
+        {/* Paging, for the documents past the first 50. Without this the API's
+            page cap silently truncated every list, search and category filter —
+            an operator could be told a runbook does not exist when it was only
+            on page 2. */}
+        {!loading && !error && total !== null && total > PAGE_SIZE && (
+          <div className="flex items-center justify-between mt-6 text-sm">
+            <span className="text-gray-400">
+              Showing {offset + 1}–{Math.min(offset + articles.length, total)} of {total}
+              {showStarredOnly && " · the star filter applies to this page only"}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                disabled={offset === 0}
+                className="px-3 py-1.5 rounded-lg hover:bg-white/10 disabled:opacity-40"
+                style={{ backgroundColor: "var(--shell)" }}
+              >
+                Previous
+              </button>
+              <button
+                onClick={() => setOffset(offset + PAGE_SIZE)}
+                disabled={offset + articles.length >= total}
+                className="px-3 py-1.5 rounded-lg hover:bg-white/10 disabled:opacity-40"
+                style={{ backgroundColor: "var(--shell)" }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Suppressed while `error` is set: "No articles found — try a different
             search" is the wrong advice when the request never succeeded. */}
         {!loading && !error && filteredArticles.length === 0 && (
@@ -720,11 +942,11 @@ export function KnowledgeBase({ onBack }: { onBack: () => void }) {
       <AnimatePresence>
         {selectedArticle && (
           <ArticleViewer
+            key={selectedArticle.id}
             article={selectedArticle}
             onClose={() => setSelectedArticle(null)}
-            onEdit={() => {
-              setSelectedArticle(null);
-            }}
+            onSave={(patch) => handleUpdateArticle(selectedArticle.id, patch)}
+            saving={saving}
           />
         )}
       </AnimatePresence>

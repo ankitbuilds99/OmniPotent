@@ -32,6 +32,8 @@ interface UseSupabaseAuthReturn {
   signInWithGoogle: () => Promise<void>
   signInWithEmail: (email: string, password: string) => Promise<void>
   signUp: (email: string, password: string) => Promise<void>
+  /** Rejects if the mail was not requested, so no caller can claim it was sent. */
+  resetPassword: (email: string) => Promise<void>
   signOut: () => Promise<void>
   isConfigured: boolean
 }
@@ -151,6 +153,24 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
     if (err) setError(err)
   }, [client])
 
+  // Throws rather than reporting through `error`, because the caller has to know
+  // whether to tell the user a link is on its way. The login page used to print
+  // "Password reset link sent to your email!" without sending anything at all.
+  const resetPassword = useCallback(async (email: string) => {
+    if (!client) {
+      throw new Error('Password reset is unavailable — the auth client did not load.')
+    }
+    setLoading(true)
+    try {
+      const { error: err } = await client.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      })
+      if (err) throw new Error(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [client])
+
   const signOut = useCallback(async () => {
     // Clear the shared token first, and unconditionally: Supabase may not be the
     // thing that authenticated this session (backend OAuth and self-serve signup
@@ -172,6 +192,7 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
     signInWithGoogle,
     signInWithEmail,
     signUp,
+    resetPassword,
     signOut,
     isConfigured,
   }

@@ -67,12 +67,13 @@ export async function getPlanComparison(): Promise<
 }
 
 // Subscription
+// GET /billing/subscription answers 200 with a `null` body when the org has no
+// subscription, so "none" and "could not tell" are already distinguishable and
+// this must not flatten them. Catching everything and returning null told a
+// paying customer whose request had 500'd that they were on no plan at all,
+// with an Upgrade button under every tier.
 export async function getSubscription(): Promise<Subscription | null> {
-  try {
-    return await get<Subscription>('/billing/subscription');
-  } catch {
-    return null;
-  }
+  return get<Subscription | null>('/billing/subscription');
 }
 
 export async function changeSubscription(

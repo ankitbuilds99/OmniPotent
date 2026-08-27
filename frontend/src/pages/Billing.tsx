@@ -20,6 +20,7 @@ import { PaymentMethodCard } from '../components/billing/PaymentMethodCard';
 import { SubscriptionCard } from '../components/billing/SubscriptionCard';
 import { CancelModal } from '../components/billing/CancelModal';
 import * as billingApi from '../api/billing';
+import { bestAnnualSavingsPercent } from '../lib/planLimits';
 import type {
   PricingPlan,
   Subscription,
@@ -32,6 +33,18 @@ import type {
 
 type Tab = 'overview' | 'plans' | 'usage' | 'invoices' | 'settings';
 
+type Settled<T> = { ok: true; value: T } | { ok: false; message: string };
+
+/** Run a request whose failure should be reported on its own rather than
+ *  bringing down the whole page load. */
+async function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  try {
+    return { ok: true, value: await promise };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 interface BillingProps {
   onBack: () => void;
 }
@@ -42,6 +55,7 @@ export function Billing({ onBack }: BillingProps) {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
 
   // Data states
   const [plans, setPlans] = useState<PricingPlan[]>([]);
@@ -59,9 +73,14 @@ export function Billing({ onBack }: BillingProps) {
     setError(null);
 
     try {
-      const [plansData, subData, usageData, historyData, invoicesData, pmData] = await Promise.all([
+      // The subscription is settled separately: an unreadable one must not
+      // blank the rest of the page, but it must not be mistaken for "you have
+      // no subscription" either — everything that keys off `subscription`
+      // (the current-plan chip, the Current Plan badge, Cancel) would quietly
+      // misdescribe the account.
+      const [plansData, subResult, usageData, historyData, invoicesData, pmData] = await Promise.all([
         billingApi.listPlans(true),
-        billingApi.getSubscription(),
+        settle(billingApi.getSubscription()),
         billingApi.getUsage(),
         billingApi.getUsageHistory(12),
         billingApi.getInvoices(10),
@@ -69,7 +88,8 @@ export function Billing({ onBack }: BillingProps) {
       ]);
 
       setPlans(plansData);
-      setSubscription(subData);
+      setSubscription(subResult.ok ? subResult.value : null);
+      setSubscriptionError(subResult.ok ? null : subResult.message);
       setUsage(usageData);
       setUsageHistory(historyData);
       setInvoices(invoicesData);
@@ -235,6 +255,26 @@ export function Billing({ onBack }: BillingProps) {
         </div>
       )}
 
+      {/* Whatever this page says about the current plan while this is set is a
+          guess, so say so once, above every tab. */}
+      {subscriptionError && (
+        <div className="max-w-7xl mx-auto px-6 pt-4">
+          <div
+            role="alert"
+            className="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-lg"
+          >
+            <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+            <p className="text-amber-400">
+              Could not load your current subscription: {subscriptionError}. This page cannot
+              show which plan you are on until it loads.{' '}
+              <button onClick={loadData} className="underline cursor-pointer">
+                Retry
+              </button>
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <main className="max-w-7xl mx-auto px-6 py-8">
         {tab === 'overview' && (
@@ -346,7 +386,7 @@ export function Billing({ onBack }: BillingProps) {
               <BillingToggle
                 value={billingCycle}
                 onChange={setBillingCycle}
-                savingsPercent={17}
+                savingsPercent={bestAnnualSavingsPercent(plans)}
               />
             </div>
 
@@ -409,25 +449,25 @@ export function Billing({ onBack }: BillingProps) {
               <div className="grid gap-8 md:grid-cols-2">
                 <UsageChart
                   data={usageHistory}
-                  metric="ai_investigations_count"
+                  metric="ai_investigations"
                   label="AI Investigations"
                   color="#00E7FF"
                 />
                 <UsageChart
                   data={usageHistory}
-                  metric="alerts_processed_count"
+                  metric="alerts_processed"
                   label="Alerts Processed"
                   color="#7C3AED"
                 />
                 <UsageChart
                   data={usageHistory}
-                  metric="api_calls_count"
+                  metric="api_calls"
                   label="API Calls"
                   color="#00FFB3"
                 />
                 <UsageChart
                   data={usageHistory}
-                  metric="postmortems_generated_count"
+                  metric="postmortems_generated"
                   label="Postmortems Generated"
                   color="#FF6B6B"
                 />

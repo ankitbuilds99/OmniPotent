@@ -80,9 +80,32 @@ function toIsoDate(d: Date): string {
   ).padStart(2, "0")}`;
 }
 
+/** One entry in a step's `targets` array, as `OncallEscalationStep.targets`
+ *  stores it: a JSON object, not a string. */
+interface EscalationTarget {
+  target_type?: string;
+  target_id?: string;
+  target_name?: string | null;
+}
+
+/** Who a step notifies, in words.
+ *
+ *  `targets` was typed `string[]` and rendered with `.join(", ")`, so every step
+ *  on the page read "Notify [object Object]" — the one line whose whole job is
+ *  telling you who gets woken up. */
+function describeTarget(target: EscalationTarget | string): string {
+  if (typeof target === "string") return target;
+  const name = target.target_name || target.target_id;
+  const kind = target.target_type;
+  if (!name) return kind ? `a ${kind}` : "unnamed target";
+  // "the checkout schedule" reads better than a bare id, and the type matters:
+  // notifying a schedule pages whoever is on call, not one named person.
+  return kind && kind !== "user" ? `${name} (${kind})` : name;
+}
+
 interface EscalationStep {
   order: number;
-  targets: string[];
+  targets: (EscalationTarget | string)[];
   delay_minutes: number;
   channels: ("sms" | "voice" | "email" | "slack" | "push")[];
 }
@@ -258,17 +281,21 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const today = new Date();
 
+  // Weeks away from the current one. The arrows either side of the heading had
+  // no onClick at all, so the only week this grid could ever show was this one.
+  const [weekOffset, setWeekOffset] = useState(0);
+
   const weekDays = useMemo(() => {
     const now = new Date();
     const startOfWeek = new Date(now);
     startOfWeek.setHours(0, 0, 0, 0);
-    startOfWeek.setDate(now.getDate() - now.getDay());
+    startOfWeek.setDate(now.getDate() - now.getDay() + weekOffset * 7);
     return Array.from({ length: 7 }, (_, i) => {
       const date = new Date(startOfWeek);
       date.setDate(startOfWeek.getDate() + i);
       return date;
     });
-  }, []);
+  }, [weekOffset]);
 
   // This grid used to assign `participants[i % participants.length]` to each
   // weekday — an invented rotation that matched nothing in the database. These
@@ -282,6 +309,9 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
       return;
     }
     let cancelled = false;
+    // Otherwise the previous week's roster stays on screen under the new
+    // week's heading while the request is in flight.
+    setWeekShifts(null);
     const from = toIsoDate(weekDays[0]);
     const to = toIsoDate(weekDays[6]);
     (async () => {
@@ -330,12 +360,40 @@ function ScheduleCalendar({ schedule }: { schedule: OnCallSchedule }) {
       style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}
     >
       <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-lg" style={{ color: "var(--text)" }}>This Week</h3>
-        <div className="flex gap-2">
-          <button className="p-1 rounded transition-colors" style={{ color: "var(--text-2)" }}>
+        <div>
+          <h3 className="font-semibold text-lg" style={{ color: "var(--text)" }}>
+            {weekOffset === 0 ? "This Week" : weekOffset === 1 ? "Next Week" : weekOffset === -1 ? "Last Week" : "Week of"}
+          </h3>
+          <p className="text-xs" style={{ color: "var(--text-2)" }}>
+            {weekDays[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+            {" – "}
+            {weekDays[6].toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setWeekOffset((w) => w - 1)}
+            aria-label="Previous week"
+            className="p-1 rounded transition-colors"
+            style={{ color: "var(--text-2)" }}
+          >
             <ChevronLeft size={16} />
           </button>
-          <button className="p-1 rounded transition-colors" style={{ color: "var(--text-2)" }}>
+          {weekOffset !== 0 && (
+            <button
+              onClick={() => setWeekOffset(0)}
+              className="text-xs px-2 py-1 rounded"
+              style={{ color: "var(--accent)" }}
+            >
+              Today
+            </button>
+          )}
+          <button
+            onClick={() => setWeekOffset((w) => w + 1)}
+            aria-label="Next week"
+            className="p-1 rounded transition-colors"
+            style={{ color: "var(--text-2)" }}
+          >
             <ChevronRight size={16} />
           </button>
         </div>
@@ -436,7 +494,9 @@ function EscalationPolicyCard({ policy }: { policy: EscalationPolicy }) {
               <div className="flex-1 pb-4">
                 <div className="flex items-center gap-2 text-sm">
                   <span className="font-medium" style={{ color: "var(--text)" }}>
-                    Notify {step.targets.join(", ")}
+                    {step.targets.length > 0
+                      ? `Notify ${step.targets.map(describeTarget).join(", ")}`
+                      : "No targets configured"}
                   </span>
                   {step.delay_minutes > 0 && (
                     <span style={{ color: "var(--text-2)" }}>after {step.delay_minutes}min</span>
@@ -763,10 +823,16 @@ export function OnCall({ onBack }: { onBack: () => void }) {
               id: policyDetail.id,
               name: policyDetail.name,
               steps: policyDetail.steps?.map((s: Record<string, unknown>, idx: number) => ({
-                order: idx + 1,
-                targets: s.targets || ["on-call"],
-                delay_minutes: s.delay_minutes || 0,
-                channels: s.notification_channels || ["slack"],
+                // The server numbers its own steps; `idx + 1` disagreed with it
+                // whenever a step had been deleted or reordered.
+                order: Number(s.step_number ?? idx + 1),
+                // No "on-call" default: a step with no targets notifies nobody,
+                // and the card should say that rather than invent a recipient.
+                targets: Array.isArray(s.targets) ? (s.targets as EscalationTarget[]) : [],
+                delay_minutes: Number(s.delay_minutes) || 0,
+                channels: Array.isArray(s.notification_channels)
+                  ? (s.notification_channels as EscalationStep["channels"])
+                  : [],
               })) || [],
             });
           }

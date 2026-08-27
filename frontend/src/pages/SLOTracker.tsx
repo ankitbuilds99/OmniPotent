@@ -8,7 +8,7 @@ import { Icon } from "../components/Icon";
 // No local API base any more: apiFetch resolves it the same way for every caller
 // (`|| ""` here vs `??` elsewhere meant two different behaviours for one concept)
 // and attaches the Authorization header these calls were missing.
-import { apiFetch } from "../lib/apiClient";
+import { apiFetch, describeFailure } from "../lib/apiClient";
 
 interface SLOAlert {
   id: string;
@@ -30,7 +30,14 @@ interface SLO {
   /** Minutes of the window, or null when the budget could not be read. */
   budget_total: number | null;
   budget_remaining: number | null;
-  budget_burn_rate: number;
+  /** Null when nothing has been measured: 0 is a burn rate, and a service
+   *  burning none of its budget is not the same as one nobody is watching. */
+  budget_burn_rate: number | null;
+  /** When the tracker projects the budget will be gone, ISO-8601. Null when it
+   *  makes no projection — nothing burning, nothing measured, or already gone. */
+  projected_exhaustion: string | null;
+  /** The burn rate at which this SLO alerts, or null if the API omitted it. */
+  alert_burn_rate_threshold: number | null;
   /** SLI samples behind `current`; 0 means the SLO exists but has no data yet. */
   sample_count: number;
   /** `no_data` is a real answer from the tracker, not an absence of one: the SLO
@@ -52,6 +59,20 @@ interface BudgetResponse {
   total_count: number;
   budget_minutes_total: number;
   budget_minutes_remaining: number;
+  /** The tracker's own projection, which this page used to ignore in favour of
+   *  dividing budget minutes by a dimensionless multiplier. */
+  projected_exhaustion: string | null;
+}
+
+/** The shape of GET /api/slos/{id}/burn-rate. */
+interface BurnRateWindows {
+  short_window: string;
+  short_window_burn_rate: number;
+  long_window: string;
+  long_window_burn_rate: number;
+  is_alerting: boolean;
+  severity: string;
+  message: string;
 }
 
 function StatusBadge({ status }: { status: SLO["status"] }) {
@@ -119,7 +140,19 @@ function BudgetGauge({ remaining, total, status }: { remaining: number | null; t
   );
 }
 
-function BurnRateIndicator({ rate }: { rate: number }) {
+function BurnRateIndicator({ rate }: { rate: number | null }) {
+  if (rate === null) {
+    // 0.0x is a measurement — a service that is burning none of its allowance.
+    // Falling back to it when the budget could not be read put a green tick
+    // beside "we have no idea how fast this is burning".
+    return (
+      <div className="flex items-center gap-1 text-gray-500">
+        <Icon name="help" size={14} />
+        <span className="font-mono">no data</span>
+      </div>
+    );
+  }
+
   const color = rate <= 1 ? "text-green-600" : rate <= 2 ? "text-yellow-600" : "text-red-600";
   const icon = rate <= 1 ? "check" : rate <= 2 ? "alert-triangle" : "alert-circle";
 
@@ -128,6 +161,51 @@ function BurnRateIndicator({ rate }: { rate: number }) {
       <Icon name={icon as "check" | "alert-triangle" | "alert-circle"} size={14} />
       <span className="font-mono">{rate.toFixed(1)}x</span>
     </div>
+  );
+}
+
+/** "3d 4h", "5h 12m", "40m" — coarse enough to read at a glance. */
+function formatDuration(ms: number): string {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    const rem = minutes % 60;
+    return rem > 0 ? `${hours}h ${rem}m` : `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  const rem = hours % 24;
+  return rem > 0 ? `${days}d ${rem}h` : `${days}d`;
+}
+
+/**
+ * The old estimate divided the remaining budget *in minutes* by the burn rate,
+ * a dimensionless multiplier, and labelled the result "h" — so a budget with
+ * 300 minutes left burning at 2x read "150h" instead of the 2.5 hours it had.
+ * The tracker already computes the projection; show that.
+ */
+function ExhaustionEstimate({ slo }: { slo: SLO }) {
+  if (slo.status === "exhausted" || (slo.budget_remaining !== null && slo.budget_remaining <= 0)) {
+    return <span className="text-red-600 font-bold">already exhausted</span>;
+  }
+  if (!slo.projected_exhaustion) {
+    // The tracker only projects while a measured budget is actually burning.
+    return <span className="text-gray-500">not projected</span>;
+  }
+
+  const at = new Date(slo.projected_exhaustion);
+  const ms = at.getTime() - Date.now();
+  if (ms <= 0) {
+    return <span className="text-red-600 font-bold" title={at.toLocaleString()}>due now</span>;
+  }
+
+  return (
+    <span
+      className={ms <= 24 * 60 * 60 * 1000 ? "text-red-600 font-bold" : ""}
+      title={at.toLocaleString()}
+    >
+      in {formatDuration(ms)}
+    </span>
   );
 }
 
@@ -214,7 +292,119 @@ function SLOCard({ slo, onSelect }: { slo: SLO; onSelect: () => void }) {
   );
 }
 
-function SLODetailPanel({ slo, onClose }: { slo: SLO; onClose: () => void }) {
+function SLODetailPanel({
+  slo,
+  onClose,
+  onChanged,
+}: {
+  slo: SLO;
+  onClose: () => void;
+  /** Re-read the SLO list after something on the server changes. */
+  onChanged: () => void;
+}) {
+  // All three of these buttons used to be decorative: no onClick, no handler,
+  // nothing. Clicking them looked like nothing had loaded yet.
+  const [busy, setBusy] = useState<null | "metrics" | "alerts" | "investigate">(null);
+
+  const [metrics, setMetrics] = useState<BurnRateWindows | null>(null);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+
+  const [editingThreshold, setEditingThreshold] = useState(false);
+  const [threshold, setThreshold] = useState("");
+  const [thresholdError, setThresholdError] = useState<string | null>(null);
+
+  const [investigation, setInvestigation] = useState<string | null>(null);
+  const [investigateError, setInvestigateError] = useState<string | null>(null);
+
+  const toggleMetrics = async () => {
+    if (metrics) {
+      setMetrics(null);
+      setMetricsError(null);
+      return;
+    }
+    setBusy("metrics");
+    setMetricsError(null);
+    try {
+      const res = await apiFetch(`/api/slos/${slo.id}/burn-rate`);
+      if (!res.ok) throw new Error(await describeFailure(res));
+      setMetrics((await res.json()) as BurnRateWindows);
+    } catch (err) {
+      setMetricsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const openThresholdEditor = () => {
+    if (editingThreshold) {
+      setEditingThreshold(false);
+      return;
+    }
+    // Seed from the current value each time it opens, so a poll that lands
+    // while the panel is closed is not overwritten by a stale mount-time read.
+    setThreshold(slo.alert_burn_rate_threshold === null ? "" : String(slo.alert_burn_rate_threshold));
+    setThresholdError(null);
+    setEditingThreshold(true);
+  };
+
+  const saveThreshold = async () => {
+    const value = Number(threshold);
+    if (!threshold.trim() || !Number.isFinite(value) || value <= 0) {
+      setThresholdError("Enter a burn rate above 0 — for example 2 for twice the sustainable rate.");
+      return;
+    }
+    setBusy("alerts");
+    setThresholdError(null);
+    try {
+      const res = await apiFetch(`/api/slos/${slo.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alert_burn_rate_threshold: value }),
+      });
+      if (!res.ok) throw new Error(await describeFailure(res));
+      setEditingThreshold(false);
+      onChanged();
+    } catch (err) {
+      setThresholdError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const investigate = async () => {
+    setBusy("investigate");
+    setInvestigateError(null);
+    setInvestigation(null);
+    try {
+      const res = await apiFetch("/api/coordinator/investigations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          incident_id: `slo-${slo.id}`,
+          affected_services: [slo.service],
+          severity: slo.status === "critical" || slo.status === "exhausted" ? "P1" : "P2",
+          context: {
+            slo_id: slo.id,
+            slo_name: slo.name,
+            slo_type: slo.type,
+            target_percent: slo.target,
+            current_sli_percent: slo.current,
+            budget_minutes_remaining: slo.budget_remaining,
+            burn_rate: slo.budget_burn_rate,
+            window: slo.window,
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(await describeFailure(res));
+      const started = (await res.json()) as { execution_id?: string };
+      setInvestigation(started.execution_id ?? "started");
+    } catch (err) {
+      setInvestigateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="fixed inset-y-0 right-0 w-96 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-xl overflow-y-auto z-50">
       <div className="sticky top-0 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 p-4">
@@ -240,17 +430,7 @@ function SLODetailPanel({ slo, onClose }: { slo: SLO; onClose: () => void }) {
           </div>
           <div className="mt-1 flex items-center justify-between text-sm">
             <span>Time to Exhaustion</span>
-            <span
-              className={
-                slo.budget_remaining !== null && slo.budget_remaining < 10
-                  ? "text-red-600 font-bold"
-                  : ""
-              }
-            >
-              {slo.budget_remaining !== null && slo.budget_burn_rate > 0
-                ? `${Math.round(slo.budget_remaining / slo.budget_burn_rate)}h`
-                : "N/A"}
-            </span>
+            <ExhaustionEstimate slo={slo} />
           </div>
         </div>
 
@@ -280,16 +460,99 @@ function SLODetailPanel({ slo, onClose }: { slo: SLO; onClose: () => void }) {
         <div>
           <h4 className="text-sm font-medium text-gray-500 mb-3">Actions</h4>
           <div className="space-y-2">
-            <button className="w-full px-3 py-2 text-sm text-left border border-gray-200 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700">
-              View Detailed Metrics
+            <button
+              onClick={toggleMetrics}
+              disabled={busy === "metrics"}
+              className="w-full px-3 py-2 text-sm text-left border border-gray-200 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-60"
+            >
+              {busy === "metrics"
+                ? "Loading metrics…"
+                : metrics
+                  ? "Hide Detailed Metrics"
+                  : "View Detailed Metrics"}
             </button>
-            <button className="w-full px-3 py-2 text-sm text-left border border-gray-200 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700">
-              Configure Alerts
+
+            {metricsError && (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                Could not load burn-rate windows: {metricsError}
+              </p>
+            )}
+
+            {metrics && (
+              <div className="p-3 space-y-1 text-xs rounded border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700/50">
+                <div className="flex justify-between">
+                  <span>{metrics.short_window} burn rate</span>
+                  <span className="font-mono">{metrics.short_window_burn_rate.toFixed(2)}x</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>{metrics.long_window} burn rate</span>
+                  <span className="font-mono">{metrics.long_window_burn_rate.toFixed(2)}x</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Alerting</span>
+                  <span className={metrics.is_alerting ? "text-red-600 font-medium" : ""}>
+                    {metrics.is_alerting ? `yes · ${metrics.severity}` : "no"}
+                  </span>
+                </div>
+                {metrics.message && <p className="text-gray-500 pt-1">{metrics.message}</p>}
+              </div>
+            )}
+
+            <button
+              onClick={openThresholdEditor}
+              className="w-full px-3 py-2 text-sm text-left border border-gray-200 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700"
+            >
+              {editingThreshold ? "Cancel" : "Configure Alerts"}
             </button>
+
+            {editingThreshold && (
+              <div className="p-3 space-y-2 rounded border border-gray-200 dark:border-gray-600">
+                <label htmlFor="burn-rate-threshold" className="block text-xs text-gray-500">
+                  Alert when the burn rate exceeds
+                </label>
+                <input
+                  id="burn-rate-threshold"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={threshold}
+                  onChange={(e) => setThreshold(e.target.value)}
+                  className="w-full px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800"
+                />
+                {thresholdError && (
+                  <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                    {thresholdError}
+                  </p>
+                )}
+                <button
+                  onClick={saveThreshold}
+                  disabled={busy === "alerts"}
+                  className="w-full px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-60"
+                >
+                  {busy === "alerts" ? "Saving…" : "Save threshold"}
+                </button>
+              </div>
+            )}
+
             {slo.status !== "healthy" && (
-              <button className="w-full px-3 py-2 text-sm text-left bg-blue-600 text-white rounded hover:bg-blue-700">
-                Investigate with AI
+              <button
+                onClick={investigate}
+                disabled={busy === "investigate"}
+                className="w-full px-3 py-2 text-sm text-left bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-60"
+              >
+                {busy === "investigate" ? "Starting investigation…" : "Investigate with AI"}
               </button>
+            )}
+
+            {investigation && (
+              <p className="text-xs text-green-700 dark:text-green-400">
+                Investigation started — execution {investigation}.
+              </p>
+            )}
+            {investigateError && (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                Could not start an investigation: {investigateError}
+              </p>
             )}
           </div>
         </div>
@@ -438,7 +701,11 @@ function EmptyState() {
 
 export function SLOTracker({ onBack }: { onBack: () => void }) {
   const [slos, setSlos] = useState<SLO[]>([]);
-  const [selectedSLO, setSelectedSLO] = useState<SLO | null>(null);
+  // The id, not the object. Holding the object froze the detail panel against
+  // the 30-second poll: the grid behind it updated and the open panel kept
+  // showing the burn rate, budget and status from the moment it was clicked.
+  // /api/slos is unpaginated, so `slos` always holds the whole list to look in.
+  const [selectedSLOId, setSelectedSLOId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [filter, setFilter] = useState<"all" | "healthy" | "warning" | "critical" | "no_data">("all");
   const [loading, setLoading] = useState(true);
@@ -498,7 +765,15 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
             // target — not the 43.2 that only ever applied to a monthly 99.9%.
             budget_total: budget?.budget_minutes_total ?? null,
             budget_remaining: budget?.budget_minutes_remaining ?? null,
-            budget_burn_rate: budget?.burn_rate ?? 0,
+            // Same rule as `current` just above: an unreadable or unmeasured
+            // budget has no burn rate. `?? 0` rendered that as a green 0.0x —
+            // the exact badge a perfectly behaved service earns.
+            budget_burn_rate: budget && budget.total_count > 0 ? budget.burn_rate : null,
+            projected_exhaustion: budget?.projected_exhaustion ?? null,
+            alert_burn_rate_threshold:
+              typeof slo.alert_burn_rate_threshold === "number"
+                ? (slo.alert_burn_rate_threshold as number)
+                : null,
             sample_count: budget?.total_count ?? 0,
             status,
             alerts: [],
@@ -555,6 +830,10 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
       setError(err instanceof Error ? err.message : "Failed to create SLO");
     }
   };
+
+  // Derived, so every poll flows straight through to the open panel. An SLO
+  // that disappears from the list closes its panel rather than stranding it.
+  const selectedSLO = selectedSLOId === null ? null : slos.find(s => s.id === selectedSLOId) ?? null;
 
   const filteredSLOs = slos.filter(slo => {
     if (filter === "all") return true;
@@ -669,7 +948,7 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
             {/* SLO Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredSLOs.map((slo) => (
-                <SLOCard key={slo.id} slo={slo} onSelect={() => setSelectedSLO(slo)} />
+                <SLOCard key={slo.id} slo={slo} onSelect={() => setSelectedSLOId(slo.id)} />
               ))}
             </div>
           </>
@@ -678,7 +957,15 @@ export function SLOTracker({ onBack }: { onBack: () => void }) {
 
       {/* Detail Panel */}
       {selectedSLO && (
-        <SLODetailPanel slo={selectedSLO} onClose={() => setSelectedSLO(null)} />
+        <SLODetailPanel
+          // Keyed so switching to another SLO starts the panel's own state
+          // (loaded metrics, half-typed threshold) fresh rather than carrying
+          // one SLO's readings over to the next.
+          key={selectedSLO.id}
+          slo={selectedSLO}
+          onClose={() => setSelectedSLOId(null)}
+          onChanged={fetchSLOs}
+        />
       )}
 
       {/* Create Modal */}

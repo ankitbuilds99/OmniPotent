@@ -357,6 +357,25 @@ input {
   padding: 1.5px 5px;
   border-radius: 4px;
 }
+/* The badge was green "connected" for every server whatever its state. Green is
+   now reserved for a connector that really is querying a live service; a
+   connector on sample data reads amber, and one we cannot classify reads
+   muted -- so the colour carries the same claim the word does. */
+.server__badge--live {
+  color: var(--ok);
+  background: rgba(45, 212, 167, 0.12);
+  border-color: rgba(45, 212, 167, 0.35);
+}
+.server__badge--demo {
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.12);
+  border-color: rgba(234, 179, 8, 0.35);
+}
+.server__badge--unknown {
+  color: var(--text-2);
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.3);
+}
 .server__tools {
   display: flex;
   flex-wrap: wrap;
@@ -1674,6 +1693,12 @@ input {
   text-transform: uppercase;
   padding: 3px 7px;
   border-radius: 5px;
+}
+/* No API key configured: the provider cannot answer, so the pill must not be
+   the same green as one that can. */
+.online-pill--off {
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.12);
 }
 .side-help {
   margin-top: auto;

@@ -2901,16 +2901,32 @@ async def share_to_slack(req: SlackShareRequest) -> dict:
     description="Check which integrations are configured and available.",
 )
 async def integration_status() -> dict:
-    """Get status of configured integrations."""
+    """Get status of configured integrations.
+
+    True means "credentials are present, so this connector talks to the real
+    service"; false means it serves the bundled offline fixtures instead. Every
+    connector in `MCP_CATALOG` that has a live mode is answered for here, so a
+    caller can tell live from demo for all of them rather than for some.
+
+    The sidebar labelled all eleven catalog entries "connected" because the
+    catalog is a static list with no state and this endpoint only covered five
+    of them; a GitHub row could read "connected" directly above its own
+    "Offline demo" widget.
+    """
     from app.integrations.slack_notify import is_slack_configured
 
+    settings = get_settings()
     return {
         "slack": is_slack_configured(),
         "github": runtime.github_connected(),
-        "pagerduty": bool(get_settings().pagerduty_api_token),
-        "datadog": bool(get_settings().dd_api_key and get_settings().dd_app_key),
-        "sentry": bool(get_settings().sentry_api_token),
-        "kubernetes": bool(get_settings().kube_config_path),
+        "pagerduty": bool(settings.pagerduty_api_token),
+        "datadog": bool(settings.dd_api_key and settings.dd_app_key),
+        "sentry": bool(settings.sentry_api_token),
+        "kubernetes": bool(settings.kube_config_path),
+        "traces": bool(settings.traces_api_url),
+        "deploys": bool(settings.deploys_api_url),
+        "argocd": bool(settings.argocd_server_url and settings.argocd_auth_token),
+        "terraform": bool(settings.terraform_cloud_token and settings.terraform_organization),
     }
 
 

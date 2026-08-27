@@ -491,3 +491,87 @@ class TestICalSubscriptionURL:
 
         assert f"user_id={alice}" in url
         assert client.get(url).status_code == 200
+
+
+class TestShiftWindowIsOverlapNotContainment:
+    """Every shift query asked for containment: `start >= from AND end <= to`.
+
+    A shift only counted if it fitted entirely inside the window, so the shift
+    in progress at the edge — the one you are most likely to be asking about —
+    was dropped. A weekly rotation cannot fit inside a Sunday-to-Saturday week
+    at all unless it happens to start on Sunday, so the calendar grid rendered
+    an empty week for a schedule that was fully covered.
+    """
+
+    def _weekly_schedule(self, client) -> str:
+        """A weekly rotation generated across June 2026.
+
+        Weekly is the case that exposes this: a Mon→Mon shift cannot fit inside
+        the Sun–Sat week the calendar asks for, no matter which week it is.
+        """
+        team = client.post("/oncall/teams", json={
+            "name": "Platform", "slug": f"platform-{uuid.uuid4().hex[:8]}",
+        })
+        assert team.status_code == 200, team.text
+        schedule = client.post("/oncall/schedules", json={
+            "team_id": team.json()["id"],
+            "name": "primary",
+            "timezone": "UTC",
+            "rotation_type": "weekly",
+            "coverage_type": "24x7",
+            "participants": [str(uuid.uuid4()), str(uuid.uuid4())],
+        })
+        assert schedule.status_code == 200, schedule.text
+        schedule_id = schedule.json()["id"]
+
+        created = client.post(f"/oncall/schedules/{schedule_id}/generate-shifts",
+                              json={"start_date": "2026-06-01", "end_date": "2026-06-29"})
+        assert created.status_code == 200, created.text
+        assert created.json()["shifts_created"] >= 4
+        return schedule_id
+
+    def _shifts(self, client, schedule: str, start: str, end: str) -> list[dict]:
+        listed = client.get(f"/oncall/schedules/{schedule}/shifts",
+                            params={"start_date": start, "end_date": end})
+        assert listed.status_code == 200, listed.text
+        return listed.json()
+
+    def test_a_weekly_rotation_shows_up_in_the_week_it_covers(self, client):
+        schedule = self._weekly_schedule(client)
+
+        # Sun 7th – Sat 13th, exactly what the calendar grid requests. The
+        # Mon 8th → Mon 15th shift covering most of it ends after the window,
+        # so containment excluded it and the grid drew seven empty days.
+        listed = self._shifts(client, schedule, "2026-06-07", "2026-06-13")
+
+        assert listed, "a fully covered week reported nobody on call"
+
+    def test_a_shift_straddling_the_whole_window_is_returned(self, client):
+        schedule = self._weekly_schedule(client)
+
+        # One day in the middle of a week-long shift: it neither starts nor ends
+        # inside the window, so containment could never match it.
+        listed = self._shifts(client, schedule, "2026-06-10", "2026-06-10")
+
+        assert listed, "a day covered by a rotation reported nobody on call"
+        assert any(
+            s["start_time"] < "2026-06-10" and s["end_time"] > "2026-06-11"
+            for s in listed
+        ), "the shift in progress that day was dropped"
+
+    def test_the_window_still_excludes_shifts_outside_it(self, client):
+        """Overlap must not degrade into "return everything"."""
+        schedule = self._weekly_schedule(client)
+
+        listed = self._shifts(client, schedule, "2026-08-01", "2026-08-07")
+
+        assert listed == []
+
+    def test_the_ical_feed_includes_the_shift_in_progress(self, client):
+        schedule = self._weekly_schedule(client)
+
+        feed = client.get(f"/oncall/schedules/{schedule}/ical",
+                          params={"start_date": "2026-06-10", "end_date": "2026-06-11"})
+
+        assert feed.status_code == 200, feed.text
+        assert "BEGIN:VEVENT" in feed.text, "the calendar feed exported an empty week"

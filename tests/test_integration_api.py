@@ -336,6 +336,62 @@ class TestGitHubIntegration:
         assert data["connected"] is False
 
 
+class TestIntegrationStatus:
+    """`/integrations/status` answers live-vs-demo for every catalog connector.
+
+    The sidebar badges every MCP server from this, so a connector missing from
+    the response cannot be classified and gets shown as unknown. It used to
+    cover five of the eleven, and the sidebar filled the gap by hardcoding
+    "connected" on all of them.
+    """
+
+    def test_answers_for_every_catalog_connector_with_a_live_mode(self, client):
+        """Nothing in the catalog is left unclassifiable except local-only servers."""
+        r = client.get("/integrations/status")
+        assert r.status_code == 200
+        status = r.json()
+
+        # repo and memory read local state; they have no credentials and no
+        # live/demo distinction to report.
+        local_only = {"repo", "memory"}
+        catalog = {s["name"] for s in api.MCP_CATALOG} - local_only
+        assert catalog <= set(status), f"unclassifiable connectors: {catalog - set(status)}"
+
+    def test_reports_false_when_no_credentials_are_configured(self, client, monkeypatch):
+        """False means "serving bundled fixtures", which is the default state."""
+        for var in (
+            "PAGERDUTY_API_TOKEN", "DD_API_KEY", "DD_APP_KEY", "SENTRY_API_TOKEN",
+            "KUBE_CONFIG_PATH", "TRACES_API_URL", "DEPLOYS_API_URL",
+            "ARGOCD_SERVER_URL", "ARGOCD_AUTH_TOKEN",
+            "TERRAFORM_CLOUD_TOKEN", "TERRAFORM_ORGANIZATION",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        cfg.get_settings.cache_clear()
+
+        status = client.get("/integrations/status").json()
+        assert not any(status.values()), f"claimed live with no credentials: {status}"
+
+    def test_reports_true_only_for_the_connector_that_was_configured(self, client, monkeypatch):
+        """One credential must not light up the rest."""
+        monkeypatch.setenv("SENTRY_API_TOKEN", "sntrys_test")
+        cfg.get_settings.cache_clear()
+
+        status = client.get("/integrations/status").json()
+        assert status["sentry"] is True
+        assert [k for k, v in status.items() if v] == ["sentry"]
+
+    def test_a_connector_needing_two_settings_is_not_live_on_one(self, client, monkeypatch):
+        """Terraform needs both a token and an org; half of it queries nothing."""
+        monkeypatch.setenv("TERRAFORM_CLOUD_TOKEN", "tf-token")
+        monkeypatch.delenv("TERRAFORM_ORGANIZATION", raising=False)
+        cfg.get_settings.cache_clear()
+        assert client.get("/integrations/status").json()["terraform"] is False
+
+        monkeypatch.setenv("TERRAFORM_ORGANIZATION", "acme")
+        cfg.get_settings.cache_clear()
+        assert client.get("/integrations/status").json()["terraform"] is True
+
+
 class TestMetricsEndpoints:
     """Integration tests for metrics endpoints."""
 

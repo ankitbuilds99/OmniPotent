@@ -12,6 +12,7 @@ import { Profile } from "./pages/Profile";
 import { History } from "./pages/History";
 import { StatusPage } from "./pages/StatusPage";
 import { Team } from "./pages/Team";
+import { AcceptInvite, PENDING_INVITATION_KEY } from "./pages/AcceptInvite";
 import { Incidents } from "./pages/Incidents";
 import { OnCall } from "./pages/OnCall";
 import { ServiceMap } from "./pages/ServiceMap";
@@ -38,6 +39,14 @@ function AppRoutes() {
 
   // Where a fresh login lands: the wizard until it has been completed once.
   const afterLogin = () => {
+    // Somebody who arrived from an invitation link came here to join a team,
+    // not to see the console. Take them back to the invitation they clicked.
+    const pendingInvitation = localStorage.getItem(PENDING_INVITATION_KEY);
+    if (pendingInvitation) {
+      localStorage.removeItem(PENDING_INVITATION_KEY);
+      navigate(`/invite/${pendingInvitation}`, { replace: true });
+      return;
+    }
     const done = localStorage.getItem("onboarding_completed");
     navigate(done ? "/console" : "/onboarding", { replace: true });
   };
@@ -137,6 +146,10 @@ function AppRoutes() {
       />
       <Route path="/status" element={<StatusPage onBack={() => navigate("/console")} />} />
       <Route path="/team" element={<Team onBack={() => navigate("/console")} />} />
+      {/* The address Team.tsx puts in every invitation email. Without a route
+          here the invitee landed on the marketing page and the invitation sat
+          pending until it expired. */}
+      <Route path="/invite/:invitationId" element={<AcceptInvite />} />
       <Route
         path="/incidents"
         element={<Incidents onBack={() => navigate("/dashboard")} />}

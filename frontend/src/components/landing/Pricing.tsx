@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Check, Sparkles, Zap, Rocket, Crown, Star, Shield, Loader2 } from 'lucide-react';
 import * as billingApi from '../../api/billing';
 import type { PricingPlan, BillingCycle } from '../../types/billing';
+import { bestAnnualSavingsPercent, describeUserLimit } from '../../lib/planLimits';
 
 const TIER_ICONS: Record<string, typeof Sparkles> = {
   starter: Sparkles,
@@ -256,7 +257,7 @@ function PricingCard({
   const displayPrice = isYearly ? plan.annual_monthly_price : plan.monthly_price;
 
   const featureList = [
-    plan.max_users === -1 ? 'Unlimited users' : `${plan.max_users} users`,
+    describeUserLimit(plan.max_users),
     plan.max_ai_investigations_monthly === null
       ? 'Unlimited AI investigations'
       : `${plan.max_ai_investigations_monthly} AI investigations/mo`,
@@ -402,6 +403,10 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // Read off whichever plans are actually on screen, so the badge still matches
+  // when the API is unreachable and FALLBACK_PLANS are showing.
+  const savingsPercent = bestAnnualSavingsPercent(plans);
+
   const handlePlanSelect = async (plan: PricingPlan) => {
     if (plan.tier === 'enterprise') {
       window.open('mailto:sales@omnipotent.ai?subject=Enterprise%20Inquiry', '_blank');
@@ -500,7 +505,11 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
               onClick={() => setIsYearly(true)}
             >
               Yearly
-              <span className="ml-1 text-success">(Save 15%)</span>
+              {savingsPercent > 0 && (
+                <span className="ml-1 text-success">
+                  (Save up to {savingsPercent.toFixed(0)}%)
+                </span>
+              )}
             </span>
           </motion.div>
         </div>
