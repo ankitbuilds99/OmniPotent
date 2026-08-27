@@ -129,6 +129,17 @@ export interface UsageData {
   features: PlanFeatures;
 }
 
+/**
+ * One month of usage: what GET /billing/usage/stats returns, and what each
+ * element of GET /billing/usage/history is.
+ *
+ * The key names come from `UsageStats.to_dict()` in
+ * app/billing/usage_tracker.py, which strips the `_count` suffix the storage
+ * layer's `UsageSummary` uses and renames `storage_bytes_used` to
+ * `storage_bytes`. `UsageHistory` used to declare the storage-layer names, so
+ * every history chart read `undefined` and drew a flat line at zero. There is
+ * no `total_cost_cents` in the response either.
+ */
 export interface UsageStats {
   year_month: string;
   ai_investigations: number;
@@ -138,19 +149,10 @@ export interface UsageStats {
   auto_fix_prs: number;
   similar_searches: number;
   active_users: number;
-  total_cost_cents: number;
+  storage_bytes: number;
 }
 
-export interface UsageHistory {
-  year_month: string;
-  ai_investigations_count: number;
-  alerts_processed_count: number;
-  api_calls_count: number;
-  postmortems_generated_count: number;
-  auto_fix_prs_count: number;
-  similar_searches_count: number;
-  active_users_count: number;
-}
+export type UsageHistory = UsageStats;
 
 export interface Invoice {
   id: string;

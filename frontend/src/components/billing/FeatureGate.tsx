@@ -44,6 +44,14 @@ export function FeatureGate({
     return <>{fallback}</>;
   }
 
+  // Derived from the two prices the API just quoted rather than restated: the
+  // badge used to read "Save 17%" beside a pair of prices that save ~15%.
+  const price = result?.upgrade?.price;
+  const annualSavingsPercent =
+    price && price.monthly && price.annual_monthly
+      ? (1 - price.annual_monthly / price.monthly) * 100
+      : 0;
+
   return (
     <>
       <div
@@ -121,7 +129,11 @@ export function FeatureGate({
                       <span className="text-slate-400">Annual</span>
                       <span className="text-white font-medium">
                         ${result.upgrade.price.annual_monthly.toFixed(0)}/mo
-                        <span className="text-green-400 text-xs ml-1">Save 17%</span>
+                        {annualSavingsPercent > 0 && (
+                          <span className="text-green-400 text-xs ml-1">
+                            Save {annualSavingsPercent.toFixed(0)}%
+                          </span>
+                        )}
                       </span>
                     </div>
                   )}

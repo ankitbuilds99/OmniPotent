@@ -4,10 +4,15 @@ import type { BillingCycle } from '../../types/billing';
 interface BillingToggleProps {
   value: BillingCycle;
   onChange: (value: BillingCycle) => void;
-  savingsPercent?: number;
+  /**
+   * The best annual saving across the plans on offer — see
+   * `bestAnnualSavingsPercent`. Required on purpose: the old default of 17%
+   * was an invention, and every plan the API describes saves ~15%.
+   */
+  savingsPercent: number;
 }
 
-export function BillingToggle({ value, onChange, savingsPercent = 17 }: BillingToggleProps) {
+export function BillingToggle({ value, onChange, savingsPercent }: BillingToggleProps) {
   const isAnnual = value === 'annual';
 
   return (
@@ -44,7 +49,9 @@ export function BillingToggle({ value, onChange, savingsPercent = 17 }: BillingT
       >
         Annual
         {savingsPercent > 0 && (
-          <span className="ml-1 text-green-400">(Save {savingsPercent}%)</span>
+          <span className="ml-1 text-green-400">
+            (Save up to {savingsPercent.toFixed(0)}%)
+          </span>
         )}
       </span>
     </div>
