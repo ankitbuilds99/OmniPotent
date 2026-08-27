@@ -248,6 +248,12 @@ export function StatusPage({ onBack }: StatusPageProps) {
 
   const overallStatus = status?.overall_status || 'operational'
   const components = status?.components || []
+  // GET /api/status carries uptime in two top-level maps keyed by component
+  // id, not on the entries of `components` — those only ever have it inside
+  // `groups`. Reading `component.uptime_30d` off this array was always
+  // undefined, so no service showed an uptime and the 30d/90d buttons changed
+  // nothing but their own colour.
+  const uptimes = (uptimeView === '30d' ? status?.uptimes_30d : status?.uptimes_90d) || {}
   const activeIncidents = status?.active_incidents || []
   const recentIncidents = status?.recent_incidents || []
   const upcomingMaintenances = status?.upcoming_maintenances || []
@@ -569,7 +575,9 @@ export function StatusPage({ onBack }: StatusPageProps) {
           <div>
             {components.map((component, i) => {
               const ServiceIcon = getServiceIcon(component.name)
-              const uptime = uptimeView === '30d' ? component.uptime_30d : component.uptime_90d
+              // A component absent from the map has no measurement, which is
+              // not the same as 0% — redis really is at 0.0% here.
+              const uptime = uptimes[component.id] ?? component[`uptime_${uptimeView}`]
               return (
                 <motion.div
                   key={component.id}
