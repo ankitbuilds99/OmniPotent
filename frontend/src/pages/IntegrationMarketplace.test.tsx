@@ -30,6 +30,18 @@ function json(body: unknown, status = 200): Response {
   })
 }
 
+/** A trimmed MCP_CATALOG, in the shape GET /config returns it. */
+const SERVERS = [
+  {
+    name: 'datadog',
+    label: 'Datadog',
+    custom: true,
+    tools: ['search_logs', 'get_error_summary', 'cluster_logs', 'get_metric'],
+  },
+  { name: 'kubernetes', label: 'Kubernetes', custom: true, tools: ['list_pods', 'describe_pod'] },
+  { name: 'traces', label: 'Traces', custom: true, tools: ['search_traces', 'get_trace'] },
+]
+
 function installFetch(overrides: Record<string, () => Response> = {}) {
   const handler = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -39,6 +51,7 @@ function installFetch(overrides: Record<string, () => Response> = {}) {
     if (overrides[key]) return overrides[key]()
     if (key === 'GET /admin/integrations') return json({ integrations: [] })
     if (key === 'GET /integrations/status') return json({})
+    if (key === 'GET /config') return json({ servers: SERVERS })
     return json({ detail: `no route for ${key}` }, 405)
   })
   vi.stubGlobal('fetch', handler)
@@ -134,6 +147,103 @@ describe('IntegrationMarketplace', () => {
         screen.getByText(/TERRAFORM_CLOUD_TOKEN and TERRAFORM_ORGANIZATION/)
       ).toBeInTheDocument()
     })
+
+    // Kubernetes has no API key to ask for. Its only credential is
+    // KUBE_CONFIG_PATH, a path the *server* opens with
+    // config.load_kube_config(config_file=…), and no endpoint in app/ accepts a
+    // file upload — so a browser cannot put a kubeconfig where that path leads.
+    it('does not ask for a Kubernetes credential a browser cannot supply', async () => {
+      installFetch()
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      const kubernetes = cardFor('Kubernetes')
+      const button = kubernetes.querySelector('button:last-of-type') as HTMLButtonElement
+      expect(button).toBeDisabled()
+      expect(button.textContent).toBe('Not available')
+      expect(kubernetes.textContent).toContain('There is no Kubernetes API key to enter')
+      // The old form's field, which would have flipped the server out of
+      // offline mode and into a load_kube_config failure.
+      expect(screen.queryByLabelText(/Kubeconfig path/)).not.toBeInTheDocument()
+    })
+
+    it('offers no credential management for a connector the deployment configures', async () => {
+      // Live from the process environment, with nothing stored for this org.
+      installFetch({ 'GET /integrations/status': () => json({ kubernetes: true }) })
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('1 connected')
+
+      const kubernetes = cardFor('Kubernetes')
+      expect(kubernetes.textContent).toContain('Connected')
+      expect(kubernetes.textContent).toContain('Configured by the deployment')
+      // Both buttons would have failed: there is no stored secret to delete,
+      // and no form to re-enter.
+      expect(kubernetes.querySelector('button')).toBeNull()
+    })
+  })
+
+  describe('claims the catalog used to make up', () => {
+    it('states capabilities from the real tool list, not invented features', async () => {
+      installFetch()
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      const datadog = cardFor('Datadog')
+      expect(datadog.textContent).toContain('search_logs')
+      expect(datadog.textContent).toContain('+1 more') // 4 tools, 3 shown
+      // MCP_CATALOG's datadog server has no such tools; "APM traces" belongs to
+      // a different server entirely.
+      for (const invented of ['Dashboards', 'Monitors', 'APM traces']) {
+        expect(datadog.textContent).not.toContain(invented)
+      }
+    })
+
+    it('claims nothing for an entry with no connector behind it', async () => {
+      installFetch()
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      // Grafana used to advertise four capabilities and a five-minute setup.
+      const grafana = cardFor('Grafana')
+      for (const invented of ['Dashboard queries', 'Annotations', 'Data sources']) {
+        expect(grafana.textContent).not.toContain(invented)
+      }
+    })
+
+    it('quotes no setup time, because nothing measures one', async () => {
+      installFetch()
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      expect(screen.queryByText(/Setup: \d+ min/)).not.toBeInTheDocument()
+      expect(document.body.textContent).not.toMatch(/Setup: /)
+    })
+
+    it('lists the trace connector it has always been able to configure', async () => {
+      installFetch({ 'POST /admin/integrations': () => json({ status: 'saved' }) })
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      // TRACES_API_URL is in _INTEGRATION_KEYS and /integrations/status reports
+      // on `traces`, but the catalog listed eleven connectors that do not exist
+      // and omitted this one, which does.
+      const traces = cardFor('Distributed tracing')
+      expect(traces.textContent).toContain('search_traces')
+
+      fireEvent.click(traces.querySelector('button:last-of-type')!)
+      fireEvent.change(await screen.findByLabelText(/Query API base URL/), {
+        target: { value: 'https://jaeger.example.com' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Connect Distributed tracing' }))
+
+      await waitFor(() =>
+        expect(calls.filter((c) => c.url === '/admin/integrations' && c.method === 'POST')).toHaveLength(1)
+      )
+      expect(calls.find((c) => c.method === 'POST')!.body).toEqual({
+        name: 'TRACES_API_URL',
+        value: 'https://jaeger.example.com',
+      })
+    })
   })
 
   describe('the connect modal', () => {
@@ -204,6 +314,7 @@ describe('IntegrationMarketplace', () => {
     it('verifies GitHub against GitHub before claiming it is connected', async () => {
       installFetch({
         'POST /github/connect': () => json({ status: 'connected', repo: 'acme/checkout' }),
+        'GET /admin/integrations': () => json({ integrations: ['GITHUB_TOKEN', 'GITHUB_REPO'] }),
         'GET /integrations/status': () => json({ github: true }),
       })
       render(<IntegrationMarketplace onBack={() => {}} />)
