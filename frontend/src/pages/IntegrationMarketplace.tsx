@@ -1,6 +1,10 @@
 /**
- * Integration Marketplace - Real API integration
- * Fetches connected integrations from /admin/integrations and /integrations/status
+ * Integration Marketplace.
+ *
+ * Every claim on this page comes from an endpoint: stored secret names from
+ * GET /admin/integrations, working/not-working from GET /integrations/status,
+ * and the capability chips from GET /config `servers[].tools`. What a build can
+ * and cannot connect comes from lib/integrationSpecs.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -8,6 +12,7 @@ import { Icon } from "../components/Icon";
 
 import { apiFetch } from "../lib/apiClient";
 import { specFor } from "../lib/integrationSpecs";
+import type { McpServer } from "../types";
 
 /** Surface the backend's own explanation for a failed call rather than hiding it. */
 async function errorDetail(res: Response, fallback: string): Promise<string> {
@@ -38,12 +43,40 @@ interface Integration {
   status: IntegrationStatus;
   /** Why it is unavailable; "" otherwise. */
   reason: string;
-  features: string[];
-  setupTime: string;
+  /**
+   * Tool names the connector's MCP server exposes, straight from GET /config.
+   * Empty when there is no server behind the entry — which is the honest answer.
+   */
+  tools: string[];
+  /**
+   * The secret names this org has stored, per GET /admin/integrations.
+   * Distinct from `status`: a connector can be "live" purely from the
+   * deployment's own environment with nothing stored here to manage.
+   */
+  storedNames: string[];
 }
 
-// Static catalog of available integrations (metadata only)
-const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
+/*
+ * Presentation metadata only: logo, blurb, category. Two fields used to live
+ * here and neither was ever true of anything.
+ *
+ * `setupTime` — "5 min", "10 min", "15 min" — was pure invention. No endpoint
+ * reports it, nothing measures it, and it rendered as "Setup: 15 min" on cards
+ * that in the same breath said "Not available", promising a quarter hour of
+ * work for something the console cannot do at all.
+ *
+ * `features` was worse, because it read as a capability contract and
+ * contradicted the actual tool lists in MCP_CATALOG (app/api/main.py:80).
+ * Datadog advertised "Dashboards" and "Monitors" — there are no such tools —
+ * and "APM traces", which belongs to a different server entirely. Sentry
+ * advertised "Breadcrumbs", Kubernetes "Resource usage", GitHub "Code search":
+ * none exist. Meanwhile the eleven entries with no connector at all listed four
+ * confident bullet points each.
+ *
+ * Both are gone. Capabilities now come from GET /config `servers[].tools`,
+ * so a card can only claim what the agent can actually call.
+ */
+const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "storedNames">[] = [
   // Observability
   {
     id: "prometheus",
@@ -51,8 +84,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Query metrics and alerts from your Prometheus server",
     category: "observability",
     logo: "https://raw.githubusercontent.com/cncf/artwork/master/projects/prometheus/icon/color/prometheus-icon-color.svg",
-    features: ["Metric queries", "Alert rules", "Recording rules", "Service discovery"],
-    setupTime: "5 min",
   },
   {
     id: "datadog",
@@ -60,8 +91,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Full-stack observability with APM, logs, and metrics",
     category: "observability",
     logo: "https://imgix.datadoghq.com/img/dd_logo_n_70x75.png",
-    features: ["APM traces", "Log search", "Metrics", "Dashboards", "Monitors"],
-    setupTime: "10 min",
   },
   {
     id: "grafana",
@@ -69,8 +98,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Query dashboards and visualizations",
     category: "observability",
     logo: "https://raw.githubusercontent.com/grafana/grafana/main/public/img/grafana_icon.svg",
-    features: ["Dashboard queries", "Annotations", "Alerting", "Data sources"],
-    setupTime: "5 min",
   },
   {
     id: "cloudwatch",
@@ -78,8 +105,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "AWS native monitoring and observability",
     category: "observability",
     logo: "https://d1.awsstatic.com/product-marketing/CloudWatch/product-page-diagram_Amazon-CloudWatch.5c0c7b56646dff9d2c27f8a2c96e7631f87b85d1.png",
-    features: ["Metrics", "Logs Insights", "Alarms", "Events"],
-    setupTime: "10 min",
   },
   {
     id: "newrelic",
@@ -87,8 +112,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Full-stack observability platform",
     category: "observability",
     logo: "https://newrelic.com/themes/flavor/assets/images/logo/logo.svg",
-    features: ["APM", "Infrastructure", "Logs", "Synthetics"],
-    setupTime: "10 min",
   },
 
   // Alerting
@@ -98,8 +121,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Incident management and on-call scheduling",
     category: "alerting",
     logo: "https://www.pagerduty.com/wp-content/uploads/2022/09/pd-logo-green.svg",
-    features: ["Incident webhooks", "On-call schedules", "Escalation policies", "Auto-acknowledge"],
-    setupTime: "5 min",
   },
   {
     id: "opsgenie",
@@ -107,8 +128,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Alert management and on-call scheduling",
     category: "alerting",
     logo: "https://www.atlassian.com/dam/jcr:a6df169b-2d56-4035-8c60-36a69291c4de/opsgenie-icon-gradient-blue.svg",
-    features: ["Alerts", "On-call", "Escalations", "Integrations"],
-    setupTime: "5 min",
   },
   {
     id: "alertmanager",
@@ -116,8 +135,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Prometheus Alertmanager webhooks",
     category: "alerting",
     logo: "https://raw.githubusercontent.com/cncf/artwork/master/projects/prometheus/icon/color/prometheus-icon-color.svg",
-    features: ["Webhook receiver", "Alert grouping", "Silences", "Inhibition"],
-    setupTime: "3 min",
   },
 
   // Code
@@ -127,8 +144,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Repository analysis and deployment correlation",
     category: "code",
     logo: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
-    features: ["Commit history", "PR analysis", "Deployment events", "Code search"],
-    setupTime: "5 min",
   },
   {
     id: "gitlab",
@@ -136,8 +151,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "GitLab repository and CI/CD integration",
     category: "code",
     logo: "https://about.gitlab.com/images/press/logo/png/gitlab-icon-rgb.png",
-    features: ["Commits", "Merge requests", "Pipelines", "Deployments"],
-    setupTime: "5 min",
   },
   {
     id: "bitbucket",
@@ -145,8 +158,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Atlassian Bitbucket repository integration",
     category: "code",
     logo: "https://wac-cdn.atlassian.com/dam/jcr:c942540c-53a6-4e49-9f9a-8f3e9e6c6e5a/bitbucket-icon-gradient-blue.svg",
-    features: ["Commits", "Pull requests", "Pipelines"],
-    setupTime: "5 min",
   },
 
   // Infrastructure
@@ -156,8 +167,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Cluster state, pods, deployments, and events",
     category: "infrastructure",
     logo: "https://raw.githubusercontent.com/kubernetes/kubernetes/master/logo/logo.svg",
-    features: ["Pod status", "Deployments", "Events", "Logs", "Resource usage"],
-    setupTime: "15 min",
   },
   {
     id: "aws",
@@ -165,8 +174,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Amazon Web Services infrastructure",
     category: "infrastructure",
     logo: "https://a0.awsstatic.com/libra-css/images/logos/aws_smile-header-desktop-en-white_59x35.png",
-    features: ["EC2", "ECS", "Lambda", "RDS", "S3", "CloudFormation"],
-    setupTime: "15 min",
   },
   {
     id: "gcp",
@@ -174,8 +181,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Google Cloud Platform services",
     category: "infrastructure",
     logo: "https://www.gstatic.com/devrel-devsite/prod/v1c4b1e8e9e8e0b8e8e9e8e0b8e8e9e8e0b8e8e9e/cloud/images/favicons/onecloud/favicon.ico",
-    features: ["GKE", "Cloud Run", "Cloud Functions", "BigQuery"],
-    setupTime: "15 min",
   },
   {
     id: "terraform",
@@ -183,8 +188,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Infrastructure as Code state and changes",
     category: "infrastructure",
     logo: "https://www.terraform.io/img/logo-hashicorp.svg",
-    features: ["State inspection", "Plan analysis", "Drift detection"],
-    setupTime: "10 min",
   },
   {
     id: "argocd",
@@ -192,8 +195,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "GitOps continuous delivery for Kubernetes",
     category: "infrastructure",
     logo: "https://raw.githubusercontent.com/argoproj/argoproj/master/docs/assets/argo.png",
-    features: ["App sync", "Rollback", "Health status", "Diff preview"],
-    setupTime: "10 min",
   },
 
   // Chat
@@ -203,8 +204,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Chat integration with @mention support",
     category: "chat",
     logo: "https://a.slack-edge.com/80588/marketing/img/icons/icon_slack_hash_colored.png",
-    features: ["@mention queries", "Alert channels", "Investigation threads", "Slash commands"],
-    setupTime: "5 min",
   },
   {
     id: "msteams",
@@ -212,8 +211,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Teams integration for investigation",
     category: "chat",
     logo: "https://img.icons8.com/color/96/microsoft-teams.png",
-    features: ["Bot mentions", "Adaptive cards", "Channel alerts"],
-    setupTime: "10 min",
   },
   {
     id: "discord",
@@ -221,8 +218,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Discord bot for team communication",
     category: "chat",
     logo: "https://assets-global.website-files.com/6257adef93867e50d84d30e2/636e0a6a49cf127bf92de1e2_icon_clyde_blurple_RGB.png",
-    features: ["Bot commands", "Channel notifications"],
-    setupTime: "5 min",
   },
 
   // Knowledge
@@ -232,8 +227,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Runbooks and documentation from Confluence",
     category: "knowledge",
     logo: "https://wac-cdn.atlassian.com/dam/jcr:eaa12b67-a29d-467c-b8fa-66f6c915a97f/confluence-icon-gradient-blue.svg",
-    features: ["Runbook import", "Documentation search", "Knowledge sync"],
-    setupTime: "10 min",
   },
   {
     id: "notion",
@@ -241,8 +234,6 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Team knowledge and documentation",
     category: "knowledge",
     logo: "https://upload.wikimedia.org/wikipedia/commons/4/45/Notion_app_logo.png",
-    features: ["Page import", "Database sync", "Knowledge base"],
-    setupTime: "10 min",
   },
   {
     id: "sentry",
@@ -250,8 +241,17 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
     description: "Error tracking and performance monitoring",
     category: "observability",
     logo: "https://sentry.io/_assets2/static/sentry-logo-black.svg",
-    features: ["Error tracking", "Issue details", "Latest events", "Breadcrumbs"],
-    setupTime: "5 min",
+  },
+  // The gap in the other direction. `traces` is a real MCP server with seven
+  // tools, TRACES_API_URL is one of the secrets `_INTEGRATION_KEYS` forwards,
+  // and GET /integrations/status has always reported on it — but the catalog
+  // listed eleven connectors that do not exist and omitted this one, which does.
+  {
+    id: "traces",
+    name: "Distributed tracing",
+    description: "Jaeger-compatible trace search, critical paths, and blast radius",
+    category: "observability",
+    logo: "https://raw.githubusercontent.com/cncf/artwork/master/projects/jaeger/icon/color/jaeger-icon-color.svg",
   },
 ];
 
@@ -287,7 +287,16 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
   };
 
   const status = statusConfig[integration.status];
-  const configured = integration.status === "live" || integration.status === "saved";
+  // Whether this org has a secret of its own to manage.
+  // Not the same question as "is it connected". Kubernetes reports connected
+  // whenever the deployment mounted a kubeconfig, and there is nothing stored
+  // here to disconnect or replace; offering those buttons would produce
+  // "Nothing stored for kubernetes to disconnect" on every click.
+  const manageable = integration.storedNames.length > 0;
+  // Replaces the invented "Setup: 10 min". The one thing worth knowing before
+  // clicking Connect is which names the credentials land under, since that is
+  // what a deployment's own env has to agree with.
+  const storedAs = specFor(integration.id).fields.map((f) => f.env);
 
   return (
     <div
@@ -316,25 +325,31 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
           {integration.reason && (
             <p className="text-xs mb-3" style={{ color: "var(--text-2)" }}>{integration.reason}</p>
           )}
-          <div className="flex flex-wrap gap-1 mb-3">
-            {integration.features.slice(0, 3).map((feature) => (
-              <span
-                key={feature}
-                className="text-xs px-2 py-0.5 rounded"
-                style={{ backgroundColor: "var(--panel)" }}
-              >
-                {feature}
-              </span>
-            ))}
-            {integration.features.length > 3 && (
-              <span className="text-xs text-gray-500">+{integration.features.length - 3} more</span>
-            )}
-          </div>
+          {integration.tools.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-3">
+              {integration.tools.slice(0, 3).map((tool) => (
+                <span
+                  key={tool}
+                  className="text-xs px-2 py-0.5 rounded font-mono"
+                  style={{ backgroundColor: "var(--panel)" }}
+                >
+                  {tool}
+                </span>
+              ))}
+              {integration.tools.length > 3 && (
+                <span className="text-xs text-gray-500" title={integration.tools.join(", ")}>
+                  +{integration.tools.length - 3} more
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
       <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--border)" }}>
-        <span className="text-xs text-gray-500">Setup: {integration.setupTime}</span>
-        {configured ? (
+        <span className="text-xs text-gray-500 font-mono truncate pr-2" title={storedAs.join(", ")}>
+          {storedAs.join(", ")}
+        </span>
+        {manageable ? (
           <div className="flex gap-2">
             <button
               onClick={onDisconnect}
@@ -358,6 +373,10 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
           >
             Connect
           </button>
+        ) : integration.status === "live" ? (
+          // Working, but from the process environment. There is no per-org
+          // secret behind it, so there is no button that would do anything.
+          <span className="text-xs text-gray-500">Configured by the deployment</span>
         ) : (
           <button
             disabled
@@ -565,6 +584,8 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
   const [connectingIntegration, setConnectingIntegration] = useState<Integration | null>(null);
   const [connectedIntegrations, setConnectedIntegrations] = useState<Set<string>>(new Set());
   const [integrationStatus, setIntegrationStatus] = useState<Record<string, boolean>>({});
+  // connector name -> the tools its MCP server exposes, from GET /config.
+  const [serverTools, setServerTools] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   // The backend refuses /admin/integrations outright on a single-tenant
   // deployment ("Admin endpoints require multi-tenant mode + a tenant API key.")
@@ -596,6 +617,19 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
         const status = await statusRes.json();
         setIntegrationStatus(status);
       }
+
+      // The tool lists behind the capability chips. A failure here is not worth
+      // an error banner — the cards simply show no capabilities, which beats
+      // showing four made-up ones.
+      const configRes = await apiFetch(`/config`, { credentials: "include" });
+      if (configRes.ok) {
+        const config = (await configRes.json()) as { servers?: McpServer[] };
+        const byName: Record<string, string[]> = {};
+        for (const server of config.servers ?? []) {
+          if (server?.name) byName[server.name] = server.tools ?? [];
+        }
+        setServerTools(byName);
+      }
     } catch (err) {
       console.error("Failed to fetch integrations:", err);
       setLoadError(err instanceof Error ? err.message : "Could not list integrations");
@@ -608,7 +642,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     fetchIntegrations();
   }, [fetchIntegrations]);
 
-  // Build the list from what the two endpoints actually report.
+  // Build the list from what the three endpoints actually report.
   //
   // The old rule was `connectedIntegrations.has(cat.id) || integrationStatus[cat.id]`.
   // Both halves were wrong. /admin/integrations returns the *names* of stored
@@ -631,7 +665,15 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     else if (spec.unsupported) status = "unavailable";
     else status = "available";
 
-    return { ...cat, status, reason: status === "unavailable" ? spec.unsupported : "" };
+    return {
+      ...cat,
+      status,
+      reason: status === "unavailable" ? spec.unsupported : "",
+      // statusKey doubles as the MCP server name. An entry with no connector
+      // finds nothing here and shows no capability chips at all.
+      tools: (spec.statusKey && serverTools[spec.statusKey]) || [],
+      storedNames: spec.fields.map((f) => f.env).filter((env) => connectedIntegrations.has(env)),
+    };
   });
 
   const filteredIntegrations = integrations.filter((integration) => {

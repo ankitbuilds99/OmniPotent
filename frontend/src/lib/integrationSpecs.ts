@@ -1,8 +1,8 @@
 /**
  * What this build can actually connect, and under which names.
  *
- * The integration catalog in the marketplace is presentation metadata — logos,
- * blurbs, "setup time". It says nothing about whether a connector exists, and
+ * The integration catalog in the marketplace is presentation metadata — logos
+ * and blurbs. It says nothing about whether a connector exists, and
  * the connect flow used to store whatever was typed under the *catalog id*
  * ("datadog", "grafana", …). Nothing reads those names. The backend forwards a
  * fixed set of env-style secrets to its MCP subprocesses
@@ -33,14 +33,20 @@ export interface SecretField {
 }
 
 export interface IntegrationSpec {
-  /** Key in GET /integrations/status, or null when nothing reports on it. */
+  /**
+   * Key in GET /integrations/status, or null when nothing reports on it.
+   * Doubles as the MCP server name in GET /config `servers[]` for every
+   * connector that has one, which is how the marketplace lists real tools
+   * instead of invented capability blurbs.
+   */
   statusKey: string | null;
   /** Secrets this build reads. Empty when there is nothing an org can set. */
   fields: SecretField[];
   /**
    * Why this build cannot connect it from the console; "" when it can.
-   * Two distinct cases end up here: no connector exists, or the connector is
-   * configured by the deployment's environment and not per organisation.
+   * Three distinct cases end up here: no connector exists, the connector is
+   * configured by the deployment's environment and not per organisation, or
+   * the credential is not something a browser can supply at all.
    */
   unsupported: string;
 }
@@ -109,19 +115,55 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
     ],
   },
 
+  /*
+   * Kubernetes has no API key to ask for.
+   *
+   * The connector's only credential is KUBE_CONFIG_PATH, and it is a *filesystem
+   * path read by the server process*, not a secret: the MCP server does
+   * `config.load_kube_config(config_file=KUBE_CONFIG_PATH)`
+   * (app/mcp/servers/kubernetes/server.py:80, and the same in
+   * app/runbooks/executor.py:123 and app/coordinator/handlers/remediation.py:840).
+   * Nothing in app/ accepts a file upload — there is no multipart endpoint
+   * anywhere — so a browser cannot put a kubeconfig where that path would find
+   * it. A path typed here names a file on someone else's machine.
+   *
+   * Worse than useless, in fact: the server treats a blank path as
+   * `OFFLINE = not KUBE_CONFIG_PATH` and serves fixtures. Saving a path that
+   * does not resolve on the server flips it into live mode, where every tool
+   * call then fails on load_kube_config. So the form could only ever leave the
+   * cluster tooling in a worse state than it found it.
+   *
+   * statusKey stays: a deployment that mounted a kubeconfig and set the
+   * variable still reports kubernetes: true, and the card still says Connected.
+   */
   kubernetes: {
     statusKey: "kubernetes",
+    fields: [],
+    unsupported:
+      "There is no Kubernetes API key to enter. The connector authenticates with a " +
+      "kubeconfig file that has to exist on the OmniPotent server (KUBE_CONFIG_PATH), " +
+      "and this build has no way to upload one — whoever runs this instance has to " +
+      "mount it and set the path.",
+  },
+
+  /*
+   * Traces is the inverse of the Kubernetes case: a connector this console can
+   * genuinely configure, which the catalog never offered. TRACES_API_URL is in
+   * `_INTEGRATION_KEYS`, is forwarded to app.mcp.servers.traces.server, and is
+   * an ordinary URL a browser can supply.
+   */
+  traces: {
+    statusKey: "traces",
     unsupported: "",
     fields: [
       {
-        env: "KUBE_CONFIG_PATH",
-        label: "Kubeconfig path",
-        placeholder: "/etc/omnipotent/kubeconfig",
+        env: "TRACES_API_URL",
+        label: "Query API base URL",
+        placeholder: "https://jaeger.example.com",
         secret: false,
         required: true,
-        help: "A path on the OmniPotent server, not on your machine — the file has to be readable there.",
+        help: "A Jaeger-compatible query API, reachable from the OmniPotent server. Leave this unset and the trace tools answer from fixtures.",
       },
-      { env: "KUBE_NAMESPACE", label: "Default namespace", placeholder: "default", secret: false, required: false },
     ],
   },
 
