@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Icon } from "../components/Icon";
 
 import { apiFetch } from "../lib/apiClient";
+import { specFor } from "../lib/integrationSpecs";
 
 /** Surface the backend's own explanation for a failed call rather than hiding it. */
 async function errorDetail(res: Response, fallback: string): Promise<string> {
@@ -20,19 +21,29 @@ async function errorDetail(res: Response, fallback: string): Promise<string> {
   return `${fallback} (HTTP ${res.status})`;
 }
 
+/**
+ * `live`   — GET /integrations/status says the connector has working credentials.
+ * `saved`  — every required secret is stored, but nothing has confirmed it works.
+ * `available`   — this console can configure it and has not.
+ * `unavailable` — no connector, or one the deployment configures, not the org.
+ */
+type IntegrationStatus = "live" | "saved" | "available" | "unavailable";
+
 interface Integration {
   id: string;
   name: string;
   description: string;
   category: "observability" | "alerting" | "code" | "infrastructure" | "chat" | "knowledge";
   logo: string;
-  status: "connected" | "available" | "coming_soon";
+  status: IntegrationStatus;
+  /** Why it is unavailable; "" otherwise. */
+  reason: string;
   features: string[];
   setupTime: string;
 }
 
 // Static catalog of available integrations (metadata only)
-const INTEGRATION_CATALOG: Omit<Integration, "status">[] = [
+const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason">[] = [
   // Observability
   {
     id: "prometheus",
@@ -254,21 +265,29 @@ const CATEGORIES = [
   { id: "knowledge", name: "Knowledge", icon: "book" },
 ];
 
-// Coming soon integrations (not yet available)
-const COMING_SOON = ["gcp", "bitbucket", "msteams", "discord", "terraform"];
+// There used to be a hardcoded COMING_SOON list — ["gcp", "bitbucket",
+// "msteams", "discord", "terraform"] — which was wrong in both directions:
+// Terraform has a working connector in MCP_CATALOG, while Prometheus, Grafana,
+// CloudWatch, New Relic, Opsgenie, Alertmanager, GitLab, AWS, Confluence and
+// Notion have none and were all offered with a live "Connect" button. What a
+// build can and cannot connect now comes from integrationSpecs.
 
 function IntegrationCard({ integration, onConnect, onDisconnect }: {
   integration: Integration;
   onConnect: () => void;
   onDisconnect: () => void;
 }) {
-  const statusConfig = {
-    connected: { label: "Connected", color: "bg-green-500/20 text-green-400 border-green-500/30" },
+  const statusConfig: Record<IntegrationStatus, { label: string; color: string }> = {
+    live: { label: "Connected", color: "bg-green-500/20 text-green-400 border-green-500/30" },
+    // Storing a secret is not evidence it works, and this is the only endpoint
+    // in the flow that could have found out — it does not try.
+    saved: { label: "Credentials saved", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30" },
     available: { label: "Available", color: "bg-blue-500/20 text-blue-400 border-blue-500/30" },
-    coming_soon: { label: "Coming Soon", color: "bg-gray-500/20 text-gray-400 border-gray-500/30" },
+    unavailable: { label: "Not available", color: "bg-gray-500/20 text-gray-400 border-gray-500/30" },
   };
 
   const status = statusConfig[integration.status];
+  const configured = integration.status === "live" || integration.status === "saved";
 
   return (
     <div
@@ -294,6 +313,9 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
             </span>
           </div>
           <p className="text-sm text-gray-400 mb-3">{integration.description}</p>
+          {integration.reason && (
+            <p className="text-xs mb-3" style={{ color: "var(--text-2)" }}>{integration.reason}</p>
+          )}
           <div className="flex flex-wrap gap-1 mb-3">
             {integration.features.slice(0, 3).map((feature) => (
               <span
@@ -312,7 +334,7 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
       </div>
       <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--border)" }}>
         <span className="text-xs text-gray-500">Setup: {integration.setupTime}</span>
-        {integration.status === "connected" ? (
+        {configured ? (
           <div className="flex gap-2">
             <button
               onClick={onDisconnect}
@@ -320,8 +342,13 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
             >
               Disconnect
             </button>
-            <button className="text-sm px-3 py-1.5 rounded-lg bg-green-500/20 text-green-400">
-              Manage
+            {/* "Manage" was a button with no handler. Re-entering the
+                credential form is the only management this build offers. */}
+            <button
+              onClick={onConnect}
+              className="text-sm px-3 py-1.5 rounded-lg bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-colors"
+            >
+              Replace credentials
             </button>
           </div>
         ) : integration.status === "available" ? (
@@ -332,8 +359,12 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
             Connect
           </button>
         ) : (
-          <button className="text-sm px-3 py-1.5 rounded-lg bg-gray-600/50 text-gray-400 cursor-not-allowed">
-            Coming Soon
+          <button
+            disabled
+            title={integration.reason}
+            className="text-sm px-3 py-1.5 rounded-lg bg-gray-600/50 text-gray-400 cursor-not-allowed"
+          >
+            Not available
           </button>
         )}
       </div>
@@ -341,29 +372,84 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
   );
 }
 
-function ConnectModal({ integration, onClose, onSave }: {
+/**
+ * Collect the credentials a connector actually reads, and say afterwards only
+ * what happened.
+ *
+ * The previous wizard had three steps. Step 1 asked for one "API Token / Key"
+ * plus an "Instance URL (optional)" that was never referenced again — a
+ * self-hosted Grafana URL or a EU-region Datadog site typed there simply
+ * vanished. Step 2 listed the integration's marketing features as uncontrolled
+ * `defaultChecked` checkboxes with no state and no onChange, so unticking a
+ * data scope you did not want shared did nothing and could not do anything:
+ * SetIntegrationRequest is `{name, value}` and has no room for scopes. Step 3
+ * then announced "Connection Successful! … AI can now query your data" for an
+ * endpoint that stores the string and returns `{"status": "saved"}` without
+ * ever contacting the vendor — an invalid token produced the same green screen.
+ *
+ * Worse, the one value that was transmitted went under `integration.id`, and
+ * `_INTEGRATION_KEYS` (app/tenancy/auth.py) only forwards env-style names to
+ * the MCP subprocesses. A key saved as "datadog" is stored, listed back by GET
+ * /admin/integrations, rendered as "Connected", and read by nothing.
+ *
+ * So: the fields come from integrationSpecs, each under the name its connector
+ * reads; GitHub goes through POST /github/connect, which verifies against
+ * api.github.com before saving; and the closing screen distinguishes "verified"
+ * from "saved, not tested".
+ */
+function ConnectModal({ integration, onClose, onSaved }: {
   integration: Integration;
   onClose: () => void;
-  onSave: (name: string, value: string) => Promise<void>;
+  onSaved: () => Promise<void>;
 }) {
-  const [step, setStep] = useState(1);
-  const [apiKey, setApiKey] = useState("");
-  const [instanceUrl, setInstanceUrl] = useState("");
+  const spec = specFor(integration.id);
+  const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<"verified" | "saved" | null>(null);
+
+  const setValue = (env: string, value: string) =>
+    setValues((prev) => ({ ...prev, [env]: value }));
+
+  const missing = spec.fields.filter((f) => f.required && !(values[f.env] ?? "").trim());
 
   const handleConnect = async () => {
-    if (!apiKey.trim()) {
-      setError("API key is required");
+    if (missing.length > 0) {
+      setError(`${missing.map((f) => f.label).join(" and ")} required.`);
       return;
     }
-
     setSaving(true);
     setError(null);
-
     try {
-      await onSave(integration.id, apiKey);
-      setStep(3);
+      if (integration.id === "github") {
+        // The only endpoint in this build that proves a credential works.
+        const res = await apiFetch("/github/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            token: (values.GITHUB_TOKEN ?? "").trim(),
+            repo: (values.GITHUB_REPO ?? "").trim(),
+          }),
+        });
+        if (!res.ok) throw new Error(await errorDetail(res, "GitHub rejected the connection"));
+        setDone("verified");
+      } else {
+        // Written one secret at a time; the request body holds a single pair.
+        for (const field of spec.fields) {
+          const value = (values[field.env] ?? "").trim();
+          if (!value) continue;
+          const res = await apiFetch(`/admin/integrations`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ name: field.env, value }),
+          });
+          if (!res.ok) throw new Error(await errorDetail(res, `Could not save ${field.env}`));
+        }
+        setDone("saved");
+      }
+      await onSaved();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to connect integration");
     } finally {
@@ -384,111 +470,87 @@ function ConnectModal({ integration, onClose, onSave }: {
             </div>
             <div>
               <h3 className="font-semibold">Connect {integration.name}</h3>
-              <p className="text-sm text-gray-400">Step {step} of 3</p>
+              <p className="text-sm text-gray-400">
+                {spec.unsupported ? "Not configurable here" : "Credentials"}
+              </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-lg">
+          <button onClick={onClose} aria-label="Close" className="p-2 hover:bg-white/10 rounded-lg">
             <Icon name="x" size={20} />
           </button>
         </div>
 
-        {step === 1 && (
-          <div>
-            <h4 className="font-medium mb-4">1. Authentication</h4>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm mb-2">API Token / Key</label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="Enter your API token"
-                  className="w-full px-4 py-2 rounded-lg border"
-                  style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
-                />
-              </div>
-              <div>
-                <label className="block text-sm mb-2">Instance URL (optional)</label>
-                <input
-                  type="url"
-                  value={instanceUrl}
-                  onChange={(e) => setInstanceUrl(e.target.value)}
-                  placeholder="https://your-instance.example.com"
-                  className="w-full px-4 py-2 rounded-lg border"
-                  style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
-                />
-              </div>
-              {error && (
-                <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                  {error}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {step === 2 && (
-          <div>
-            <h4 className="font-medium mb-4">2. Configure Access</h4>
-            <div className="space-y-3">
-              {integration.features.map((feature) => (
-                <label key={feature} className="flex items-center gap-3 p-3 rounded-lg" style={{ backgroundColor: "var(--shell)" }}>
-                  <input type="checkbox" defaultChecked className="rounded" />
-                  <span>{feature}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {step === 3 && (
+        {spec.unsupported ? (
+          <p className="text-sm text-gray-400">{spec.unsupported}</p>
+        ) : done ? (
           <div className="text-center py-8">
             <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center mx-auto mb-4">
               <Icon name="check" size={32} className="text-green-500" />
             </div>
-            <h4 className="font-semibold text-lg mb-2">Connection Successful!</h4>
+            <h4 className="font-semibold text-lg mb-2">
+              {done === "verified" ? "Connected" : "Credentials saved"}
+            </h4>
             <p className="text-gray-400">
-              {integration.name} is now connected to OmniPotent.
-              AI can now query your {integration.category} data.
+              {done === "verified"
+                ? `${integration.name} answered with the repository, so the token works.`
+                : `Saved as ${spec.fields.map((f) => f.env).join(", ")}. This endpoint stores ` +
+                  `credentials without contacting ${integration.name}, so the first ` +
+                  `investigation that uses them is what will prove them right or wrong.`}
             </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {spec.fields.map((field) => (
+              <div key={field.env}>
+                <label className="block text-sm mb-2" htmlFor={`field-${field.env}`}>
+                  {field.label}
+                  {!field.required && <span className="text-gray-500"> (optional)</span>}
+                </label>
+                <input
+                  id={`field-${field.env}`}
+                  type={field.secret ? "password" : "text"}
+                  value={values[field.env] ?? ""}
+                  onChange={(e) => setValue(field.env, e.target.value)}
+                  placeholder={field.placeholder}
+                  className="w-full px-4 py-2 rounded-lg border"
+                  style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  {field.help ? `${field.help} ` : ""}
+                  Stored as <span className="font-mono">{field.env}</span>.
+                </p>
+              </div>
+            ))}
+            {error && (
+              <div
+                role="alert"
+                className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3"
+              >
+                {error}
+              </div>
+            )}
           </div>
         )}
 
-        <div className="flex items-center justify-between mt-6 pt-6 border-t" style={{ borderColor: "var(--border)" }}>
-          {step > 1 && step < 3 ? (
+        <div className="flex items-center justify-end mt-6 pt-6 border-t" style={{ borderColor: "var(--border)" }}>
+          {spec.unsupported || done ? (
             <button
-              onClick={() => setStep(step - 1)}
-              className="px-4 py-2 rounded-lg hover:bg-white/10"
+              onClick={onClose}
+              className="px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
             >
-              Back
+              Done
             </button>
           ) : (
-            <div />
-          )}
-          {step === 1 && (
-            <button
-              onClick={() => setStep(2)}
-              disabled={!apiKey.trim()}
-              className="px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Continue
-            </button>
-          )}
-          {step === 2 && (
             <button
               onClick={handleConnect}
               disabled={saving}
               className="px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {saving ? "Connecting..." : "Connect"}
-            </button>
-          )}
-          {step === 3 && (
-            <button
-              onClick={onClose}
-              className="px-6 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700"
-            >
-              Done
+              {saving
+                ? integration.id === "github"
+                  ? "Checking…"
+                  : "Saving…"
+                : `Connect ${integration.name}`}
             </button>
           )}
         </div>
@@ -546,15 +608,31 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     fetchIntegrations();
   }, [fetchIntegrations]);
 
-  // Build integrations list with real status
-  const integrations: Integration[] = INTEGRATION_CATALOG.map((cat) => ({
-    ...cat,
-    status: connectedIntegrations.has(cat.id) || integrationStatus[cat.id]
-      ? "connected"
-      : COMING_SOON.includes(cat.id)
-      ? "coming_soon"
-      : "available",
-  }));
+  // Build the list from what the two endpoints actually report.
+  //
+  // The old rule was `connectedIntegrations.has(cat.id) || integrationStatus[cat.id]`.
+  // Both halves were wrong. /admin/integrations returns the *names* of stored
+  // secrets, which are env-style (DD_API_KEY, …), so a catalog id was never
+  // going to be in that set unless this page had put it there itself — which it
+  // had, under a name no connector reads. And /integrations/status is keyed by
+  // connector, not by catalog id: "grafana", "newrelic" and the rest are absent
+  // from it entirely, so `integrationStatus[cat.id]` was undefined for two
+  // thirds of the catalog.
+  const integrations: Integration[] = INTEGRATION_CATALOG.map((cat) => {
+    const spec = specFor(cat.id);
+    const live = Boolean(spec.statusKey && integrationStatus[spec.statusKey]);
+    const stored =
+      spec.fields.length > 0 &&
+      spec.fields.filter((f) => f.required).every((f) => connectedIntegrations.has(f.env));
+
+    let status: IntegrationStatus;
+    if (live) status = "live";
+    else if (stored) status = "saved";
+    else if (spec.unsupported) status = "unavailable";
+    else status = "available";
+
+    return { ...cat, status, reason: status === "unavailable" ? spec.unsupported : "" };
+  });
 
   const filteredIntegrations = integrations.filter((integration) => {
     const matchesCategory = category === "all" || integration.category === category;
@@ -563,41 +641,37 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
     return matchesCategory && matchesSearch;
   });
 
-  const connectedCount = integrations.filter(i => i.status === "connected").length;
-
-  // Save integration to API
-  const handleSaveIntegration = async (name: string, value: string) => {
-    const res = await apiFetch(`/admin/integrations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ name, value }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || "Failed to save integration");
-    }
-
-    // Refresh list
-    await fetchIntegrations();
-  };
+  const connectedCount = integrations.filter(i => i.status === "live").length;
+  const savedCount = integrations.filter(i => i.status === "saved").length;
 
   // Disconnect integration
   const handleDisconnect = async (integrationId: string) => {
-    if (!confirm(`Are you sure you want to disconnect ${integrationId}?`)) return;
+    // Deleting by catalog id removed nothing, because the secrets are stored
+    // under the connector's env names. Every one of them has to go, or a
+    // half-configured integration keeps answering as "credentials saved".
+    const names = specFor(integrationId).fields
+      .map((f) => f.env)
+      .filter((env) => connectedIntegrations.has(env));
+    if (names.length === 0) {
+      setLoadError(`Nothing stored for ${integrationId} to disconnect.`);
+      return;
+    }
+    if (!confirm(`Delete the stored ${names.join(", ")} for ${integrationId}?`)) return;
 
     try {
-      const res = await apiFetch(`/admin/integrations/${encodeURIComponent(integrationId)}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
+      for (const name of names) {
+        const res = await apiFetch(`/admin/integrations/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
 
-      if (!res.ok) {
-        // This used to only act on res.ok, so the 405 from the missing DELETE
-        // route left the card showing "Connected" with no explanation.
-        setLoadError(await errorDetail(res, `Could not disconnect ${integrationId}`));
-        return;
+        if (!res.ok) {
+          // This used to only act on res.ok, so a failed delete left the card
+          // showing "Connected" with no explanation.
+          setLoadError(await errorDetail(res, `Could not delete ${name}`));
+          await fetchIntegrations();
+          return;
+        }
       }
       await fetchIntegrations();
     } catch (err) {
@@ -620,7 +694,11 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
               <div>
                 <h1 className="text-xl font-semibold">Integrations</h1>
                 <p className="text-sm text-gray-400">
-                  {loading ? "Loading..." : `${connectedCount} connected`}
+                  {loading
+                    ? "Loading..."
+                    : savedCount > 0
+                      ? `${connectedCount} connected, ${savedCount} awaiting first use`
+                      : `${connectedCount} connected`}
                 </p>
               </div>
             </div>
@@ -723,7 +801,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
         <ConnectModal
           integration={connectingIntegration}
           onClose={() => setConnectingIntegration(null)}
-          onSave={handleSaveIntegration}
+          onSaved={fetchIntegrations}
         />
       )}
     </div>
