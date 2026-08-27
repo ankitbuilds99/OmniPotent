@@ -48,6 +48,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     signInWithGoogle,
     signInWithEmail,
     signUp,
+    resetPassword,
     loading: authLoading,
     error: authError,
     isConfigured: supabaseConfigured,
@@ -160,6 +161,10 @@ export function Login({ onBack, onSuccess }: LoginProps) {
           setSuccess('Check your email to confirm your account!')
           setMode('login')
         } else if (mode === 'forgot') {
+          // This used to print "link sent" without sending anything, so a
+          // locked-out user waited for mail that was never requested — and
+          // could repeat that forever without regaining access.
+          await resetPassword(email)
           setSuccess('Password reset link sent to your email!')
           setMode('login')
         }
@@ -170,8 +175,15 @@ export function Login({ onBack, onSuccess }: LoginProps) {
           localStorage.setItem('demo_user', JSON.stringify({ email, name: name || email }))
           onSuccess()
         } else if (mode === 'forgot') {
-          setSuccess('In demo mode, passwords cannot be reset.')
-          setMode('login')
+          // No password store and no reset endpoint on this deployment, so say
+          // what the user can actually do instead of implying mail is coming.
+          setLocalError(
+            backendProviders.length > 0
+              ? `There is no password to reset — this deployment signs you in with ${backendProviders
+                  .map((p) => p.name)
+                  .join(' or ')}.`
+              : 'Password reset is not available on this deployment. Use "Try Demo" to continue without an account.'
+          )
         }
       }
     } catch (err) {

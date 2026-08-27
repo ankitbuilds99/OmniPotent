@@ -48,6 +48,12 @@ interface Invitation {
   expires_at: string
 }
 
+/** An entry of GET /api/teams/invitations/pending — invitations addressed to me. */
+interface PendingInvitation {
+  invitation: Invitation
+  team: { id: string; name: string }
+}
+
 /** Shape of GET /api/teams (TeamResponse). */
 interface TeamSummary {
   id: string
@@ -81,6 +87,8 @@ export function Team({ onBack }: TeamProps) {
   const [team, setTeam] = useState<TeamSummary | null>(null)
   const [members, setMembers] = useState<TeamMember[]>([])
   const [invitations, setInvitations] = useState<Invitation[]>([])
+  const [myInvitations, setMyInvitations] = useState<PendingInvitation[]>([])
+  const [acceptingInvitation, setAcceptingInvitation] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
@@ -95,6 +103,7 @@ export function Team({ onBack }: TeamProps) {
 
   useEffect(() => {
     loadTeam()
+    loadMyInvitations()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -133,6 +142,45 @@ export function Team({ onBack }: TeamProps) {
 
     const invRes = await apiFetch(`/api/teams/${teamId}/invitations`)
     setInvitations(invRes.ok ? ((await invRes.json()) as Invitation[]) : [])
+  }
+
+  // Invitations addressed to whoever is signed in, from any team. The mailed
+  // link is the primary way in, but this deployment only sends mail if EmailJS
+  // is configured — without this panel an invitee whose mail never arrived has
+  // no way to join at all, and the invitation expires after seven days.
+  const loadMyInvitations = async () => {
+    try {
+      const res = await apiFetch('/api/teams/invitations/pending')
+      if (!res.ok) {
+        setMyInvitations([])
+        return
+      }
+      setMyInvitations((await res.json()) as PendingInvitation[])
+    } catch {
+      setMyInvitations([])
+    }
+  }
+
+  const handleAcceptInvitation = async (invitationId: string) => {
+    setAcceptingInvitation(invitationId)
+    setError(null)
+    try {
+      const res = await apiFetch(`/api/teams/invitations/${invitationId}/accept`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setError(await errorDetail(res, 'Failed to accept invitation'))
+        return
+      }
+      const body = (await res.json()) as { team?: { name?: string | null } }
+      setSuccess(body.team?.name ? `You have joined ${body.team.name}` : 'Invitation accepted')
+      await loadMyInvitations()
+      await loadTeam()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to accept invitation')
+    } finally {
+      setAcceptingInvitation(null)
+    }
   }
 
   const loadTeam = async () => {
@@ -422,6 +470,55 @@ export function Team({ onBack }: TeamProps) {
               <button onClick={() => setError(null)} className="ml-auto">
                 <X size={18} style={{ color: 'var(--text-2)' }} />
               </button>
+            </div>
+          )}
+
+          {/* Invitations addressed to me */}
+          {myInvitations.length > 0 && (
+            <div
+              className="rounded-xl overflow-hidden mb-6"
+              style={{
+                backgroundColor: 'var(--surface)',
+                border: '1px solid var(--accent)'
+              }}
+            >
+              <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+                <h2
+                  className="font-semibold flex items-center gap-2"
+                  style={{ color: 'var(--text)' }}
+                >
+                  <Mail size={18} style={{ color: 'var(--accent)' }} />
+                  Invitations for you ({myInvitations.length})
+                </h2>
+              </div>
+              {myInvitations.map(({ invitation, team: invitedTeam }) => (
+                <div
+                  key={invitation.id}
+                  className="px-4 py-3 flex items-center justify-between gap-4"
+                  style={{ borderBottom: '1px solid var(--border)' }}
+                >
+                  <div>
+                    <p style={{ color: 'var(--text)' }}>{invitedTeam.name}</p>
+                    <p className="text-sm" style={{ color: 'var(--text-2)' }}>
+                      As {getRoleLabel(invitation.role)} · expires{' '}
+                      {new Date(invitation.expires_at).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleAcceptInvitation(invitation.id)}
+                    disabled={acceptingInvitation === invitation.id}
+                    className="px-4 py-2 rounded-lg font-medium flex items-center gap-2"
+                    style={{
+                      backgroundColor: 'var(--accent)',
+                      color: 'var(--bg)',
+                      opacity: acceptingInvitation === invitation.id ? 0.6 : 1
+                    }}
+                  >
+                    <CheckCircle size={16} />
+                    {acceptingInvitation === invitation.id ? 'Joining…' : 'Accept'}
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 

@@ -3,7 +3,7 @@
  * Shows user info, connected accounts, and settings
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import {
   User,
@@ -14,18 +14,79 @@ import {
   Github,
   Chrome,
   Key,
-  Clock
+  Clock,
+  AlertTriangle
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { apiFetch, describeFailure } from '../lib/apiClient'
+import { getAuthToken } from '../lib/authToken'
+
+/** GET /auth/me. The backend knows who is signed in whether or not Supabase does. */
+interface AccountInfo {
+  id: string
+  email: string
+  name: string
+  avatar_url: string | null
+  org_id: string | null
+  role: string
+  providers: string[]
+}
 
 interface ProfileProps {
   onBack: () => void
   onLogout: () => void
 }
 
+function providerIcon(provider: string) {
+  if (provider === 'github') return Github
+  if (provider === 'google') return Chrome
+  return Mail
+}
+
 export function Profile({ onBack, onLogout }: ProfileProps) {
-  const { user, session, signOut, isConfigured } = useSupabaseAuth()
+  const { user, session, signOut } = useSupabaseAuth()
   const [loggingOut, setLoggingOut] = useState(false)
+
+  // This page used to read identity from Supabase alone. On a deployment that
+  // signs users in through the backend's own OAuth — Supabase unconfigured —
+  // that left a genuinely authenticated user looking at "Not available",
+  // "Unknown", an avatar reading "N" and a panel telling them they were a guest.
+  const [account, setAccount] = useState<AccountInfo | null>(null)
+  const [accountError, setAccountError] = useState<string | null>(null)
+  const [loadingAccount, setLoadingAccount] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const load = async () => {
+      // No credential to ask with; Supabase state is the only identity there is.
+      if (!getAuthToken()) {
+        if (!cancelled) setLoadingAccount(false)
+        return
+      }
+      try {
+        const res = await apiFetch('/auth/me')
+        if (!res.ok) throw new Error(await describeFailure(res))
+        const data = (await res.json()) as AccountInfo
+        if (!cancelled) {
+          setAccount(data)
+          setAccountError(null)
+        }
+      } catch (err) {
+        // A 401 here is meaningful — the token this app is sending is not one
+        // the server recognises — so it is reported rather than swallowed.
+        if (!cancelled) setAccountError(err instanceof Error ? err.message : String(err))
+      } finally {
+        if (!cancelled) setLoadingAccount(false)
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+    }
+    // Re-runs once Supabase mirrors its access token into the shared store.
+  }, [session])
 
   const handleLogout = async () => {
     setLoggingOut(true)
@@ -33,18 +94,54 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
     onLogout()
   }
 
-  // Get user metadata
-  const email = user?.email || 'Not available'
+  // The backend's answer wins; Supabase metadata fills in what it does not carry.
   const nameFromMeta = user?.user_metadata?.full_name || user?.user_metadata?.name
-  const name = typeof nameFromMeta === 'string' ? nameFromMeta : email.split('@')[0]
   const avatarFromMeta = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
-  const avatarUrl = typeof avatarFromMeta === 'string' ? avatarFromMeta : undefined
   const providerFromMeta = user?.app_metadata?.provider
-  const provider = typeof providerFromMeta === 'string' ? providerFromMeta : 'email'
-  const createdAt = user?.created_at ? new Date(user.created_at).toLocaleDateString() : 'Unknown'
 
-  // Get provider icon
-  const ProviderIcon = provider === 'github' ? Github : provider === 'google' ? Chrome : Mail
+  const email = account?.email || user?.email || null
+  const name =
+    account?.name ||
+    (typeof nameFromMeta === 'string' ? nameFromMeta : null) ||
+    email?.split('@')[0] ||
+    null
+  const avatarUrl =
+    account?.avatar_url || (typeof avatarFromMeta === 'string' ? avatarFromMeta : undefined)
+  const providers =
+    account?.providers && account.providers.length > 0
+      ? account.providers
+      : typeof providerFromMeta === 'string'
+        ? [providerFromMeta]
+        : []
+  // Every user used to be told "Owner" — a confident claim about their
+  // permissions that the server contradicts the first time an action 403s.
+  const role = account?.role ?? null
+  const createdAt = user?.created_at ? new Date(user.created_at).toLocaleDateString() : null
+
+  const signedIn = account !== null || user !== null
+
+  if (loadingAccount && !signedIn) {
+    return (
+      <div className="min-h-screen" style={{ backgroundColor: 'var(--bg)' }}>
+        <header className="nav">
+          <button
+            className="nav__btn"
+            onClick={onBack}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+          >
+            <ChevronLeft size={18} />
+            <span>Back to Console</span>
+          </button>
+          <div className="nav__right">
+            <span className="nav__tag">Profile</span>
+          </div>
+        </header>
+        <main className="max-w-2xl mx-auto px-4 py-8" style={{ color: 'var(--text-2)' }}>
+          Loading your profile…
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: 'var(--bg)' }}>
@@ -70,6 +167,24 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3 }}
         >
+          {accountError && (
+            <div
+              role="alert"
+              className="rounded-xl p-4 mb-6 flex items-start gap-3 text-sm"
+              style={{
+                backgroundColor: 'var(--surface)',
+                border: '1px solid var(--warn, #f59e0b)',
+                color: 'var(--text-2)'
+              }}
+            >
+              <AlertTriangle size={18} style={{ color: 'var(--warn, #f59e0b)', flexShrink: 0 }} />
+              <span>
+                Could not read your account from the server: {accountError}. Anything it alone
+                knows — your role in particular — is not shown below.
+              </span>
+            </div>
+          )}
+
           {/* Profile Card */}
           <div
             className="rounded-xl p-6 mb-6"
@@ -83,7 +198,7 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
               {avatarUrl ? (
                 <img
                   src={avatarUrl}
-                  alt={name}
+                  alt={name ?? 'Profile'}
                   className="w-20 h-20 rounded-full"
                   style={{ border: '3px solid var(--accent)' }}
                 />
@@ -95,7 +210,7 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
                     color: 'var(--bg)'
                   }}
                 >
-                  {name.charAt(0).toUpperCase()}
+                  {(name ?? '?').charAt(0).toUpperCase()}
                 </div>
               )}
               <div>
@@ -103,61 +218,83 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
                   className="text-2xl font-bold"
                   style={{ color: 'var(--text)' }}
                 >
-                  {name}
+                  {name ?? 'Not signed in'}
                 </h1>
-                <p style={{ color: 'var(--text-2)' }}>{email}</p>
+                {email && <p style={{ color: 'var(--text-2)' }}>{email}</p>}
               </div>
             </div>
 
-            {/* Info Grid */}
+            {/* Info Grid. Rows are omitted rather than filled with placeholders:
+                "Unknown" reads as a fact about the account, not about the page. */}
             <div className="grid gap-4">
-              {/* Email */}
-              <div
-                className="flex items-center gap-3 p-3 rounded-lg"
-                style={{ backgroundColor: 'var(--bg)' }}
-              >
-                <Mail size={20} style={{ color: 'var(--accent)' }} />
-                <div>
-                  <p className="text-sm" style={{ color: 'var(--text-2)' }}>Email</p>
-                  <p style={{ color: 'var(--text)' }}>{email}</p>
+              {email && (
+                <div
+                  className="flex items-center gap-3 p-3 rounded-lg"
+                  style={{ backgroundColor: 'var(--bg)' }}
+                >
+                  <Mail size={20} style={{ color: 'var(--accent)' }} />
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--text-2)' }}>Email</p>
+                    <p style={{ color: 'var(--text)' }}>{email}</p>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Auth Provider */}
-              <div
-                className="flex items-center gap-3 p-3 rounded-lg"
-                style={{ backgroundColor: 'var(--bg)' }}
-              >
-                <ProviderIcon size={20} style={{ color: 'var(--accent)' }} />
-                <div>
-                  <p className="text-sm" style={{ color: 'var(--text-2)' }}>Signed in with</p>
-                  <p style={{ color: 'var(--text)', textTransform: 'capitalize' }}>{provider}</p>
-                </div>
-              </div>
+              {providers.map((provider) => {
+                const ProviderIcon = providerIcon(provider)
+                return (
+                  <div
+                    key={provider}
+                    className="flex items-center gap-3 p-3 rounded-lg"
+                    style={{ backgroundColor: 'var(--bg)' }}
+                  >
+                    <ProviderIcon size={20} style={{ color: 'var(--accent)' }} />
+                    <div>
+                      <p className="text-sm" style={{ color: 'var(--text-2)' }}>Signed in with</p>
+                      <p style={{ color: 'var(--text)', textTransform: 'capitalize' }}>{provider}</p>
+                    </div>
+                  </div>
+                )
+              })}
 
-              {/* Member Since */}
-              <div
-                className="flex items-center gap-3 p-3 rounded-lg"
-                style={{ backgroundColor: 'var(--bg)' }}
-              >
-                <Clock size={20} style={{ color: 'var(--accent)' }} />
-                <div>
-                  <p className="text-sm" style={{ color: 'var(--text-2)' }}>Member since</p>
-                  <p style={{ color: 'var(--text)' }}>{createdAt}</p>
+              {createdAt && (
+                <div
+                  className="flex items-center gap-3 p-3 rounded-lg"
+                  style={{ backgroundColor: 'var(--bg)' }}
+                >
+                  <Clock size={20} style={{ color: 'var(--accent)' }} />
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--text-2)' }}>Member since</p>
+                    <p style={{ color: 'var(--text)' }}>{createdAt}</p>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Role */}
-              <div
-                className="flex items-center gap-3 p-3 rounded-lg"
-                style={{ backgroundColor: 'var(--bg)' }}
-              >
-                <Shield size={20} style={{ color: 'var(--accent)' }} />
-                <div>
-                  <p className="text-sm" style={{ color: 'var(--text-2)' }}>Role</p>
-                  <p style={{ color: 'var(--text)' }}>Owner</p>
+              {role && (
+                <div
+                  className="flex items-center gap-3 p-3 rounded-lg"
+                  style={{ backgroundColor: 'var(--bg)' }}
+                >
+                  <Shield size={20} style={{ color: 'var(--accent)' }} />
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--text-2)' }}>Role</p>
+                    <p style={{ color: 'var(--text)', textTransform: 'capitalize' }}>{role}</p>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {account?.org_id && (
+                <div
+                  className="flex items-center gap-3 p-3 rounded-lg"
+                  style={{ backgroundColor: 'var(--bg)' }}
+                >
+                  <User size={20} style={{ color: 'var(--accent)' }} />
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--text-2)' }}>Organization</p>
+                    <p style={{ color: 'var(--text)' }}>{account.org_id}</p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -224,8 +361,9 @@ export function Profile({ onBack, onLogout }: ProfileProps) {
             </button>
           </div>
 
-          {/* Not Configured State */}
-          {!isConfigured && (
+          {/* Guest state — keyed to whether anyone is actually signed in, not to
+              whether Supabase happens to be the thing that would sign them in. */}
+          {!signedIn && (
             <div
               className="rounded-xl p-6 mt-6 text-center"
               style={{

@@ -220,3 +220,75 @@ describe('Team page', () => {
     })
   })
 })
+
+// The mailed link is the primary way to redeem an invitation, but this
+// deployment only sends mail when EmailJS is configured. Without somewhere to
+// accept from inside the app, an invitee whose mail never arrived could not
+// join at all, and the invitation expired seven days later.
+describe('Invitations addressed to me', () => {
+  const PENDING = [
+    {
+      invitation: {
+        id: 'inv-42',
+        email: 'owner@acme.test',
+        role: 'member',
+        status: 'pending',
+        created_at: '2026-01-03T00:00:00',
+        expires_at: '2026-01-10T00:00:00',
+      },
+      team: { id: 'team-9', name: 'Platform' },
+    },
+  ]
+
+  beforeEach(() => {
+    calls = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('offers to accept an invitation the signed-in user has been sent', async () => {
+    installFetch({
+      'GET /api/teams/invitations/pending': () => json(PENDING),
+      'POST /api/teams/invitations/inv-42/accept': () =>
+        json({ message: 'Invitation accepted', team: { id: 'team-9', name: 'Platform' } }),
+    })
+    render(<Team onBack={() => {}} />)
+
+    expect(await screen.findByText('Invitations for you (1)')).toBeInTheDocument()
+    expect(screen.getByText('Platform')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /accept/i }))
+
+    expect(await screen.findByText('You have joined Platform')).toBeInTheDocument()
+    const accept = calls.find(c => c.method === 'POST' && c.url.endsWith('/accept'))
+    expect(accept!.url).toBe('/api/teams/invitations/inv-42/accept')
+  })
+
+  it('reports why an invitation was refused instead of pretending it was joined', async () => {
+    installFetch({
+      'GET /api/teams/invitations/pending': () => json(PENDING),
+      'POST /api/teams/invitations/inv-42/accept': () =>
+        json({ detail: 'Cannot accept invitation (status: expired)' }, 400),
+    })
+    render(<Team onBack={() => {}} />)
+    await screen.findByText('Invitations for you (1)')
+
+    fireEvent.click(screen.getByRole('button', { name: /accept/i }))
+
+    expect(
+      await screen.findByText('Cannot accept invitation (status: expired)')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/You have joined/)).not.toBeInTheDocument()
+  })
+
+  it('shows no panel when nothing is waiting for the user', async () => {
+    installFetch({ 'GET /api/teams/invitations/pending': () => json([]) })
+    render(<Team onBack={() => {}} />)
+    await screen.findByText('bob@acme.test')
+
+    expect(screen.queryByText(/Invitations for you/)).not.toBeInTheDocument()
+  })
+})
