@@ -1,12 +1,26 @@
 /**
- * Single source of truth for the frontend's build-time configuration.
+ * The API's absolute base URL, for the places that need a real href.
  *
- * Every module used to re-derive the API base URL itself, and they disagreed:
- * some wrote `import.meta.env.VITE_API_URL ?? "http://localhost:8000"`, others
- * `|| ""`. `??` only falls back on null/undefined, so the Dockerfile's
+ * Every module used to re-derive this itself, and they disagreed: some wrote
+ * `import.meta.env.VITE_API_URL ?? "http://localhost:8000"`, others `|| ""`.
+ * `??` only falls back on null/undefined, so the Dockerfile's
  * `ENV VITE_API_URL=""` (deliberately empty => same-origin) survived as an empty
  * string, and `new URL("")` throws `TypeError: Invalid URL` — which killed the
- * WebSocket hook at module load in every production image. Resolve it once, here.
+ * WebSocket hook at module load in every production image.
+ *
+ * Requests do not come through here. `lib/apiClient` owns those, and deliberately
+ * keeps its base *relative* ("" => same-origin), which is what its 22 callers and
+ * the Vite dev proxy expect; `lib/authToken` owns the credential they carry. This
+ * module is for what a relative base cannot do: an `<a href>` into the backend's
+ * own pages (/docs, /redoc) has to be somewhere a new tab can actually go.
+ *
+ * It exported a `wsUrl`, an `API_TOKEN` and an `authHeaders` too, and all three
+ * were dead. `lib/apiClient.wsUrl` is what the WebSocket hook calls. And this
+ * module's `authHeaders` read a token fixed at build time, so a user who signed
+ * in at run time still sent no credential and every request came back 401 —
+ * which is the precise bug `lib/authToken` was written to fix. Keeping the losing
+ * half of a fixed bug in the tree, under a docstring announcing itself as the
+ * single source of truth, is how it gets imported again by mistake.
  */
 
 /** Local dev fallback: the Vite dev server serves only the SPA, API is on 8000. */
@@ -17,7 +31,7 @@ const DEV_API_URL = "http://localhost:8000";
  * as "unset". An operator who exports `VITE_API_URL=` means "I did not set this",
  * never "the base URL is the empty string" — the `??` form got that wrong.
  */
-export function envOr(value: string | undefined | null, fallback: string): string {
+function envOr(value: string | undefined | null, fallback: string): string {
   if (value === undefined || value === null) return fallback;
   const trimmed = value.trim();
   return trimmed === "" ? fallback : trimmed;
@@ -51,10 +65,11 @@ function defaultApiBaseUrl(): string {
  *
  * The Dockerfile frames the empty value as "relative, same-origin", so an operator
  * deploying under a prefix will reasonably write `VITE_API_URL=/api` — and
- * `new URL("/api")` throws exactly like `new URL("")` did. Resolving here keeps
- * that spelling working for `wsUrl`, whose whole job is to never throw at module
- * load. Absolute inputs pass through unchanged. Resolution is against the origin,
- * not the current href, so the answer does not depend on which SPA route is open.
+ * `new URL("/api")` throws exactly like `new URL("")` did. Resolving it here is
+ * what lets this module promise an absolute answer, which is the whole point of
+ * it: a link built from a relative base is not a link a new tab can follow.
+ * Absolute inputs pass through unchanged. Resolution is against the origin, not
+ * the current href, so the answer does not depend on which SPA route is open.
  */
 function toAbsolute(url: string): string {
   const origin = typeof window !== "undefined" ? window.location?.origin : undefined;
@@ -67,29 +82,7 @@ function toAbsolute(url: string): string {
   }
 }
 
-/** Absolute base URL for every API call. Never empty, never trailing-slashed. */
+/** Absolute base URL for links into the API. Never empty, never trailing-slashed. */
 export const API_BASE_URL: string = stripTrailingSlash(
   toAbsolute(envOr(import.meta.env.VITE_API_URL, defaultApiBaseUrl()))
 );
-
-/** Optional bearer token — set VITE_API_TOKEN when the backend has COPILOT_API_TOKEN. */
-export const API_TOKEN: string = envOr(import.meta.env.VITE_API_TOKEN, "");
-
-/** `Authorization` header when a token is configured, otherwise just `extra`. */
-export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return API_TOKEN ? { ...extra, Authorization: `Bearer ${API_TOKEN}` } : { ...extra };
-}
-
-/**
- * WebSocket URL for `path` (e.g. `/ws/chat/abc`), with the http->ws scheme swap.
- *
- * `API_BASE_URL` is guaranteed absolute above, so `new URL` cannot throw here —
- * that guarantee is the whole point of this module.
- */
-export function wsUrl(path = ""): string {
-  const url = new URL(API_BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  const base = stripTrailingSlash(url.toString());
-  if (!path) return base;
-  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
-}

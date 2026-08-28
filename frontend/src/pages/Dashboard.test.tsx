@@ -165,4 +165,86 @@ describe('Dashboard Services card', () => {
     expect(card).toHaveTextContent('3')
     expect(card).not.toHaveTextContent('healthy')
   })
+
+  it('does not call an empty alert list a healthy fleet', async () => {
+    // The Services card above refuses to claim health without a measurement.
+    // The alerts panel used to claim it on strictly less evidence — "no active
+    // alerts - all systems operational" — from the same render of the same page.
+    const { Dashboard } = await import('./Dashboard')
+    render(<Dashboard onBack={() => {}} />)
+
+    expect(await screen.findByText('No active alerts')).toBeInTheDocument()
+    expect(screen.queryByText(/all systems operational/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Dashboard controls', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/api/knowledge-graph/topology')) return json(TOPOLOGY)
+        if (url.includes('/api/knowledge-graph/service-metrics')) return NO_PROMETHEUS.clone()
+        if (url.includes('/api/runbooks/executions')) return json([])
+        if (url.includes('/api/runbooks')) return json([])
+        if (url.includes('/oncall/alerts')) {
+          return json([
+            {
+              id: 'a-1',
+              title: 'Checkout error rate high',
+              description: null,
+              severity: 'critical',
+              status: 'triggered',
+              source: 'datadog',
+              triggered_at: '2026-08-28T14:06:02Z',
+              team_id: 't-1',
+            },
+          ])
+        }
+        return json({ detail: `no route for ${url}` }, 404)
+      })
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  // Both were rendered as blue links with no onClick, no handler and no prop
+  // behind them, so a click did nothing whatsoever. "Investigate" sat on every
+  // alert row, which is the control an operator reaches for first.
+  it('offers no alert controls that do nothing when clicked', async () => {
+    const { Dashboard } = await import('./Dashboard')
+    const { fireEvent } = await import('@testing-library/react')
+    render(<Dashboard onBack={() => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Alerts' }))
+    await screen.findByText('Checkout error rate high')
+
+    expect(screen.queryByRole('button', { name: 'Investigate' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'View All Rules' })).toBeNull()
+    // The controls that do work are still there.
+    expect(screen.getByRole('button', { name: 'Ack' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Resolve' })).toBeInTheDocument()
+  })
+
+  // The tab fetches nothing, so "connect X to view metrics" was a promise no
+  // credential could keep — and named CloudWatch, which this build has no
+  // connector for at all, plus Prometheus, which is not connectable from here.
+  it('does not invite connecting a connector that would not fill the metrics tab', async () => {
+    const { Dashboard } = await import('./Dashboard')
+    const { fireEvent } = await import('@testing-library/react')
+    const onServiceMap = vi.fn()
+    render(<Dashboard onBack={() => {}} onServiceMap={onServiceMap} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Metrics' }))
+
+    expect(screen.queryByText(/Connect to Datadog, Prometheus, or CloudWatch/)).toBeNull()
+    expect(screen.queryByText(/CloudWatch/)).toBeNull()
+    // It points at the screen that does render per-service metrics instead.
+    fireEvent.click(screen.getByRole('button', { name: 'Open Service Map' }))
+    expect(onServiceMap).toHaveBeenCalled()
+  })
 })

@@ -244,6 +244,81 @@ describe('IntegrationMarketplace', () => {
         value: 'https://jaeger.example.com',
       })
     })
+
+    // The same omission as `traces`, one row over, and the traces fix walked
+    // past it: `deploys` is in MCP_CATALOG with three tools and has always been
+    // reported by GET /integrations/status, but no catalog row meant the
+    // connector answering "what shipped, and when" could not be seen — let alone
+    // diagnosed — from the page whose whole job is showing what is connected.
+    it('lists the deploy connector that /integrations/status has always reported on', async () => {
+      installFetch({ 'GET /integrations/status': () => json({ deploys: true }) })
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('1 connected')
+
+      const deploys = cardFor('Deploy tracker')
+      expect(deploys.textContent).toContain('Connected')
+      // DEPLOYS_API_URL is read through `_isecret` but is not in
+      // `_INTEGRATION_KEYS`, so a per-org secret would never reach the
+      // subprocess — there is no credential form to offer, only an explanation.
+      expect(deploys.textContent).toContain('Configured by the deployment')
+      expect(deploys.textContent).toContain('DEPLOYS_API_URL, DEPLOYS_API_TOKEN')
+      expect(deploys.querySelector('button')).toBeNull()
+    })
+
+    // The variable names used to live only inside the `unsupported` prose, which
+    // the card renders only when the connector is *not* working. So a card that
+    // said "Connected — configured by the deployment" named nothing at all, and
+    // the reader most likely to want the variable was the one who could not see
+    // it. Kubernetes is the long-standing case; the deploys card above is new.
+    it('names the deployment variables behind a connector it cannot configure', async () => {
+      installFetch({ 'GET /integrations/status': () => json({ kubernetes: true }) })
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('1 connected')
+
+      const kubernetes = cardFor('Kubernetes')
+      expect(kubernetes.textContent).toContain('Connected')
+      expect(kubernetes.textContent).toContain('KUBE_CONFIG_PATH')
+    })
+
+    // Prometheus genuinely has no MCP server, but the card used to go on to say
+    // a PROMETHEUS_URL could be set "but nothing in the console reads it". That
+    // is false in the expensive direction: it backs
+    // GET /api/knowledge-graph/service-metrics, which is the only thing
+    // measuring service health anywhere in the product. An operator who
+    // believed it would leave the Service Map and the dashboard's Services card
+    // permanently unmeasured.
+    it('does not tell an operator that PROMETHEUS_URL is read by nothing', async () => {
+      installFetch()
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      const prometheus = cardFor('Prometheus')
+      expect(prometheus.textContent).not.toContain('nothing in the console reads it')
+      expect(prometheus.textContent).toContain('Service Map')
+      expect(prometheus.textContent).toContain('PROMETHEUS_URL')
+    })
+  })
+
+  // Ten of the twenty-three catalog logos were dead URLs — CloudWatch 403, and
+  // 404 for New Relic, Opsgenie, GitLab, Bitbucket, Google Cloud, Terraform,
+  // Confluence and Sentry, two of which (Sentry, Terraform) are live connectors.
+  // They are repointed, but a hardcoded third-party URL rots on someone else's
+  // schedule, so the failure needs a floor that is not an empty grey tile.
+  describe('a logo that will not load', () => {
+    it('falls back to the initial rather than an empty tile', async () => {
+      installFetch()
+      render(<IntegrationMarketplace onBack={() => {}} />)
+      await screen.findByText('0 connected')
+
+      const datadog = cardFor('Datadog')
+      const img = datadog.querySelector('img') as HTMLImageElement
+      expect(img).toBeTruthy()
+
+      fireEvent.error(img)
+
+      expect(datadog.querySelector('img')).toBeNull()
+      expect(datadog.textContent).toContain('D')
+    })
   })
 
   describe('the connect modal', () => {

@@ -2,7 +2,20 @@ import { useRef, useState, useEffect } from 'react'
 import { motion, useInView } from 'framer-motion'
 import { TrendingUp, Clock, Rocket, Container, Globe } from 'lucide-react'
 
-const METRICS = [
+import { apiFetch } from '../../lib/apiClient'
+
+interface Metric {
+  icon: typeof TrendingUp
+  value: number
+  suffix: string
+  label: string
+  color: string
+  description: string
+}
+
+/** Claims about outcomes, which no endpoint can settle. Both are framed as
+ *  targets and the section says "private beta" underneath, so they stay. */
+const OUTCOME_METRICS: Metric[] = [
   {
     icon: TrendingUp,
     value: 70,
@@ -18,32 +31,69 @@ const METRICS = [
     label: 'Avg Resolution',
     color: '#00E7FF',
     description: 'Down from 4+ hours manual RCA'
-  },
-  {
-    icon: Rocket,
-    value: 48,
-    suffix: '',
-    label: 'AI Tools',
-    color: '#7C3AED',
-    description: 'Integrated observability actions'
-  },
-  {
-    icon: Container,
-    value: 9,
-    suffix: '',
-    label: 'MCP Servers',
-    color: '#0DB7ED',
-    description: 'Datadog, K8s, GitHub, PagerDuty...'
-  },
-  {
-    icon: Globe,
-    value: 5,
-    suffix: '',
-    label: 'LLM Providers',
-    color: '#FF9900',
-    description: 'Claude, GPT-4, Gemini, Groq, DeepSeek'
   }
 ]
+
+/** The five providers `_LLM_KEY_ENV` (app/tenancy/auth.py) accepts a key for.
+ *  Not derivable: GET /config reports the provider in use, not the set that
+ *  could be used. Verified against that dict rather than left to memory. */
+const PROVIDER_METRIC: Metric = {
+  icon: Globe,
+  value: 5,
+  suffix: '',
+  label: 'LLM Providers',
+  color: '#FF9900',
+  description: 'Claude, GPT-4, Gemini, Groq, DeepSeek'
+}
+
+interface Catalog {
+  servers: number
+  tools: number
+  labels: string[]
+}
+
+/**
+ * Connector and tool counts, counted rather than typed in.
+ *
+ * These two cards read "48 AI Tools" and "9 MCP Servers" as literals. Both were
+ * wrong: MCP_CATALOG (app/api/main.py) carries 11 servers exposing 64 tools, and
+ * had done since traces, deploys, argocd and terraform were added. Nobody
+ * updated the landing page, because nothing connected the two — the numbers were
+ * only ever going to drift further, and understate the product while they did.
+ *
+ * GET /config returns that catalog verbatim and needs no credential, so the
+ * cards can just count it. A build that adds a connector now says so by itself.
+ */
+function useCatalog(): Catalog | null {
+  const [catalog, setCatalog] = useState<Catalog | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    apiFetch('/config')
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((cfg: { servers?: { label?: string; tools?: string[] }[] }) => {
+        if (cancelled) return
+        const servers = cfg.servers ?? []
+        setCatalog({
+          servers: servers.length,
+          tools: servers.reduce((n, s) => n + (s.tools?.length ?? 0), 0),
+          labels: servers.map((s) => s.label ?? '').filter(Boolean)
+        })
+      })
+      .catch(() => {
+        // A marketing page has no business showing an error banner, and a
+        // stale literal is exactly what this replaced — so the two derived
+        // cards simply do not render. Better a shorter row than a made-up one.
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return catalog
+}
 
 function AnimatedNumber({
   value,
@@ -93,7 +143,7 @@ function MetricCard({
   metric,
   index
 }: {
-  metric: typeof METRICS[0]
+  metric: Metric
   index: number
 }) {
   const Icon = metric.icon
@@ -153,53 +203,85 @@ function MetricCard({
   )
 }
 
-// Live graph component
-function LiveGraph({ color }: { color: string }) {
-  const [data, setData] = useState<number[]>(Array(20).fill(50))
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setData((prev) => {
-        const newData = [...prev.slice(1)]
-        const lastValue = prev[prev.length - 1]
-        const change = (Math.random() - 0.5) * 20
-        const newValue = Math.max(20, Math.min(80, lastValue + change))
-        newData.push(newValue)
-        return newData
-      })
-    }, 500)
-
-    return () => clearInterval(interval)
-  }, [])
-
-  const points = data
-    .map((v, i) => `${(i / (data.length - 1)) * 100},${100 - v}`)
-    .join(' ')
-
+/*
+ * What used to sit here: `LiveGraph`, three of them, under a "Live Performance"
+ * heading with a pulsing green dot captioned "Real-time" and the labels Request
+ * Rate, CPU Usage and Memory.
+ *
+ * None of it was live and none of it was performance. Each graph seeded itself
+ * with `Array(20).fill(50)` and then walked that line every 500ms by
+ * `(Math.random() - 0.5) * 20`, clamped to 20–80 so it always looked plausibly
+ * healthy. Three independent random walks, presented to a visitor on the public
+ * landing page as this system's real-time request rate, CPU and memory. Whose
+ * infrastructure it was meant to describe was never answerable, because the
+ * answer was nobody's.
+ *
+ * This is the same thing GlobalMap was fixed for, and the fix is the same:
+ * nothing here was measurable, so nothing here is drawn. What replaces it is the
+ * connector catalog from GET /config — a real list of what this build ships,
+ * which is what the panel was gesturing at anyway.
+ */
+function ConnectorStrip({ catalog }: { catalog: Catalog }) {
   return (
-    <svg className="w-full h-12" viewBox="0 0 100 100" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id={`graph-${color}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polygon
-        points={`0,100 ${points} 100,100`}
-        fill={`url(#graph-${color})`}
-      />
-      <polyline
-        points={points}
-        fill="none"
-        stroke={color}
-        strokeWidth="2"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
+    <motion.div
+      className="floating-card p-6"
+      initial={{ opacity: 0, y: 40 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true }}
+      transition={{ duration: 0.5, delay: 0.3 }}
+    >
+      <div className="flex items-center justify-between mb-4">
+        <span className="font-display font-semibold text-white">Connectors in this build</span>
+        <span className="text-sm text-white/50">
+          {catalog.tools} tools across {catalog.servers} MCP servers
+        </span>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {catalog.labels.map((label) => (
+          <span
+            key={label}
+            className="text-sm px-3 py-1.5 rounded-lg bg-white/5 text-white/70 border border-white/10"
+          >
+            {label}
+          </span>
+        ))}
+      </div>
+    </motion.div>
   )
 }
 
 export function Metrics() {
+  const catalog = useCatalog()
+
+  // The two counted cards sit between the outcome targets and the provider
+  // count, where the literals used to be. Until /config answers — or if it never
+  // does — the row is three cards wide rather than five holding a guess.
+  const metrics: Metric[] = [
+    ...OUTCOME_METRICS,
+    ...(catalog
+      ? [
+          {
+            icon: Rocket,
+            value: catalog.tools,
+            suffix: '',
+            label: 'AI Tools',
+            color: '#7C3AED',
+            description: 'Integrated observability actions'
+          },
+          {
+            icon: Container,
+            value: catalog.servers,
+            suffix: '',
+            label: 'MCP Servers',
+            color: '#0DB7ED',
+            description: catalog.labels.slice(0, 4).join(', ')
+          }
+        ]
+      : []),
+    PROVIDER_METRIC
+  ]
+
   return (
     <section className="relative py-32 overflow-hidden">
       {/* Background */}
@@ -242,43 +324,17 @@ export function Metrics() {
         </div>
 
         {/* Metrics grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 mb-12">
-          {METRICS.map((metric, i) => (
+        <div
+          className={`grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12 ${
+            metrics.length === 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-3'
+          }`}
+        >
+          {metrics.map((metric, i) => (
             <MetricCard key={metric.label} metric={metric} index={i} />
           ))}
         </div>
 
-        {/* Live graphs */}
-        <motion.div
-          className="floating-card p-6"
-          initial={{ opacity: 0, y: 40 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.5, delay: 0.3 }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <span className="font-display font-semibold text-white">Live Performance</span>
-            <span className="flex items-center gap-2 text-sm text-success">
-              <span className="w-2 h-2 bg-success rounded-full animate-pulse" />
-              Real-time
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div>
-              <div className="text-sm text-white/50 mb-2">Request Rate</div>
-              <LiveGraph color="#00E7FF" />
-            </div>
-            <div>
-              <div className="text-sm text-white/50 mb-2">CPU Usage</div>
-              <LiveGraph color="#7C3AED" />
-            </div>
-            <div>
-              <div className="text-sm text-white/50 mb-2">Memory</div>
-              <LiveGraph color="#00FFB3" />
-            </div>
-          </div>
-        </motion.div>
+        {catalog && <ConnectorStrip catalog={catalog} />}
       </div>
     </section>
   )

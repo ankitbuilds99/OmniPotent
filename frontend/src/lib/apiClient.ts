@@ -13,7 +13,13 @@
 import { authHeaders } from "./authToken";
 
 /** Backend origin. Empty string means same-origin, which is what the Vite dev
- *  proxy and the production single-origin deployment both want. */
+ *  proxy and the production single-origin deployment both want.
+ *
+ *  Relative on purpose, and not the same value as `config.API_BASE_URL`, which
+ *  is absolute. The two are not rival derivations of one thing: requests want
+ *  the relative form so they follow whatever origin served the page, and links
+ *  cannot use it — an `<a href>` built from "" goes nowhere useful in a new tab.
+ *  `config` handles those; everything that fetches belongs here. */
 export const API_BASE: string = import.meta.env.VITE_API_URL || "";
 
 /** Absolute URL for a backend path. Passes through anything already absolute. */

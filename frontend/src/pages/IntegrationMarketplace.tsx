@@ -104,14 +104,14 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     name: "AWS CloudWatch",
     description: "AWS native monitoring and observability",
     category: "observability",
-    logo: "https://d1.awsstatic.com/product-marketing/CloudWatch/product-page-diagram_Amazon-CloudWatch.5c0c7b56646dff9d2c27f8a2c96e7631f87b85d1.png",
+    logo: "https://raw.githubusercontent.com/awslabs/aws-icons-for-plantuml/main/dist/ManagementGovernance/CloudWatch.png",
   },
   {
     id: "newrelic",
     name: "New Relic",
     description: "Full-stack observability platform",
     category: "observability",
-    logo: "https://newrelic.com/themes/flavor/assets/images/logo/logo.svg",
+    logo: "https://cdn.simpleicons.org/newrelic",
   },
 
   // Alerting
@@ -127,7 +127,7 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     name: "OpsGenie",
     description: "Alert management and on-call scheduling",
     category: "alerting",
-    logo: "https://www.atlassian.com/dam/jcr:a6df169b-2d56-4035-8c60-36a69291c4de/opsgenie-icon-gradient-blue.svg",
+    logo: "https://cdn.simpleicons.org/opsgenie",
   },
   {
     id: "alertmanager",
@@ -150,14 +150,14 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     name: "GitLab",
     description: "GitLab repository and CI/CD integration",
     category: "code",
-    logo: "https://about.gitlab.com/images/press/logo/png/gitlab-icon-rgb.png",
+    logo: "https://cdn.simpleicons.org/gitlab",
   },
   {
     id: "bitbucket",
     name: "Bitbucket",
     description: "Atlassian Bitbucket repository integration",
     category: "code",
-    logo: "https://wac-cdn.atlassian.com/dam/jcr:c942540c-53a6-4e49-9f9a-8f3e9e6c6e5a/bitbucket-icon-gradient-blue.svg",
+    logo: "https://cdn.simpleicons.org/bitbucket",
   },
 
   // Infrastructure
@@ -180,14 +180,14 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     name: "Google Cloud",
     description: "Google Cloud Platform services",
     category: "infrastructure",
-    logo: "https://www.gstatic.com/devrel-devsite/prod/v1c4b1e8e9e8e0b8e8e9e8e0b8e8e9e8e0b8e8e9e/cloud/images/favicons/onecloud/favicon.ico",
+    logo: "https://cdn.simpleicons.org/googlecloud",
   },
   {
     id: "terraform",
     name: "Terraform",
     description: "Infrastructure as Code state and changes",
     category: "infrastructure",
-    logo: "https://www.terraform.io/img/logo-hashicorp.svg",
+    logo: "https://cdn.simpleicons.org/terraform",
   },
   {
     id: "argocd",
@@ -226,7 +226,7 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     name: "Confluence",
     description: "Runbooks and documentation from Confluence",
     category: "knowledge",
-    logo: "https://wac-cdn.atlassian.com/dam/jcr:eaa12b67-a29d-467c-b8fa-66f6c915a97f/confluence-icon-gradient-blue.svg",
+    logo: "https://cdn.simpleicons.org/confluence",
   },
   {
     id: "notion",
@@ -240,7 +240,7 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     name: "Sentry",
     description: "Error tracking and performance monitoring",
     category: "observability",
-    logo: "https://sentry.io/_assets2/static/sentry-logo-black.svg",
+    logo: "https://cdn.simpleicons.org/sentry",
   },
   // The gap in the other direction. `traces` is a real MCP server with seven
   // tools, TRACES_API_URL is one of the secrets `_INTEGRATION_KEYS` forwards,
@@ -252,6 +252,26 @@ const INTEGRATION_CATALOG: Omit<Integration, "status" | "reason" | "tools" | "st
     description: "Jaeger-compatible trace search, critical paths, and blast radius",
     category: "observability",
     logo: "https://raw.githubusercontent.com/cncf/artwork/master/projects/jaeger/icon/color/jaeger-icon-color.svg",
+  },
+  // And the same omission again, which the `traces` fix walked straight past.
+  // `deploys` is a real MCP server (list_deploys, get_deploy, deploys_in_window),
+  // it is in MCP_CATALOG, and GET /integrations/status reports on it — but no
+  // catalog row meant the connector that answers "what shipped, and when" could
+  // not be seen or diagnosed from the page whose whole job is showing what is
+  // connected. Deployment-configured, so it renders as such; see integrationSpecs.
+  //
+  // No logo, deliberately. Every other row wears the mark of the product behind
+  // it, and `traces` can wear Jaeger's because TRACES_API_URL *is* a Jaeger
+  // query API. This connector is vendor-neutral — DEPLOYS_API_URL points at
+  // whatever deploy API the deployment runs — so borrowing Spinnaker's or
+  // Octopus's mark to fill the tile would advertise an integration that does not
+  // exist. The blank falls through to the initial, which claims nothing.
+  {
+    id: "deploys",
+    name: "Deploy tracker",
+    description: "Deploy timeline for correlating an error onset with the change that caused it",
+    category: "infrastructure",
+    logo: "",
   },
 ];
 
@@ -271,6 +291,44 @@ const CATEGORIES = [
 // CloudWatch, New Relic, Opsgenie, Alertmanager, GitLab, AWS, Confluence and
 // Notion have none and were all offered with a live "Connect" button. What a
 // build can and cannot connect now comes from integrationSpecs.
+
+/**
+ * The connector's mark, or its initial when that cannot be fetched.
+ *
+ * Ten of the twenty-three logo URLs in the catalog above were dead — CloudWatch
+ * 403, and 404 for New Relic, Opsgenie, GitLab, Bitbucket, Google Cloud,
+ * Terraform, Confluence and Sentry, several of them vendor CDN paths that had
+ * simply been reorganised since. Two of those (Sentry, Terraform) are live
+ * connectors. They are repointed now, but a hardcoded third-party URL is a thing
+ * that rots on someone else's schedule, so the failure needs a floor.
+ *
+ * The card used to set `display: none` on error, leaving an empty grey tile that
+ * looks like a rendering bug; the modal had no error handling at all, so it
+ * showed the browser's broken-image glyph next to "Connect New Relic". Both now
+ * fall back to the initial, which reads as deliberate.
+ */
+function IntegrationLogo({ src, name, size }: { src: string; name: string; size: "sm" | "md" }) {
+  const [broken, setBroken] = useState(false);
+  const box = size === "md" ? "w-12 h-12 rounded-xl" : "w-10 h-10 rounded-lg";
+  const img = size === "md" ? "w-8 h-8" : "w-6 h-6";
+
+  return (
+    <div className={`${box} bg-white/10 flex items-center justify-center overflow-hidden shrink-0`}>
+      {broken || !src ? (
+        <span aria-hidden="true" className="font-semibold text-gray-300">
+          {name.charAt(0).toUpperCase()}
+        </span>
+      ) : (
+        <img
+          src={src}
+          alt={name}
+          className={`${img} object-contain`}
+          onError={() => setBroken(true)}
+        />
+      )}
+    </div>
+  );
+}
 
 function IntegrationCard({ integration, onConnect, onDisconnect }: {
   integration: Integration;
@@ -296,7 +354,13 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
   // Replaces the invented "Setup: 10 min". The one thing worth knowing before
   // clicking Connect is which names the credentials land under, since that is
   // what a deployment's own env has to agree with.
-  const storedAs = specFor(integration.id).fields.map((f) => f.env);
+  //
+  // For a connector the org cannot configure, that is the deployment's own
+  // variables. This slot used to be blank for every one of them — Kubernetes,
+  // ArgoCD, Terraform, deploys — so a working card said "Configured by the
+  // deployment" and left the reader to guess by what.
+  const spec = specFor(integration.id);
+  const storedAs = spec.fields.length > 0 ? spec.fields.map((f) => f.env) : spec.envNames;
 
   return (
     <div
@@ -304,16 +368,7 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
       style={{ backgroundColor: "var(--shell)", borderColor: "var(--border)" }}
     >
       <div className="flex items-start gap-4">
-        <div className="w-12 h-12 rounded-xl bg-white/10 flex items-center justify-center overflow-hidden">
-          <img
-            src={integration.logo}
-            alt={integration.name}
-            className="w-8 h-8 object-contain"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = "none";
-            }}
-          />
-        </div>
+        <IntegrationLogo src={integration.logo} name={integration.name} size="md" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <h3 className="font-semibold truncate">{integration.name}</h3>
@@ -484,9 +539,7 @@ function ConnectModal({ integration, onClose, onSaved }: {
       >
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-white/10 flex items-center justify-center overflow-hidden">
-              <img src={integration.logo} alt={integration.name} className="w-6 h-6 object-contain" />
-            </div>
+            <IntegrationLogo src={integration.logo} name={integration.name} size="sm" />
             <div>
               <h3 className="font-semibold">Connect {integration.name}</h3>
               <p className="text-sm text-gray-400">

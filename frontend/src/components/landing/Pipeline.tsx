@@ -514,7 +514,10 @@ export function Pipeline() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.2 }}
           >
-            Real-time visualization of your deployment pipeline with live logs
+            {/* Was "Real-time visualization … with live logs". The stages and their
+                log lines are a fixed script advanced by a timer — there is no fetch
+                in this file and nothing for it to be live against. */}
+            The stages a change moves through, and what the agent does at each one
           </motion.p>
         </div>
 

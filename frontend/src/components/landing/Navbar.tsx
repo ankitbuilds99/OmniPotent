@@ -2,6 +2,13 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Sparkles, Menu, X, ArrowRight, Code, Palette } from 'lucide-react'
 import { THEMES, DEFAULT_THEME } from '../../themes'
+// The "API Docs" link is a real navigation target, so it needs the same base
+// every API call uses. It had its own `?? 'http://localhost:8000'` — one of the
+// last two survivors of the fix config.ts exists for. `??` keeps the
+// Dockerfile's deliberately-empty VITE_API_URL as "", and where it was unset
+// entirely the deployed bundle shipped a link to the *visitor's* port 8000.
+// Either way the button on the public landing page went nowhere.
+import { API_BASE_URL } from '../../config'
 
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
@@ -10,8 +17,6 @@ const NAV_LINKS = [
   { label: 'Blog', href: '#blog' },
   { label: 'Pricing', href: '#pricing' }
 ]
-
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 export function Navbar({ onLaunch }: { onLaunch: () => void }) {
   const [isScrolled, setIsScrolled] = useState(false)

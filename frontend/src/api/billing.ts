@@ -20,7 +20,8 @@ import type {
 } from '../types/billing';
 
 // The credential is read per call (see lib/authToken) so a sign-in takes effect
-// without a reload; ../config's authHeaders is fixed at build time and cannot.
+// without a reload. ../config's rival build-time authHeaders, which could not,
+// is gone.
 import { authHeaders } from '../lib/authToken';
 import { API_BASE, describeFailure } from '../lib/apiClient';
 
