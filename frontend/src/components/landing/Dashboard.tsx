@@ -1,3 +1,29 @@
+/**
+ * The operations console, as a labelled product illustration.
+ *
+ * This section used to be headed "Real-time monitoring" over the sub-heading
+ * "Live dashboard with metrics, logs, and infrastructure health", and every
+ * number under it was written by hand: CPU 68%, Memory 72%, Network 205 MB/s,
+ * 1,200 requests/sec, four sparklines from literal arrays, an "Infrastructure
+ * Health" panel scoring API Gateway at 99% and Payments at 87%, and a container
+ * count of 24 running / 2 pending / 8 pods / 3 nodes. The trend badges — +5%,
+ * +3%, +12%, +8%, all green, all up — were invented alongside them and did not
+ * describe the sparkline they sat on.
+ *
+ * The log panel went further. It carried a pulsing green dot captioned
+ * "streaming", drew each line by `Math.random()` from a list of ten canned
+ * messages, and stamped it with `new Date()` — the visitor's own clock — so a
+ * fabricated event about a Redis timeout appeared to have happened seconds ago
+ * on real infrastructure. Nothing on this page was measuring anything, and on a
+ * public landing page there was no infrastructure it could have belonged to.
+ *
+ * Showing what the console looks like is fair; claiming the numbers are live is
+ * not. So the copy now says this is the bundled demo scenario, the "real-time"
+ * and "streaming" affordances are gone, and the log replay is a fixed script
+ * with its own timestamps instead of a random draw against the visitor's clock.
+ * Same fix as GlobalMap and the Metrics section.
+ */
+
 import { useRef, useState, useEffect } from 'react'
 import { motion, useInView, AnimatePresence } from 'framer-motion'
 import {
@@ -95,14 +121,33 @@ function Sparkline({
   )
 }
 
+/** The change across the series the card is drawing.
+ *
+ *  `trend` and `trendValue` used to be props, hand-set to +5%, +3%, +12% and
+ *  +8% — all up, all green, and none of them measured the sparkline underneath.
+ *  CPU's series runs 45 -> 65 across the window, which is +44%, not +5%; the
+ *  badge and the line it sat on were simply two unrelated pieces of fiction.
+ *  Reading the change off the series is one fewer thing to keep in step, and
+ *  the only way the badge can be right. */
+function seriesTrend(data: number[]): { direction: 'up' | 'down'; label: string } | null {
+  if (data.length < 2) return null
+  const first = data[0]
+  const last = data[data.length - 1]
+  if (!first) return null
+  const pct = ((last - first) / first) * 100
+  if (Math.abs(pct) < 0.5) return null
+  return {
+    direction: pct > 0 ? 'up' : 'down',
+    label: `${pct > 0 ? '+' : ''}${pct.toFixed(0)}%`
+  }
+}
+
 // Dashboard metric card
 function MetricCard({
   icon: Icon,
   title,
   value,
   suffix = '',
-  trend,
-  trendValue,
   data,
   color,
   delay = 0
@@ -111,12 +156,12 @@ function MetricCard({
   title: string
   value: number
   suffix?: string
-  trend?: 'up' | 'down'
-  trendValue?: string
   data?: number[]
   color: string
   delay?: number
 }) {
+  const trend = data ? seriesTrend(data) : null
+
   return (
     <motion.div
       className="floating-card p-5"
@@ -135,15 +180,15 @@ function MetricCard({
         {trend && (
           <div
             className={`flex items-center gap-1 text-sm ${
-              trend === 'up' ? 'text-success' : 'text-danger'
+              trend.direction === 'up' ? 'text-success' : 'text-danger'
             }`}
           >
-            {trend === 'up' ? (
+            {trend.direction === 'up' ? (
               <TrendingUp className="w-4 h-4" />
             ) : (
               <TrendingDown className="w-4 h-4" />
             )}
-            {trendValue}
+            {trend.label}
           </div>
         )}
       </div>
@@ -190,34 +235,39 @@ function ProgressBar({
   )
 }
 
-// Live log stream
-function LogStream() {
+/**
+ * The scripted log timeline for the bundled checkout-svc scenario — the same
+ * 1.8.0 discount rollout the offline fixtures in app/mcp/servers are built
+ * around, so the demo tells one coherent story instead of ten unrelated events
+ * shuffled at random.
+ *
+ * The timestamps belong to the script. They used to come from `new Date()`,
+ * which is what made a canned line read as something that had just happened on
+ * the visitor's own systems.
+ */
+const LOG_SCRIPT: Array<{ level: string; message: string; time: string }> = [
+  { level: 'info', time: '14:02:11', message: 'Deploy checkout-svc 1.8.0 started (discount rollout)' },
+  { level: 'success', time: '14:03:48', message: 'Deployment rollout complete: checkout-svc' },
+  { level: 'warning', time: '14:06:02', message: 'Error rate rising: checkout-svc 0.4% -> 3.1%' },
+  { level: 'error', time: '14:06:30', message: 'Connection timeout: redis-cluster' },
+  { level: 'info', time: '14:06:44', message: 'Correlated onset with deploy 1.8.0 (28s prior)' },
+  { level: 'info', time: '14:07:15', message: 'Blast radius: checkout-svc, payments-svc' },
+  { level: 'success', time: '14:08:02', message: 'Rollback proposed: checkout-svc -> 1.7.4' },
+  { level: 'success', time: '14:09:20', message: 'Health check passed: checkout-svc' }
+]
+
+function LogReplay() {
   const [logs, setLogs] = useState<Array<{ id: number; level: string; message: string; time: string }>>([])
-  const logId = useRef(0)
+  const cursor = useRef(0)
 
-  const LOG_MESSAGES = [
-    { level: 'info', message: 'Pod checkout-svc-7f8d9b scaled to 3 replicas' },
-    { level: 'success', message: 'Health check passed: api-gateway' },
-    { level: 'info', message: 'Ingress rule updated: /api/v2/*' },
-    { level: 'warning', message: 'High memory usage: payments-svc (78%)' },
-    { level: 'info', message: 'ConfigMap reloaded: nginx-config' },
-    { level: 'success', message: 'Deployment rollout complete: inventory-svc' },
-    { level: 'info', message: 'Certificate renewed: *.example.com' },
-    { level: 'error', message: 'Connection timeout: redis-cluster' },
-    { level: 'success', message: 'Auto-scaling triggered: frontend-pod' },
-    { level: 'info', message: 'Metrics exported to Prometheus' }
-  ]
-
+  // A fixed loop through the script, not a draw from it. Deterministic, so every
+  // visitor sees the same incident play out in the order it actually happened.
   useEffect(() => {
     const interval = setInterval(() => {
-      const randomLog = LOG_MESSAGES[Math.floor(Math.random() * LOG_MESSAGES.length)]
-      const now = new Date()
-      const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
-
-      setLogs((prev) => [
-        { id: logId.current++, ...randomLog, time },
-        ...prev.slice(0, 4)
-      ])
+      const next = LOG_SCRIPT[cursor.current % LOG_SCRIPT.length]
+      const id = cursor.current
+      cursor.current += 1
+      setLogs((prev) => [{ id, ...next }, ...prev.slice(0, 4)])
     }, 2000)
 
     return () => clearInterval(interval)
@@ -240,11 +290,8 @@ function LogStream() {
     >
       <div className="flex items-center gap-2 mb-4">
         <FileText className="w-5 h-5 text-primary" />
-        <span className="font-display font-semibold text-white">Live Logs</span>
-        <span className="ml-auto flex items-center gap-1">
-          <span className="w-2 h-2 bg-success rounded-full animate-pulse" />
-          <span className="text-white/50 text-xs">streaming</span>
-        </span>
+        <span className="font-display font-semibold text-white">Incident log</span>
+        <span className="ml-auto text-white/40 text-xs">replay</span>
       </div>
 
       <div className="space-y-2 font-mono text-xs">
@@ -274,11 +321,14 @@ function LogStream() {
 export function Dashboard() {
   const containerRef = useRef<HTMLDivElement>(null)
 
-  // Sample data for sparklines
+  // The demo scenario's series. Each card's headline number is the last point of
+  // its own series, so the big figure and the line under it cannot disagree —
+  // Network I/O read 205 against a series ending 205, but only by coincidence.
   const cpuData = [45, 52, 48, 61, 55, 70, 65, 58, 62, 68, 72, 65]
   const memoryData = [62, 58, 65, 70, 68, 75, 72, 78, 74, 80, 76, 72]
   const networkData = [120, 145, 160, 155, 180, 175, 190, 185, 200, 195, 210, 205]
   const requestData = [850, 920, 880, 950, 1020, 980, 1050, 1100, 1080, 1150, 1120, 1200]
+  const last = (series: number[]) => series[series.length - 1]
 
   return (
     <section ref={containerRef} className="relative py-32 overflow-hidden">
@@ -316,7 +366,7 @@ export function Dashboard() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.1 }}
           >
-            Real-time <span className="gradient-text">monitoring</span>
+            One console for the <span className="gradient-text">whole incident</span>
           </motion.h2>
           <motion.p
             className="text-white/60 text-lg max-w-2xl mx-auto"
@@ -325,7 +375,9 @@ export function Dashboard() {
             viewport={{ once: true }}
             transition={{ duration: 0.5, delay: 0.2 }}
           >
-            Live dashboard with metrics, logs, and infrastructure health
+            Metrics, container state and the incident timeline in one view. The figures
+            below are the bundled checkout-svc demo scenario, not live infrastructure —
+            connect your own and the same panels fill in from it.
           </motion.p>
         </div>
 
@@ -334,10 +386,8 @@ export function Dashboard() {
           <MetricCard
             icon={Cpu}
             title="CPU Usage"
-            value={68}
+            value={last(cpuData)}
             suffix="%"
-            trend="up"
-            trendValue="+5%"
             data={cpuData}
             color="#00E7FF"
             delay={0}
@@ -345,10 +395,8 @@ export function Dashboard() {
           <MetricCard
             icon={HardDrive}
             title="Memory"
-            value={72}
+            value={last(memoryData)}
             suffix="%"
-            trend="up"
-            trendValue="+3%"
             data={memoryData}
             color="#7C3AED"
             delay={0.1}
@@ -356,10 +404,8 @@ export function Dashboard() {
           <MetricCard
             icon={Network}
             title="Network I/O"
-            value={205}
+            value={last(networkData)}
             suffix=" MB/s"
-            trend="up"
-            trendValue="+12%"
             data={networkData}
             color="#00FFB3"
             delay={0.2}
@@ -367,10 +413,8 @@ export function Dashboard() {
           <MetricCard
             icon={Activity}
             title="Requests/sec"
-            value={1200}
+            value={last(requestData)}
             suffix=""
-            trend="up"
-            trendValue="+8%"
             data={requestData}
             color="#FF9900"
             delay={0.3}
@@ -440,8 +484,8 @@ export function Dashboard() {
             </div>
           </motion.div>
 
-          {/* Live logs */}
-          <LogStream />
+          {/* Scripted incident timeline */}
+          <LogReplay />
         </div>
       </div>
     </section>

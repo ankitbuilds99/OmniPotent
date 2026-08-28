@@ -3,7 +3,9 @@
 import type { AppConfig, ChatResponse, GithubStatus, Me, MetricsResponse, StreamEvent } from "./types";
 
 // The credential is read per call (see lib/authToken), so signing in takes effect
-// without a reload — ./config's authHeaders is fixed at build time and cannot.
+// without a reload. ./config used to carry a rival authHeaders that read a
+// build-time token and could not; it has been deleted rather than left to be
+// imported by accident.
 import { authHeaders } from "./lib/authToken";
 import { API_BASE, wsUrl } from "./lib/apiClient";
 

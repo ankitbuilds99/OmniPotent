@@ -2,6 +2,10 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { motion, useInView } from 'framer-motion'
 import { Check, RotateCcw } from 'lucide-react'
 
+// A fixed script, typed out on a timer. Nothing here runs, connects or reports —
+// which is fine for a product illustration, and was not what the section claimed:
+// it was headed "Live Terminal" over "…in real-time". Same fabrication the
+// Metrics and Dashboard sections were carrying, one section along.
 const TERMINAL_LINES = [
   { type: 'command', text: '$ deploy production', delay: 0 },
   { type: 'progress', text: '✓ Building Docker image...', delay: 500, status: 'success' },
@@ -121,7 +125,7 @@ export function Terminal() {
               viewport={{ once: true }}
               transition={{ duration: 0.5 }}
             >
-              Live Terminal
+              Deploy walkthrough
             </motion.span>
             <motion.h2
               className="font-display text-3xl md:text-4xl lg:text-5xl font-bold text-white mb-4"
@@ -139,7 +143,7 @@ export function Terminal() {
               viewport={{ once: true }}
               transition={{ duration: 0.5, delay: 0.2 }}
             >
-              Watch AI orchestrate your entire deployment pipeline in real-time
+              The deploy sequence the agent drives, start to finish
             </motion.p>
           </div>
 

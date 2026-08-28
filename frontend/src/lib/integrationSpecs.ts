@@ -43,6 +43,17 @@ export interface IntegrationSpec {
   /** Secrets this build reads. Empty when there is nothing an org can set. */
   fields: SecretField[];
   /**
+   * Variables the *deployment's* environment supplies, for connectors an org
+   * cannot configure itself. Empty when `fields` covers it.
+   *
+   * These names only ever existed inside the `unsupported` prose, so a card for
+   * a connector that was working — Kubernetes, ArgoCD, Terraform, deploys — said
+   * "Configured by the deployment" and stopped there. The operator most likely
+   * to be reading it is the one trying to work out which variable to go and set,
+   * and the answer was shown only in the state where it no longer mattered.
+   */
+  envNames: string[];
+  /**
    * Why this build cannot connect it from the console; "" when it can.
    * Three distinct cases end up here: no connector exists, the connector is
    * configured by the deployment's environment and not per organisation, or
@@ -56,6 +67,7 @@ function noConnector(name: string): IntegrationSpec {
   return {
     statusKey: null,
     fields: [],
+    envNames: [],
     unsupported: `This build has no ${name} connector. Nothing would read a credential saved here.`,
   };
 }
@@ -65,6 +77,7 @@ function deploymentOnly(statusKey: string, envNames: string[]): IntegrationSpec 
   return {
     statusKey,
     fields: [],
+    envNames,
     unsupported:
       `Configured by the deployment, through ${envNames.join(" and ")}. ` +
       `Saving a value here would not reach it — ask whoever runs this instance.`,
@@ -75,6 +88,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   datadog: {
     statusKey: "datadog",
     unsupported: "",
+    envNames: [],
     fields: [
       { env: "DD_API_KEY", label: "API key", placeholder: "32-character key", secret: true, required: true },
       { env: "DD_APP_KEY", label: "Application key", placeholder: "40-character key", secret: true, required: true },
@@ -92,6 +106,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   pagerduty: {
     statusKey: "pagerduty",
     unsupported: "",
+    envNames: [],
     fields: [
       { env: "PAGERDUTY_API_TOKEN", label: "REST API token", placeholder: "u+…", secret: true, required: true },
       {
@@ -108,6 +123,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   sentry: {
     statusKey: "sentry",
     unsupported: "",
+    envNames: [],
     fields: [
       { env: "SENTRY_API_TOKEN", label: "Auth token", placeholder: "sntrys_…", secret: true, required: true },
       { env: "SENTRY_ORG", label: "Organization slug", placeholder: "acme", secret: false, required: true },
@@ -139,6 +155,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   kubernetes: {
     statusKey: "kubernetes",
     fields: [],
+    envNames: ["KUBE_CONFIG_PATH", "KUBE_NAMESPACE"],
     unsupported:
       "There is no Kubernetes API key to enter. The connector authenticates with a " +
       "kubeconfig file that has to exist on the OmniPotent server (KUBE_CONFIG_PATH), " +
@@ -155,6 +172,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   traces: {
     statusKey: "traces",
     unsupported: "",
+    envNames: [],
     fields: [
       {
         env: "TRACES_API_URL",
@@ -170,6 +188,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   github: {
     statusKey: "github",
     unsupported: "",
+    envNames: [],
     fields: [
       {
         env: "GITHUB_TOKEN",
@@ -187,20 +206,55 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   slack: {
     statusKey: "slack",
     fields: [],
+    envNames: ["SLACK_BOT_TOKEN"],
     unsupported:
       "Slack posting is configured by the deployment (SLACK_BOT_TOKEN). For your own " +
       "notification routing, add an incoming webhook on the Notifications page instead.",
   },
   argocd: deploymentOnly("argocd", ["ARGOCD_SERVER_URL", "ARGOCD_AUTH_TOKEN"]),
   terraform: deploymentOnly("terraform", ["TERRAFORM_CLOUD_TOKEN", "TERRAFORM_ORGANIZATION"]),
+  /*
+   * The same omission `traces` had, one row over. `deploys` is a real MCP server
+   * with three tools, it is in MCP_CATALOG, and GET /integrations/status has
+   * always reported on it — the marketplace simply never listed it, so the one
+   * connector that answers "what shipped, and when" was invisible to the people
+   * configuring the product.
+   *
+   * Deployment-only, like argocd and terraform: DEPLOYS_API_URL and
+   * DEPLOYS_API_TOKEN are read through `_isecret`, but neither name is in
+   * `_INTEGRATION_KEYS`, so a per-org secret saved under them is never forwarded
+   * to the subprocess. Only the deployment's own environment reaches it.
+   */
+  deploys: deploymentOnly("deploys", ["DEPLOYS_API_URL", "DEPLOYS_API_TOKEN"]),
 
   // Catalog entries with no connector behind them.
+  /*
+   * Prometheus is the one entry where "no connector" was the wrong summary.
+   *
+   * There is genuinely no Prometheus MCP server — the agent's metric tools read
+   * Datadog — so `statusKey` stays null and the card shows no capability chips.
+   * But the old text went on to say a PROMETHEUS_URL "can be set by the
+   * deployment but nothing in the console reads it", and that is false in the
+   * expensive direction. PROMETHEUS_URL is exactly what backs
+   * GET /api/knowledge-graph/service-metrics (app/knowledge_graph/api_router.py),
+   * which is the only thing that measures service health anywhere in this
+   * product: leave it unset and the Service Map shows no request rate, error
+   * rate or p99 for anything, and the dashboard's Services card reads "health
+   * unmeasured" permanently (`readServiceHealth` in pages/Dashboard.tsx).
+   *
+   * An operator who believed that sentence would never set the one variable that
+   * turns both of those on.
+   */
   prometheus: {
     statusKey: null,
     fields: [],
+    envNames: ["PROMETHEUS_URL"],
     unsupported:
-      "This build has no Prometheus connector. Its metric tools read Datadog; a " +
-      "PROMETHEUS_URL can be set by the deployment but nothing in the console reads it.",
+      "The agent has no Prometheus tools — its metric tools read Datadog. The Service " +
+      "Map and the dashboard's service-health card do read Prometheus though, through " +
+      "PROMETHEUS_URL on the API; without it both report health as unmeasured. That is " +
+      "a deployment setting rather than a per-organisation secret, so ask whoever runs " +
+      "this instance to set it.",
   },
   grafana: noConnector("Grafana"),
   cloudwatch: noConnector("CloudWatch"),
@@ -209,6 +263,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
   alertmanager: {
     statusKey: null,
     fields: [],
+    envNames: [],
     unsupported:
       "There is no Alertmanager connector to query. Alertmanager sends alerts *to* " +
       "OmniPotent instead — point its webhook receiver at this deployment's /webhooks endpoint.",
@@ -229,6 +284,7 @@ export function specFor(id: string): IntegrationSpec {
     INTEGRATION_SPECS[id] ?? {
       statusKey: null,
       fields: [],
+      envNames: [],
       unsupported: `This build has no connector for "${id}".`,
     }
   );

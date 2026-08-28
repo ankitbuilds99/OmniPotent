@@ -18,6 +18,12 @@ import {
   X
 } from 'lucide-react'
 
+// The other survivor of the same fix as Navbar: these are links to the live API
+// (/docs, /redoc), and they inlined `?? 'http://localhost:8000'` rather than
+// reading the base config.ts resolves once. See that module for why `??` is the
+// wrong operator against the Dockerfile's `ENV VITE_API_URL=""`.
+import { API_BASE_URL } from '../../config'
+
 const DOCS_SECTIONS = [
   {
     id: 'quickstart',
@@ -187,7 +193,7 @@ function DocSection({ section, isActive }: { section: typeof DOCS_SECTIONS[0]; i
               {section.content.links.map((link: { label: string; url: string; desc: string }, i: number) => (
                 <a
                   key={i}
-                  href={`${import.meta.env.VITE_API_URL ?? 'http://localhost:8000'}${link.url}`}
+                  href={`${API_BASE_URL}${link.url}`}
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-2 px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-lg text-primary text-sm font-medium transition-colors"

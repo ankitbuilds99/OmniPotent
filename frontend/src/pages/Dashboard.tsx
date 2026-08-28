@@ -337,11 +337,15 @@ function AlertsTab({
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+      {/* "View All Rules" used to sit here, and "Investigate" on every row below.
+          Neither had an onClick — no handler, no prop, nothing behind them. They
+          were styled as links, so clicking did nothing at all and the operator
+          was left assuming the page had hung. There is no alert-rules screen in
+          this build to point the first one at, and no per-alert investigation
+          entry point for the second, so both are gone rather than wired to
+          somewhere they do not belong. */}
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700">
         <h3 className="font-semibold">Active Alerts</h3>
-        <button className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">
-          View All Rules
-        </button>
       </div>
       {alerts.length > 0 ? (
         <div className="overflow-x-auto">
@@ -388,9 +392,6 @@ function AlertsTab({
                           Resolve
                         </button>
                       )}
-                      <button className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">
-                        Investigate
-                      </button>
                     </div>
                   </td>
                 </tr>
@@ -399,7 +400,11 @@ function AlertsTab({
           </table>
         </div>
       ) : (
-        <EmptyState message="No active alerts - all systems operational" icon="check" />
+        // Not "all systems operational", which is what this said. An empty alert
+        // list means nothing has alerted — it is not a health measurement, and
+        // this same page deliberately refuses to claim health two panels up when
+        // no Prometheus is configured. It cannot claim it here on less evidence.
+        <EmptyState message="No active alerts" icon="check" />
       )}
     </div>
   );
@@ -507,21 +512,55 @@ function RunbooksTab({
   );
 }
 
-function MetricsTab({ onIntegrations }: { onIntegrations?: () => void }) {
+/**
+ * The Metrics tab is a placeholder, and now says so.
+ *
+ * It read "Connect to Datadog, Prometheus, or CloudWatch to view metrics" over a
+ * button to the marketplace, and two of those three were wrong: this build has
+ * no CloudWatch connector at all (`noConnector` in lib/integrationSpecs), and
+ * Prometheus is a deployment variable rather than anything the console can
+ * connect. Worse, the sentence promised something no connector delivers —
+ * nothing here fetches, so an operator who went and connected Datadog came back
+ * to the identical screen and had no way to tell whether the credential had
+ * failed or the feature had.
+ *
+ * So it points at where per-service metrics genuinely are rather than inviting a
+ * round trip that cannot change what is on screen.
+ */
+function MetricsTab({
+  onIntegrations,
+  onServiceMap,
+}: {
+  onIntegrations?: () => void;
+  onServiceMap?: () => void;
+}) {
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8">
-      <div className="text-center">
+      <div className="text-center max-w-xl mx-auto">
         <Icon name="chart" size={48} />
-        <h3 className="mt-4 text-lg font-medium">Metrics Dashboard</h3>
+        <h3 className="mt-4 text-lg font-medium">No metrics browser in this build</h3>
         <p className="mt-2 text-gray-500">
-          Connect to Datadog, Prometheus, or CloudWatch to view metrics.
+          Live request rate, error rate and p99 per service are on the Service Map, which
+          reads Prometheus through PROMETHEUS_URL on the API — a deployment setting, not a
+          credential you can save here. The agent&rsquo;s own metric tools query Datadog,
+          which you can connect.
         </p>
-        <button
-          onClick={onIntegrations}
-          className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-        >
-          Configure Integrations
-        </button>
+        <div className="mt-4 flex items-center justify-center gap-2">
+          {onServiceMap && (
+            <button
+              onClick={onServiceMap}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              Open Service Map
+            </button>
+          )}
+          <button
+            onClick={onIntegrations}
+            className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700"
+          >
+            Configure Integrations
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -861,7 +900,9 @@ export function Dashboard({
             onCreateRunbook={() => onRunbooks?.()}
           />
         )}
-        {activeTab === "metrics" && <MetricsTab onIntegrations={onIntegrations} />}
+        {activeTab === "metrics" && (
+          <MetricsTab onIntegrations={onIntegrations} onServiceMap={onServiceMap} />
+        )}
       </div>
     </div>
   );
