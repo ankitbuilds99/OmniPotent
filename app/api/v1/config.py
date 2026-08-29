@@ -18,7 +18,7 @@ from app.api.main import (
     require_perm,
 )
 
-router = APIRouter(prefix="/config", tags=["Config"])
+router: APIRouter = APIRouter(prefix="/config", tags=["Config"])
 
 # The root handlers are called as plain functions, so their routes' RBAC
 # dependencies do not run for a /v1 request and are restated here. These write

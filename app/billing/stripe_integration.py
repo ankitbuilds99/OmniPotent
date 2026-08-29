@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 from uuid import UUID, uuid4
 
 from app.billing.models import (
@@ -21,6 +21,20 @@ from app.billing.models import (
 from app.billing.plans import PlanManager
 
 log = logging.getLogger("omnipotent.billing.stripe")
+
+
+class _BillingPeriod(TypedDict, total=False):
+    """The period keywords ``Subscription`` accepts, each independently optional.
+
+    A plain ``dict[str, datetime]`` would say only "some string keys", so
+    unpacking it into ``Subscription(...)`` reads to a type checker as possibly
+    supplying *any* field -- including ``cancel_at_period_end: bool`` and
+    ``stripe_customer_id: str``. Naming the two keys is what makes the unpack
+    checkable while still letting either one be absent.
+    """
+
+    current_period_start: datetime
+    current_period_end: datetime
 
 
 class StripeClient(Protocol):
@@ -828,14 +842,13 @@ class StripeBillingService:
         # Only the period fields Stripe actually sent are set; the rest keep the
         # dataclass defaults. Writing a fabricated period would put a renewal
         # date in front of the customer that nothing measured.
-        periods = {
-            key: value
-            for key, value in (
-                ("current_period_start", _epoch(_field(data, "current_period_start"))),
-                ("current_period_end", _epoch(_field(data, "current_period_end"))),
-            )
-            if value is not None
-        }
+        periods: _BillingPeriod = {}
+        period_start = _epoch(_field(data, "current_period_start"))
+        if period_start is not None:
+            periods["current_period_start"] = period_start
+        period_end = _epoch(_field(data, "current_period_end"))
+        if period_end is not None:
+            periods["current_period_end"] = period_end
         if len(periods) != 2:
             log.warning(
                 "Stripe subscription %s arrived without a complete billing period; "

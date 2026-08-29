@@ -425,7 +425,11 @@ def analyze_spans(spans: list[dict]) -> dict:
 
     bottlenecks = []
     for sp in spans:
-        kids = children.get(sp.get("span_id"), [])
+        # A span with no id has no children registered against it -- `children`
+        # is keyed only by truthy `parent` values -- so the lookup was already
+        # returning [] for one; this just says so without passing None as a key.
+        span_id = sp.get("span_id")
+        kids = children.get(span_id, []) if span_id else []
         self_time = max(0, sp.get("duration_ms", 0) - sum(c.get("duration_ms", 0) for c in kids))
         bottlenecks.append({
             "span_id": sp.get("span_id"), "service": sp.get("service") or UNKNOWN_SERVICE,

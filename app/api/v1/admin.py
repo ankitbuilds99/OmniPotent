@@ -17,7 +17,7 @@ from app.api.main import (
     require_perm,
 )
 
-router = APIRouter(prefix="/admin", tags=["Admin"])
+router: APIRouter = APIRouter(prefix="/admin", tags=["Admin"])
 
 # The root handlers run as plain functions here, so the RBAC dependencies that
 # guard the root routes do not fire for a /v1 request. Each one is restated

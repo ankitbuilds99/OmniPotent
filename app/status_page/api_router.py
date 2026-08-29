@@ -388,7 +388,10 @@ async def _verification_link_rejected(http_request: Request) -> str | None:
         return None
 
     path = router.url_path_for(_VERIFY_ROUTE_NAME)
-    scope = {
+    # ASGI's own type for a scope: the values are deliberately heterogeneous
+    # (str, bytes, tuple, None, list), so without this the inferred value type
+    # collapses to something no `HTTPConnection` will accept.
+    scope: dict[str, Any] = {
         "type": "http",
         "method": "GET",
         "path": path,

@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
+router: APIRouter = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 
 @router.post("/github")
