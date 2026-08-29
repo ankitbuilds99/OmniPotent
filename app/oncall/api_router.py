@@ -21,12 +21,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 
 from app.database.engine import session_dependency as get_async_session
+from app.database.models import Member
 from app.database.orgs import ensure_org_row, org_uuid
 from app.notifications.delivery import notify
 from app.oncall.schedule_service import get_schedule_service
 from app.oncall.escalation_service import get_escalation_service
 from app.oncall.ai_oncall_service import get_ai_oncall_service
 from app.oncall.models import (
+    DEFAULT_ESCALATION_CHANNELS,
     OncallTeam,
     OncallTeamMember,
     OncallShift,
@@ -229,9 +231,47 @@ class CreateTeamRequest(BaseModel):
 
 
 class AddTeamMemberRequest(BaseModel):
-    user_id: UUID
-    role: str = "member"
-    skills: list[str] = []
+    """Who to put on this team, and where a page to them should go.
+
+    `user_id` alone used to be the only way to say who, and nothing in this
+    product — API or frontend — ever produced one: `members` is created by
+    migration and was written by no application code, while `/admin/members` and
+    SCIM populate the separate tenancy store whose ids are strings, not UUIDs. So
+    the only caller who could use this endpoint was one holding an id it had
+    inserted by hand, and every page aimed at a responder resolved to no address.
+
+    `email` is the way in now: it identifies the person the way the rest of the
+    product does, and adding them creates the `members` row a page is addressed
+    from. `phone` and `slack_user_id` are the addresses no store in this build
+    previously had room for; they go into `contact_methods`, which is what
+    `EscalationService._page_routing` reads when a policy pages on sms, voice,
+    whatsapp or Slack.
+
+    `user_id` still works — an existing responder is referred to by the id this
+    endpoint handed back — but one of the two has to be given, because a
+    membership with neither names nobody this deployment can page.
+
+    Everything except who is optional and every omitted field is left as it was
+    on an existing membership, rather than reset to its default. Posting the same
+    person again is how a role is corrected, and a request that only says
+    "Ada is now the lead" must not take away the phone number her sms pages are
+    addressed to — a silently emptied address is exactly the failure this
+    endpoint was added to end. `role` and `skills` therefore default to None
+    ("unchanged") rather than to "member" and []; a new membership with neither
+    given still gets those.
+    """
+
+    user_id: UUID | None = None
+    email: str | None = None
+    phone: str | None = None
+    slack_user_id: str | None = None
+    #: Full control over the order channels are tried in and what each one is
+    #: addressed to, for callers that want more than the three fields above.
+    #: Entries are {"type": ..., "delay_minutes": ..., "value": ...}; when given,
+    #: this replaces what `phone`/`slack_user_id` would have built.
+    contact_methods: list[dict[str, Any]] | None = None
+    role: str | None = None
+    skills: list[str] | None = None
     timezone: str | None = None
 
 
@@ -438,28 +478,217 @@ async def get_team(
     return team
 
 
+async def _responder(db: Any, request: AddTeamMemberRequest) -> Member:
+    """The `members` row this membership is for, creating it from an email.
+
+    This is the writer `members` never had. The table is where every on-call
+    `user_id` points and where `EscalationService._page_routing` reads the
+    address a page is sent to, but no application code inserted into it, so a
+    deployment provisioned through this API had a row for nobody and every page
+    resolved to no address. Adding a responder to an on-call team is the moment
+    the product learns a person exists, so it is where the row is written.
+
+    An existing responder is matched case-insensitively but stored as typed:
+    `ix_members_org_email` is unique on the exact string, so matching exactly
+    would make Ada@corp and ada@corp two responders with two ids, and paging
+    whichever one the caller last quoted. Storing as typed keeps the address
+    `_acting_member` compares an actor against intact.
+    """
+    from sqlalchemy import func, select
+
+    org = await _ensure_org_row(db)
+    email = (request.email or "").strip()
+
+    if request.user_id is not None:
+        member = (
+            await db.execute(
+                select(Member).where(
+                    Member.id == request.user_id, Member.org_id == org
+                )
+            )
+        ).scalar_one_or_none()
+        if member is None:
+            # 404 on the id rather than silently creating a membership for it:
+            # a member row that does not exist is a responder no page can be
+            # addressed to, and the escalation would only discover that at 3am.
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No member {request.user_id} in this organization. Add the "
+                    f"responder by email to create one."
+                ),
+            )
+        if email and member.email.lower() != email.lower():
+            # A corrected address is the whole point of being able to re-post a
+            # responder; refusing it would leave the page going to the old one.
+            member.email = email
+        return member
+
+    if not email or "@" not in email:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Provide either an existing `user_id` or an `email` to page this "
+                "responder at; a membership with neither can never be paged."
+            ),
+        )
+
+    member = (
+        await db.execute(
+            select(Member).where(
+                Member.org_id == org, func.lower(Member.email) == email.lower()
+            )
+        )
+    ).scalar_one_or_none()
+    if member is None:
+        member = Member(org_id=org, email=email, role="responder")
+        db.add(member)
+        await db.flush()
+        log.info("Created member %s for responder %s", member.id, email)
+    return member
+
+
+def _contact_methods(request: AddTeamMemberRequest) -> list[dict[str, Any]] | None:
+    """The contact methods to store, in the order a page should try them.
+
+    Only methods with something behind them are listed. The column used to
+    default to push, then sms, then phone, then email with no address against
+    any of them, which described a responder nobody could reach on the first
+    three: `_page_routing` addresses a page from the values here, so an entry
+    with no value is an ordering statement and nothing more.
+
+    None when the request carries no address at all, which means "leave what is
+    stored alone". Rebuilding the list from an empty request would erase the
+    number an sms page is addressed to every time somebody re-posted a responder
+    to change their role, and the erasure would only be discovered by the page
+    that failed.
+    """
+    if request.contact_methods is not None:
+        return request.contact_methods
+    if not request.phone and not request.slack_user_id:
+        return None
+
+    methods: list[dict[str, Any]] = []
+    if request.phone:
+        methods.append({"type": "sms", "delay_minutes": 0, "value": request.phone.strip()})
+        methods.append({"type": "phone", "delay_minutes": 2, "value": request.phone.strip()})
+    if request.slack_user_id:
+        methods.append(
+            {"type": "slack", "delay_minutes": 0, "value": request.slack_user_id.strip()}
+        )
+    # `members.email` carries the address, so this entry is the ordering only.
+    methods.append({"type": "email", "delay_minutes": 0 if not methods else 5})
+    return methods
+
+
 @router.post("/teams/{team_id}/members")
 async def add_team_member(
     team_id: UUID,
     request: AddTeamMemberRequest,
     db=Depends(get_async_session),
 ):
-    """Add a member to the team."""
+    """Add a responder to the team, and record where a page reaches them.
+
+    Idempotent on (team, responder): posting the same person again updates what
+    the request names rather than violating `uq_oncall_member` and answering a
+    500. Updating how somebody is paged is the same request as adding them, and
+    the alternative was a caller who could never correct a wrong number. Fields
+    the request omits keep the value they had, so correcting one of them cannot
+    quietly empty the address the next page is aimed at.
+    """
+    from sqlalchemy import select
+
     await _owned_team(db, team_id)
 
-    member = OncallTeamMember(
-        team_id=team_id,
-        user_id=request.user_id,
-        role=request.role,
-        skills=request.skills,
-        timezone=request.timezone,
-    )
-    db.add(member)
+    responder = await _responder(db, request)
+
+    member = (
+        await db.execute(
+            select(OncallTeamMember).where(
+                OncallTeamMember.team_id == team_id,
+                OncallTeamMember.user_id == responder.id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    contact_methods = _contact_methods(request)
+    if member is None:
+        member = OncallTeamMember(
+            team_id=team_id,
+            user_id=responder.id,
+            role=request.role or "member",
+            skills=request.skills or [],
+            timezone=request.timezone,
+        )
+        # Left unset when the request named no address, so the column's own
+        # default applies rather than a second copy of it written out here.
+        if contact_methods is not None:
+            member.contact_methods = contact_methods
+        db.add(member)
+    else:
+        if request.role is not None:
+            member.role = request.role
+        if request.skills is not None:
+            member.skills = request.skills
+        if request.timezone is not None:
+            member.timezone = request.timezone
+        if contact_methods is not None:
+            member.contact_methods = contact_methods
+        member.is_active = True
+
     await db.commit()
     await db.refresh(member)
 
-    log.info("Added member %s to team %s", request.user_id, team_id)
-    return {"id": member.id, "user_id": member.user_id, "role": member.role}
+    log.info("Added member %s (%s) to team %s", responder.id, responder.email, team_id)
+    return {
+        "id": member.id,
+        "user_id": member.user_id,
+        "email": responder.email,
+        "role": member.role,
+        "contact_methods": member.contact_methods,
+    }
+
+
+@router.get("/teams/{team_id}/members")
+async def list_team_members(
+    team_id: UUID,
+    db=Depends(get_async_session),
+):
+    """The team's responders, with the ids and addresses pages are aimed at.
+
+    Without this there was no request that produced a `user_id`, so nothing could
+    name an escalation target: `POST /escalation-policies` takes user ids and the
+    only place they existed was inside rows nobody could read back.
+    """
+    from sqlalchemy import select
+
+    await _owned_team(db, team_id)
+
+    rows = (
+        await db.execute(
+            select(OncallTeamMember, Member.email)
+            .outerjoin(Member, Member.id == OncallTeamMember.user_id)
+            .where(OncallTeamMember.team_id == team_id)
+            .order_by(OncallTeamMember.joined_at)
+        )
+    ).all()
+
+    return [
+        {
+            "id": member.id,
+            "user_id": member.user_id,
+            # None, not "": no `members` row for this id is a different thing
+            # from a member row with an empty address, and only the first means
+            # the membership was written before this endpoint could create one.
+            "email": email,
+            "role": member.role,
+            "skills": member.skills,
+            "timezone": member.timezone,
+            "contact_methods": member.contact_methods,
+            "is_active": member.is_active,
+        }
+        for member, email in rows
+    ]
 
 
 @router.get("/teams/{team_id}/current-oncall")
@@ -1909,20 +2138,48 @@ class CreateEnhancedEscalationPolicyRequest(BaseModel):
     is_default: bool = False
 
 
+def _requested_channels(channel_enum: Any, requested: Any) -> list[Any]:
+    """The channels a step asked for, or the default that can deliver.
+
+    An unrecognised name is a 400 naming the ones that exist: it used to be an
+    unhandled ValueError out of the enum, so a typo in one channel of one step
+    answered 500 with no indication of which word was wrong.
+    """
+    names = list(requested) if requested else list(DEFAULT_ESCALATION_CHANNELS)
+    channels = []
+    for name in names:
+        try:
+            channels.append(channel_enum(name))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown notification channel {name!r}. Known channels: "
+                    + ", ".join(sorted(c.value for c in channel_enum))
+                ),
+            ) from None
+    return channels
+
+
 @router.post("/escalation-policies/enhanced")
 async def create_enhanced_escalation_policy(
     request: CreateEnhancedEscalationPolicyRequest,
     db=Depends(get_async_session),
 ):
     """
-    Create an enhanced escalation policy with PagerDuty-level features.
+    Create an escalation policy from a step list, with delays and repeat.
 
-    Features:
-    - Multiple steps with configurable delays
-    - Different paths for high/low urgency
-    - Time-based routing (business hours vs after hours)
-    - Alert matching conditions
-    - Repeat behavior
+    The urgency-specific paths, time-based routing and match conditions this
+    route advertises are refused rather than accepted, because only
+    `steps` survives being saved: `oncall_escalation_policies` has columns for a
+    single ordered step list, and this handler persists `policy.steps` alone —
+    `low_urgency_steps`, `time_rules` and `match_conditions` were never even read
+    off the request, and `high_urgency_steps` was built into an object that was
+    then dropped on the floor. The response said otherwise, reporting
+    `has_high_urgency_path: true` for a path that did not exist and
+    `time_rules_count: 0` for rules the caller had just sent. An after-hours
+    escalation path that silently never fires is discovered at 3am; a 400 is
+    discovered when the policy is written.
     """
     from app.oncall.escalations import (
         EscalationPolicyBuilder,
@@ -1933,6 +2190,28 @@ async def create_enhanced_escalation_policy(
     from uuid import uuid4
 
     team = await _owned_team(db, request.team_id)
+
+    unstorable = [
+        name
+        for name, value in (
+            ("high_urgency_steps", request.high_urgency_steps),
+            ("low_urgency_steps", request.low_urgency_steps),
+            ("time_rules", request.time_rules),
+            ("match_conditions", request.match_conditions),
+        )
+        if value
+    ]
+    if unstorable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This build stores a single escalation step list per policy, so "
+                + ", ".join(unstorable)
+                + " would be accepted and then never applied to an alert. Put the "
+                "steps that must run in `steps`, or create one policy per case and "
+                "match it with `conditions` on POST /oncall/escalation-policies."
+            ),
+        )
 
     policy_id = uuid4()
     builder = EscalationPolicyBuilder(request.name, policy_id)
@@ -1950,10 +2229,15 @@ async def create_enhanced_escalation_policy(
                 schedule_layer=t.get("layer"),
             ))
 
-        channels = [
-            NotificationChannel(c)
-            for c in step_config.get("channels", ["push", "sms"])
-        ]
+        # A step that names no channels gets the deliverable default rather than
+        # a literal repeated here. This one said ["push", "sms"]: push cannot
+        # deliver in this build at all and sms needs a number, so a policy posted
+        # without channels was a policy that paged nobody. Because
+        # `EscalationStep.to_dict()` writes `notification_channels` explicitly,
+        # nothing downstream ever got the chance to substitute a working default.
+        channels = _requested_channels(
+            NotificationChannel, step_config.get("channels")
+        )
 
         builder.add_step(
             delay_minutes=step_config.get("delay_minutes", 0),
@@ -1962,28 +2246,6 @@ async def create_enhanced_escalation_policy(
             repeat_count=step_config.get("repeat_count", 1),
             description=step_config.get("description"),
         )
-
-    # Add high urgency steps if provided
-    if request.high_urgency_steps:
-        builder.for_high_urgency()
-        for step_config in request.high_urgency_steps:
-            targets = [
-                EscalationTarget(
-                    target_type=TargetType(t["type"]),
-                    target_id=t["id"],
-                    schedule_layer=t.get("layer"),
-                )
-                for t in step_config.get("targets", [])
-            ]
-            channels = [
-                NotificationChannel(c)
-                for c in step_config.get("channels", ["push", "sms", "phone"])
-            ]
-            builder.add_step(
-                delay_minutes=step_config.get("delay_minutes", 0),
-                targets=targets,
-                channels=channels,
-            )
 
     builder.with_repeat(enabled=request.repeat_enabled, limit=request.repeat_limit)
 
@@ -2004,13 +2266,13 @@ async def create_enhanced_escalation_policy(
         repeat_limit=request.repeat_limit,
     )
 
+    # Counted off the rows that were written, not off the in-memory builder: the
+    # two were not the same thing, and it was the builder that got reported.
+    await db.refresh(db_policy, ["steps"])
     return {
         "id": db_policy.id,
         "name": db_policy.name,
-        "steps_count": len(policy.steps),
-        "has_high_urgency_path": policy.high_urgency_steps is not None,
-        "has_low_urgency_path": policy.low_urgency_steps is not None,
-        "time_rules_count": len(policy.time_rules),
+        "steps_count": len(db_policy.steps),
     }
 
 

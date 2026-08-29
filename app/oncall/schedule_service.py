@@ -60,6 +60,32 @@ def _rotation_period(rotation_type: str, length_days: int) -> timedelta:
     }.get(rotation_type, timedelta(days=max(1, length_days)))
 
 
+def _overlapping(model: Any, start_date: date, end_date: date) -> tuple[Any, Any]:
+    """Filter clauses for rows that overlap the day range [start_date, end_date].
+
+    Gap detection used to select its shifts and its overrides by *containment* —
+    `start_time >= from` AND `end_time <= to` — which drops exactly the row that
+    matters: the one that is in progress across the edge of the window. A weekly
+    rotation running Mon 09:00 → Mon 09:00 is contained in no Wed–Fri window, so
+    a fully staffed three days were answered as one 72-hour hole with nobody on
+    call, and every other window had its edges measured against a truncated set
+    of shifts. `app/oncall/api_router.py:_overlaps()` documents the same failure
+    for the router's own queries; this one was never converted.
+
+    The bounds are half-open and identical to the window `detect_gaps` rebuilds
+    in Python, so a row that only touches a boundary — a shift ending at exactly
+    00:00 on the first day — still contributes no covered second and the genuine
+    gap behind it is reported at its true size rather than papered over. The
+    predicate lives here rather than being imported from the router because the
+    router imports this module, and because overrides need the same rule applied
+    to a different table.
+    """
+    return (
+        model.start_time < datetime.combine(end_date + timedelta(days=1), time.min),
+        model.end_time > datetime.combine(start_date, time.min),
+    )
+
+
 def _handoff(day: date, hour: int, minute: int, tz: Any) -> datetime:
     """The wall-clock handoff on `day`, as a real instant in `tz`.
 
@@ -609,8 +635,7 @@ class ScheduleService:
                 OncallShift.schedule_id == schedule_id,
                 OncallShift.shift_type == "primary",
                 OncallShift.status.in_(["scheduled", "active"]),
-                OncallShift.start_time >= datetime.combine(start_date, time.min),
-                OncallShift.end_time <= datetime.combine(end_date + timedelta(days=1), time.max),
+                *_overlapping(OncallShift, start_date, end_date),
             )
             .order_by(OncallShift.start_time)
         )
@@ -621,8 +646,7 @@ class ScheduleService:
             .where(
                 OncallOverride.schedule_id == schedule_id,
                 OncallOverride.status == "active",
-                OncallOverride.start_time >= datetime.combine(start_date, time.min),
-                OncallOverride.end_time <= datetime.combine(end_date + timedelta(days=1), time.max),
+                *_overlapping(OncallOverride, start_date, end_date),
             )
         )
         overrides = list(override_result.scalars().all())

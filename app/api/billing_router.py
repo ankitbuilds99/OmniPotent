@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.billing.api import BillingUnavailableError, UnknownMetricError
@@ -27,6 +27,42 @@ from app.billing.runtime import get_stripe_service as _get_stripe_service  # noq
 log = logging.getLogger("omnipotent.api.billing")
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
+
+
+def _require_perm(action: str) -> Any:
+    """The app's RBAC dependency, imported lazily to avoid a circular import.
+
+    `app.api.main` imports this router, so importing `require_perm` from it at
+    module scope would be a cycle. Same shim `app/notifications/router.py` uses.
+    """
+
+    async def _dep() -> None:
+        from app.api.main import require_perm
+
+        await require_perm(action)()
+
+    return _dep
+
+
+# `manage_billing` was declared in the permission matrix (app/tenancy/models.py)
+# and enforced on no route. The only app-wide dependency is `require_auth`, which
+# proves who the caller is and says nothing about what they may do, so any key in
+# the org — down to the lowest `viewer` rank — reached the money routes: cancel or
+# downgrade the org's paid plan, or mint a Stripe customer-portal URL, which hands
+# over the card on file, the invoice history and cancellation.
+#
+# The routes below now guarantee that the plan and the payment instrument can only
+# be moved by an owner, and that the billing documents (who was charged what, and
+# the card) need admin — the same bar `view_audit` sets on /audit, because both
+# are administrative reads rather than part of plain "view". `require_perm`
+# returns early when multi-tenancy is off, so single-tenant and offline demo
+# deployments, which have no roles at all, are unaffected.
+#
+# Plain reads — /plans, /subscription, /usage/*, /features*, /upgrade-options,
+# proration — stay open to a viewer on purpose: they expose no payment
+# instrument, and gating them would blank the Billing page for most of an org.
+_BILLING_OWNER = Depends(_require_perm("manage_billing"))
+_BILLING_READER = Depends(_require_perm("view_audit"))
 
 
 def _unavailable(exc: BillingUnavailableError) -> HTTPException:
@@ -130,7 +166,7 @@ async def get_subscription() -> dict[str, Any] | None:
     return await api.get_subscription(org_id)
 
 
-@router.post("/subscription/change")
+@router.post("/subscription/change", dependencies=[_BILLING_OWNER])
 async def change_subscription(req: ChangePlanRequest) -> dict[str, Any]:
     """Change subscription plan."""
     api = _get_billing_api()
@@ -143,7 +179,7 @@ async def change_subscription(req: ChangePlanRequest) -> dict[str, Any]:
         raise _bad_request(e) from e
 
 
-@router.post("/subscription/cancel")
+@router.post("/subscription/cancel", dependencies=[_BILLING_OWNER])
 async def cancel_subscription(req: CancelRequest) -> dict[str, Any]:
     """Cancel subscription."""
     api = _get_billing_api()
@@ -156,7 +192,7 @@ async def cancel_subscription(req: CancelRequest) -> dict[str, Any]:
         raise _bad_request(e) from e
 
 
-@router.post("/subscription/reactivate")
+@router.post("/subscription/reactivate", dependencies=[_BILLING_OWNER])
 async def reactivate_subscription() -> dict[str, Any]:
     """Reactivate canceled subscription."""
     api = _get_billing_api()
@@ -230,7 +266,7 @@ async def check_usage_limit(metric: str, increment: int = 1) -> dict[str, Any]:
 
 
 # Checkout and portal endpoints
-@router.post("/checkout")
+@router.post("/checkout", dependencies=[_BILLING_OWNER])
 async def create_checkout(req: CheckoutRequest) -> dict[str, Any]:
     """Create a Stripe checkout session."""
     api = _get_billing_api()
@@ -250,7 +286,7 @@ async def create_checkout(req: CheckoutRequest) -> dict[str, Any]:
         raise _bad_request(e) from e
 
 
-@router.post("/portal")
+@router.post("/portal", dependencies=[_BILLING_OWNER])
 async def create_portal(req: PortalRequest) -> dict[str, Any]:
     """Create a Stripe customer portal session."""
     api = _get_billing_api()
@@ -264,7 +300,7 @@ async def create_portal(req: PortalRequest) -> dict[str, Any]:
 
 
 # Invoice and payment method endpoints
-@router.get("/invoices")
+@router.get("/invoices", dependencies=[_BILLING_READER])
 async def get_invoices(limit: int = 10) -> list[dict[str, Any]]:
     """Get invoice history."""
     api = _get_billing_api()
@@ -272,7 +308,7 @@ async def get_invoices(limit: int = 10) -> list[dict[str, Any]]:
     return await api.get_invoices(org_id, limit)
 
 
-@router.get("/payment-methods")
+@router.get("/payment-methods", dependencies=[_BILLING_READER])
 async def get_payment_methods() -> list[dict[str, Any]]:
     """Get payment methods."""
     api = _get_billing_api()
@@ -307,7 +343,7 @@ async def get_upgrade_options() -> list[dict[str, Any]]:
 
 
 # Usage tracking endpoint
-@router.post("/track")
+@router.post("/track", dependencies=[_BILLING_OWNER])
 async def track_usage(req: TrackUsageRequest) -> dict[str, Any]:
     """Track a usage event."""
     api = _get_billing_api()

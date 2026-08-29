@@ -32,10 +32,47 @@ from app.policy_engine import (
     create_criteria_evaluator,
 )
 from app.policy_engine.change_windows import RecurrencePattern
+from app.api.main import require_perm
 
 log = logging.getLogger("omnipotent.api.policy")
 
-router = APIRouter(prefix="/policy", tags=["policy-engine"])
+# Router-wide `view`, plus a stronger action on every route that persists or
+# executes something. Nothing in this file was gated, which cost nothing while
+# the router was unreachable; including it on the app is what turned the gap into
+# a live escalation for any multi-tenant `viewer` seat.
+#
+# `GET /policy/audit` is the sharpest edge and the reason this is not merely a
+# missing gate: the root `GET /audit` is admin-only behind
+# require_perm("view_audit"), and an ungated mirror of the same trail under /v1
+# is a working way *round* a gate the deployment already enforces. It reads the
+# policy engine's own audit log — evaluation ids, the actor named on each request
+# and every approval decision — so it takes the same `view_audit`.
+#
+# Change windows are the deployment's production change-control record, not a
+# view of one: a freeze blocks every deploy in its scope, an emergency override
+# lifts every freeze at once, and deleting a window removes the block outright.
+# Rolling a policy back to an earlier version is the same kind of act. That is
+# configuration of how the fleet may be changed, so those take
+# `manage_integrations` (admin) — the action the root config routes already use
+# for the settings that decide what the fleet can reach. The approval routes take
+# `approve_action` (responder), which is the vocabulary item in
+# app/tenancy/models.py that names this exact workflow; there is no
+# change-window-specific action to name instead.
+#
+# Evaluations stay at the router's `view`: /evaluate, /opa/evaluate,
+# /kyverno/evaluate, /windows/check and /criteria/entry/evaluate all answer
+# "would this change be allowed", which is what a read-only seat exists for, and
+# none of them creates a window, an approval or a policy version. `require_perm`
+# is a no-op in single-tenant mode, so the offline demo is unaffected.
+_MANAGE = [Depends(require_perm("manage_integrations"))]
+_APPROVE = [Depends(require_perm("approve_action"))]
+_AUDIT = [Depends(require_perm("view_audit"))]
+
+router = APIRouter(
+    prefix="/policy",
+    tags=["policy-engine"],
+    dependencies=[Depends(require_perm("view"))],
+)
 
 # Singleton instances
 _policy_engine: PolicyEngine | None = None
@@ -398,7 +435,7 @@ async def list_kyverno_policies(
 
 
 # Change Windows
-@router.post("/windows", response_model=ChangeWindowResponse)
+@router.post("/windows", response_model=ChangeWindowResponse, dependencies=_MANAGE)
 async def create_change_window(
     request: ChangeWindowRequest,
     manager: ChangeWindowManager = Depends(get_window_manager),
@@ -491,17 +528,6 @@ async def get_change_window(
     return window.to_dict()
 
 
-@router.delete("/windows/{window_id}")
-async def delete_change_window(
-    window_id: str,
-    manager: ChangeWindowManager = Depends(get_window_manager),
-) -> dict[str, str]:
-    """Delete a change window."""
-    if manager.delete_window(window_id):
-        return {"status": "deleted", "window_id": window_id}
-    raise HTTPException(status_code=404, detail="Window not found")
-
-
 @router.post("/windows/check", response_model=WindowCheckResponse)
 async def check_change_allowed(
     request: WindowCheckRequest,
@@ -526,7 +552,7 @@ async def check_change_allowed(
     )
 
 
-@router.post("/windows/freeze")
+@router.post("/windows/freeze", dependencies=_MANAGE)
 async def create_change_freeze(
     name: str,
     start_time: str,
@@ -566,7 +592,7 @@ async def create_change_freeze(
     )
 
 
-@router.post("/windows/emergency-override")
+@router.post("/windows/emergency-override", dependencies=_MANAGE)
 async def activate_emergency_override(
     request: EmergencyOverrideRequest,
     manager: ChangeWindowManager = Depends(get_window_manager),
@@ -591,7 +617,7 @@ async def activate_emergency_override(
     }
 
 
-@router.delete("/windows/emergency-override")
+@router.delete("/windows/emergency-override", dependencies=_MANAGE)
 async def deactivate_emergency_override(
     environment: str | None = None,
     service: str | None = None,
@@ -601,6 +627,22 @@ async def deactivate_emergency_override(
     if manager.deactivate_emergency_override(environment, service):
         return {"status": "deactivated"}
     raise HTTPException(status_code=404, detail="No active override found")
+
+
+# Declared after `DELETE /windows/emergency-override`, and it has to stay there.
+# Starlette matches routes in declaration order, so with `/windows/{window_id}`
+# first the literal path never wins: `DELETE /windows/emergency-override` bound
+# window_id="emergency-override" and answered 404 "Window not found" from the
+# wrong handler, which is what a caller trying to lift an override actually got.
+@router.delete("/windows/{window_id}", dependencies=_MANAGE)
+async def delete_change_window(
+    window_id: str,
+    manager: ChangeWindowManager = Depends(get_window_manager),
+) -> dict[str, str]:
+    """Delete a change window."""
+    if manager.delete_window(window_id):
+        return {"status": "deleted", "window_id": window_id}
+    raise HTTPException(status_code=404, detail="Window not found")
 
 
 # Entry/Exit Criteria
@@ -682,7 +724,7 @@ async def list_criteria_templates(
 
 
 # Approvals
-@router.post("/approvals/request")
+@router.post("/approvals/request", dependencies=_APPROVE)
 async def request_approval(
     request: ApprovalRequest,
     engine: PolicyEngine = Depends(get_policy_engine),
@@ -702,7 +744,7 @@ async def request_approval(
     }
 
 
-@router.post("/approvals/{approval_id}/approve")
+@router.post("/approvals/{approval_id}/approve", dependencies=_APPROVE)
 async def approve_request(
     approval_id: str,
     request: ApprovalActionRequest,
@@ -714,7 +756,7 @@ async def approve_request(
     raise HTTPException(status_code=404, detail="Approval request not found")
 
 
-@router.post("/approvals/{approval_id}/reject")
+@router.post("/approvals/{approval_id}/reject", dependencies=_APPROVE)
 async def reject_request(
     approval_id: str,
     rejected_by: str,
@@ -740,7 +782,7 @@ async def get_approval_status(
 
 
 # Audit
-@router.get("/audit")
+@router.get("/audit", dependencies=_AUDIT)
 async def get_audit_log(
     limit: int = Query(100, ge=1, le=1000),
     action: str | None = Query(None),
@@ -769,7 +811,7 @@ async def list_policy_versions(
     }
 
 
-@router.post("/versions/{policy_name}/rollback/{version}")
+@router.post("/versions/{policy_name}/rollback/{version}", dependencies=_MANAGE)
 async def rollback_policy_version(
     policy_name: str,
     version: str,

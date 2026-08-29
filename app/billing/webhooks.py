@@ -124,6 +124,82 @@ class UnknownPlan(ValueError):
         super().__init__(f"unknown plan in Stripe metadata: {plan!r}")
 
 
+def _metadata_value(meta: dict, *keys: str) -> str:
+    """The first non-empty string among `keys` in Stripe metadata."""
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _report_unroutable(etype: str, obj: dict, meta: dict) -> None:
+    """Say what happened to a subscription event that names no tenancy org.
+
+    Two very different deployments arrive here and they used to get the same
+    ERROR. On a single-tenant deployment there is no `orgs` table row to move at
+    all — `subscription_metadata` leaves `org_id` off deliberately, because any
+    value it invented would make `set_plan` match zero rows and turn the
+    receiver's harmless "ignored" into a permanent 404 and an endless Stripe
+    retry — so *every* delivery landed here and logged an error for something
+    that is working as designed. The subscription is still recorded: the billing
+    store leg of the same delivery files it under `organization_id`, and that is
+    the key `FeatureGateService` resolves the deployment's entitlement from.
+
+    On a multi-tenant deployment the same event really is unroutable, and the
+    keys that did arrive say which fix is needed: only `organization_id` means a
+    subscription written before the shared metadata contract, none at all means
+    one created by hand in the Stripe dashboard.
+    """
+    keys = ", ".join(sorted(str(k) for k in meta)) or "none"
+    if not get_settings().copilot_multi_tenant:
+        log.info(
+            "Stripe %s for subscription %s carries no tenancy org id, which is "
+            "expected on a single-tenant deployment: there is no orgs row to "
+            "move, and billing_subscriptions is the record of what was bought. "
+            "Metadata keys were [%s]",
+            etype,
+            obj.get("id") or "?",
+            keys,
+        )
+        return
+    log.error(
+        "Stripe %s for subscription %s carries no tenancy org id, so no plan "
+        "was applied; metadata keys were [%s] and `metadata.org_id` is the "
+        "one this receiver can route on",
+        etype,
+        obj.get("id") or "?",
+        keys,
+    )
+
+
+def _tier_from_price(obj: dict) -> str:
+    """The catalog tier the subscription's current Stripe Price sells, if known.
+
+    Empty when the deployment has no STRIPE_PRICE_IDS entry for the Price, which
+    is the normal state for a deployment that never configured the mapping — the
+    caller falls back to the metadata there rather than refusing the delivery.
+    """
+    from app.billing.stripe_integration import plan_for_price_id, subscription_price_id
+
+    price_id = subscription_price_id(obj)
+    if not price_id:
+        return ""
+    priced = plan_for_price_id(price_id)
+    if priced is None:
+        return ""
+    name = priced[0]
+    if quota_plan_for(name) is None:
+        log.warning(
+            "STRIPE_PRICE_IDS maps price %s to %r, which is not a tier this "
+            "product sells; falling back to the subscription's metadata",
+            price_id,
+            name,
+        )
+        return ""
+    return name
+
+
 def plan_from_stripe_event(event: dict) -> tuple[str, str] | None:
     """Map a Stripe subscription event to (org_id, enforced plan).
 
@@ -131,6 +207,32 @@ def plan_from_stripe_event(event: dict) -> tuple[str, str] | None:
     is what `set_plan` stores and what the quota check reads. Stripe metadata
     carries a *catalog* tier name ("growth"), so it is translated here rather
     than at each call site.
+
+    Both metadata spellings are accepted. This read `org_id`/`plan` only, while
+    the checkout session this product creates wrote `organization_id`/`plan_name`
+    (app/billing/stripe_integration.py): every real upgrade therefore arrived
+    here carrying keys this function did not look at, resolved to None, and was
+    answered `{"status": "ignored"}` with a 200 — so Stripe never retried, no
+    alarm fired, and the customer who had just been charged stayed on the free
+    plan. The checkout session now writes both pairs and this reads both, so the
+    producer and the receiver cannot drift apart again.
+
+    `organization_id` is deliberately *not* accepted as the org id: it is the
+    billing org UUID, `uuid5(ORG_NAMESPACE, tenancy_org_id)`, and that derivation
+    is one-way — handing it to `set_plan` would match zero rows.
+
+    On `created`/`updated` the subscription's own Stripe Price outranks the
+    metadata, the same precedence `_apply_price_change` uses on the billing-store
+    half. A tier change bought in Stripe's own customer portal — which is where
+    `POST /billing/portal` sends customers — reaches this product only as
+    `customer.subscription.updated`, with the item's Price rewritten and the
+    metadata still naming the tier they moved *off*. Reading the metadata alone
+    moved `billing_subscriptions` (which follows the Price) and left `orgs.plan`
+    behind, so an upgraded customer got the features and was still metered on the
+    quota of the tier they had left. The metadata is still the answer when the
+    Price maps to nothing — a deployment that never configured STRIPE_PRICE_IDS
+    has no other source, and guessing from an unmapped Price would be a billing
+    decision made on no evidence.
 
     Returns None when the event is not a subscription change at all, and raises
     `UnknownPlan` when it is one but names a plan that does not exist. Those two
@@ -141,21 +243,42 @@ def plan_from_stripe_event(event: dict) -> tuple[str, str] | None:
     customer was downgraded.
     """
     etype = event.get("type", "")
+    if etype not in (
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    ):
+        return None
     obj = (event.get("data") or {}).get("object") or {}
     meta = obj.get("metadata") or {}
-    org_id = (meta.get("org_id") or "").strip()
+    org_id = _metadata_value(meta, "org_id")
     if not org_id:
+        # A subscription event nothing can be applied to is not "nothing to do",
+        # but on a single-tenant deployment it is also not a fault; the reporting
+        # tells the two apart.
+        _report_unroutable(etype, obj, meta)
         return None
     if etype == "customer.subscription.deleted":
         return org_id, "free"
-    if etype in ("customer.subscription.created", "customer.subscription.updated"):
-        raw = (meta.get("plan") or "").strip().lower()
-        # "free" is not a catalog tier — it is what a cancellation resolves to —
-        # but Stripe metadata may name it directly, so accept it.
-        if raw in PLAN_QUOTAS:
-            return org_id, raw
-        plan = quota_plan_for(raw)
-        if plan is None:
-            raise UnknownPlan(raw)
-        return org_id, plan
-    return None
+    stated = _metadata_value(meta, "plan", "plan_name").lower()
+    priced = _tier_from_price(obj)
+    if priced and stated and priced != stated:
+        log.info(
+            "Stripe %s for subscription %s is on the price for %r while its "
+            "metadata still names %r; applying %r, which is what the customer "
+            "is being charged for",
+            etype,
+            obj.get("id") or "?",
+            priced,
+            stated,
+            priced,
+        )
+    raw = priced or stated
+    # "free" is not a catalog tier — it is what a cancellation resolves to —
+    # but Stripe metadata may name it directly, so accept it.
+    if raw in PLAN_QUOTAS:
+        return org_id, raw
+    plan = quota_plan_for(raw)
+    if plan is None:
+        raise UnknownPlan(raw)
+    return org_id, plan

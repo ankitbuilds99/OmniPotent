@@ -39,6 +39,10 @@ __all__ = [
 _BILLING_STORE: DatabaseBillingStore | None = None
 _STRIPE_SERVICE: StripeBillingService | None = None
 _BILLING_API: BillingAPI | None = None
+# Which Stripe service `_BILLING_API` was built with, so `get_billing_api` can
+# tell "built without one" from "built with the one that exists" without reaching
+# into BillingAPI's internals.
+_BILLING_API_STRIPE: StripeBillingService | None = None
 
 
 def get_billing_store() -> DatabaseBillingStore:
@@ -77,13 +81,30 @@ def get_stripe_service() -> StripeBillingService | None:
 
 
 def get_billing_api() -> BillingAPI:
-    """The one BillingAPI for this process."""
-    global _BILLING_API
-    if _BILLING_API is None:
-        _BILLING_API = BillingAPI(
-            store=get_billing_store(),
-            stripe_service=get_stripe_service(),
-        )
+    """The one BillingAPI for this process, rebuilt if Stripe arrives later.
+
+    `BillingAPI` takes the Stripe service once, at construction, and refuses
+    every Stripe-backed operation with `BillingUnavailableError` while it holds
+    None. This memoised whatever `get_stripe_service()` answered on the very
+    first call, and that call is not always made after the configuration is
+    readable: a health check, a feature-flag lookup or an import-time warm-up
+    that lands before STRIPE_API_KEY is in the environment pinned a Stripe-less
+    BillingAPI for the life of the process, so `POST /webhooks/stripe` reported
+    `billing_store: not_configured` for every real delivery on a deployment that
+    was configured perfectly well — and `billing_subscriptions` stayed empty
+    while customers were charged.
+
+    `get_stripe_service()` keeps retrying until it succeeds, so asking it every
+    time costs one attribute read once it has, and the BillingAPI is rebuilt only
+    on the transition. Rebuilding is safe because it holds no state of its own:
+    the store is the shared singleton and the gate, tracker and reporter it
+    builds are all derived from it.
+    """
+    global _BILLING_API, _BILLING_API_STRIPE
+    service = get_stripe_service()
+    if _BILLING_API is None or (service is not None and service is not _BILLING_API_STRIPE):
+        _BILLING_API = BillingAPI(store=get_billing_store(), stripe_service=service)
+        _BILLING_API_STRIPE = service
     return _BILLING_API
 
 

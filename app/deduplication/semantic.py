@@ -22,11 +22,26 @@ class SemanticConfig:
     """Configuration for semantic similarity."""
 
     similarity_threshold: float = 0.85
+    # `sentence-transformers` lives in the optional `vectors-local` extra and is not
+    # installed in the deployed image, so the fallback below is the live path. Its
+    # scores are token-overlap cosines, a different scale from a transformer cosine,
+    # and they get their own threshold rather than borrowing one calibrated for a
+    # model that is not running. At 0.85 an overlap match means near-identical
+    # wording, which is the only claim this measure can honestly make.
+    lexical_similarity_threshold: float = 0.85
     embedding_model: str = "all-MiniLM-L6-v2"
     cache_ttl_hours: int = 24
     max_candidates: int = 100
     use_entity_extraction: bool = True
     use_learned_equivalences: bool = True
+    # Two alerts from different services describing different failures are two
+    # incidents, however alike their wording. `_find_by_equivalence` has always
+    # enforced this; the text path did not, which is how an OOM on one service was
+    # merged into another service's certificate incident. Despite the name — kept
+    # because it is a stored configuration key — this switch governs the invariant
+    # on every Layer 2 branch, entity matching included, so that turning it off is
+    # one decision rather than three different ones per code path.
+    require_same_service_for_text_match: bool = True
 
 
 @dataclass
@@ -299,13 +314,20 @@ class MetricEquivalenceMapper:
 
 @dataclass
 class CachedEmbedding:
-    """Cached embedding with metadata."""
+    """Cached embedding with metadata.
+
+    `embedding` is empty when no embedding model is loaded: the text similarity
+    path then works from `text` directly instead of from a vector that was never a
+    real embedding. `service` is carried so a candidate can be rejected without a
+    lookup back into the incident store.
+    """
 
     alert_id: UUID
     embedding: list[float]
     text: str
     created_at: datetime = field(default_factory=datetime.utcnow)
     incident_id: UUID | None = None
+    service: str = ""
 
 
 class EmbeddingCache:
@@ -333,15 +355,18 @@ class EmbeddingCache:
         embedding: list[float],
         text: str,
         incident_id: UUID | None = None,
+        service: str = "",
     ) -> None:
-        """Cache an embedding."""
+        """Cache an embedding, or just the text when there is no embedding."""
         self._cache[alert_id] = CachedEmbedding(
             alert_id=alert_id,
             embedding=embedding,
             text=text,
             incident_id=incident_id,
+            service=service,
         )
-        self._text_cache[text] = embedding
+        if embedding:
+            self._text_cache[text] = embedding
 
     def get_all_with_incident(self) -> list[CachedEmbedding]:
         """Get all cached embeddings with incident IDs."""
@@ -351,6 +376,17 @@ class EmbeddingCache:
             for cached in self._cache.values()
             if cached.incident_id and cached.created_at > cutoff
         ]
+
+    def forget_incident(self, incident_id: UUID) -> int:
+        """Drop every cached alert belonging to `incident_id`."""
+        doomed = [
+            aid for aid, cached in self._cache.items() if cached.incident_id == incident_id
+        ]
+        for aid in doomed:
+            cached = self._cache.pop(aid, None)
+            if cached:
+                self._text_cache.pop(cached.text, None)
+        return len(doomed)
 
     def cleanup(self) -> int:
         """Remove expired entries."""
@@ -378,6 +414,8 @@ class EmbeddingCache:
 class SemanticSimilarityEngine:
     """Semantic similarity detection using multiple methods."""
 
+    _TOKEN_RE = re.compile(r"[a-z0-9]+")
+
     def __init__(self, config: SemanticConfig | None = None):
         self.config = config or SemanticConfig()
         self._entity_extractor = EntityExtractor()
@@ -385,22 +423,48 @@ class SemanticSimilarityEngine:
         self._embedding_cache = EmbeddingCache(self.config.cache_ttl_hours)
         self._incident_alerts: dict[UUID, list[RawAlert]] = {}
         self._model: Any = None
+        self._model_load_attempted = False
+        self._model_unavailable_reason: str | None = None
 
     def _load_model(self) -> None:
-        """Lazy load embedding model."""
-        if self._model is not None:
+        """Lazy load embedding model, remembering why it is unavailable.
+
+        The previous version left `_model = None` after a failed import and had no
+        "already tried" flag, so every alert re-ran the import and the only record
+        of the failure was a repeated log line. The reason is now kept so
+        `get_stats()` can name it instead of reporting a bare `model_loaded: false`.
+        """
+        if self._model_load_attempted:
             return
+        self._model_load_attempted = True
 
         try:
             from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(self.config.embedding_model)
             log.info("Loaded embedding model: %s", self.config.embedding_model)
-        except ImportError:
-            log.warning(
-                "sentence-transformers not installed, using fallback similarity"
-            )
+        except Exception as e:
             self._model = None
+            self._model_unavailable_reason = f"{type(e).__name__}: {e}"
+            log.warning(
+                "Embedding model %s unavailable (%s); Layer 2 text matching falls "
+                "back to token-overlap similarity, which detects re-wordings of the "
+                "same alert but not synonyms.",
+                self.config.embedding_model,
+                self._model_unavailable_reason,
+            )
+
+    @property
+    def similarity_backend(self) -> str:
+        """Which measure `find_similar` is actually using."""
+        return "embedding" if self._model is not None else "lexical_overlap"
+
+    def _active_threshold(self) -> float:
+        """Threshold matching the measure in use."""
+        self._load_model()
+        if self._model is not None:
+            return self.config.similarity_threshold
+        return self.config.lexical_similarity_threshold
 
     def register_alert(self, alert: RawAlert, incident_id: UUID) -> None:
         """Register an alert with its incident."""
@@ -410,8 +474,32 @@ class SemanticSimilarityEngine:
 
         text = self._get_alert_text(alert)
         embedding = self._get_embedding(text)
-        if embedding:
-            self._embedding_cache.put(alert.alert_id, embedding, text, incident_id)
+        # The alert is cached even with no embedding: its text and service are what
+        # the fallback comparison needs, and dropping it would leave the text path
+        # with no candidates at all rather than with honest ones.
+        self._embedding_cache.put(
+            alert.alert_id,
+            embedding or [],
+            text,
+            incident_id,
+            service=alert.service,
+        )
+
+    def forget_incident(self, incident_id: UUID) -> int:
+        """Stop offering this incident's alerts as match candidates.
+
+        Layer 2 keeps every registered alert forever, so a resolved incident went
+        on attracting new alerts to itself; `DeduplicationPipeline` had to refuse
+        each stale match at merge time. Refused work is still work, and the index
+        still grew without bound. Called from `resolve_incident`, this removes the
+        candidates instead, so the refusal never has to happen.
+
+        Returns the number of cached alerts dropped — the answer is a measurement,
+        not a promise, so a caller that gets 0 knows nothing was there.
+        """
+        alerts = self._incident_alerts.pop(incident_id, [])
+        self._embedding_cache.forget_incident(incident_id)
+        return len(alerts)
 
     def find_similar(
         self,
@@ -419,16 +507,26 @@ class SemanticSimilarityEngine:
         threshold: float | None = None,
     ) -> SemanticMatch | None:
         """Find semantically similar alerts."""
-        threshold = threshold or self.config.similarity_threshold
+        # Two measures with different scales can both run inside one call — a
+        # candidate cached before the model loaded, or one the model failed to
+        # encode, is compared lexically even when everything else is compared by
+        # embedding. Each measure therefore carries its own threshold. An explicit
+        # `threshold` argument is the caller overriding the decision outright, so it
+        # applies to whichever measure ends up running.
+        if threshold is not None:
+            lexical_threshold = threshold
+        else:
+            threshold = self._active_threshold()
+            lexical_threshold = self.config.lexical_similarity_threshold
 
         if self.config.use_entity_extraction:
             entity_match = self._find_by_entity_matching(alert, threshold)
             if entity_match:
                 return entity_match
 
-        embedding_match = self._find_by_embedding(alert, threshold)
-        if embedding_match:
-            return embedding_match
+        text_match = self._find_by_text_similarity(alert, threshold, lexical_threshold)
+        if text_match:
+            return text_match
 
         if self.config.use_learned_equivalences:
             equiv_match = self._find_by_equivalence(alert, threshold)
@@ -437,50 +535,126 @@ class SemanticSimilarityEngine:
 
         return None
 
-    def _find_by_embedding(
+    def _find_by_text_similarity(
         self,
         alert: RawAlert,
         threshold: float,
+        lexical_threshold: float,
     ) -> SemanticMatch | None:
-        """Find similar alerts using embedding similarity."""
+        """Find similar alerts by comparing alert text.
+
+        This used to compare hash-bucket vectors produced by `_fallback_embedding`.
+        Those vectors were non-negative in every dimension, so the cosine between
+        two entirely unrelated alerts sat around 0.75-0.8 and routinely crossed the
+        0.85 threshold: a search-index OOM was merged into an auth-service
+        certificate incident because their hashes happened to overlap. The measure
+        is now either a real embedding cosine or an explicit token-overlap cosine,
+        both of which are near zero for unrelated text, and a candidate from a
+        different service is never a text match at all.
+
+        Which of the two ran is decided per candidate, not once per call. A model
+        can be loaded and still leave a particular candidate unembedded — it was
+        cached before the model was, or `encode` raised on it — and the earlier
+        version read the backend once up front, so those candidates were scored
+        lexically while the match reported `method="embedding"` and was judged
+        against the embedding threshold. The measure that produced the number now
+        names itself and is held to its own threshold.
+
+        "Best" is likewise decided within a measure and never across two. A single
+        candidate set can hold both kinds, and the two numbers are not on the same
+        scale: a transformer cosine of 0.86 between two re-wordings of one failure
+        says far more than a token-overlap cosine of 0.90 between two alerts that
+        happen to share boilerplate. A shared `best_score` let the lexical number
+        win that comparison and hand back the wrong incident. The embedding is the
+        calibrated measure, so when any candidate produced one it decides the
+        match; the lexical best is the answer only when nothing was embedded.
+        """
         self._load_model()
 
         text = self._get_alert_text(alert)
         embedding = self._get_embedding(text)
 
-        if not embedding:
-            return None
-
         cached_embeddings = self._embedding_cache.get_all_with_incident()
         if not cached_embeddings:
             return None
 
-        best_match: SemanticMatch | None = None
-        best_score = threshold
+        best: dict[str, tuple[float, SemanticMatch]] = {}
 
         for cached in cached_embeddings:
             if cached.alert_id == alert.alert_id:
                 continue
+            if not cached.incident_id:
+                continue
+            if self._different_service(alert.service, cached.service):
+                continue
 
-            score = self._cosine_similarity(embedding, cached.embedding)
-            if score > best_score and cached.incident_id:
-                best_score = score
-                best_match = SemanticMatch(
+            if embedding and cached.embedding:
+                score = self._cosine_similarity(embedding, cached.embedding)
+                method = "embedding"
+                candidate_threshold = threshold
+            else:
+                score = self._lexical_similarity(text, cached.text)
+                method = "lexical_overlap"
+                candidate_threshold = lexical_threshold
+
+            if score <= candidate_threshold:
+                continue
+            incumbent = best.get(method)
+            if incumbent is not None and score <= incumbent[0]:
+                continue
+
+            best[method] = (
+                score,
+                SemanticMatch(
                     alert_id=cached.alert_id,
                     incident_id=cached.incident_id,
                     similarity_score=score,
-                    method="embedding",
+                    method=method,
                     embedding_distance=1 - score,
-                )
+                ),
+            )
 
-        return best_match
+        for method in ("embedding", "lexical_overlap"):
+            if method in best:
+                return best[method][1]
+        return None
+
+    def _different_service(self, service: str, candidate_service: str) -> bool:
+        """Whether the same-service guard should reject this candidate.
+
+        An empty service is an unknown service, not a wildcard. `service` on both
+        `RawAlert` and the API's `ProcessAlertRequest` defaults to the empty string
+        with nothing requiring it to be filled in, so treating "" as "matches
+        anything" handed back the whole invariant: one alert posted with
+        `service: ""` could be text-matched onto any incident in the org, and every
+        such alert could be matched onto each other. Two alerts are the same service
+        only when both name it and both name the same one.
+        """
+        if not self.config.require_same_service_for_text_match:
+            return False
+        if not service or not candidate_service:
+            return True
+        return service != candidate_service
 
     def _find_by_entity_matching(
         self,
         alert: RawAlert,
         threshold: float,
     ) -> SemanticMatch | None:
-        """Find similar alerts using entity extraction."""
+        """Find similar alerts using entity extraction.
+
+        This is the first branch `find_similar` tries, ahead of the text path, and
+        it had no service guard of any kind. It was safe only by arithmetic: the
+        service term carries 0.35 of `_entity_similarity`'s weight, so two alerts
+        from different services top out at 0.65 and cannot reach the 0.85 default
+        threshold. Nothing said so, and nothing held it — lowering the threshold,
+        passing `threshold=0.6` from a caller, or re-weighting the entity scores
+        would have quietly reopened cross-service merging on the branch that runs
+        before the one where the invariant is written down. The same-service rule
+        is now enforced here explicitly, on the alerts' own `service` fields rather
+        than on `entities.service`, which falls back to a token scraped out of the
+        message and is a guess rather than a fact.
+        """
         entities = self._entity_extractor.extract(alert)
 
         if not entities.service and not entities.metric_type:
@@ -489,6 +663,9 @@ class SemanticSimilarityEngine:
         for incident_id, alerts in self._incident_alerts.items():
             for existing_alert in alerts:
                 if existing_alert.alert_id == alert.alert_id:
+                    continue
+
+                if self._different_service(alert.service, existing_alert.service):
                     continue
 
                 existing_entities = self._entity_extractor.extract(existing_alert)
@@ -517,7 +694,17 @@ class SemanticSimilarityEngine:
         alert: RawAlert,
         threshold: float,
     ) -> SemanticMatch | None:
-        """Find similar alerts using metric equivalence."""
+        """Find similar alerts using metric equivalence.
+
+        "Both alerts measure latency" is a weak enough signal on its own that the
+        service has to carry the rest of the claim. The guard here used to compare
+        `entities.service` — which falls back to a token scraped out of the message
+        when the field is empty — against the *other* alert's raw field, and to skip
+        itself entirely when either side came out empty. So an alert posted with
+        `service: ""` and the word "latency" in it merged into whichever incident
+        had last mentioned latency, in any service. Both alerts must now name the
+        same service, on the field rather than on a guess about it.
+        """
         entities = self._entity_extractor.extract(alert)
 
         if not entities.metric_type:
@@ -530,11 +717,7 @@ class SemanticSimilarityEngine:
                 if existing_alert.alert_id == alert.alert_id:
                     continue
 
-                if (
-                    entities.service
-                    and existing_alert.service
-                    and entities.service != existing_alert.service
-                ):
+                if not alert.service or alert.service != existing_alert.service:
                     continue
 
                 existing_entities = self._entity_extractor.extract(existing_alert)
@@ -601,39 +784,63 @@ class SemanticSimilarityEngine:
         return " ".join(p for p in parts if p)
 
     def _get_embedding(self, text: str) -> list[float] | None:
-        """Get embedding for text."""
+        """Get an embedding for text, or None when no model can produce one.
+
+        Returning None is the point: there used to be a `_fallback_embedding` that
+        manufactured a vector out of word hashes and handed it back as though a
+        model had produced it, which made every caller believe an embedding
+        similarity had been measured when none had. Callers now see the absence and
+        use `_lexical_similarity`, which says what it is.
+        """
         cached = self._embedding_cache.get_by_text(text)
         if cached:
             return cached
 
+        self._load_model()
         if self._model is None:
-            return self._fallback_embedding(text)
+            return None
 
         try:
-            embedding = self._model.encode(text).tolist()
-            return embedding
+            return self._model.encode(text).tolist()
         except Exception as e:
-            log.warning("Failed to generate embedding: %s", e)
-            return self._fallback_embedding(text)
+            log.warning(
+                "Embedding model %s failed on an alert (%s); falling back to "
+                "token-overlap similarity for it.",
+                self.config.embedding_model,
+                e,
+            )
+            return None
 
-    def _fallback_embedding(self, text: str) -> list[float]:
-        """Simple fallback embedding using word hashing."""
-        import hashlib
+    def _tokenize(self, text: str) -> dict[str, float]:
+        """Term frequencies for the words of an alert."""
+        counts: dict[str, float] = {}
+        for token in self._TOKEN_RE.findall(text.lower()):
+            counts[token] = counts.get(token, 0.0) + 1.0
+        return counts
 
-        words = text.lower().split()
-        embedding = [0.0] * 128
+    def _lexical_similarity(self, text1: str, text2: str) -> float:
+        """Cosine similarity over the two texts' term frequencies.
 
-        for i, word in enumerate(words):
-            word_hash = int(hashlib.md5(word.encode(), usedforsecurity=False).hexdigest()[:8], 16)
-            for j in range(128):
-                if (word_hash >> (j % 32)) & 1:
-                    embedding[j] += 1.0 / (i + 1)
+        A plain bag-of-words cosine: 1.0 for the same words, 0.0 for texts that
+        share none. Unlike the hash-bucket vectors this replaced, the number has no
+        floor, so "unrelated" reads as near zero rather than as 0.8. It measures
+        wording overlap and nothing more — two ways of saying the same thing in
+        different words score low here, which is the honest answer from a measure
+        that has no notion of meaning.
+        """
+        tf1 = self._tokenize(text1)
+        tf2 = self._tokenize(text2)
+        if not tf1 or not tf2:
+            return 0.0
 
-        norm = sum(x * x for x in embedding) ** 0.5
-        if norm > 0:
-            embedding = [x / norm for x in embedding]
+        shared = set(tf1) & set(tf2)
+        if not shared:
+            return 0.0
 
-        return embedding
+        dot = sum(tf1[t] * tf2[t] for t in shared)
+        norm1 = sum(v * v for v in tf1.values()) ** 0.5
+        norm2 = sum(v * v for v in tf2.values()) ** 0.5
+        return dot / (norm1 * norm2)
 
     def _cosine_similarity(self, v1: list[float], v2: list[float]) -> float:
         """Calculate cosine similarity between two vectors."""
@@ -664,28 +871,42 @@ class SemanticSimilarityEngine:
         emb1 = self._get_embedding(t1)
         emb2 = self._get_embedding(t2)
 
-        embedding_sim = 0.0
+        # `embedding_similarity` stays None when no model measured one. Reporting
+        # 0.0 there would claim the two alerts are semantically unrelated, which is
+        # a measurement nobody took.
         if emb1 and emb2:
-            embedding_sim = self._cosine_similarity(emb1, emb2)
+            text_sim = self._cosine_similarity(emb1, emb2)
+            text_method = "embedding"
+            embedding_sim: float | None = text_sim
+        else:
+            text_sim = self._lexical_similarity(t1, t2)
+            text_method = "lexical_overlap"
+            embedding_sim = None
 
         entity_sim = self._entity_similarity(e1, e2)
+        combined = (text_sim * 0.6) + (entity_sim * 0.4)
+        threshold = self._active_threshold()
+        same_service = not self._different_service(alert1.service, alert2.service)
 
         return {
             "alert1_entities": e1.to_dict(),
             "alert2_entities": e2.to_dict(),
+            "text_similarity": text_sim,
+            "text_similarity_method": text_method,
             "embedding_similarity": embedding_sim,
             "entity_similarity": entity_sim,
-            "combined_score": (embedding_sim * 0.6) + (entity_sim * 0.4),
+            "combined_score": combined,
             "metric_equivalent": self._equivalence_mapper.are_equivalent(
                 e1.metric_type or "", e2.metric_type or ""
             ),
             "recommendation": "MERGE"
-            if (embedding_sim * 0.6 + entity_sim * 0.4) >= self.config.similarity_threshold
+            if combined >= threshold and same_service
             else "SEPARATE",
         }
 
     def get_stats(self) -> dict[str, Any]:
         """Get semantic engine statistics."""
+        self._load_model()
         return {
             "cache_stats": self._embedding_cache.stats(),
             "incidents_tracked": len(self._incident_alerts),
@@ -693,8 +914,17 @@ class SemanticSimilarityEngine:
                 len(alerts) for alerts in self._incident_alerts.values()
             ),
             "model_loaded": self._model is not None,
+            # Which measure Layer 2 is really running, and why it is not the
+            # embedding one when it is not.
+            "similarity_backend": self.similarity_backend,
+            "model_unavailable_reason": self._model_unavailable_reason,
             "config": {
-                "threshold": self.config.similarity_threshold,
+                "threshold": self._active_threshold(),
+                "embedding_threshold": self.config.similarity_threshold,
+                "lexical_threshold": self.config.lexical_similarity_threshold,
                 "model": self.config.embedding_model,
+                "require_same_service_for_text_match": (
+                    self.config.require_same_service_for_text_match
+                ),
             },
         }

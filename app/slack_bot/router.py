@@ -695,8 +695,68 @@ def _short(incident_id) -> str:
     return str(incident_id)[:8]
 
 
+# A word is treated as an incident reference when it is all hex (dashes
+# allowed) and at least as long as the eight-character short id the bot prints.
+# Anything shorter or with a non-hex letter in it is prose — `/incident resolve
+# rolled back the deploy` must still mean "the current incident".
+_INCIDENT_REF = re.compile(r"[0-9a-fA-F]{8}[0-9a-fA-F-]*")
+
+
+def _looks_like_incident_ref(token: str) -> bool:
+    return bool(_INCIDENT_REF.fullmatch(token))
+
+
+async def _incident_by_ref(ref: str):
+    """The incident `ref` names, as `(incident, problem)` — one or the other.
+
+    A reference that resolves to nothing must never fall through to some other
+    incident: `/incident resolve <mistyped-uuid>` used to resolve whichever
+    incident happened to be newest, so the one the responder meant to close
+    stayed open while an unrelated one was closed under them.
+
+    The reference is matched as a full UUID first and then as the leading hex of
+    one, because the only id this bot ever prints into a channel is the
+    eight-character `_short` form — that is what a responder copies back, and
+    feeding it to `UUID()` is a parse error, not a lookup.
+    """
+    from uuid import UUID
+
+    from app.incidents.store import get_incident_store
+
+    store = get_incident_store()
+    token = ref.strip()
+    if not token:
+        return None, "No incident id was given."
+
+    try:
+        incident = await store.get_incident(UUID(token))
+    except (ValueError, AttributeError, TypeError):
+        incident = None
+    if incident is not None:
+        return incident, None
+
+    prefix = token.lower()
+    matches = [
+        i for i in await store.list_incidents(limit=200)
+        if str(i.id).lower().startswith(prefix)
+    ]
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        listed = ", ".join(f"`{_short(i.id)}` {i.title}" for i in matches[:5])
+        return None, (
+            f"`{token}` matches {len(matches)} incidents ({listed}). Pass more "
+            f"of the id so there is only one."
+        )
+    return None, (
+        f"There is no incident `{token}` in this workspace, so nothing was "
+        f"changed. Check the id — the bot prints the first eight characters — "
+        f"or drop it to act on the most recent unresolved incident."
+    )
+
+
 async def _target_incident(args: str):
-    """The incident a subcommand applies to, plus the leftover arguments.
+    """The incident a subcommand applies to, the leftover arguments, and why not.
 
     Slack hands us a channel, not an incident, so the id may be given as the
     first word; without one we take the most recent incident that is not yet
@@ -704,30 +764,34 @@ async def _target_incident(args: str):
     these handlers used to post ":white_check_mark: Incident Resolved" into the
     channel with no incident behind it at all, and a channel that believes an
     incident is closed stops working it.
-    """
-    from uuid import UUID
 
+    The third element is the reason an id that *was* supplied did not resolve.
+    It is set only in that case — the "no id and nothing open" case is the
+    caller's own message — and when it is set the caller must refuse, because
+    the danger being guarded here is acting on a different incident than the one
+    that was named.
+    """
     from app.incidents.models import IncidentStatus
     from app.incidents.store import get_incident_store
 
     store = get_incident_store()
     first, _, rest = args.partition(" ")
-    if first.strip():
-        try:
-            candidate = await store.get_incident(UUID(first.strip()))
-        except (ValueError, AttributeError, TypeError):
-            candidate = None
-        if candidate is not None:
-            return candidate, rest.strip()
+    token = first.strip()
+    if token and _looks_like_incident_ref(token):
+        incident, problem = await _incident_by_ref(token)
+        return incident, rest.strip(), problem
 
     open_incidents = [
         i for i in await store.list_incidents(limit=25)
         if i.status != IncidentStatus.RESOLVED
     ]
-    return (open_incidents[0] if open_incidents else None), args.strip()
+    return (open_incidents[0] if open_incidents else None), args.strip(), None
 
 
-def _no_incident() -> dict:
+def _no_incident(problem: str | None = None) -> dict:
+    """Why the command did nothing: a bad id if one was given, else no incident."""
+    if problem:
+        return _ephemeral(f":grey_question: {problem}")
     return _ephemeral(
         ":grey_question: There is no open incident to act on. Pass an incident "
         "id as the first argument, or declare one with `/incident create "
@@ -760,6 +824,45 @@ def _incident_line(incident, headline: str, user_id: str) -> dict:
             },
         ],
     }
+
+
+async def _escalate_one_level(incident, user_name: str, reason: str = ""):
+    """Raise `incident` one step up the severity ladder; return `(incident, headline)`.
+
+    Shared by `/incident escalate` and the Escalate modal so the two cannot
+    drift: the modal used to render an ":arrow_up: Incident Escalated ... Paging
+    on-call" card without touching the record, so the severity the pager routes
+    on never moved.
+
+    At the top of the ladder there is no step left, and the headline says so
+    instead of claiming a change that did not happen.
+    """
+    from app.incidents.store import get_incident_store
+
+    store = get_incident_store()
+    current = incident.severity.value
+    index = _SEVERITY_ORDER.index(current) if current in _SEVERITY_ORDER else 1
+    if index == 0:
+        await store.add_timeline_note(
+            incident.id,
+            f"Escalation requested by {user_name}" + (f": {reason}" if reason else ""),
+            user=user_name,
+            kind="escalation",
+        )
+        return incident, (
+            ":arrow_up: *Escalation noted* — already at the highest severity, "
+            "so the record is unchanged."
+        )
+
+    raised = _SEVERITY_ORDER[index - 1]
+    updated = await store.update_incident(incident.id, {"severity": raised})
+    await store.add_timeline_note(
+        incident.id,
+        f"Escalated to {raised} by {user_name}" + (f": {reason}" if reason else ""),
+        user=user_name,
+        kind="escalation",
+    )
+    return (updated or incident), f":arrow_up: *Escalated* {current} → {raised}"
 
 
 @router.post("/commands/incident")
@@ -846,9 +949,9 @@ async def slash_incident(request: Request, background_tasks: BackgroundTasks):
         }
 
     if subcommand in {"update", "resolve", "escalate", "severity", "ack", "acknowledge"}:
-        incident, rest = await _target_incident(args)
+        incident, rest, problem = await _target_incident(args)
         if incident is None:
-            return _no_incident()
+            return _no_incident(problem)
 
         try:
             if subcommand == "update":
@@ -900,38 +1003,8 @@ async def slash_incident(request: Request, background_tasks: BackgroundTasks):
                     user_id,
                 )
 
-            # escalate: one step up the severity ladder, and say so when there
-            # is no step left rather than claiming an escalation happened.
-            current = incident.severity.value
-            index = _SEVERITY_ORDER.index(current) if current in _SEVERITY_ORDER else 1
-            if index == 0:
-                await store.add_timeline_note(
-                    incident.id,
-                    f"Escalation requested by {user_name}"
-                    + (f": {rest}" if rest else ""),
-                    user=user_name,
-                    kind="escalation",
-                )
-                return _incident_line(
-                    incident,
-                    ":arrow_up: *Escalation noted* — already at the highest "
-                    "severity, so the record is unchanged.",
-                    user_id,
-                )
-            raised = _SEVERITY_ORDER[index - 1]
-            updated = await store.update_incident(incident.id, {"severity": raised})
-            await store.add_timeline_note(
-                incident.id,
-                f"Escalated to {raised} by {user_name}"
-                + (f": {rest}" if rest else ""),
-                user=user_name,
-                kind="escalation",
-            )
-            return _incident_line(
-                updated or incident,
-                f":arrow_up: *Escalated* {current} → {raised}",
-                user_id,
-            )
+            updated, headline = await _escalate_one_level(incident, user_name, rest)
+            return _incident_line(updated, headline, user_id)
         except Exception as e:  # noqa: BLE001 — reported, not swallowed
             logger.exception("/incident %s failed", subcommand)
             return _ephemeral(f":x: `/incident {subcommand}` failed: {e}")
@@ -1003,6 +1076,64 @@ async def _create_slack_channel(name: str, invite: str = "") -> tuple[str, str]:
         return channel_id, ""
 
 
+async def _open_war_room(incident, user_id: str, title: str = "") -> dict:
+    """Create the war room channel for `incident`, or say why there is none.
+
+    `/warroom create` and the "Create War Room" button share this so that both
+    announce a channel only after Slack has actually made one. The button used
+    to render "*War Room Created* *Channel:* <#...>" from a channel name it made
+    up locally, which sent responders looking for a room that did not exist.
+    """
+    from app.slack_bot.war_room import get_war_room_manager
+
+    manager = get_war_room_manager()
+
+    existing = manager.get_by_incident(str(incident.id))
+    if existing is not None:
+        return _ephemeral(
+            f":information_source: <#{existing.channel_id}> is already the "
+            f"war room for `{_short(incident.id)}`."
+        )
+
+    room_title = title or incident.title
+    name = manager._generate_channel_name(_short(incident.id), room_title)
+    channel_id, error = await _create_slack_channel(name, invite=user_id)
+    if error:
+        return _ephemeral(
+            f":x: Could not create the war room channel: {error}. No channel "
+            f"was created — the incident is still at `{_short(incident.id)}`."
+        )
+
+    war_room = await manager.create_war_room(
+        incident_id=str(incident.id),
+        org_id=str(getattr(incident, "org_id", "")) or "default",
+        title=room_title,
+        severity=incident.severity.value,
+        description=incident.description or "",
+        channel_id=channel_id,
+        channel_name=name,
+    )
+
+    return {
+        "response_type": "in_channel",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f":mega: *War Room Created*\n\n"
+                        f"*Channel:* <#{war_room.channel_id}>\n"
+                        f"*Incident:* {incident.title} "
+                        f"(`{_short(incident.id)}`)\n"
+                        f"*Created by:* <@{user_id}>"
+                    ),
+                },
+            },
+        ],
+    }
+
+
 @router.post("/commands/warroom")
 async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
     """Handle /warroom slash command - create and manage war rooms.
@@ -1027,57 +1158,16 @@ async def slash_warroom(request: Request, background_tasks: BackgroundTasks):
     manager = get_war_room_manager()
 
     if subcommand == "create":
-        incident, rest = await _target_incident(args)
+        incident, rest, problem = await _target_incident(args)
         if incident is None:
+            if problem:
+                return _ephemeral(f":grey_question: {problem}")
             return _ephemeral(
                 ":grey_question: A war room needs an incident. Declare one with "
                 "`/incident create <title>` first, or pass an incident id."
             )
 
-        existing = manager.get_by_incident(str(incident.id))
-        if existing is not None:
-            return _ephemeral(
-                f":information_source: <#{existing.channel_id}> is already the "
-                f"war room for `{_short(incident.id)}`."
-            )
-
-        title = rest or incident.title
-        name = manager._generate_channel_name(_short(incident.id), title)
-        channel_id, error = await _create_slack_channel(name, invite=user_id)
-        if error:
-            return _ephemeral(
-                f":x: Could not create the war room channel: {error}. No channel "
-                f"was created — the incident is still at `{_short(incident.id)}`."
-            )
-
-        war_room = await manager.create_war_room(
-            incident_id=str(incident.id),
-            org_id=str(getattr(incident, "org_id", "")) or "default",
-            title=title,
-            severity=incident.severity.value,
-            description=incident.description or "",
-            channel_id=channel_id,
-            channel_name=name,
-        )
-
-        return {
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f":mega: *War Room Created*\n\n"
-                            f"*Channel:* <#{war_room.channel_id}>\n"
-                            f"*Incident:* {incident.title} "
-                            f"(`{_short(incident.id)}`)\n"
-                            f"*Created by:* <@{user_id}>"
-                        ),
-                    },
-                },
-            ],
-        }
+        return await _open_war_room(incident, user_id, title=rest)
 
     if subcommand == "list":
         active_rooms = manager.get_active_war_rooms()
@@ -1233,7 +1323,12 @@ async def slash_postmortem(request: Request, background_tasks: BackgroundTasks):
     args = parts[1] if len(parts) > 1 else ""
 
     if subcommand in {"generate", "actions"}:
-        incident, _rest = await _target_incident(args)
+        incident, _rest, problem = await _target_incident(args)
+        if problem:
+            # An id was named and it is not an incident here. Writing a
+            # postmortem about a *different* incident under that id is worse
+            # than writing none.
+            return _ephemeral(f":grey_question: {problem}")
         if incident is None:
             from app.incidents.store import get_incident_store
 
@@ -1294,7 +1389,7 @@ async def slash_stakeholder(request: Request):
 
     from datetime import datetime, timezone
 
-    incident, _rest = await _target_incident("")
+    incident, _rest, _problem = await _target_incident("")
     if incident is not None:
         from app.incidents.store import get_incident_store
 
@@ -1432,8 +1527,9 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
     action_type = payload.get("type")
     user = payload.get("user", {})
     user_id = user.get("id", "")
-    channel = payload.get("channel", {})
-    channel_id = channel.get("id", "")
+    # The incident record wants a name, and a button payload carries one; the
+    # Slack id is the fallback so the audit trail is never blank.
+    user_name = str(user.get("username") or user.get("name") or user_id)
     trigger_id = payload.get("trigger_id", "")
     response_url = payload.get("response_url", "")
 
@@ -1443,52 +1539,67 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
             action_id = action.get("action_id", "")
             _ = action.get("value", "")  # Available for action-specific handlers
 
-            # Incident action handlers
+            # Incident action handlers. Acknowledge is the one button that
+            # writes on the click itself, so it goes through the store here
+            # rather than through the confirmation-only action handler.
             if action_id.startswith("ack_") or action_id.startswith("acknowledge_"):
-                incident_id = action_id.split("_", 1)[1]
-                return await _handle_incident_action(
-                    "acknowledge", incident_id, user_id, channel_id, response_url
-                )
+                ref = action_id.split("_", 1)[1]
+                return await _handle_acknowledge_click(ref, user_id, user_name)
 
             elif action_id.startswith("escalate_"):
                 incident_id = action_id.replace("escalate_", "")
+                incident, problem = await _incident_by_ref(incident_id)
+                if incident is None:
+                    return _no_incident(problem)
                 # Open escalation modal
                 from app.slack_bot.interactions import get_incident_action_handler
                 handler = get_incident_action_handler()
                 return {
                     "response_action": "open_modal",
-                    "view": handler.get_escalation_modal(incident_id, trigger_id),
+                    "view": handler.get_escalation_modal(str(incident.id), trigger_id),
                 }
 
             elif action_id.startswith("resolve_"):
                 incident_id = action_id.replace("resolve_", "")
+                incident, problem = await _incident_by_ref(incident_id)
+                if incident is None:
+                    return _no_incident(problem)
                 from app.slack_bot.interactions import get_incident_action_handler
                 handler = get_incident_action_handler()
                 return {
                     "response_action": "open_modal",
-                    "view": handler.get_resolution_modal(incident_id, trigger_id),
+                    "view": handler.get_resolution_modal(str(incident.id), trigger_id),
                 }
 
             elif action_id.startswith("snooze_"):
                 incident_id = action_id.replace("snooze_", "")
+                incident, problem = await _incident_by_ref(incident_id)
+                if incident is None:
+                    return _no_incident(problem)
                 from app.slack_bot.interactions import get_incident_action_handler
                 handler = get_incident_action_handler()
                 return {
                     "response_action": "open_modal",
-                    "view": handler.get_snooze_options_modal(incident_id, trigger_id),
+                    "view": handler.get_snooze_options_modal(
+                        str(incident.id), trigger_id
+                    ),
                 }
 
             elif action_id.startswith("warroom_") or action_id.startswith("create_war_room_"):
                 incident_id = action_id.split("_")[-1]
-                return await _handle_incident_action(
-                    "create_war_room", incident_id, user_id, channel_id, response_url
-                )
+                incident, problem = await _incident_by_ref(incident_id)
+                if incident is None:
+                    return _no_incident(problem)
+                return await _open_war_room(incident, user_id)
 
             elif action_id.startswith("update_") or action_id.startswith("post_update_"):
                 incident_id = action_id.split("_")[-1]
+                incident, problem = await _incident_by_ref(incident_id)
+                if incident is None:
+                    return _no_incident(problem)
                 return {
                     "response_action": "open_modal",
-                    "view": _get_status_update_modal(incident_id, trigger_id),
+                    "view": _get_status_update_modal(str(incident.id), trigger_id),
                 }
 
             elif action_id.startswith("investigate_"):
@@ -1593,74 +1704,131 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
             team = values.get("escalation_team", {}).get("team_select", {}).get("selected_option", {}).get("value", "on-call")
             reason = values.get("escalation_reason", {}).get("reason_input", {}).get("value", "")
 
-            from app.slack_bot.interactions import get_incident_action_handler
-            handler = get_incident_action_handler()
-            result = await handler.handle_action(
-                action_id=f"escalate_{incident_id}",
-                incident_id=incident_id,
-                user_id=user_id,
-                channel_id=channel_id,
-                action_type="escalate",
-                action_value=None,
+            incident, problem = await _incident_by_ref(incident_id)
+            if incident is None:
+                return _modal_error("escalation_reason", problem)
+
+            note = f"escalated from Slack to {level} ({team})"
+            if reason:
+                note += f" — {reason}"
+            updated, headline = await _escalate_one_level(incident, user_name, note)
+            # The tier and team the modal offers have no pager behind them in
+            # this build — nothing here calls the escalation policy — so they
+            # are recorded on the timeline and the channel is told that is all
+            # that happened, rather than being shown "Paging on-call team...".
+            headline += (
+                f"\n\n_{level} ({team}) is recorded on the timeline. This button "
+                f"does not page a tier; the on-call escalation policy does._"
             )
-            result.details.update({"level": level, "team": team, "reason": reason})
-
-            if response_url:
-                background_tasks.add_task(_send_response, response_url, result.blocks)
-
+            await _post_incident_result(
+                background_tasks, response_url, updated, headline, user_id
+            )
             return {"response_action": "clear"}
 
         elif callback_id.startswith("resolve_submit_"):
             incident_id = callback_id.replace("resolve_submit_", "")
             resolution_type = values.get("resolution_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "fixed")
-            _ = values.get("resolution_summary", {}).get("summary_input", {}).get("value", "")
+            summary = values.get("resolution_summary", {}).get("summary_input", {}).get("value", "") or ""
+            follow_up = values.get("follow_up", {}).get("followup_input", {}).get("value", "") or ""
 
-            from app.slack_bot.interactions import get_incident_action_handler
-            handler = get_incident_action_handler()
-            await handler.handle_action(
-                action_id=f"resolve_{incident_id}",
-                incident_id=incident_id,
-                user_id=user_id,
-                channel_id=channel_id,
-                action_type="resolve",
-                action_value=resolution_type,
+            incident, problem = await _incident_by_ref(incident_id)
+            if incident is None:
+                return _modal_error("resolution_summary", problem)
+
+            from app.incidents.store import get_incident_store
+
+            store = get_incident_store()
+            notes = resolution_type.replace("_", " ")
+            if summary.strip():
+                notes += f" — {summary.strip()}"
+            updated = await store.resolve_incident(incident.id, user_name, notes=notes)
+            if updated is None:
+                return _modal_error(
+                    "resolution_summary",
+                    f"Incident {_short(incident.id)} could not be resolved — it "
+                    f"is no longer in this workspace. Nothing was changed.",
+                )
+            if follow_up.strip():
+                await store.add_timeline_note(
+                    incident.id,
+                    f"Follow-up: {follow_up.strip()}",
+                    user=user_name,
+                    kind="action_item",
+                )
+
+            headline = ":white_check_mark: *Incident Resolved*"
+            if summary.strip():
+                headline += f"\n\n{summary.strip()}"
+            await _post_incident_result(
+                background_tasks, response_url, updated, headline, user_id
             )
-
             return {"response_action": "clear"}
 
         elif callback_id.startswith("snooze_submit_"):
             incident_id = callback_id.replace("snooze_submit_", "")
             snooze_duration = values.get("snooze_duration", {}).get("duration_select", {}).get("selected_option", {}).get("value", "30")
 
-            from app.slack_bot.interactions import get_incident_action_handler
-            handler = get_incident_action_handler()
-            await handler.handle_action(
-                action_id=f"snooze_{incident_id}",
-                incident_id=incident_id,
-                user_id=user_id,
-                channel_id=channel_id,
-                action_type="snooze",
-                action_value=snooze_duration,
-            )
+            incident, problem = await _incident_by_ref(incident_id)
+            if incident is None:
+                return _modal_error("snooze_duration", problem)
 
+            from app.incidents.store import get_incident_store
+
+            # Snoozing was an entry in a dictionary inside the Slack process and
+            # nothing anywhere read it, so "Incident Snoozed — resumes at 14:05"
+            # meant the pager kept firing the whole time. The request goes on the
+            # timeline, which is real, and the reply says plainly that the
+            # notifications do not stop.
+            updated = await get_incident_store().add_timeline_note(
+                incident.id,
+                f"Snooze requested by {user_name} for {snooze_duration} minutes",
+                user=user_name,
+                kind="snooze_requested",
+            )
+            headline = (
+                f":zzz: *Snooze recorded* — {snooze_duration} minutes\n\n"
+                f"_Nothing in this build suppresses notifications, so paging "
+                f"continues. Silence it in the on-call policy if it has to stop._"
+            )
+            await _post_incident_result(
+                background_tasks, response_url, updated or incident, headline, user_id
+            )
             return {"response_action": "clear"}
 
         elif callback_id.startswith("status_update_"):
             incident_id = callback_id.replace("status_update_", "")
-            _ = values.get("update_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "update")
-            status_update_text = values.get("update_text", {}).get("text_input", {}).get("value", "")
+            update_type = values.get("update_type", {}).get("type_select", {}).get("selected_option", {}).get("value", "update")
+            status_update_text = values.get("update_text", {}).get("text_input", {}).get("value", "") or ""
 
-            from app.slack_bot.interactions import get_incident_action_handler
-            handler = get_incident_action_handler()
-            await handler.handle_action(
-                action_id=f"update_{incident_id}",
-                incident_id=incident_id,
-                user_id=user_id,
-                channel_id=channel_id,
-                action_type="post_update",
-                action_value=status_update_text,
+            if not status_update_text.strip():
+                return _modal_error("update_text", "An update needs some text.")
+
+            incident, problem = await _incident_by_ref(incident_id)
+            if incident is None:
+                return _modal_error("update_text", problem)
+
+            from app.incidents.store import get_incident_store
+
+            updated = await get_incident_store().add_timeline_note(
+                incident.id,
+                status_update_text.strip(),
+                user=user_name,
+                kind=update_type or "status_update",
             )
-
+            if updated is None:
+                return _modal_error(
+                    "update_text",
+                    f"Incident {_short(incident.id)} is no longer in this "
+                    f"workspace, so the update was not recorded.",
+                )
+            await _post_incident_result(
+                background_tasks,
+                response_url,
+                updated,
+                f":speech_balloon: *Status update recorded*\n\n"
+                f"{status_update_text.strip()}",
+                user_id,
+            )
             return {"response_action": "clear"}
 
     elif action_type == "shortcut":
@@ -1681,28 +1849,164 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
     return {"ok": True}
 
 
-async def _handle_incident_action(
-    action_type: str,
-    incident_id: str,
-    user_id: str,
-    channel_id: str,
+def _modal_error(block_id: str, problem: str | None) -> dict:
+    """Refuse a modal submission inside the modal, saying why.
+
+    Slack keeps the dialog open and shows the text under `block_id`, which is
+    the only place a submission can report a failure — the alternative used here
+    before was to return `{"response_action": "clear"}` regardless, so a
+    submission that changed nothing looked exactly like one that worked.
+    """
+    return {
+        "response_action": "errors",
+        "errors": {
+            block_id: problem or "There is no incident to act on.",
+        },
+    }
+
+
+async def _post_incident_result(
+    background_tasks: BackgroundTasks,
     response_url: str,
-) -> dict:
-    """Handle an incident action."""
-    from app.slack_bot.interactions import get_incident_action_handler
+    incident,
+    headline: str,
+    user_id: str,
+) -> None:
+    """Put what was actually recorded back into the channel, if Slack gave us a way.
 
-    handler = get_incident_action_handler()
-    result = await handler.handle_action(
-        action_id=f"{action_type}_{incident_id}",
-        incident_id=incident_id,
-        user_id=user_id,
-        channel_id=channel_id,
-        action_type=action_type,
-    )
+    A modal submission has nowhere to render a message, so the confirmation goes
+    through the response_url. Without one there is nothing to post to — the
+    write has still happened, and it is on the incident timeline either way.
+    """
+    if not response_url:
+        logger.info(
+            "No response_url on the submission for incident %s; the change is "
+            "recorded but the channel will not see a confirmation",
+            getattr(incident, "id", "?"),
+        )
+        return
+    blocks = _incident_line(incident, headline, user_id)["blocks"]
+    background_tasks.add_task(_send_response, response_url, blocks)
 
-    if result.blocks:
-        return {"blocks": result.blocks}
-    return {"text": result.message}
+
+async def _handle_acknowledge_click(ref: str, user_id: str, user_name: str) -> dict:
+    """Acknowledge whatever the clicked button refers to, and say what changed.
+
+    Every one of these buttons used to end in a confirmation card built from the
+    action id alone — the incident was never looked up and nothing was ever
+    written, so the channel read ":white_check_mark: Incident Acknowledged"
+    while the incident stayed untriaged and the escalation kept paging.
+
+    Three different producers mint an `ack_*` action id, and they are not all
+    incidents: `ack_alert_<id>` comes from the on-call escalation page
+    (app/oncall/escalation_service.py) and `ack_handoff_<user>` from the shift
+    handoff card (app/slack_bot/blocks.py). Each is answered for what it is
+    rather than being run through the incident path, which is what turned a
+    handoff acknowledgement into "Incident Acknowledged" for an incident named
+    `handoff_U9`.
+    """
+    if ref.startswith("alert_"):
+        return await _acknowledge_oncall_alert(ref[len("alert_"):], user_id)
+
+    if ref.startswith("handoff_"):
+        # Shift handoffs are rendered from a live summary and stored nowhere, so
+        # there is no record to mark acknowledged. Saying so is better than a
+        # green check for a write that cannot happen.
+        return _ephemeral(
+            f":wave: Thanks — <@{user_id}> has seen the handoff. Nothing in this "
+            f"build stores handoffs, so this acknowledgement is not recorded "
+            f"anywhere; note it on the incident with `/incident update` if it "
+            f"needs to be on the record."
+        )
+
+    incident, problem = await _incident_by_ref(ref)
+    if incident is None:
+        return _no_incident(problem)
+
+    from app.incidents.store import get_incident_store
+
+    updated = await get_incident_store().acknowledge_incident(incident.id, user_name)
+    if updated is None:
+        return _ephemeral(
+            f":x: Incident `{_short(incident.id)}` could not be acknowledged — it "
+            f"is no longer in this workspace. Nothing was changed."
+        )
+    return _incident_line(updated, ":eyes: *Acknowledged*", user_id)
+
+
+async def _acknowledge_oncall_alert(alert_ref: str, user_id: str) -> dict:
+    """Acknowledge the on-call alert a paging message's button refers to.
+
+    The escalation page carries `ack_alert_<uuid>` and nothing handled that
+    prefix, so the click fell into the incident branch and answered with a
+    fabricated "Incident Acknowledged" while `EscalationService.acknowledge_alert`
+    — the only code that stops the escalation — never ran.
+
+    `acknowledged_by` is a foreign key into `members` and a Slack user id is not
+    one, so the attribution is left NULL and the clicker is named in the reply
+    instead. Stopping the page matters more than recording who stopped it.
+    """
+    from uuid import UUID
+
+    try:
+        alert_id = UUID(alert_ref.strip())
+    except (ValueError, AttributeError, TypeError):
+        return _ephemeral(
+            f":grey_question: `{alert_ref}` is not an alert id, so no alert was "
+            f"acknowledged."
+        )
+
+    from sqlalchemy import select
+
+    from app.database.engine import get_session
+    from app.database.orgs import org_uuid
+    from app.oncall.escalation_service import EscalationService
+    from app.oncall.models import OncallAlert
+
+    async with get_session() as session:
+        # Scoped to the org on this request: the service looks alerts up by id
+        # alone, and an id from another tenant must not be actionable here.
+        row = (
+            await session.execute(
+                select(OncallAlert).where(
+                    OncallAlert.id == alert_id, OncallAlert.org_id == org_uuid()
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return _ephemeral(
+                f":grey_question: There is no alert `{str(alert_id)[:8]}` in this "
+                f"workspace, so nothing was acknowledged."
+            )
+
+        try:
+            alert = await EscalationService(session).acknowledge_alert(alert_id, None)
+        except ValueError as exc:  # already acknowledged, already resolved
+            return _ephemeral(f":information_source: {exc}.")
+        title, status = alert.title, alert.status
+
+    return {
+        "response_type": "in_channel",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f":eyes: *Alert acknowledged*\n\n"
+                        f"*{title}* (`{str(alert_id)[:8]}`) • Status: {status}\n"
+                        f"Escalation for this alert stops here."
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"Acknowledged by <@{user_id}>"},
+                ],
+            },
+        ],
+    }
 
 
 async def _send_response(response_url: str, blocks: list[dict]) -> None:

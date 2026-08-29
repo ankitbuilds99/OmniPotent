@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
+
+from fastapi import HTTPException
 
 from app.knowledge_graph import graph_store
 
@@ -370,22 +373,50 @@ def _walk_services(
     return distances
 
 
+class KnowledgeGraphUnavailable(HTTPException):
+    """A Neo4j server was configured and cannot be used, so the graph refuses.
+
+    This is an `HTTPException` with status 503 so that the refusal reaches the
+    caller as a service-unavailable answer carrying the real reason, whether the
+    request came through the REST router, the GraphQL schema or the sync engine.
+    The alternative — the behaviour this class replaces — was to answer 200 from
+    the relational store, which reports somebody else's graph as if it were the
+    configured one.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(status_code=503, detail=reason)
+
+
 class Neo4jKnowledgeGraph:
     """Knowledge graph for infrastructure, over Neo4j or the relational store.
 
     Two backends, chosen by whether a Neo4j URI is configured:
 
     * `uri` set — Cypher against that server, and if it cannot be reached
-      `connect()` records `connect_error` and every operation refuses. It used
-      to swallow the failure and write to a process-local dict instead, which is
-      the worst possible outcome: an operator who configured a production Neo4j
-      got HTTP 200s, an empty blast radius and no indication that any of it was
-      fiction.
+      `connect()` records `connect_error` and every operation refuses by raising
+      `KnowledgeGraphUnavailable` (HTTP 503). It used to swallow the failure and
+      read and write the relational store instead, which is the worst possible
+      outcome: an operator who configured a production Neo4j got HTTP 200s, an
+      empty blast radius that reads as "nothing depends on this service" and no
+      indication anywhere that any of it was fiction, while writes forked the
+      graph into two disagreeing copies.
     * `uri` empty (the default) — the `graph_nodes` / `graph_edges` tables via
       `app.knowledge_graph.graph_store`, scoped to the requesting org. Durable
       across restarts and shared between workers; the traversals below are
       implemented directly instead of delegating to Cypher.
+
+    The relational store is therefore a *configuration*, never a fallback: which
+    backend answers is decided by `uri` alone, so no answer can come from a
+    different graph than the one the operator asked for.
     """
+
+    #: How long to wait before a request retries a Neo4j that failed to connect.
+    #: Without a retry the first failure would latch for the life of the process
+    #: (`_OrgGraph.ready()` calls `connect()` exactly once), so a server that
+    #: came back would stay "unavailable" until a restart. Without the interval
+    #: every request during an outage would pay a fresh connection timeout.
+    RECONNECT_INTERVAL_SECONDS = 30.0
 
     def __init__(
         self,
@@ -401,9 +432,13 @@ class Neo4jKnowledgeGraph:
         self._driver: Any = None
         self._connected = False
         # Non-empty only when a Neo4j server was configured and is unusable.
-        # The router turns it into a 503 rather than serving a half-graph.
+        # `_session()` raises it as a 503 rather than serving a half-graph.
         self.connect_error = ""
         self._subscriptions: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
+        # Serialises reconnection attempts so a burst of requests arriving
+        # during an outage produces one connection attempt, not one per request.
+        self._connect_lock = asyncio.Lock()
+        self._last_connect_attempt: float | None = None
 
     @property
     def connected(self) -> bool:
@@ -419,8 +454,13 @@ class Neo4jKnowledgeGraph:
             log.info("No COPILOT_NEO4J_URI set; knowledge graph uses the database")
             return False
 
+        self._last_connect_attempt = time.monotonic()
+
         try:
             from neo4j import AsyncGraphDatabase
+
+            # A retry after an outage must not leak the driver it is replacing.
+            await self._discard_driver()
 
             self._driver = AsyncGraphDatabase.driver(
                 self.uri,
@@ -435,6 +475,7 @@ class Neo4jKnowledgeGraph:
 
         except ImportError:
             self._connected = False
+            await self._discard_driver()
             self.connect_error = (
                 f"COPILOT_NEO4J_URI is set to {self.uri} but the 'neo4j' driver is not "
                 "installed. Install the 'knowledge-graph' extra, or unset "
@@ -445,6 +486,7 @@ class Neo4jKnowledgeGraph:
 
         except Exception as e:
             self._connected = False
+            await self._discard_driver()
             self.connect_error = (
                 f"Cannot reach the Neo4j server at {self.uri}: {e}. Fix the server or "
                 "unset COPILOT_NEO4J_URI to use the database-backed graph."
@@ -452,11 +494,51 @@ class Neo4jKnowledgeGraph:
             log.error("%s", self.connect_error)
             return False
 
+    async def _discard_driver(self) -> None:
+        """Drop the current driver, ignoring a close that fails on a dead server."""
+        driver, self._driver = self._driver, None
+        if driver is None:
+            return
+        try:
+            await driver.close()
+        except Exception as e:
+            log.debug("Closing the Neo4j driver: %s", e)
+
+    async def _ensure_connected(self) -> None:
+        """Retry a configured Neo4j that is not currently connected.
+
+        `_OrgGraph.ready()` calls `connect()` once per org and latches, so
+        without this a Neo4j that was down at first contact — or a password that
+        was rotated and then fixed — would stay unusable until the process
+        restarted. Attempts are spaced by `RECONNECT_INTERVAL_SECONDS` and
+        serialised, so an outage costs one connection timeout per interval
+        rather than one per request.
+        """
+        if not self.uri or (self._connected and self._driver):
+            return
+
+        last = self._last_connect_attempt
+        if last is not None and time.monotonic() - last < self.RECONNECT_INTERVAL_SECONDS:
+            return
+
+        async with self._connect_lock:
+            # Another request may have reconnected, or just tried and failed,
+            # while this one waited for the lock.
+            if self._connected and self._driver:
+                return
+            last = self._last_connect_attempt
+            if last is not None and time.monotonic() - last < self.RECONNECT_INTERVAL_SECONDS:
+                return
+            await self.connect()
+
     async def close(self) -> None:
         """Close the connection."""
         if self._driver:
-            await self._driver.close()
+            await self._discard_driver()
             self._connected = False
+            # A closed client that is asked for a session again should try to
+            # reconnect rather than serve the interval out as "unavailable".
+            self._last_connect_attempt = None
 
     async def _ensure_indexes(self) -> None:
         """Create indexes for efficient queries."""
@@ -483,10 +565,26 @@ class Neo4jKnowledgeGraph:
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[Any]:
-        """Get a database session."""
+        """A Cypher session, or None when the relational store is the backend.
+
+        A `None` session means "no Neo4j is configured", and only that. It used
+        also to mean "a Neo4j is configured but unreachable", which made the two
+        indistinguishable to every caller below: reads answered out of the
+        relational store — an empty blast radius presented as a measured zero —
+        and writes landed there too, forking the graph. A configured server that
+        cannot be reached now raises instead, carrying the reason `connect()`
+        recorded.
+        """
+        await self._ensure_connected()
+
         if self._connected and self._driver:
             async with self._driver.session(database=self.database) as session:
                 yield session
+        elif self.uri:
+            raise KnowledgeGraphUnavailable(
+                self.connect_error
+                or f"The knowledge graph is not connected to the Neo4j server at {self.uri}."
+            )
         else:
             yield None
 

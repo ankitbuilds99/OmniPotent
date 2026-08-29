@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -85,19 +86,275 @@ _FALLBACK_TRACES: list[dict[str, Any]] = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# Live mode — normalising a Jaeger payload into the fixture span shape
+#
+# Everything downstream of `get_trace` (the dependency graph, blast radius,
+# incident correlation, critical-path/fault localization) reasons over spans
+# that carry `service` and `parent`. Live mode used to map a Jaeger span to only
+# span_id/operation/duration_ms, so every one of those tools raised
+# KeyError('service') the moment an operator pointed TRACES_API_URL at a real
+# Jaeger — the four headline traces capabilities worked in demo mode only. The
+# normalisers below reconstruct the full fixture shape from the wire format:
+# service comes from the trace-level `processes` map (or an inlined `process`),
+# parentage from the CHILD_OF reference, and status/error from tags and logs,
+# because Jaeger has no first-class span status field.
+# --------------------------------------------------------------------------- #
+UNKNOWN_SERVICE = "unknown-service"
+
+
+def _tags_of(span: dict) -> dict[str, Any]:
+    return {t.get("key"): t.get("value") for t in (span.get("tags") or []) if t.get("key")}
+
+
+def _span_service(span: dict, processes: dict) -> str:
+    """Jaeger stores the emitting service once per trace under `processes` and
+    references it from each span via `processID`; some exporters inline it as
+    `process` instead. Return "" when neither is present rather than inventing a
+    name — an unattributed span must stay visibly unattributed."""
+    inline = span.get("process")
+    if isinstance(inline, dict) and inline.get("serviceName"):
+        return str(inline["serviceName"])
+    entry = (processes or {}).get(span.get("processID")) or {}
+    if isinstance(entry, dict) and entry.get("serviceName"):
+        return str(entry["serviceName"])
+    return ""
+
+
+def _span_parent(span: dict) -> str | None:
+    """Parentage lives in `references`, not in a parent field. Prefer CHILD_OF
+    (the true call edge); fall back to any reference so a FOLLOWS_FROM tree still
+    yields a graph instead of a flat list of orphans."""
+    refs = [r for r in (span.get("references") or []) if isinstance(r, dict) and r.get("spanID")]
+    for ref in refs:
+        if ref.get("refType") == "CHILD_OF":
+            return str(ref["spanID"])
+    return str(refs[0]["spanID"]) if refs else None
+
+
+def _recorded_failure(span: dict, tags: dict[str, Any]) -> str:
+    """Return the human-readable reason a span recorded a failure, or "".
+
+    The text may live in an OpenTracing `error.*` tag, an OpenTelemetry
+    `exception.*` tag, `otel.status_description`, or — most often for exceptions —
+    in a span log whose `event` field is `error`/`exception`."""
+    for key in ("error.message", "error.object", "exception.message", "exception.type",
+                "otel.status_description"):
+        value = tags.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for log in span.get("logs") or []:
+        if not isinstance(log, dict):
+            continue
+        fields = {f.get("key"): f.get("value") for f in (log.get("fields") or [])
+                  if isinstance(f, dict) and f.get("key")}
+        value = fields.get("error.object") or fields.get("exception.message") or fields.get("message")
+        if fields.get("event") in {"error", "exception"} and isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _span_status(span: dict) -> tuple[str, str]:
+    """Decide ok/error for a Jaeger span and recover the human-readable reason.
+
+    Jaeger has no first-class status field, so the signals have to be ranked. An
+    explicit verdict from the instrumentation wins: the OpenTelemetry
+    `otel.status_code` or the classic OpenTracing `error` tag. Only when the span
+    states no status at all do we fall back to circumstantial evidence — a 5xx
+    `http.status_code`, or a recorded error/exception — because without that
+    fallback fault localization reports "no error spans" on a trace that plainly
+    failed.
+
+    The ranking matters in both directions. This used to force error whenever an
+    `exception.*` tag or an `event: exception` log was present, which contradicts
+    OpenTelemetry: record_exception() and set_status() are deliberately separate,
+    so a span that caught an exception, retried and succeeded sets status OK while
+    still carrying the exception record. Such a span was reported as an error span
+    and, being the deepest one, became the fault span — naming a recovered call as
+    the cause of the incident. A span that says OK is now reported as ok, and its
+    recorded exception is not surfaced as the span's error."""
+    tags = _tags_of(span)
+    # Some exporters emit the proto enum name (STATUS_CODE_ERROR) instead of ERROR.
+    otel = str(tags.get("otel.status_code", "")).strip().upper()
+    otel = otel[len("STATUS_CODE_"):] if otel.startswith("STATUS_CODE_") else otel
+    error_tag = str(tags.get("error", "")).strip().lower() in {"true", "1"}
+    recorded = _recorded_failure(span, tags)
+
+    if otel == "ERROR" or error_tag:
+        failed = True
+    elif otel == "OK":
+        failed = False
+    else:
+        failed = _as_int(tags.get("http.status_code"), 0) >= 500 or bool(recorded)
+    if not failed:
+        return "ok", ""
+    return "error", recorded
+
+
+def _iso_utc(micros: Any) -> str:
+    """Jaeger timestamps are microseconds since the epoch. Return "" for a missing
+    one so a trace with no reported start is not silently dated 1970."""
+    value = _as_int(micros, 0)
+    if value <= 0:
+        return ""
+    return datetime.fromtimestamp(value / 1_000_000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def trace_from_jaeger(payload: dict, trace_id: str = "") -> dict[str, Any]:
+    """Convert one Jaeger trace document into the same shape the offline fixtures
+    use, so live and demo mode feed the pure analysis helpers identical spans.
+
+    A payload that is not an object at all is treated as a trace with no spans:
+    callers report that as an unreadable document, which is a better answer than
+    an AttributeError from deep inside the normaliser."""
+    if not isinstance(payload, dict):
+        payload = {}
+    processes = payload.get("processes") or {}
+    raw_spans = [sp for sp in (payload.get("spans") or []) if isinstance(sp, dict)]
+    spans: list[dict[str, Any]] = []
+    for raw in raw_spans:
+        status, error = _span_status(raw)
+        span: dict[str, Any] = {
+            "span_id": raw.get("spanID"),
+            "service": _span_service(raw, processes),
+            "operation": raw.get("operationName"),
+            "duration_ms": round(_as_int(raw.get("duration"), 0) / 1000),
+            "status": status,
+            "parent": _span_parent(raw),
+            "start": _iso_utc(raw.get("startTime")),
+        }
+        if error:
+            span["error"] = error
+        spans.append(span)
+
+    # The root is the span nobody in this trace parents; Jaeger does not guarantee
+    # it is first in the list, so pick it explicitly (earliest start wins on ties).
+    known = {sp["span_id"] for sp in spans}
+    roots = [sp for sp in spans if not sp.get("parent") or sp["parent"] not in known]
+    root = min(roots or spans, key=lambda sp: sp.get("start") or "\uffff") if spans else {}
+    return {
+        "trace_id": payload.get("traceID") or trace_id,
+        "root_service": root.get("service", ""),
+        "operation": root.get("operation"),
+        "duration_ms": root.get("duration_ms", 0),
+        "status": "error" if any(sp["status"] == "error" for sp in spans) else "ok",
+        "start": root.get("start", ""),
+        "span_count": len(spans),
+        "spans": spans,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Live mode — talking to jaeger-query
+# --------------------------------------------------------------------------- #
+SUMMARY_KEYS = ("trace_id", "root_service", "operation", "duration_ms", "status", "start", "span_count")
+
+
+def _jaeger_get(path: str, params: dict | None = None):
+    import httpx
+
+    return httpx.get(f"{TRACES_API_URL}{path}", params=params, timeout=20)
+
+
+def _payload_data(resp) -> list:
+    """The `data` array of a jaeger-query response, always as a list.
+
+    jaeger-query answers errors with `"data": null` and a populated `errors`
+    array, so `.get("data", [])` still hands back a None that nothing can iterate.
+    A body that is not JSON, or not an object, is treated the same way: no data."""
+    try:
+        body = resp.json()
+    except Exception:
+        return []
+    data = body.get("data") if isinstance(body, dict) else None
+    return data if isinstance(data, list) else []
+
+
+def _jaeger_reason(resp) -> str:
+    """jaeger-query explains refusals in an `errors: [{code, msg}]` array. Quote it
+    verbatim so the operator sees the backend's own reason rather than ours."""
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    errors = body.get("errors") if isinstance(body, dict) else None
+    return "; ".join(
+        str(e["msg"]) for e in (errors or []) if isinstance(e, dict) and e.get("msg")
+    )
+
+
+def _jaeger_services() -> list[str]:
+    """Every service jaeger-query knows about, sorted so a fan-out is deterministic."""
+    resp = _jaeger_get("/api/services")
+    resp.raise_for_status()
+    return sorted({s.strip() for s in _payload_data(resp) if isinstance(s, str) and s.strip()})
+
+
+def _live_traces(service: str | None, error_only: bool, min_dur: int, limit: int) -> list[dict]:
+    """Fetch traces from jaeger-query and normalise them into the fixture shape.
+
+    /api/traces *requires* a `service` parameter — jaeger-query rejects the request
+    with "parameter 'service' is required" without one (the repo's other Jaeger
+    client, app/knowledge_graph/sync_engine.py, always sends it). The live search
+    branch used to send only `limit`, so the two callers that legitimately have no
+    service to name — service_dependencies(), which wants the whole graph, and
+    get_exemplars(), which pivots on a time window — could not work against a real
+    backend at all: setting TRACES_API_URL turned them from a KeyError into an
+    HTTP error. When the caller names no service we now ask which services exist
+    and query them in turn, stopping as soon as `limit` distinct traces are in
+    hand; naming a service (the common case) is still a single request.
+
+    Filtering happens on the normalised trace rather than on the wire, so live and
+    offline mode answer the same question. In particular error_only is not pushed
+    down to Jaeger's tag filter: that matches only spans literally tagged
+    error=true and would silently drop traces whose failure is a 5xx status or a
+    recorded exception, which _span_status does count.
+    """
+    services = [service] if service else _jaeger_services()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for name in services:
+        resp = _jaeger_get("/api/traces", {"service": name, "limit": limit})
+        resp.raise_for_status()
+        for payload in _payload_data(resp):
+            if not isinstance(payload, dict):
+                continue
+            tr = trace_from_jaeger(payload)
+            # A trace that crosses N services is returned once per service.
+            if tr["trace_id"] and tr["trace_id"] in seen:
+                continue
+            seen.add(tr["trace_id"])
+            if error_only and tr["status"] != "error":
+                continue
+            if min_dur and tr["duration_ms"] < min_dur:
+                continue
+            if service and not any(sp.get("service") == service for sp in tr["spans"]):
+                continue
+            out.append(tr)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
 def deps_from_traces(traces: list[dict]) -> list[list[str]]:
     """Derive caller→callee service edges from span parent links. Pure + sorted
-    so the dependency graph is deterministic."""
+    so the dependency graph is deterministic.
+
+    Spans whose service could not be attributed are skipped rather than defaulted:
+    an edge to a made-up service name would be a claim the trace never made."""
     span_service: dict[str, str] = {}
     for tr in traces:
         for sp in tr.get("spans", []):
-            span_service[sp["span_id"]] = sp["service"]
+            service = sp.get("service")
+            if sp.get("span_id") and service:
+                span_service[sp["span_id"]] = service
     edges: set[tuple[str, str]] = set()
     for tr in traces:
         for sp in tr.get("spans", []):
             parent = sp.get("parent")
-            if parent and parent in span_service:
-                caller, callee = span_service[parent], sp["service"]
+            callee = sp.get("service")
+            if callee and parent and parent in span_service:
+                caller = span_service[parent]
                 if caller != callee:
                     edges.add((caller, callee))
     return [list(e) for e in sorted(edges)]
@@ -139,8 +396,15 @@ def analyze_spans(spans: list[dict]) -> dict:
     parent. Separately surfaces error spans and the *fault span* (the deepest error
     span), since on an error incident the fault is often a fast span the latency
     view would overlook.
+
+    A span the backend could not attribute to a service is still reported — its
+    timings are real — but it is labelled UNKNOWN_SERVICE so the reader can tell
+    "the trace did not say" apart from a genuine service name. A span that arrived
+    without an id is handled the same way: it is read with .get() throughout and
+    simply parents nothing, because one malformed span in a thousand-span trace
+    must not turn the whole critical-path analysis into a KeyError.
     """
-    by_id = {sp["span_id"]: sp for sp in spans}
+    by_id = {sp["span_id"]: sp for sp in spans if sp.get("span_id")}
     children: dict[str, list[dict]] = {}
     for sp in spans:
         parent = sp.get("parent")
@@ -148,18 +412,24 @@ def analyze_spans(spans: list[dict]) -> dict:
             children.setdefault(parent, []).append(sp)
 
     def _depth(sp: dict) -> int:
-        d, cur = 0, sp
+        # `seen` guards against a parent cycle in a malformed trace, which would
+        # otherwise spin here forever instead of returning a depth.
+        d, cur, seen = 0, sp, {id(sp)}
         while cur.get("parent") and cur["parent"] in by_id:
-            d += 1
             cur = by_id[cur["parent"]]
+            if id(cur) in seen:
+                break
+            seen.add(id(cur))
+            d += 1
         return d
 
     bottlenecks = []
     for sp in spans:
-        kids = children.get(sp["span_id"], [])
+        kids = children.get(sp.get("span_id"), [])
         self_time = max(0, sp.get("duration_ms", 0) - sum(c.get("duration_ms", 0) for c in kids))
         bottlenecks.append({
-            "span_id": sp["span_id"], "service": sp["service"], "operation": sp["operation"],
+            "span_id": sp.get("span_id"), "service": sp.get("service") or UNKNOWN_SERVICE,
+            "operation": sp.get("operation"),
             "duration_ms": sp.get("duration_ms", 0), "self_time_ms": self_time,
             "status": sp.get("status", "ok"),
         })
@@ -170,12 +440,12 @@ def analyze_spans(spans: list[dict]) -> dict:
     return {
         "bottlenecks": bottlenecks,
         "error_spans": [
-            {"span_id": sp["span_id"], "service": sp["service"], "operation": sp["operation"],
-             "error": sp.get("error", "")} for sp in error_spans
+            {"span_id": sp.get("span_id"), "service": sp.get("service") or UNKNOWN_SERVICE,
+             "operation": sp.get("operation"), "error": sp.get("error", "")} for sp in error_spans
         ],
         "fault_span": (
-            {"span_id": fault["span_id"], "service": fault["service"],
-             "operation": fault["operation"], "error": fault.get("error", "")} if fault else None
+            {"span_id": fault.get("span_id"), "service": fault.get("service") or UNKNOWN_SERVICE,
+             "operation": fault.get("operation"), "error": fault.get("error", "")} if fault else None
         ),
     }
 
@@ -222,31 +492,15 @@ def search_traces(
                 continue
             if service and not any(sp["service"] == service for sp in tr["spans"]):
                 continue
-            out.append({k: tr[k] for k in
-                        ("trace_id", "root_service", "operation", "duration_ms", "status", "start", "span_count")})
+            out.append({k: tr[k] for k in SUMMARY_KEYS})
         return out[:limit]
 
-    import httpx
-
-    params: dict = {"limit": limit}
-    if service:
-        params["service"] = service
-    resp = httpx.get(f"{TRACES_API_URL}/api/traces", params=params, timeout=20)
-    resp.raise_for_status()
-    out = []
-    for tr in resp.json().get("data", []):
-        spans = tr.get("spans", [])
-        has_err = any(
-            any(t.get("key") == "error" and t.get("value") for t in sp.get("tags", []))
-            for sp in spans
-        )
-        if error_only and not has_err:
-            continue
-        root = spans[0] if spans else {}
-        out.append({"trace_id": tr.get("traceID"), "root_service": "", "operation": root.get("operationName"),
-                    "duration_ms": round(root.get("duration", 0) / 1000), "status": "error" if has_err else "ok",
-                    "span_count": len(spans)})
-    return out[:limit]
+    # Live rows go through the same normaliser as get_trace, so they carry a real
+    # root_service and start (they used to be blank and absent, which broke
+    # get_exemplars' window filter) and honour min_duration_ms, which the live
+    # branch previously ignored outright.
+    return [{k: tr[k] for k in SUMMARY_KEYS}
+            for tr in _live_traces(service, error_only, min_dur, limit)]
 
 
 @mcp.tool()
@@ -258,14 +512,28 @@ def get_trace(trace_id: str) -> dict:
         return tr or {"error": f"unknown trace '{trace_id}' (offline demo has "
                       f"{[t['trace_id'] for t in _get_traces()]})"}
 
-    import httpx
+    resp = _jaeger_get(f"/api/traces/{trace_id}")
+    data = _payload_data(resp)
+    payload = next((row for row in data if isinstance(row, dict)), None)
 
-    resp = httpx.get(f"{TRACES_API_URL}/api/traces/{trace_id}", timeout=20)
+    # An unknown trace is a 404 from a real jaeger-query, not a 200 with an empty
+    # array, so the "not found" answer has to be decided before raise_for_status()
+    # turns it into an HTTPStatusError; the empty-array form is kept because some
+    # gateways in front of Jaeger answer that way instead. Either way the point is
+    # to name the missing trace rather than return a zero-span trace that reads as
+    # a successful lookup of a request with no work in it.
+    if resp.status_code == 404 or (resp.status_code == 200 and not data):
+        reason = _jaeger_reason(resp)
+        return {"error": f"trace '{trace_id}' not found at the configured traces API "
+                         f"({TRACES_API_URL})" + (f": {reason}" if reason else "")}
     resp.raise_for_status()
-    data = (resp.json().get("data") or [{}])[0]
-    return {"trace_id": trace_id, "spans": [
-        {"span_id": sp.get("spanID"), "operation": sp.get("operationName"),
-         "duration_ms": round(sp.get("duration", 0) / 1000)} for sp in data.get("spans", [])]}
+    if payload is None:
+        # 200 with a `data` array holding something that is not a trace object.
+        # Report the shape we actually got instead of raising AttributeError from
+        # inside the normaliser.
+        return {"error": f"traces API ({TRACES_API_URL}) returned no readable trace document "
+                         f"for '{trace_id}' (data[0] is {type(data[0]).__name__}, expected object)"}
+    return trace_from_jaeger(payload, trace_id=trace_id)
 
 
 @mcp.tool()
@@ -274,7 +542,10 @@ def service_dependencies() -> list[list[str]]:
     from observed spans (not static config)."""
     if OFFLINE:
         return deps_from_traces(_get_traces())
-    return deps_from_traces([get_trace(t["trace_id"]) for t in search_traces(limit=100)])
+    # jaeger-query's search returns whole trace documents, not summaries, so the
+    # spans needed for the edges are already in hand — this used to re-fetch each
+    # trace individually, one HTTP round trip per result, for data it already had.
+    return deps_from_traces(_live_traces(None, False, 0, 100))
 
 
 @mcp.tool()

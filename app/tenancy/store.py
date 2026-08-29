@@ -52,6 +52,15 @@ def _hash_secret(secret: str) -> str:
 
 
 _SCHEMA = """
+-- `orgs.plan` is free-form TEXT with no CHECK constraint, and this table is
+-- created by this file rather than by an Alembic revision (the migrations/ tree
+-- covers the app database in app/database/models.py, not the tenant store). That
+-- is why widening the plan vocabulary in app/tenancy/models.py — adding the
+-- `growth` and `business` brackets a paid subscription needs somewhere to land —
+-- took no migration: an existing tenants.sqlite accepts the new values as they
+-- are written. What it does not do is rewrite history, so an org that was
+-- squeezed into `team` by an earlier Growth or Business payment stays there
+-- until its next subscription event arrives from Stripe.
 CREATE TABLE IF NOT EXISTS orgs (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, plan TEXT NOT NULL,
     created_at TEXT NOT NULL, stripe_customer_id TEXT DEFAULT '',

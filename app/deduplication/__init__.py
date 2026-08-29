@@ -75,10 +75,13 @@ from app.deduplication.ml_correlation import (
 
 from app.deduplication.suppression import (
     SuppressionEngine,
+    SuppressionConfig,
     MaintenanceWindowManager,
     KnownIssueTracker,
     FlappingDetector,
+    BusinessRule,
     BusinessRuleEngine,
+    DigestEntry,
 )
 
 from app.deduplication.pipeline import (
@@ -148,10 +151,15 @@ __all__ = [
     "ClusterLabeler",
     # Suppression
     "SuppressionEngine",
+    "SuppressionConfig",
     "MaintenanceWindowManager",
     "KnownIssueTracker",
     "FlappingDetector",
+    "BusinessRule",
     "BusinessRuleEngine",
+    # Reachable from `pipeline.suppression.pending_digests()`; exported so a
+    # caller can name the type without reaching into the submodule.
+    "DigestEntry",
     # Pipeline
     "DeduplicationPipeline",
     "PipelineConfig",

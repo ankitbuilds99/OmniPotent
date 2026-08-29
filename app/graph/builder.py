@@ -41,7 +41,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -76,8 +76,22 @@ def make_guarded_tool_node(tools):
 
     async def guarded(state: AgentState) -> dict:
         from app import otel
+
+        # ToolNode runs the tool calls on the *last* message. In multi-agent mode
+        # the message carrying an approved write is not last — the reviewer's
+        # verdict and the approval gate come after it — so the queue the approval
+        # gate filled is the only place those calls still exist. Replay them onto
+        # a scratch message the node can read; it is not returned, so it never
+        # enters the transcript, and the ToolMessages it produces carry the
+        # original tool-call ids and so answer the original proposal.
+        payload = state
+        queued = state.get("pending_tool_calls") or []
+        messages = list(state.get("messages") or [])
+        if queued and not getattr(messages[-1] if messages else None, "tool_calls", None):
+            payload = {**state, "messages": [*messages, AIMessage(content="", tool_calls=queued)]}
+
         with otel.span("mcp.tools"):
-            result = await inner.ainvoke(state)
+            result = await inner.ainvoke(payload)
         out: list = []
         for m in result.get("messages", []):
             if isinstance(m, ToolMessage):
@@ -204,6 +218,7 @@ def _build_multi_agent_graph(tools, checkpointer):
     - Reviewer: Validates actions before execution
     """
     from app.agents import OrchestratorAgent
+    from app.agents.remediation import review_summary
 
     g = StateGraph(AgentState)
 
@@ -320,6 +335,13 @@ def _build_multi_agent_graph(tools, checkpointer):
             if result.get("status") == "needs_tools":
                 updates["pending_tool_calls"] = result.get("tool_calls", [])
             elif result.get("status") == "needs_review":
+                # Deliberately not `pending_tool_calls`, even though the agent
+                # now returns the calls at the top level here too: that channel
+                # means "run these", and `route_after_remediation` checks it
+                # first, so filling it here would jump the write straight to the
+                # tool node past both the reviewer and the human gate. The calls
+                # travel inside `pending_action` instead, and only the approval
+                # node — after a human says yes — promotes them to the queue.
                 updates["multi_agent_phase"] = "reviewing"
                 updates["pending_action"] = result.get("result", {}).get("proposed_action")
 
@@ -332,7 +354,11 @@ def _build_multi_agent_graph(tools, checkpointer):
         with otel.span("agent.reviewer"):
             context = _get_or_create_context(state)
             pending_action = state.get("pending_action") or context.metadata.get("pending_action", {})
-            task = f"Review this proposed action: {pending_action}"
+            # The display half only: `pending_action` also carries the verbatim
+            # calls for the approval gate to execute, and stringifying those into
+            # the prompt would ship a pull request's whole body and patch to the
+            # model that the summary truncates precisely to avoid.
+            task = f"Review this proposed action: {review_summary(pending_action)}"
 
             result = orchestrator.reviewer.process(
                 task=task,
@@ -447,7 +473,7 @@ def _build_multi_agent_graph(tools, checkpointer):
         else:
             return "report"
 
-    def route_after_tools_multi(state: AgentState) -> Literal["investigator", "remediation", "orchestrator"]:
+    def route_after_tools_multi(state: AgentState) -> Literal["investigator", "remediation", "orchestrator", "report"]:
         """Route back to the appropriate agent after tools execute.
 
         The queue is cleared by the tools node itself; a router cannot mutate
@@ -459,6 +485,12 @@ def _build_multi_agent_graph(tools, checkpointer):
             return "investigator"
         elif agent == "remediation":
             return "remediation"
+        elif agent == "approval":
+            # The human-approved fix just ran, which is the end of the work:
+            # write it up. Returning to an agent instead would re-enter the
+            # phase machine still holding a root cause and propose the very
+            # fix that was just executed, asking for approval a second time.
+            return "report"
         else:
             return "orchestrator"
 
@@ -476,6 +508,15 @@ def _build_multi_agent_graph(tools, checkpointer):
 
     def route_after_approval_multi(state: AgentState) -> Literal["tools", "remediation", "report"]:
         """Route after human approval decision in multi-agent mode."""
+        # An approval reached through `pending_action` leaves its calls in the
+        # queue rather than on the last message, which here is still the
+        # reviewer's verdict. Re-reading that message found no tool calls and
+        # sent the approved write to `report`, so the run announced a fix that
+        # had never run. Only the approval node writes this queue, so reaching
+        # `tools` through it still requires having passed the human gate.
+        if state.get("pending_tool_calls"):
+            return "tools"
+
         last = state.get("messages", [])[-1] if state.get("messages") else None
         if last and getattr(last, "tool_calls", None):
             return "tools"
@@ -523,7 +564,12 @@ def _build_multi_agent_graph(tools, checkpointer):
     g.add_conditional_edges(
         "tools",
         route_after_tools_multi,
-        {"investigator": "investigator", "remediation": "remediation", "orchestrator": "orchestrator"},
+        {
+            "investigator": "investigator",
+            "remediation": "remediation",
+            "orchestrator": "orchestrator",
+            "report": "report",
+        },
     )
 
     g.add_conditional_edges(

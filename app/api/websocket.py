@@ -430,6 +430,49 @@ async def _handle_messages(conn: ClientConnection, thread_id: str) -> None:
             })
 
 
+async def _authorize(conn: ClientConnection, thread_id: str, action: str) -> bool:
+    """Apply the RBAC matrix to one inbound message, as the HTTP twin does.
+
+    `/chat/stream` and `/approve/stream` are declared with
+    `Depends(require_perm("run_investigation"))` and
+    `Depends(require_perm("approve_action"))`, but a `@router.websocket` route
+    cannot carry route dependencies, so this transport enforced no role at all.
+    The handshake's `require_auth` resolves the tenant from the `auth-<token>`
+    subprotocol and stops there: a read-only `viewer` key that the HTTP routes
+    answered with 403 could open the socket and both start investigations and
+    approve the agent's pending writes, with the approval landing in the trail
+    as a legitimate `approval.decided` row.
+
+    Calling `require_perm` itself, rather than re-deriving the matrix here,
+    guarantees that one credential gets the same verdict whichever transport it
+    arrives on — the client is handed the HTTP 403 detail verbatim in the
+    error frame this handler already speaks. Returns True when the caller may
+    proceed; when it returns False the denial frame has already been sent.
+
+    The check is per message rather than per handshake because a single
+    connection carries both actions and they are separate permissions; opening
+    the socket stays available to any authenticated role, since watching an
+    investigation is a read.
+    """
+    from fastapi import HTTPException
+
+    from app.api.main import require_perm
+
+    try:
+        await require_perm(action)()
+    except HTTPException as exc:
+        log.warning(
+            "WebSocket %s denied: thread=%s: %s", action, thread_id, exc.detail
+        )
+        await manager.send(conn, {
+            "type": "error",
+            "thread_id": thread_id,
+            "message": exc.detail,
+        })
+        return False
+    return True
+
+
 async def _handle_chat(
     conn: ClientConnection,
     thread_id: str,
@@ -449,6 +492,9 @@ async def _handle_chat(
     """Handle a chat message (start investigation)."""
     from fastapi import HTTPException
     import time as time_mod
+
+    if not await _authorize(conn, thread_id, "run_investigation"):
+        return
 
     try:
         _check_message(message)
@@ -546,6 +592,11 @@ async def _handle_approval(
     import time as time_mod
 
     from app.api.main import _SESSIONS, _record_slo_failure, _record_slo_fields
+
+    # Ahead of the audit row as well as the resume: a decision the role may not
+    # make must never be recorded as one that was made.
+    if not await _authorize(conn, thread_id, "approve_action"):
+        return
 
     tid = _scoped(thread_id)
     existed = tid in _SESSIONS

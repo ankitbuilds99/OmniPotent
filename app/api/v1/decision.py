@@ -28,10 +28,37 @@ from app.decision_engine.option_ranker import RankingStrategy
 from app.decision_engine.engine import (
     IncidentContext,
 )
+from app.api.main import require_perm
 
 log = logging.getLogger("omnipotent.api.decision")
 
-router = APIRouter(prefix="/decision", tags=["decision-engine"])
+# This file declared no RBAC at all, which was harmless only for as long as the
+# router was not included on the app. Mounting it made every route here reachable
+# by any key the deployment issues, a multi-tenant `viewer` seat included.
+#
+# The router-wide gate is `view`, and for most of the surface that is the honest
+# answer: /predict-success, /rank-options and /decide recommend, they do not act.
+# Nothing they touch changes what the fleet does — the caller supplies the
+# incident and the candidate options, and the reply is a ranking and a
+# recommendation that some other route would have to carry out.
+#
+# /record-outcome is the exception and does not belong with them. It feeds the
+# real result of a remediation back into `SuccessPredictor.record_outcome`, which
+# moves the calibration factor and appends to the historical set every later
+# prediction is scored against. A read-only seat that can post outcomes can
+# therefore steer every future recommendation the engine makes, including for
+# other users of the same deployment. It takes `approve_action` (responder and
+# above), the vocabulary item in app/tenancy/models.py that names the lifecycle
+# of an action the agent proposed; the matrix has no model-training action to
+# name instead. `require_perm` is a no-op in single-tenant mode, so the offline
+# demo is unaffected.
+_RECORD = [Depends(require_perm("approve_action"))]
+
+router = APIRouter(
+    prefix="/decision",
+    tags=["decision-engine"],
+    dependencies=[Depends(require_perm("view"))],
+)
 
 # Singleton instances
 _decision_engine: DecisionEngine | None = None
@@ -473,7 +500,7 @@ async def make_decision(
         raise HTTPException(status_code=500, detail=f"Decision failed: {str(e)}")
 
 
-@router.post("/record-outcome/{prediction_id}")
+@router.post("/record-outcome/{prediction_id}", dependencies=_RECORD)
 async def record_outcome(
     prediction_id: str,
     was_successful: bool,

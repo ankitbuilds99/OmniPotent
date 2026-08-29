@@ -19,7 +19,7 @@ from app.agents.protocol import (
     SharedContext,
     TaskStatus,
 )
-from app.agents.remediation import RemediationAgent
+from app.agents.remediation import RemediationAgent, review_summary
 from app.agents.reviewer import ReviewerAgent
 from app.graph.prompts import ORCHESTRATOR_AGENT_SYSTEM
 
@@ -247,11 +247,7 @@ class OrchestratorAgent(BaseAgent):
                 "context": context.to_dict(),
             }
 
-        if result.get("status") == "needs_review":
-            context.metadata["phase"] = InvestigationPhase.REVIEWING
-            context.metadata["pending_action"] = result.get("result", {}).get("proposed_action")
-
-        return {
+        out = {
             "status": result.get("status", "remediating"),
             "agent": "remediation",
             "result": result.get("result"),
@@ -259,6 +255,19 @@ class OrchestratorAgent(BaseAgent):
             "tokens_used": result.get("tokens_used", 0),
             "context": context.to_dict(),
         }
+
+        if result.get("status") == "needs_review":
+            context.metadata["phase"] = InvestigationPhase.REVIEWING
+            context.metadata["pending_action"] = result.get("result", {}).get("proposed_action")
+            out["context"] = context.to_dict()
+            # Same key the `needs_tools` branch above uses, because callers read
+            # exactly one place for the calls an agent produced. Dropping it here
+            # left a caller outside the graph with a prose summary of a fix and no
+            # way to run it once approved. The status still says these must be
+            # reviewed first — the key carries the calls, not permission.
+            out["tool_calls"] = result.get("tool_calls", [])
+
+        return out
 
     def _continue_remediation(
         self,
@@ -279,11 +288,7 @@ class OrchestratorAgent(BaseAgent):
                 "context": context.to_dict(),
             }
 
-        if result.get("status") == "needs_review":
-            context.metadata["phase"] = InvestigationPhase.REVIEWING
-            context.metadata["pending_action"] = result.get("result", {}).get("proposed_action")
-
-        return {
+        out = {
             "status": result.get("status", "remediating"),
             "agent": "remediation",
             "result": result.get("result"),
@@ -291,6 +296,16 @@ class OrchestratorAgent(BaseAgent):
             "tokens_used": result.get("tokens_used", 0),
             "context": context.to_dict(),
         }
+
+        if result.get("status") == "needs_review":
+            context.metadata["phase"] = InvestigationPhase.REVIEWING
+            context.metadata["pending_action"] = result.get("result", {}).get("proposed_action")
+            out["context"] = context.to_dict()
+            # See _start_remediation: the proposed calls travel at the top level
+            # on this branch too, so an approval surface has something to run.
+            out["tool_calls"] = result.get("tool_calls", [])
+
+        return out
 
     def _continue_review(
         self,
@@ -300,7 +315,10 @@ class OrchestratorAgent(BaseAgent):
     ) -> dict[str, Any]:
         """Process review of a proposed action."""
         pending_action = context.metadata.get("pending_action", {})
-        review_task = f"Review this proposed action: {pending_action}"
+        # Display half only — the verbatim calls stored alongside it exist for the
+        # approval gate to execute, and their untruncated args (a whole PR body and
+        # patch) have no business in the reviewer's prompt.
+        review_task = f"Review this proposed action: {review_summary(pending_action)}"
 
         result = self.reviewer.process(review_task, messages, context)
 

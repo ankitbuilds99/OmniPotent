@@ -262,7 +262,13 @@ def test_feature_data_does_not_cross_tenants(mt):
     assert rb_id not in {r["id"] for r in c.get("/api/runbooks", headers=b).json()}
     assert c.get(f"/api/runbooks/{rb_id}", headers=b).status_code == 404
     # B cannot delete what it cannot see, and A's copy is untouched by the attempt.
-    assert c.delete(f"/api/runbooks/{rb_id}", headers=b).status_code == 404
+    # The refusal is 403 rather than 404 because the runbooks router now carries the
+    # RBAC matrix it had been missing entirely: deleting a definition is admin-and-up,
+    # so B's responder key is turned away by role before the org-scoped lookup that
+    # used to answer "not found" ever runs. Nothing about the tenant isolation this
+    # test is checking changed — the role check is decided without consulting the
+    # row, so it says the same thing for an id that exists and one that does not.
+    assert c.delete(f"/api/runbooks/{rb_id}", headers=b).status_code == 403
     assert c.get(f"/api/runbooks/{rb_id}", headers=a).status_code == 200
 
     assert c.post("/api/planning/graphs", headers=a,

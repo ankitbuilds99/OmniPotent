@@ -28,52 +28,123 @@ from app.digital_twin import (
 )
 from app.digital_twin.simulator import SimulationType
 from app.digital_twin.chaos_engine import SafetyLevel
+from app.api.main import require_perm
+from app.config import get_settings
+from app import tenant_context
 
 log = logging.getLogger("omnipotent.api.digital_twin")
 
-router = APIRouter(prefix="/digital-twin", tags=["digital-twin"])
+# Router-wide `view`, plus `approve_action` on anything that mutates. Until this
+# router was included on the app nothing here was reachable, so the missing RBAC
+# had no consequence; mounting it gives the gap one. Despite the name, these
+# handlers do not only model infrastructure — `ChaosEngine._inject_pod_kill` calls
+# `KubernetesConnector.delete_pod` against the live cluster, `InfrastructureCloner`
+# POSTs real namespaces, deployments and network policies, and both read the
+# deployment's own kube credentials. Left ungated, a multi-tenant `viewer` seat —
+# the cheapest read-only key an org can hand out — could delete production pods
+# through /chaos/run. `approve_action` (responder and above) is the same gate the
+# root `/remediate` route uses for rolling back and restarting deployments, which
+# is the closest existing act; the RBAC vocabulary in app/tenancy/models.py has no
+# chaos-specific action to name instead.
+#
+# Reads stay at `view`: listing environments or asking for a downtime forecast is
+# the kind of thing a viewer seat exists for. `require_perm` is a no-op in
+# single-tenant mode, so the offline demo keeps working unchanged.
+_RUN = [Depends(require_perm("approve_action"))]
 
-# Singleton instances
-_digital_twin: DigitalTwinSimulator | None = None
-_cloner: InfrastructureCloner | None = None
-_downtime_predictor: DowntimePredictor | None = None
-_rollback_simulator: RollbackSimulator | None = None
-_chaos_engine: ChaosEngine | None = None
+router = APIRouter(
+    prefix="/digital-twin",
+    tags=["digital-twin"],
+    dependencies=[Depends(require_perm("view"))],
+)
+
+# One set of engines per owning org, not one per process.
+#
+# The engines keep every record they produce in instance dicts — `_simulations`,
+# `_environments`, `_scenarios`, `_experiments` — and each listing route hands
+# back the whole dict. Sharing one instance across the deployment therefore
+# published org A's simulations, cloned environments, rollback scenarios and
+# chaos experiments to org B, and let org B read (and act on) them by id.
+#
+# That is not the disclosure of a model. `ChaosEngine._inject_pod_kill` calls
+# `KubernetesConnector.delete_pod` against the live cluster and
+# `InfrastructureCloner` POSTs real namespaces, deployments and network policies,
+# so an id lifted from a listing is an id another org can pass to
+# `POST /chaos/abort/{id}`, `POST /rollback/simulate/{id}` or
+# `DELETE /clone/{env_id}`.
+#
+# Keying the registry by org fixes reads and writes with the same fact — an org's
+# engine can only ever hold what that org created — instead of a per-route filter
+# that the next endpoint added here would forget. It also removes an accidental
+# cross-tenant coupling in the other direction: `ChaosEngine._running_experiment`
+# is a one-at-a-time guard, and while the engine was shared org A's running
+# experiment made org B's `POST /chaos/run` fail with "another experiment is
+# already running". Per-org engines are the right granularity for that guard too,
+# because each tenant drives its own cluster with its own kube credentials.
+#
+# Single-tenant deployments resolve to the one `storage_org_id()` fallback key, so
+# they hold exactly one instance of each engine and behave as they did before.
+_ENGINES: dict[str, dict[str, Any]] = {}
+
+
+def _engine_org() -> str:
+    """The org whose engines this request is allowed to touch.
+
+    Deny-by-default when multi-tenancy is on and nothing resolved a tenant, which
+    is the rule `app/incident_memory.py` applies to stored records: such a caller
+    has no org whose records it is entitled to read, and falling back to
+    `storage_org_id()`'s shared "default" key would file every one of them in a
+    single bucket and recreate the leak one level down. `require_auth` rejects an
+    unresolved tenant before any route here runs, so this is the backstop for a
+    future exemption rather than a branch the app reaches today.
+    """
+    if not get_settings().copilot_multi_tenant:
+        return tenant_context.storage_org_id()
+    cfg = tenant_context.get_tenant()
+    if cfg is None or not cfg.org_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "No tenant is resolved on this request, so there is no org whose "
+                "digital-twin records may be read or acted on."
+            ),
+        )
+    return cfg.org_id
+
+
+def _engine(kind: str, factory: Any) -> Any:
+    """The current org's instance of one engine, built on first use.
+
+    Resolved inside the request — `Depends` runs while the tenant contextvar is
+    still set, whereas a FastAPI BackgroundTask may run after the middleware has
+    reset it, so anything deferred has to capture the engine rather than call this
+    later.
+    """
+    bucket = _ENGINES.setdefault(_engine_org(), {})
+    engine = bucket.get(kind)
+    if engine is None:
+        engine = bucket[kind] = factory()
+    return engine
 
 
 def get_digital_twin() -> DigitalTwinSimulator:
-    global _digital_twin
-    if _digital_twin is None:
-        _digital_twin = create_digital_twin()
-    return _digital_twin
+    return _engine("twin", create_digital_twin)
 
 
 def get_cloner() -> InfrastructureCloner:
-    global _cloner
-    if _cloner is None:
-        _cloner = InfrastructureCloner()
-    return _cloner
+    return _engine("cloner", InfrastructureCloner)
 
 
 def get_downtime_predictor() -> DowntimePredictor:
-    global _downtime_predictor
-    if _downtime_predictor is None:
-        _downtime_predictor = DowntimePredictor()
-    return _downtime_predictor
+    return _engine("downtime", DowntimePredictor)
 
 
 def get_rollback_simulator() -> RollbackSimulator:
-    global _rollback_simulator
-    if _rollback_simulator is None:
-        _rollback_simulator = RollbackSimulator()
-    return _rollback_simulator
+    return _engine("rollback", RollbackSimulator)
 
 
 def get_chaos_engine() -> ChaosEngine:
-    global _chaos_engine
-    if _chaos_engine is None:
-        _chaos_engine = ChaosEngine()
-    return _chaos_engine
+    return _engine("chaos", ChaosEngine)
 
 
 # Request/Response Models
@@ -263,7 +334,7 @@ class CapacityForecastResponse(BaseModel):
 
 
 # Endpoints - Infrastructure Cloning
-@router.post("/clone", response_model=CloneResponse)
+@router.post("/clone", response_model=CloneResponse, dependencies=_RUN)
 async def clone_environment(
     request: CloneRequest,
     background_tasks: BackgroundTasks,
@@ -341,7 +412,7 @@ async def get_cloned_environment(
     return env.to_dict()
 
 
-@router.delete("/clone/{env_id}")
+@router.delete("/clone/{env_id}", dependencies=_RUN)
 async def delete_cloned_environment(
     env_id: str,
     force: bool = Query(False),
@@ -353,7 +424,7 @@ async def delete_cloned_environment(
     raise HTTPException(status_code=404, detail="Environment not found")
 
 
-@router.post("/clone/cleanup")
+@router.post("/clone/cleanup", dependencies=_RUN)
 async def cleanup_expired_environments(
     cloner: InfrastructureCloner = Depends(get_cloner),
 ) -> dict[str, int]:
@@ -473,7 +544,7 @@ async def forecast_capacity(
 
 
 # Endpoints - Rollback Simulation
-@router.post("/rollback/scenario", response_model=RollbackScenarioResponse)
+@router.post("/rollback/scenario", response_model=RollbackScenarioResponse, dependencies=_RUN)
 async def create_rollback_scenario(
     request: RollbackScenarioRequest,
     simulator: RollbackSimulator = Depends(get_rollback_simulator),
@@ -538,8 +609,8 @@ async def simulate_rollback(
 async def list_rollback_scenarios(
     simulator: RollbackSimulator = Depends(get_rollback_simulator),
 ) -> dict[str, Any]:
-    """List all rollback scenarios."""
-    scenarios = list(simulator._scenarios.values())
+    """List the calling org's rollback scenarios."""
+    scenarios = simulator.list_scenarios()
     return {
         "scenarios": [s.to_dict() for s in scenarios],
         "count": len(scenarios),
@@ -547,7 +618,7 @@ async def list_rollback_scenarios(
 
 
 # Endpoints - Chaos Engineering
-@router.post("/chaos/experiment", response_model=ChaosExperimentResponse)
+@router.post("/chaos/experiment", response_model=ChaosExperimentResponse, dependencies=_RUN)
 async def create_chaos_experiment(
     request: ChaosExperimentRequest,
     chaos: ChaosEngine = Depends(get_chaos_engine),
@@ -590,7 +661,7 @@ async def create_chaos_experiment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/chaos/run/{experiment_id}", response_model=ChaosResultResponse)
+@router.post("/chaos/run/{experiment_id}", response_model=ChaosResultResponse, dependencies=_RUN)
 async def run_chaos_experiment(
     experiment_id: str,
     dry_run: bool = Query(False),
@@ -620,7 +691,7 @@ async def run_chaos_experiment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/chaos/abort/{experiment_id}")
+@router.post("/chaos/abort/{experiment_id}", dependencies=_RUN)
 async def abort_chaos_experiment(
     experiment_id: str,
     chaos: ChaosEngine = Depends(get_chaos_engine),
@@ -635,8 +706,8 @@ async def abort_chaos_experiment(
 async def list_chaos_experiments(
     chaos: ChaosEngine = Depends(get_chaos_engine),
 ) -> dict[str, Any]:
-    """List all chaos experiments."""
-    experiments = list(chaos._experiments.values())
+    """List the calling org's chaos experiments."""
+    experiments = chaos.list_experiments()
     return {
         "experiments": [e.to_dict() for e in experiments],
         "count": len(experiments),
@@ -667,7 +738,7 @@ async def list_failure_types() -> dict[str, Any]:
 
 
 # Endpoints - Full Simulation
-@router.post("/simulate", response_model=SimulationResultResponse)
+@router.post("/simulate", response_model=SimulationResultResponse, dependencies=_RUN)
 async def run_simulation(
     request: SimulationRequest,
     twin: DigitalTwinSimulator = Depends(get_digital_twin),

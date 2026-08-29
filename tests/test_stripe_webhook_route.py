@@ -52,12 +52,20 @@ def _reset() -> None:
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """Production posture: the shared bearer is set, so require_auth is live."""
+    """Production posture: the shared bearer is set, so require_auth is live.
+
+    STRIPE_API_KEY is explicitly removed rather than left to the environment, so
+    the billing-store half of every reply below has one known answer
+    (`not_configured`) instead of one that depends on whose machine this runs on.
+    That is the posture these tests are about: a deployment that upgrades by
+    webhook alone, where `orgs.plan` is the only record of the tier.
+    """
     monkeypatch.setenv("COPILOT_MULTI_TENANT", "true")
     monkeypatch.setenv("COPILOT_TENANT_DB", str(tmp_path / "tenants.sqlite"))
     monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/app.db")
     monkeypatch.setenv("COPILOT_API_TOKEN", TOKEN)
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", WHSEC)
+    monkeypatch.delenv("STRIPE_API_KEY", raising=False)
     _reset()
     store = tenant_auth.get_store()
     org = asyncio.run(_provision(store))
@@ -75,6 +83,24 @@ def _signed(body: bytes, secret: str = WHSEC) -> dict[str, str]:
     ts = str(int(time.time()))
     mac = hmac.new(secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
     return {"Stripe-Signature": f"t={ts},v1={mac}", "Content-Type": "application/json"}
+
+
+def _halves(response) -> tuple[dict, dict]:
+    """The tenant-plan half of the receiver's reply and the billing-store half.
+
+    One verified delivery has to land in two records — `orgs.plan`, the quota
+    bracket this app enforces, and `billing_subscriptions`, the subscription
+    itself — so the reply names both outcomes. `billing_store` is not optional
+    decoration: without it a delivery that moved one store and not the other read
+    as a clean `{"status": "applied"}`, which is exactly how a paid subscription
+    could exist in Stripe and nowhere here. Its absence fails here, and the
+    tenant-plan half is still compared exactly, so a stray extra key is still a
+    failure.
+    """
+    payload = response.json()
+    store_leg = payload.pop("billing_store", None)
+    assert store_leg is not None, "the reply must say what the billing store did"
+    return payload, store_leg
 
 
 def _stripe_webhook_paths() -> set[str]:
@@ -112,7 +138,13 @@ def test_a_correctly_signed_event_applies_the_plan(client):
 
     r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
     assert r.status_code == 200, r.text
-    assert r.json() == {"status": "applied", "org_id": org.id, "plan": "team"}
+    plan_leg, store_leg = _halves(r)
+    assert plan_leg == {"status": "applied", "org_id": org.id, "plan": "team"}
+    # No Stripe API key on this deployment, so there is no billing-store leg at
+    # all. That is neither a success nor a failure, and saying so is what keeps
+    # an empty `billing_subscriptions` from looking like a store that was written.
+    assert store_leg["status"] == "not_configured"
+    assert "Stripe API key" in store_leg["detail"]
 
     stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
     assert stored is not None and stored.plan == "team"
@@ -147,17 +179,26 @@ def test_a_cancellation_drops_the_org_to_free(client):
     }).encode()
 
     r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
-    assert r.json() == {"status": "applied", "org_id": org.id, "plan": "free"}
+    plan_leg, store_leg = _halves(r)
+    assert plan_leg == {"status": "applied", "org_id": org.id, "plan": "free"}
+    assert store_leg["status"] == "not_configured"
 
     stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
     assert stored.plan == "free"
 
 
-def test_a_catalog_tier_is_translated_to_the_plan_that_is_enforced(client):
+def test_a_catalog_tier_is_kept_as_the_plan_that_is_enforced(client):
     """Stripe metadata carries a catalog tier; `orgs.plan` holds a quota plan.
 
-    "growth" is a real, sold tier that PLAN_QUOTAS has no bracket for. Untranslated
-    it hit `normalize_plan` and became `free` — a downgrade on a paid upgrade.
+    "growth" is a real, sold tier, and `PLAN_QUOTAS` now has a bracket for it —
+    so the tier that was bought is the tier that is stored. Two answers were
+    wrong before that bracket existed and both cost the customer what they paid
+    for: untranslated, "growth" hit `normalize_plan` and became `free`; mapped
+    onto "team" it silently withheld every Growth entitlement (unlimited
+    investigations, the dependency map, the MTTA/MTTR dashboard) from someone
+    being billed for exactly those. `orgs.plan` is the only record of the tier on
+    a deployment that upgrades by webhook, so a lossy write here is not a display
+    detail — it destroys the entitlement.
     """
     c, org = client
     body = json.dumps({
@@ -167,10 +208,31 @@ def test_a_catalog_tier_is_translated_to_the_plan_that_is_enforced(client):
 
     r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
     assert r.status_code == 200, r.text
-    assert r.json()["plan"] == "team"
+    assert r.json()["plan"] == "growth"
 
     stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
-    assert stored.plan == "team"
+    assert stored.plan == "growth"
+
+
+def test_a_tier_with_no_bracket_of_its_own_is_translated_upwards(client):
+    """"scale" has no PLAN_QUOTAS bracket, so it resolves to Enterprise's.
+
+    Lossy, but only upwards: the customer gets at least what they bought. The
+    translation table is the one place that decides this, and this pins that a
+    tier without a bracket is never rounded *down*.
+    """
+    c, org = client
+    body = json.dumps({
+        "type": "customer.subscription.updated",
+        "data": {"object": {"metadata": {"org_id": org.id, "plan": "scale"}}},
+    }).encode()
+
+    r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
+    assert r.status_code == 200, r.text
+    assert r.json()["plan"] == "enterprise"
+
+    stored = asyncio.run(tenant_auth.get_store().get_org(org.id))
+    assert stored.plan == "enterprise"
 
 
 @pytest.mark.parametrize("plan", ["pro_monthly", "starter_yearly", "platinum", ""])
@@ -219,7 +281,9 @@ def test_a_non_subscription_event_is_still_ignored_not_rejected(client):
 
     r = c.post("/webhooks/stripe", content=body, headers=_signed(body))
     assert r.status_code == 200
-    assert r.json() == {"status": "ignored", "type": "payment_intent.created"}
+    plan_leg, store_leg = _halves(r)
+    assert plan_leg == {"status": "ignored", "type": "payment_intent.created"}
+    assert store_leg["status"] == "not_configured"
 
 
 def test_the_duplicate_billing_receiver_is_gone(client):

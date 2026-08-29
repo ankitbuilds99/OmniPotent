@@ -75,6 +75,28 @@ class ExecutionContext:
     checkpoint_interval: int = 60
     checkpoint_dir: Path | None = None
 
+    def __post_init__(self) -> None:
+        # A concurrency limit below one used to be stored verbatim, and the
+        # execution loop then sliced an empty batch out of a non-empty ready
+        # list: `asyncio.gather()` over nothing completes without ever
+        # suspending, no task left READY, and the loop recomputed the same ready
+        # list forever without handing control back to the event loop. That is
+        # not a slow request — it is a busy loop that starves the whole worker,
+        # so every other request, websocket and health check on that process
+        # hangs and even cancellation cannot land. (max_parallel=-1 took the
+        # adjacent path and blew up inside asyncio.Semaphore instead.) There is
+        # no sensible reading of "run zero tasks at a time", so it is raised to
+        # serial execution and the caller's value is logged rather than quietly
+        # honoured, which keeps the loop making progress on every pass.
+        if self.max_parallel < 1:
+            log.warning(
+                "max_parallel=%s is not a usable concurrency limit; "
+                "execution %s will run tasks one at a time instead",
+                self.max_parallel,
+                self.execution_id,
+            )
+            self.max_parallel = 1
+
     def get_variable(self, name: str, default: Any = None) -> Any:
         return self.variables.get(name, default)
 
@@ -277,13 +299,18 @@ class ExecutionEngine:
                     skipped_tasks += 1
                 continue
 
-            semaphore = asyncio.Semaphore(ctx.max_parallel)
+            # Clamped again at the point of use: ExecutionContext is a plain
+            # dataclass, so a caller (or a resumed checkpoint) can still drop
+            # max_parallel below one after construction, and an empty batch here
+            # means this pass changes nothing and the loop spins.
+            limit = max(1, ctx.max_parallel)
+            semaphore = asyncio.Semaphore(limit)
 
             async def execute_with_semaphore(task: TaskNode) -> None:
                 async with semaphore:
                     await self._execute_task(ctx, task)
 
-            batch = ready_tasks[:ctx.max_parallel * 2]
+            batch = ready_tasks[:limit * 2]
             await asyncio.gather(
                 *[execute_with_semaphore(task) for task in batch],
                 return_exceptions=True,
@@ -303,6 +330,14 @@ class ExecutionEngine:
             if (now - last_checkpoint).total_seconds() >= ctx.checkpoint_interval:
                 await self._create_checkpoint(ctx)
                 last_checkpoint = now
+
+            # Guarantee one suspension point per pass. Everything above can
+            # complete without yielding (a gather over already-finished work
+            # does not), and a `while True:` that never yields does not merely
+            # run long — it locks the event loop out of the process entirely.
+            # This costs one scheduler tick per batch and makes cancellation and
+            # co-running requests possible no matter what the batch did.
+            await asyncio.sleep(0)
 
         completed_at = datetime.now(timezone.utc)
         duration = (completed_at - started_at).total_seconds()

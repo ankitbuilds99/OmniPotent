@@ -1432,8 +1432,15 @@ async def _collect_health_statuses() -> dict[str, ComponentStatus]:
     return statuses
 
 
-async def _collect_mcp_statuses() -> dict[str, tuple[str, ComponentStatus]]:
-    """Component id -> (server name, status) for every registered MCP server."""
+async def _collect_mcp_statuses() -> dict[str, tuple[str, ComponentStatus]] | None:
+    """Component id -> (server name, status) for every registered MCP server.
+
+    `None` means the check itself failed, which is a different fact from "the
+    check ran and reported no servers" and must not be collapsed into it. An
+    empty dict is a real measurement — every server is idle — and the caller
+    heals stale rows from it; `None` means nothing was measured and the caller
+    must leave every row alone. Both used to return `{}`.
+    """
     from app.mcp.health import get_health_monitor
 
     servers: dict[str, tuple[str, ComponentStatus]] = {}
@@ -1443,7 +1450,7 @@ async def _collect_mcp_statuses() -> dict[str, tuple[str, ComponentStatus]]:
         # Nothing is written for MCP in this case: the components keep whatever
         # they were last measured at rather than being invented as healthy.
         log.exception("status page: MCP health check failed")
-        return servers
+        return None
 
     for server_health in summary.servers:
         servers[f"mcp_{server_health.name}"] = (
@@ -1462,7 +1469,8 @@ async def _sync_from_health_checks() -> None:
     # Redis and the LLM provider over the network, and holding a connection for
     # the length of all that is how the pool runs dry.
     component_statuses = await _collect_health_statuses()
-    mcp_statuses = await _collect_mcp_statuses()
+    measured_mcp = await _collect_mcp_statuses()
+    mcp_statuses = measured_mcp if measured_mcp is not None else {}
     now = _now()
 
     async with get_session() as session:
@@ -1529,6 +1537,27 @@ async def _sync_from_health_checks() -> None:
         by_status: dict[ComponentStatus, list[str]] = {}
         for comp_id, (_server_name, status) in mcp_statuses.items():
             component_statuses[comp_id] = status
+
+        if measured_mcp is not None:
+            # An `mcp_*` row this org has that the check did not report on. Only
+            # ids present in `mcp_statuses` used to be written, so once idle
+            # servers stopped appearing in `summary.servers` — which is correct,
+            # nothing has a session open to measure — the rows left behind kept
+            # whatever they were last set to, forever. Rows written as
+            # MAJOR_OUTAGE by the older behaviour therefore showed a permanent
+            # outage on the public page for servers that were merely idle, and
+            # no amount of the deployment being healthy would clear them. This
+            # deployment's own database holds 21 such rows.
+            #
+            # DEGRADED is the same value `_map_mcp_status` already gives
+            # MCPServerStatus.UNKNOWN and the one a component row is created
+            # with before anything measures it, so "unmeasured" reads the same
+            # way here as it does everywhere else rather than being invented as
+            # operational — which would be the opposite lie.
+            for comp_id in existing:
+                if comp_id.startswith("mcp_") and comp_id not in mcp_statuses:
+                    component_statuses[comp_id] = ComponentStatus.DEGRADED
+
         for comp_id, status in component_statuses.items():
             by_status.setdefault(status, []).append(comp_id)
         for status, comp_ids in by_status.items():

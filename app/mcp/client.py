@@ -9,9 +9,12 @@ Adding a new capability = adding one entry here. No agent code changes.
 
 from __future__ import annotations
 
+import functools
 import logging
 import sys
+import time
 from contextlib import AsyncExitStack
+from datetime import timedelta
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -19,6 +22,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools as _load_session_tools
 
 from app import policy, runtime, tenant_context
 from app.config import get_settings
+from app.mcp.health import MCPHealthMonitor, get_health_monitor
 
 log = logging.getLogger("omnipotent.mcp")
 
@@ -268,7 +272,33 @@ def _server_config() -> dict:
         log.warning("Could not load marketplace agents: %s", exc)
         installed = {}
 
-    return {**installed, **builtin}
+    merged = {**installed, **builtin}
+
+    # Every session gets a read deadline. Without one, ClientSession waits on a
+    # response forever (mcp/shared/session.py does `fail_after(None)`), so a
+    # wedged-but-alive subprocess — a kubernetes call against an unresponsive API
+    # server, say — hung the turn for the life of the process: the thread lock is
+    # held for the whole turn and a running thread is never evictable, so the
+    # session slot was stranded too. setdefault, so a marketplace agent that ships
+    # its own session_kwargs keeps them.
+    for entry in merged.values():
+        entry.setdefault("session_kwargs", {}).setdefault(
+            "read_timeout_seconds", timedelta(seconds=_read_timeout_s(s))
+        )
+
+    return merged
+
+
+# The client-side deadline is the last resort, not the primary timeout: a server
+# that bounds its own outbound calls at http_timeout_mcp should get the chance to
+# fail with its own, far more specific error before we cut the transport out from
+# under it. Hence the headroom multiple rather than the raw setting.
+_READ_TIMEOUT_HEADROOM = 3.0
+
+
+def _read_timeout_s(s) -> float:
+    """Seconds to wait for any single MCP response before giving up."""
+    return max(float(s.http_timeout_mcp), 1.0) * _READ_TIMEOUT_HEADROOM
 
 
 # Tool names that mutate external state and require human approval. The action
@@ -286,8 +316,14 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
     subprocess per server for the whole session, instead of `get_tools()`, whose
     tools spawn and tear down a fresh subprocess on *every* tool call — a stdio
     handshake per call that dominated latency in a multi-tool investigation.
+
+    This is also the only place that knows which MCP servers actually came up, so
+    it is where the health monitor is fed: every server that completes the stdio
+    handshake is registered, every one that does not is recorded with the real
+    reason it failed, and each loaded tool is wrapped to report its latency and
+    errors. Before that, `MCPHealthMonitor` had no producer at all and /healthz
+    published an MCP block nothing had ever measured.
     """
-    settings = get_settings()
     config = _server_config()
     client = MultiServerMCPClient(config)
     tools: list[BaseTool] = []
@@ -297,9 +333,16 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
     # - 128 tool limit
     # - Model hallucinates tool calls not in the request
     # For Groq, run in "chat-only" mode with no tools to avoid these issues.
-    if settings.copilot_provider == "groq":
+    # Resolve the provider the way llm.py builds the model — runtime.provider(),
+    # which honours the UI "Connect" override and the request's tenant. The frozen
+    # .env value disagreed with the model actually in use: switching the UI off
+    # Groq left the agent with zero tools (silently chat-only), and a Groq tenant
+    # on an Anthropic host got all ~22 servers' tools and hit the 128-tool cap.
+    if runtime.provider() == "groq":
         # No tools for Groq - avoids hallucination and rate limits
         return [], client
+
+    monitor = get_health_monitor()
 
     # Iterate the config, not _SERVERS: marketplace-installed agents live only in
     # the config, and a name in _SERVERS with no config entry raised KeyError into
@@ -307,10 +350,165 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
     for name in config:
         try:
             session = await stack.enter_async_context(client.session(name))
-            tools.extend(await _load_session_tools(session))
         except Exception as exc:
             # Not fatal — an unconfigured integration is a normal state — but it
-            # is the answer to "why are this agent's tools missing?", so say so.
+            # is the answer to "why are this agent's tools missing?", so say so,
+            # in the logs and on the health surface.
             log.debug("MCP server %r did not start: %s", name, exc)
+            monitor.record_start_failure(name, f"did not start: {type(exc).__name__}: {exc}")
+            continue
+        try:
+            loaded = await _load_session_tools(session)
+        except Exception as exc:
+            # A different failure with the same effect on the agent, and it must
+            # not be reported as the one above: the subprocess did start and its
+            # session is open on the exit stack; what failed was listing its
+            # tools. Saying "did not start" would send an operator to look at a
+            # process that is running fine.
+            log.debug("MCP server %r started but listing its tools failed: %s", name, exc)
+            monitor.record_start_failure(
+                name, f"started, but listing its tools failed: {type(exc).__name__}: {exc}"
+            )
+            continue
+        monitor.register_session(name, tool_count=len(loaded))
+        # Released before the session's own teardown (exit stacks unwind LIFO), so
+        # a server stops counting as live at the moment its owner starts closing.
+        stack.callback(monitor.release_session, name)
+        tools.extend(_instrument(loaded, name, monitor))
 
     return tools, client
+
+
+def _instrument(
+    loaded: list[BaseTool], server_name: str, monitor: MCPHealthMonitor
+) -> list[BaseTool]:
+    """Wrap each tool's coroutine so every call reports its latency and outcome to
+    the health monitor.
+
+    The wrap happens here rather than in the graph's tool node because this is the
+    only layer that knows which server a tool came from — by the time LangGraph
+    invokes it, a tool is just a name. Failures are recorded and re-raised
+    unchanged: the monitor observes, it never swallows.
+    """
+    for tool in loaded:
+        inner = getattr(tool, "coroutine", None)
+        if inner is None:  # nothing to time; a sync-only tool is not an MCP tool
+            continue
+        tool.coroutine = _timed(inner, monitor, server_name, tool.name)
+    return loaded
+
+
+def _timed(inner, monitor: MCPHealthMonitor, server_name: str, tool_name: str):
+    @functools.wraps(inner)
+    async def call(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            result = await inner(*args, **kwargs)
+        except Exception as exc:
+            # Deliberately not BaseException: a cancelled call (the SSE client
+            # hung up, the turn was abandoned) measured nothing about the server
+            # — it may still be answering — and booking it as a server failure
+            # made client disconnects look like an MCP outage. It propagates
+            # unrecorded, as do KeyboardInterrupt/SystemExit.
+            kind = _error_kind(exc)
+            _observe(monitor, server_name, tool_name, started, success=False,
+                     kind=kind, detail=f"{type(exc).__name__}: {exc}")
+            raise
+        _observe(monitor, server_name, tool_name, started, success=True)
+        return result
+
+    return call
+
+
+# Failure kinds, deliberately a closed set: one of these is what reaches the
+# Prometheus `error` label, which is a metric label and must not carry free-form
+# text (see app/observability/metrics.record_mcp_tool_call).
+#
+# Only TIMEOUT and TRANSPORT say anything about the server's health. MCP reports
+# a refused action and a broken pipe the same way at the type level — the adapter
+# raises ToolException for any `isError` result — so a sandbox correctly refusing
+# to read /etc/passwd used to be indistinguishable from a crashed subprocess, and
+# two such refusals were enough to park the server on UNHEALTHY for good.
+_KIND_TOOL_ERROR = "tool_error"   # the server answered: refused, or rejected the arguments
+_KIND_RPC_ERROR = "rpc_error"     # the server answered with a JSON-RPC error
+_KIND_TIMEOUT = "timeout"         # no answer before the read deadline
+_KIND_TRANSPORT = "transport"     # the connection itself failed
+
+# The entire label domain of `copilot_mcp_tool_errors_total`'s `error` label.
+# Naming it, rather than leaving the four constants scattered, is what lets
+# `_observe` refuse anything else on the way out: the series count stays bounded
+# at servers x tools x 4 no matter what a future caller passes.
+_ERROR_KINDS = frozenset(
+    {_KIND_TOOL_ERROR, _KIND_RPC_ERROR, _KIND_TIMEOUT, _KIND_TRANSPORT}
+)
+
+_HEALTH_SIGNAL_KINDS = frozenset({_KIND_TIMEOUT, _KIND_TRANSPORT})
+
+# httpx.codes.REQUEST_TIMEOUT, the code mcp/shared/session.py attaches when its
+# own read deadline expires. Imported by value to keep httpx out of this path.
+_MCP_REQUEST_TIMEOUT_CODE = 408
+
+
+def _error_kind(exc: Exception) -> str:
+    """Classify a failed tool call: did the server answer, or not?"""
+    from langchain_core.tools import ToolException
+    from mcp.shared.exceptions import McpError
+
+    if isinstance(exc, ToolException):
+        return _KIND_TOOL_ERROR
+    if isinstance(exc, McpError):
+        code = getattr(getattr(exc, "error", None), "code", None)
+        if code == _MCP_REQUEST_TIMEOUT_CODE:
+            return _KIND_TIMEOUT
+        # Any other McpError arrived as a JSON-RPC error response, which means the
+        # subprocess was alive enough to compose and send one.
+        return _KIND_RPC_ERROR
+    if isinstance(exc, TimeoutError):  # asyncio.TimeoutError is this since 3.11
+        return _KIND_TIMEOUT
+    return _KIND_TRANSPORT
+
+
+def _observe(
+    monitor: MCPHealthMonitor,
+    server_name: str,
+    tool_name: str,
+    started: float,
+    *,
+    success: bool,
+    kind: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Report one finished tool call to both MCP observability surfaces.
+
+    `detail` (the exception type and message) goes to the health monitor, which
+    keeps one string per server as the operator-facing reason. `kind` is what
+    reaches Prometheus, because that value is used as a metric label: the message
+    contains whatever the model asked for — a file path, a query — so passing it
+    through would mint a new time series per distinct request and grow the
+    registry without bound. Only a member of `_ERROR_KINDS` is forwarded; an
+    unclassified failure is still counted as an error, under the metric's own
+    "unknown" label, rather than smuggling free text in as a new series.
+
+    The Prometheus counters are fed here for the same reason the health monitor
+    is: `copilot_mcp_tool_calls_total` / `_errors_total` / `_latency_seconds` are
+    what deploy/observability/prometheus-alerts.yaml alerts on, and nothing on the
+    request path had ever incremented them, so those rules watched series that
+    never existed. Instrumentation must never take a tool call down with it, so a
+    metrics failure is logged and swallowed — the tool result is not.
+    """
+    elapsed_s = time.perf_counter() - started
+    health_signal = success or kind in _HEALTH_SIGNAL_KINDS
+    monitor.record_tool_call(
+        server_name, tool_name, elapsed_s * 1000.0, success=success, error=detail,
+        health_signal=health_signal,
+    )
+    try:
+        from app.observability import metrics
+
+        metrics.record_mcp_tool_call(
+            server_name, tool_name, elapsed_s, success=success,
+            error=kind if kind in _ERROR_KINDS else None,
+        )
+    except Exception:  # noqa: BLE001 — observability is never load-bearing
+        log.debug("could not record MCP tool metrics for %s.%s",
+                  server_name, tool_name, exc_info=True)

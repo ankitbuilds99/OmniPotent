@@ -89,12 +89,40 @@ async def _run(question: str | None) -> None:
             console.print()
 
 
+def _plans() -> tuple[str, ...]:
+    """The enforced plan vocabulary, straight from the quota table."""
+    from app.tenancy.models import PLANS
+
+    return tuple(PLANS)
+
+
+def _plan_arg(value: str) -> str:
+    """Resolve `--plan` against the plans this deployment actually meters.
+
+    The vocabulary is read from `PLAN_QUOTAS`, not restated here: the help text
+    used to list "free | team | enterprise" long after growth and business were
+    added, so an operator provisioning from the CLI could not discover the two
+    plans in the middle of the price list. Unknown values are refused rather than
+    passed through, because the store normalises anything it does not recognise
+    down to free — a typo would otherwise provision a free org and say so only in
+    a log line.
+    """
+    plan = value.strip().lower()
+    if plan not in _plans():
+        raise argparse.ArgumentTypeError(
+            f"unknown plan {value!r}; this deployment meters: {', '.join(_plans())}"
+        )
+    return plan
+
+
 async def _provision_org(rest: list[str]) -> None:
     """Create an org + its owner API key in the tenant store (commercial bootstrap)."""
     parser = argparse.ArgumentParser(prog="copilot provision-org")
     parser.add_argument("--name", required=True, help="organization name")
     parser.add_argument("--email", required=True, help="owner email")
-    parser.add_argument("--plan", default="team", help="free | team | enterprise")
+    parser.add_argument(
+        "--plan", default="team", type=_plan_arg, help=" | ".join(_plans())
+    )
     ns = parser.parse_args(rest)
 
     from app.tenancy.auth import get_store

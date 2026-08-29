@@ -43,6 +43,93 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.models import Base, JSONType
 
 
+#: The channels an escalation step pages on when its author did not choose any.
+#:
+#: This used to be ["push", "sms", "phone"], and not one of the three can carry a
+#: page in this build. Push needs a registered device and there is no endpoint
+#: through which a browser could register one (`app/notifications/delivery.py`
+#: lists it in UNAVAILABLE for exactly that reason); sms and phone need the
+#: responder's number, and no table in this schema has a column to keep one in.
+#: A default nobody edits is the configuration most deployments run, so the
+#: product's out-of-the-box escalation policy was guaranteed to page nobody and
+#: to record three failed notifications every time it tried.
+#:
+#: Email is what is left: it is the one address a caller can hand this product
+#: without any other system's help — `POST /oncall/teams/{id}/members` takes an
+#: email, writes the `members` row the on-call foreign keys point at, and
+#: `app/notifications/email.py` has a real provider behind it. It is a default,
+#: not a restriction: a policy that asks for sms or phone still gets it, from the
+#: number recorded in `OncallTeamMember.contact_methods`, and fails with the
+#: specific missing piece when there is none. `EscalationService` imports this
+#: rather than restating it, so the service default and the column default cannot
+#: drift apart.
+#:
+#: This makes email the default that *can* be addressed on a deployment where
+#: nobody has entered a phone number; it still does not promise that it reaches
+#: anyone. The page needs a responder whose address someone recorded, and where
+#: none was, the page fails naming the store that is empty
+#: (`EscalationService._page_routing`) and the step falls back to the org's own
+#: configured channels rather than to silence.
+DEFAULT_ESCALATION_CHANNELS: tuple[str, ...] = ("email",)
+
+
+#: Where a `contact_methods` entry keeps the address itself. The column predates
+#: any reader, so no key was ever settled on; these are accepted in order of
+#: specificity so a payload written against either spelling still routes.
+CONTACT_ADDRESS_KEYS: tuple[str, ...] = ("value", "address", "target", "contact")
+
+#: The method names a responder can be recorded under, mapped onto the kind of
+#: address they share. sms, phone, voice and whatsapp are all one phone number —
+#: recording it once must page on all four, or a policy that asks for "voice"
+#: fails next to a stored "sms" number that would have worked.
+CONTACT_KINDS: dict[str, str] = {
+    "email": "email",
+    "mail": "email",
+    "sms": "phone",
+    "text": "phone",
+    "phone": "phone",
+    "voice": "phone",
+    "call": "phone",
+    "whatsapp": "phone",
+    "slack": "slack",
+}
+
+
+def contact_addresses(methods: Any) -> dict[str, str]:
+    """The addresses in a member's `contact_methods`, keyed by kind.
+
+    `contact_methods` is the only per-responder place in this schema that can
+    hold a phone number or a Slack id, and until `EscalationService._page_routing`
+    started reading it the column had neither a reader nor a writer anywhere in
+    `app/` — every sms, voice and Slack page in the product was therefore
+    unaddressable by construction, whatever the escalation policy asked for.
+
+    Entries without an address are preferences, not addresses: they say what
+    order to try channels in, and the entry for `email` is expected to be one of
+    them because `members.email` already holds that address. They are skipped
+    here rather than treated as empty destinations.
+
+    Anything unparseable is skipped rather than raised on: this runs while a page
+    is being addressed, and one malformed entry must not stop the responder being
+    reached on the channels that are intact.
+    """
+    found: dict[str, str] = {}
+    if not isinstance(methods, list):
+        return found
+    for entry in methods:
+        if not isinstance(entry, dict):
+            continue
+        kind = CONTACT_KINDS.get(str(entry.get("type") or "").strip().lower())
+        if not kind or kind in found:
+            continue
+        for key in CONTACT_ADDRESS_KEYS:
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                found[kind] = value.strip()
+                break
+    return found
+
+
 # ============================================================================
 # TEAM MODELS
 # ============================================================================
@@ -111,20 +198,35 @@ class OncallTeamMember(Base):
     )
     role: Mapped[str] = mapped_column(String(50), default="member", nullable=False)
 
-    # Contact preferences (order matters for escalation)
-    contact_methods: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=[
-        {"type": "push", "delay_minutes": 0},
-        {"type": "sms", "delay_minutes": 1},
-        {"type": "phone", "delay_minutes": 3},
-        {"type": "email", "delay_minutes": 5},
-    ])
+    # How to reach this person, in the order to try. Each entry is
+    # {"type": <method>, "delay_minutes": <int>} and may carry the address
+    # itself under "value" — a phone number for sms/phone/voice/whatsapp, a
+    # user id for slack. `contact_addresses()` above reads it and
+    # `EscalationService._page_routing` addresses the page from what it finds;
+    # `POST /oncall/teams/{team_id}/members` writes it. Before those three
+    # existed this column had no reader and no writer at all, so the phone
+    # number an sms page needs had nowhere to come from and every sms, voice and
+    # Slack step in the product failed unaddressed.
+    #
+    # The default is email alone, and deliberately carries no address: the email
+    # address lives on `members.email`, so this default reaches the responder as
+    # soon as they exist. It used to be push/sms/phone/email — push cannot
+    # deliver in this build at all, and the sms and phone entries named channels
+    # with no number behind them, so the stated order began with three methods
+    # guaranteed to fail. A callable default, because a list literal here is one
+    # list shared by every member row the mapper builds: editing one member's
+    # contact methods in place would edit every other member's too.
+    contact_methods: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONType, default=lambda: [{"type": "email", "delay_minutes": 0}]
+    )
 
     # Availability preferences
     timezone: Mapped[str | None] = mapped_column(String(50))
     working_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
 
-    # Skills for AI routing
-    skills: Mapped[list[str]] = mapped_column(JSONType, default=[])
+    # Skills for AI routing. Callable default for the same reason as
+    # `contact_methods`: one shared list would be every member's skill list.
+    skills: Mapped[list[str]] = mapped_column(JSONType, default=list)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     joined_at: Mapped[datetime] = mapped_column(
@@ -482,8 +584,13 @@ class OncallEscalationStep(Base):
     # Targets: [{"type": "schedule", "schedule_id": "...", "layer": "primary"}, ...]
     targets: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, nullable=False)
 
-    # Notification settings
-    notification_channels: Mapped[list[str]] = mapped_column(JSONType, default=["push", "sms", "phone"])
+    # Notification settings. The default is a callable so that every row gets its
+    # own list: a literal default is one list object shared by every instance the
+    # mapper creates, and appending a channel to one step's list would quietly
+    # add it to every step inserted afterwards in the same process.
+    notification_channels: Mapped[list[str]] = mapped_column(
+        JSONType, default=lambda: list(DEFAULT_ESCALATION_CHANNELS)
+    )
 
     # Conditions to skip this step
     skip_if: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
