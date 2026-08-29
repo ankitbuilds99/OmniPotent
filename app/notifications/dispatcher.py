@@ -45,6 +45,22 @@ class NotificationPriority(Enum):
     CRITICAL = "critical"
 
 
+#: The severity order, written down once. `_should_send` used to decide whether a
+#: notification cleared the recipient's floor by comparing `priority.value` with
+#: `min_priority.value` — the enum's *strings*. That comparison is alphabetical,
+#: and both "critical" and "high" sort before "low", so with the default floor of
+#: LOW every CRITICAL and HIGH notification was discarded before a single channel
+#: was tried while MEDIUM and LOW were delivered. The ordering was inverted
+#: precisely for the two levels that exist in order to be delivered, which on the
+#: on-call path meant a SEV1 page was the one page guaranteed never to be sent.
+_PRIORITY_RANK: dict[NotificationPriority, int] = {
+    NotificationPriority.LOW: 0,
+    NotificationPriority.MEDIUM: 1,
+    NotificationPriority.HIGH: 2,
+    NotificationPriority.CRITICAL: 3,
+}
+
+
 @dataclass
 class NotificationPreferences:
     """User notification preferences."""
@@ -96,6 +112,24 @@ _SENT_NOTIFICATIONS: dict[str, datetime] = {}
 _DEDUPE_WINDOW_SECONDS = 300
 
 
+def _email_failure_reason() -> str:
+    """Why an email send came back False. Imported lazily: only needed to explain
+    a failure, and `send_email` is monkeypatched in tests that never touch the
+    provider."""
+    try:
+        from app.notifications.email import get_email_provider
+
+        if not get_email_provider().is_configured():
+            return (
+                "no email provider is configured on this deployment (set "
+                "SMTP_HOST/SMTP_USERNAME/SMTP_PASSWORD, SENDGRID_API_KEY or "
+                "AWS_SES_ENABLED)"
+            )
+    except Exception as exc:  # noqa: BLE001 — explaining a failure must not raise
+        return f"the email provider could not be inspected: {exc}"
+    return "the configured email provider rejected the message"
+
+
 class NotificationDispatcher:
     """Dispatches notifications across channels based on user preferences."""
 
@@ -145,36 +179,82 @@ class NotificationDispatcher:
         self,
         user_id: str,
         notification: Notification,
+        preferences: NotificationPreferences | None = None,
     ) -> list[DeliveryResult]:
-        """Dispatch notification to user across configured channels."""
-        prefs = get_user_preferences(user_id)
+        """Dispatch notification to user across configured channels.
+
+        `preferences` lets a caller that already knows where this recipient can be
+        reached say so. Without it the routing comes from `_USER_PREFERENCES`, a
+        process-local dictionary that nothing in the application ever writes to, so
+        every recipient resolved to the same hardcoded default — no address, no
+        phone number, and only EMAIL and PUSH enabled. That default silently
+        overrode the channel the caller had explicitly asked for, which is how the
+        on-call pager came to have no channel it could deliver on. A caller with
+        persisted, per-recipient routing passes it here instead of writing it into
+        the process dictionary, where it would go stale and leak across tenants.
+        """
+        prefs = preferences if preferences is not None else get_user_preferences(user_id)
         results: list[DeliveryResult] = []
 
-        if not self._should_send(notification, prefs):
-            log.debug(
-                "Skipping notification %s for user %s (filtered)",
+        suppressed = self._suppression_reason(notification, prefs)
+        if suppressed:
+            # Named, not "(filtered)". Three unrelated rules can drop a
+            # notification here and the caller sees the same empty list for all
+            # of them, so the log line is the only place the difference between
+            # "below their priority floor" and "muted by quiet hours" survives.
+            log.info(
+                "Notification %s for user %s not sent: %s",
                 notification.id,
                 user_id,
+                suppressed,
             )
             return results
 
-        if notification.dedupe_key:
-            cache_key = f"{user_id}:{notification.dedupe_key}"
-            if cache_key in _SENT_NOTIFICATIONS:
-                last_sent = _SENT_NOTIFICATIONS[cache_key]
-                if (datetime.now(timezone.utc) - last_sent).total_seconds() < _DEDUPE_WINDOW_SECONDS:
-                    log.debug("Deduplicating notification %s", notification.dedupe_key)
-                    return results
-            _SENT_NOTIFICATIONS[cache_key] = datetime.now(timezone.utc)
+        # The dedupe window suppresses a repeat of something that *went out*. The
+        # mark used to be written here, before a single channel had been tried, so
+        # a page that failed for a real reason — no provider configured, no address
+        # on file, the provider refusing the message — silenced every retry of it
+        # for the next five minutes, and the retry was reported as a duplicate of a
+        # page that had never been delivered. On the on-call path that turns a
+        # recoverable failure into a five-minute hole with a reassuring reason
+        # attached, which is the failure mode this module keeps being fixed for.
+        # The mark is now written after the attempt and only when a channel
+        # actually accepted the notification, below.
+        cache_key = f"{user_id}:{notification.dedupe_key}" if notification.dedupe_key else ""
+        if cache_key in _SENT_NOTIFICATIONS:
+            last_sent = _SENT_NOTIFICATIONS[cache_key]
+            if (datetime.now(timezone.utc) - last_sent).total_seconds() < _DEDUPE_WINDOW_SECONDS:
+                log.debug("Deduplicating notification %s", notification.dedupe_key)
+                return results
 
         channels = notification.channels or prefs.enabled_channels
 
         for channel in channels:
             if channel not in prefs.enabled_channels:
+                # A channel the caller explicitly asked for and the recipient has
+                # switched off is reported as a failed delivery rather than
+                # dropped from the list. Dropping it silently is how a page that
+                # nobody received became indistinguishable from a page that was
+                # never attempted: the caller got an empty list and had to guess
+                # between "deduplicated", "suppressed" and "channel off".
+                results.append(
+                    DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error=(
+                            f"{channel.value} is not one of this recipient's "
+                            f"enabled channels"
+                        ),
+                    )
+                )
                 continue
 
             result = await self._deliver(user_id, prefs, notification, channel)
             results.append(result)
+
+        if cache_key and any(r.success for r in results):
+            _SENT_NOTIFICATIONS[cache_key] = datetime.now(timezone.utc)
 
         return results
 
@@ -184,19 +264,46 @@ class NotificationDispatcher:
         prefs: NotificationPreferences,
     ) -> bool:
         """Check if notification should be sent based on preferences."""
-        if notification.priority.value < prefs.min_priority.value:
-            return False
+        return not self._suppression_reason(notification, prefs)
+
+    def _suppression_reason(
+        self,
+        notification: Notification,
+        prefs: NotificationPreferences,
+    ) -> str:
+        """Why this notification must not be sent, or "" when it may be.
+
+        The reason exists because "should I send this" has three different
+        answers that an operator has to be able to tell apart after the fact.
+        `_should_send` stays a boolean for its callers.
+        """
+        # Ranked, never lexicographic. A priority missing from the table ranks
+        # above every known level and an unknown floor ranks below every known
+        # level, so a level added to the enum without being ranked here is
+        # delivered rather than quietly dropped — silent suppression is the
+        # failure this table exists to prevent, not one to reintroduce.
+        floor = _PRIORITY_RANK.get(prefs.min_priority, 0)
+        if _PRIORITY_RANK.get(notification.priority, len(_PRIORITY_RANK)) < floor:
+            return (
+                f"priority {notification.priority.value} is below the recipient's "
+                f"floor of {prefs.min_priority.value}"
+            )
 
         if prefs.quiet_hours_start is not None and prefs.quiet_hours_end is not None:
             if notification.priority != NotificationPriority.CRITICAL:
                 current_hour = datetime.now(timezone.utc).hour
                 if prefs.quiet_hours_start <= current_hour < prefs.quiet_hours_end:
-                    return False
+                    return (
+                        f"the recipient's quiet hours "
+                        f"({prefs.quiet_hours_start}:00-{prefs.quiet_hours_end}:00 UTC) "
+                        f"cover a non-critical notification"
+                    )
 
         if notification.type in prefs.alert_filters:
-            return prefs.alert_filters[notification.type]
+            if not prefs.alert_filters[notification.type]:
+                return f"the recipient has {notification.type!r} switched off"
 
-        return True
+        return ""
 
     async def _deliver(
         self,
@@ -213,7 +320,7 @@ class NotificationDispatcher:
                         notification_id=notification.id,
                         channel=channel,
                         success=False,
-                        error="No email configured",
+                        error="No email address on file for this recipient",
                     )
                 success = await send_email(
                     to=prefs.email,
@@ -224,6 +331,14 @@ class NotificationDispatcher:
                     notification_id=notification.id,
                     channel=channel,
                     success=success,
+                    # `send_email` answers with a bare False for both "this
+                    # deployment has no mail provider" and "the provider refused
+                    # the message", and a DeliveryResult with no error reads
+                    # downstream as the generic "delivery failed". Asking the
+                    # provider which of the two it was costs nothing and is the
+                    # difference between an operator setting SMTP_HOST and an
+                    # operator chasing a bounce that never happened.
+                    error=None if success else _email_failure_reason(),
                 )
 
             elif channel == NotificationChannel.PUSH:
@@ -233,20 +348,47 @@ class NotificationDispatcher:
                     body=notification.body,
                     data=notification.data,
                 )
-                success = any(results.values()) if results else False
-                return DeliveryResult(
-                    notification_id=notification.id,
-                    channel=channel,
-                    success=success,
-                )
-
-            elif channel == NotificationChannel.SLACK:
-                if not self.slack_handler or not prefs.slack_user_id:
+                if not results:
+                    # An empty result is not a failed send, it is no send at all:
+                    # the recipient has no registered device, and this build ships
+                    # no endpoint through which a browser could register one. Say
+                    # that, rather than leaving the caller to render an errorless
+                    # failure as the generic "delivery failed" — the reader would
+                    # go looking for a push provider outage that never happened.
                     return DeliveryResult(
                         notification_id=notification.id,
                         channel=channel,
                         success=False,
-                        error="Slack not configured",
+                        error=(
+                            "No registered device for this recipient; this build "
+                            "has no device-registration endpoint"
+                        ),
+                    )
+                return DeliveryResult(
+                    notification_id=notification.id,
+                    channel=channel,
+                    success=any(results.values()),
+                )
+
+            elif channel == NotificationChannel.SLACK:
+                # "<channel> not configured" conflated two unrelated problems that
+                # different people have to fix: nobody knows where to reach this
+                # recipient, versus the deployment has no wiring for the channel at
+                # all. The branches below name the piece that is actually missing,
+                # here and for the phone-backed channels that follow.
+                if not prefs.slack_user_id:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="No Slack user ID on file for this recipient",
+                    )
+                if not self.slack_handler:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="Slack delivery is not wired up on this deployment",
                     )
                 success = await self.slack_handler(
                     user_id=prefs.slack_user_id,
@@ -279,12 +421,19 @@ class NotificationDispatcher:
                 )
 
             elif channel == NotificationChannel.SMS:
-                if not self.sms_handler or not prefs.phone:
+                if not prefs.phone:
                     return DeliveryResult(
                         notification_id=notification.id,
                         channel=channel,
                         success=False,
-                        error="SMS not configured",
+                        error="No phone number on file for this recipient",
+                    )
+                if not self.sms_handler:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="SMS delivery is not wired up on this deployment",
                     )
                 success = await self.sms_handler(
                     phone=prefs.phone,
@@ -297,12 +446,19 @@ class NotificationDispatcher:
                 )
 
             elif channel == NotificationChannel.VOICE:
-                if not self.voice_handler or not prefs.phone:
+                if not prefs.phone:
                     return DeliveryResult(
                         notification_id=notification.id,
                         channel=channel,
                         success=False,
-                        error="Voice not configured",
+                        error="No phone number on file for this recipient",
+                    )
+                if not self.voice_handler:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="Voice delivery is not wired up on this deployment",
                     )
                 result = await self.voice_handler(
                     phone=prefs.phone,
@@ -316,12 +472,19 @@ class NotificationDispatcher:
                 )
 
             elif channel == NotificationChannel.WHATSAPP:
-                if not self.whatsapp_handler or not prefs.phone:
+                if not prefs.phone:
                     return DeliveryResult(
                         notification_id=notification.id,
                         channel=channel,
                         success=False,
-                        error="WhatsApp not configured",
+                        error="No phone number on file for this recipient",
+                    )
+                if not self.whatsapp_handler:
+                    return DeliveryResult(
+                        notification_id=notification.id,
+                        channel=channel,
+                        success=False,
+                        error="WhatsApp delivery is not wired up on this deployment",
                     )
                 result = await self.whatsapp_handler(
                     phone=prefs.phone,
@@ -466,8 +629,13 @@ async def notify(
     channels: set[NotificationChannel] | None = None,
     data: dict[str, Any] | None = None,
     dedupe_key: str | None = None,
+    preferences: NotificationPreferences | None = None,
 ) -> list[DeliveryResult]:
-    """Send notification to a user."""
+    """Send notification to a user.
+
+    Pass `preferences` when the caller — not this module's process dictionary —
+    is the authority on where the recipient can be reached; see `dispatch`.
+    """
     import secrets
 
     notification = Notification(
@@ -482,4 +650,4 @@ async def notify(
     )
 
     dispatcher = get_dispatcher()
-    return await dispatcher.dispatch(user_id, notification)
+    return await dispatcher.dispatch(user_id, notification, preferences=preferences)

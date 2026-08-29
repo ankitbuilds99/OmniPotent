@@ -12,12 +12,18 @@ point CORPUS_PATH (or the `corpus_path` arg) at your own prior RCAs/runbooks.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
 import os
 import re
 from collections import Counter
 from pathlib import Path
+
+from app.tenant_context import get_tenant
+
+log = logging.getLogger("omnipotent.incident_memory")
 
 _DEFAULT_CORPUS = Path(__file__).resolve().parent / "mcp" / "servers" / "memory" / "corpus.json"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,13 +33,66 @@ def corpus_path(explicit: str = "") -> Path:
     return Path(explicit or os.environ.get("CORPUS_PATH") or _DEFAULT_CORPUS).resolve()
 
 
-def learned_corpus_path() -> Path:
+def _org_file_token(org_id: str) -> str:
+    """A filename-safe token that maps one org id to exactly one corpus file.
+
+    The readable slug is for the operator reading a directory listing; the digest
+    is what makes the mapping injective. Sanitising alone is not enough — "acme/prod"
+    and "acme-prod" both sanitise to "acme-prod" and would then share a single
+    learned corpus, which is precisely the cross-tenant leak this scoping exists to
+    close.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", org_id.lower()).strip("-")[:40] or "org"
+    return f"{slug}-{hashlib.sha256(org_id.encode()).hexdigest()[:12]}"
+
+
+def learned_corpus_path() -> Path | None:
     """Where continually-learned incidents accumulate — separate from the bundled
-    demo corpus so the shipped fixture is never mutated."""
+    demo corpus so the shipped fixture is never mutated, and separate per org so
+    one tenant's root causes never reach another's.
+
+    This used to resolve to one process-wide file with no org in it, so a root
+    cause learned from org A's investigation was merged into every other org's
+    search results and, through the planner's prior-incidents block, into their
+    LLM prompt. Now: single-tenant deployments (the default, and the offline demo)
+    get the exact unscoped path they always had — there is one org, so that file is
+    its file and an existing learned_incidents.json is not orphaned — while a
+    multi-tenant deployment derives one file per org from the configured base path.
+
+    Returns None when multi-tenancy is on and no tenant is resolved on this call.
+    That is tenant_context's deny-by-default rule applied to storage: an ownerless
+    record has no org entitled to read it, and filing it in a shared "unowned"
+    bucket would recreate the leak at one remove.
+    """
     from app.config import get_settings
 
-    base = get_settings().copilot_learned_corpus.strip()
-    return Path(base).expanduser().resolve() if base else (_PROJECT_ROOT / "learned_incidents.json")
+    settings = get_settings()
+    base = settings.copilot_learned_corpus.strip()
+    path = Path(base).expanduser().resolve() if base else (_PROJECT_ROOT / "learned_incidents.json")
+    if not settings.copilot_multi_tenant:
+        return path
+    cfg = get_tenant()
+    if cfg is None or not cfg.org_id:
+        return None
+    return path.with_name(f"{path.stem}.{_org_file_token(cfg.org_id)}{path.suffix}")
+
+
+def _readable_by_current_tenant(rec: dict) -> bool:
+    """Whether a learned record may be served to whoever is on this call.
+
+    Per-org paths are the primary isolation; this is the second lock, for a file
+    that holds foreign records anyway — a base path shared between deployments, a
+    restored pre-scoping backup, a hand-edited corpus. A record with no `org` stamp
+    predates the scoping and has no known owner, so with multi-tenancy on it is
+    served to nobody; with multi-tenancy off there is a single org and every record
+    belongs to it.
+    """
+    from app.config import get_settings
+
+    if not get_settings().copilot_multi_tenant:
+        return True
+    cfg = get_tenant()
+    return cfg is not None and bool(rec.get("org")) and rec.get("org") == cfg.org_id
 
 
 def _read_json(path: Path) -> list[dict]:
@@ -44,15 +103,25 @@ def _read_json(path: Path) -> list[dict]:
         return []
 
 
+def _own_learned_records(path: Path | None) -> list[dict]:
+    """The learned records the current caller owns — the only ones any read path
+    may see or dedupe against."""
+    if path is None:
+        return []
+    return [r for r in _read_json(path) if _readable_by_current_tenant(r)]
+
+
 def load_corpus(explicit: str = "") -> list[dict]:
     """Load the incident corpus. With no explicit/env path, merges the bundled
-    corpus with continually-learned incidents (deduped by id); an explicit path is
-    returned verbatim so callers/tests can pin an isolated corpus."""
+    read-only corpus with the calling org's continually-learned incidents (deduped
+    by id); an explicit path is returned verbatim so callers/tests can pin an
+    isolated corpus. Another org's learned incidents are never part of the result,
+    so neither `search()` nor the planner block built on it can disclose them."""
     base = _read_json(corpus_path(explicit))
     if explicit or os.environ.get("CORPUS_PATH"):
         return base
     seen = {r.get("id") for r in base}
-    learned = [r for r in _read_json(learned_corpus_path()) if r.get("id") not in seen]
+    learned = [r for r in _own_learned_records(learned_corpus_path()) if r.get("id") not in seen]
     return base + learned
 
 
@@ -237,8 +306,21 @@ def build_record(request: str, report: dict, date: str, seq: int = 0) -> dict:
 
 
 def append_incident(record: dict, path: Path | None = None) -> bool:
-    """Append a record to the learned corpus. Best-effort: never raises."""
+    """Append a record to the learned corpus. Best-effort: never raises.
+
+    Refuses the write when multi-tenancy is on and no tenant is resolved: there is
+    no file that only the record's owner could read, and returning True anyway
+    would report a success the caller cannot tell apart from a real write. The
+    warning names the reason so an operator sees why nothing was learned.
+    """
     target = path or learned_corpus_path()
+    if target is None:
+        log.warning(
+            "Not storing learned incident %s: multi-tenancy is on but no tenant is "
+            "resolved, so the record has no owning org.",
+            record.get("id", "?"),
+        )
+        return False
     try:
         records = _read_json(target)
         records.append(record)
@@ -257,6 +339,12 @@ def learn_from_report(request: str, report: dict, date: str) -> dict | None:
     low-confidence guesses. Deduped by root cause so a repeated incident doesn't
     accumulate duplicates. Returns the stored record, or None if skipped.
 
+    The record is filed under, and deduped against, the requesting org alone. Two
+    tenants hitting the same failure mode therefore each keep their own copy:
+    org B's investigation is neither suppressed by org A's record nor allowed to
+    inherit it. Nothing is learned at all when multi-tenancy is on and no tenant
+    resolved — see `learned_corpus_path`.
+
     When vectors are enabled, also adds the record to the vector store for semantic
     search.
     """
@@ -267,13 +355,27 @@ def learn_from_report(request: str, report: dict, date: str) -> dict | None:
     if report.get("abstained") or not (report.get("root_cause") or "").strip():
         return None
 
+    target = learned_corpus_path()
+    if target is None:
+        log.warning(
+            "Not learning from this investigation: multi-tenancy is on but no tenant "
+            "is resolved, so there is no org to file the learned incident under."
+        )
+        return None
+
     rc = report["root_cause"].strip().lower()
-    existing = _read_json(learned_corpus_path())
+    existing = _own_learned_records(target)
     if any((r.get("root_cause") or "").strip().lower() == rc for r in existing):
         return None  # already learned this failure mode
 
     record = build_record(request, report, date=date, seq=len(existing))
-    if not append_incident(record):
+    cfg = get_tenant()
+    if get_settings().copilot_multi_tenant and cfg is not None:
+        # Stamp the owner so the read guard can reject this record if the file it
+        # lands in is ever read by another org. Single-tenant records stay
+        # unstamped, keeping that deployment's file byte-for-byte what it was.
+        record["org"] = cfg.org_id
+    if not append_incident(record, target):
         return None
 
     # Also add to vector store if enabled

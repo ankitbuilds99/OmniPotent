@@ -28,7 +28,13 @@ class ConnectorConfig:
     username: str = ""
     password: str = ""
     timeout_seconds: float = 30.0
-    verify_ssl: bool = True
+    # Mirrors httpx's ``verify``: ``True`` means the public trust store, ``False``
+    # disables verification entirely, and a string is the path to a CA bundle to
+    # trust *instead* of the public roots. The annotation used to say ``bool``
+    # only, which made mypy reject the Kubernetes connector's cluster-CA path and
+    # broke the CI type gate; a service signed by a private CA has no way to be
+    # verified without naming its bundle here.
+    verify_ssl: bool | str = True
     extra: dict[str, Any] = field(default_factory=dict)
 
 

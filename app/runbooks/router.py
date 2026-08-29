@@ -24,6 +24,16 @@ configured reports failure rather than claiming an action it did not perform.
 matched it as a runbook id and it answered 404 "Runbook not found" — the
 execution listing had never been reachable. Literal paths now precede the
 parameterised one.
+
+*Authorisation.* Every route here was open to any authenticated caller. The
+app-wide dependency is `Depends(require_auth)`, which only proves a credential
+is valid; `require_perm` is the sole authorisation mechanism in this codebase and
+it is a per-route dependency, so a router that declares none is a router with no
+RBAC at all. A `viewer` API key — the least-privileged role, refused 403 when it
+tries to approve a single agent write — could author a runbook containing a
+`kubernetes` or `command` step, execute it, clear its own approval gate and then
+delete both the runbook and the execution rows that recorded what it did. The
+matrix is applied below, once, for the whole router.
 """
 
 from __future__ import annotations
@@ -31,7 +41,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app import tenant_context
@@ -49,7 +59,52 @@ from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.runbooks.api")
 
-router = APIRouter(prefix="/runbooks", tags=["runbooks"])
+
+async def _enforce_runbook_rbac(request: Request) -> None:
+    """Run the org RBAC matrix for whichever runbook route was matched.
+
+    Keyed on the matched endpoint rather than on the HTTP method, because method
+    is not enough here: `POST /{id}/execute` and `POST ""` are both writes but
+    they are not the same privilege. The table lives at the foot of this module,
+    next to the routes it classifies.
+
+    Authoring is deliberately a rung above executing. A responder may run a
+    runbook someone else wrote; if a responder could also *write* one, then
+    "may execute a runbook" would silently mean "may run any command the
+    executor's allowlist permits", and the distinction between the two roles
+    would buy nothing. So definitions are `manage_integrations` (admin, the same
+    rung as handing the deployment a Datadog or GitHub credential) and running,
+    approving and rejecting are `approve_action` (responder, the rung the agent's
+    own proposed writes already sit on).
+
+    Unclassified routes are refused rather than served: a route added later
+    without a table entry fails loudly here instead of quietly inheriting no
+    authorisation, which is the exact way this router lost its RBAC in the first
+    place. `require_perm` itself is a no-op in single-tenant deployments, which
+    have no roles, so the offline demo is unaffected.
+    """
+    from app.api.main import require_perm  # here, not at module scope: main imports us
+
+    endpoint = getattr(request.scope.get("route"), "endpoint", None)
+    action = _PERMISSION_BY_ENDPOINT.get(endpoint)
+    if action is None:
+        name = getattr(endpoint, "__name__", None) or request.url.path
+        log.error("Runbook route %s has no entry in _PERMISSION_BY_ENDPOINT", name)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Runbook route '{name}' has no RBAC classification; refusing to "
+                "serve it rather than run it unauthorised."
+            ),
+        )
+    await require_perm(action)()
+
+
+router = APIRouter(
+    prefix="/runbooks",
+    tags=["runbooks"],
+    dependencies=[Depends(_enforce_runbook_rbac)],
+)
 
 
 class RunbookResponse(BaseModel):
@@ -487,3 +542,26 @@ async def execute_runbook(
         _schedule(background_tasks, execution.id, approved_through=-1)
         return _execution(execution)
     return _execution(execution, {"waiting_on": rb.steps[0].id} if rb.steps else None)
+
+
+# The permission every route above is served under, read by `_enforce_runbook_rbac`.
+# Declared here so it can name the endpoint functions themselves: a rename or a
+# deletion is then an ImportError-grade mistake rather than a path string that
+# quietly stops matching and leaves a route ungoverned.
+#
+# Deleting an execution is an admin act, not a responder one: those rows are the
+# record of what ran against production and who cleared it, and the trail they
+# belong to is already `view_audit` (admin) to so much as read.
+_PERMISSION_BY_ENDPOINT: dict[Any, str] = {
+    list_runbooks: "view",
+    get_runbook: "view",
+    list_executions: "view",
+    get_execution: "view",
+    create_runbook: "manage_integrations",
+    update_runbook: "manage_integrations",
+    delete_runbook: "manage_integrations",
+    delete_execution: "manage_integrations",
+    execute_runbook: "approve_action",
+    approve_execution: "approve_action",
+    reject_execution: "approve_action",
+}

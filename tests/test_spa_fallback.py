@@ -86,3 +86,53 @@ def test_unknown_api_paths_still_404(client: TestClient, path: str) -> None:
     response = client.get(path)
     assert response.status_code == 404, path
     assert "text/html" not in response.headers.get("content-type", ""), path
+
+
+# The two tests above assert the symptom. These assert the mechanism, because
+# the symptom came back on a dependency bump with nothing else changing.
+
+
+def test_the_api_segment_list_sees_routes_behind_include_router() -> None:
+    """`oncall` and `billing` only exist behind `include_router`.
+
+    FastAPI 0.137 stopped flattening included routers into `app.routes`, leaving
+    one `_IncludedRouter` per call — an object with no `.path`. The segment list
+    read `.path` off the top level only, so it went from covering the whole API
+    to covering the 85 routes declared inline, and `/oncall/nope` started
+    answering `200 text/html`. Nothing failed loudly; two parametrized cases
+    above are the only thing that noticed.
+    """
+    from app.api import main
+
+    served = set(main._served_paths(main.app.routes))
+    # Inline routes are found by the easy path; these are the ones that need
+    # the recursion, one per include style: no prefix, prefix="/api", and the
+    # WebSocket router that `effective_candidates()` cannot see at all.
+    assert "/oncall/schedules" in served
+    assert "/api/teams" in served
+    assert "/ws/chat/{thread_id}" in served
+    assert len(served) > 300, len(served)
+
+    for segment in ("oncall", "billing", "api", "ws", "auth"):
+        assert segment in main._API_SEGMENTS, segment
+
+
+def test_a_write_to_a_path_that_does_not_exist_is_404_not_405() -> None:
+    """StaticFiles rejects non-GET verbs before it looks for the file.
+
+    That made the catch-all mount claim every mistyped path existed. The
+    GraphQL status probe distinguishes "not mounted" from "mounted" by checking
+    for 404, so an unmounted schema read as reachable.
+    """
+    from app.api.main import app as fresh_app
+
+    with TestClient(fresh_app) as c:
+        assert c.post("/api/no-such-endpoint-at-all").status_code == 404
+        assert c.put("/nowhere-at-all").status_code == 404
+        # A file that is really there keeps 405: the resource exists, the verb
+        # is what is wrong, and saying 404 would be the same lie in reverse.
+        assert c.post("/index.html").status_code == 405
+        # And so does a path a real route owns. The mount sits at "/" and so
+        # matches everything, which means a wrong-verb call to a real endpoint
+        # never reaches that endpoint to collect its own 405 — it arrives here.
+        assert c.post("/healthz").status_code == 405

@@ -5,12 +5,15 @@ Public and admin endpoints for the status page system.
 
 from __future__ import annotations
 
+import logging
+import sys
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from pydantic import BaseModel, Field, EmailStr
+from starlette.requests import HTTPConnection
 
 from app.config import get_settings
 from app.status_page.models import (
@@ -29,7 +32,25 @@ from app.status_page.notifications import (
 from app.status_page.store import get_live_status_store, get_status_store
 from app.url_guard import BlockedURL, assert_public_url
 
+log = logging.getLogger("omnipotent.status_page.api")
+
 router = APIRouter(prefix="/api/status", tags=["Status Page"])
+
+# The route the emailed verification link points at. Named once because both the
+# link builder and the check that the link is reachable resolve it by name.
+_VERIFY_ROUTE_NAME = "verify_subscription"
+
+# What a subscriber is told when the verification link cannot be opened. The
+# subscribe form is anonymous and app/api/main.py's auth gate no longer stands in
+# front of it, so this string is read by strangers; frontend/src/pages/StatusPage.tsx
+# renders `detail` verbatim into the form. It therefore says what happened to the
+# address and nothing about how this deployment is built — the diagnosis, which
+# names internal paths and symbols, goes to the server log for the operator.
+_EMAIL_SUBSCRIPTIONS_UNAVAILABLE = (
+    "Email subscriptions are temporarily unavailable on this deployment. Your "
+    "address was not stored and nothing was sent to it. The reason has been "
+    "recorded in the server log; please try again later."
+)
 
 
 # --- Request/Response Models ---
@@ -304,10 +325,114 @@ def _verification_link(http_request: Request, subscriber_id: str, token: str) ->
     deployment and is at worst the host the subscriber just used themselves.
     """
     query = urlencode({"id": subscriber_id, "token": token})
-    path = router.url_path_for("verify_subscription")
+    path = router.url_path_for(_VERIFY_ROUTE_NAME)
     configured = (get_settings().status_page_url or "").strip().rstrip("/")
     base = configured or str(http_request.base_url).rstrip("/")
     return f"{base}{path}?{query}"
+
+
+def _verification_link_is_served_here(http_request: Request) -> bool:
+    """Whether the link we are about to mail is answered by *this* app.
+
+    `_verification_link` prefers `status_page_url` when an operator has set one,
+    so a deployment can serve its status page from a separate public host or from
+    behind an edge that injects a credential. There the local auth gate says
+    nothing about whether the emailed link opens, and probing it would refuse a
+    subscription loop that works. Only a link whose origin is this app's own is
+    the local gate's business; an origin we cannot parse counts as elsewhere,
+    because refusing on a guess is the failure mode being avoided.
+    """
+    configured = (get_settings().status_page_url or "").strip()
+    if not configured:
+        return True
+    there = urlsplit(configured)
+    here = urlsplit(str(http_request.base_url))
+    return bool(there.netloc) and (there.scheme, there.netloc) == (here.scheme, here.netloc)
+
+
+async def _verification_link_rejected(http_request: Request) -> str | None:
+    """Ask the app's own auth gate whether the emailed link can be opened at all.
+
+    The verification link is opened from a mail client, and a mail client sends
+    no Authorization header — the single-use random token in the query string is
+    the only credential that route has or needs. But this router is mounted on an
+    app that gates *every* route with `require_auth`, whose exemption list lives
+    with the app rather than with the router, and a router cannot opt one of its
+    own paths out of it. So on any deployment that had a credential configured —
+    which production always does — the emailed URL was answered 401 before
+    `verify_subscription` ever ran. The subscriber stayed unverified, and
+    `notify_subscribers` skips unverified subscribers, so the address was kept
+    forever and told about nothing while the response said "check your email".
+
+    app/api/main.py now exempts the anonymous half of this router, so on a stock
+    deployment this returns None and the subscribe/verify loop runs. The probe
+    stays because the exemption lives in another file and is one edit away from
+    being lost again: rather than trusting it, this runs the real gate against a
+    real credential-less GET of the real path and reports what actually happened.
+
+    Returns an operator-facing diagnosis (for the log, not the response) only when
+    the gate *refused* the anonymous click, i.e. raised 401/403. Any other outcome
+    — the gate erroring on the synthetic connection, or refusing for a transient
+    reason — is logged and treated as "unmeasured": a probe that could not reach a
+    verdict must not be the thing that kills email subscriptions.
+    """
+    gate = getattr(sys.modules.get("app.api.main"), "require_auth", None)
+    if gate is None:
+        return None
+    # Only relevant when that gate is actually installed on the app serving this
+    # request; embedded/standalone mounts of this router are not affected by it.
+    router_deps = getattr(getattr(http_request.app, "router", None), "dependencies", [])
+    if not any(getattr(dep, "dependency", None) is gate for dep in router_deps):
+        return None
+    if not _verification_link_is_served_here(http_request):
+        return None
+
+    path = router.url_path_for(_VERIFY_ROUTE_NAME)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "scheme": http_request.url.scheme,
+        "server": (http_request.url.hostname or "localhost", http_request.url.port or 80),
+        "query_string": b"id=probe&token=probe",
+        "headers": [],
+        "client": None,
+    }
+    try:
+        await gate(HTTPConnection(scope))
+    except HTTPException as refusal:
+        if refusal.status_code not in (401, 403):
+            log.warning(
+                "verification-link reachability probe of %s was inconclusive: the auth "
+                "gate raised %s (%s); accepting the subscription anyway",
+                path,
+                refusal.status_code,
+                refusal.detail,
+            )
+            return None
+        return (
+            f"an anonymous GET of {path} — which is what a mail client does with the "
+            f"link — is refused by this deployment's API authentication gate "
+            f"({refusal.status_code}: {refusal.detail}), so the address could never be "
+            f"verified. To enable email subscriptions, exempt a GET of {path!r} from "
+            "`require_auth` in app/api/main.py (`_is_public_status_page` / "
+            "`_PUBLIC_PATHS` keep the per-IP rate limiter on it, `_OPEN_PATHS` does "
+            "not); the single-use token in the link is that route's credential."
+        )
+    except Exception:
+        # Not a refusal: the gate itself broke on a synthetic connection. That is a
+        # bug in the probe or the gate, not evidence about the mail client's click,
+        # so it is reported as itself rather than dressed up as an auth rejection.
+        log.warning(
+            "verification-link reachability probe of %s could not run; accepting the "
+            "subscription anyway",
+            path,
+            exc_info=True,
+        )
+        return None
+    return None
 
 
 @router.post("/subscribe", response_model=SubscribeResponse, status_code=201)
@@ -322,8 +447,12 @@ async def subscribe_to_updates(
     An email subscription is stored unverified and the verification link is
     mailed to the address; only a verified subscription is ever notified, so an
     address that never opens the link never hears from us. Email therefore needs
-    a configured email provider — without one this returns 503 rather than
-    accepting an address it could never verify.
+    two things, and each returns 503 when it is missing rather than accepting an
+    address that could never be verified: a configured email provider to carry
+    the link, and a verification route this deployment's auth gate lets an
+    anonymous mail-client click reach. The second 503 keeps its reason out of the
+    response — this endpoint is anonymous and its `detail` is rendered to whoever
+    submitted the form — and writes the diagnosis to the server log instead.
 
     A webhook subscription is verified on creation: possession of the URL is the
     only credential a webhook has. The URL itself is checked first — see
@@ -398,6 +527,17 @@ async def subscribe_to_updates(
             "so the verification link cannot be sent. To enable them, "
             f"{EMAIL_DELIVERY_REQUIREMENTS}.",
         )
+
+    # Same reasoning one step further along: a link that is sent but cannot be
+    # opened leaves exactly the same dead row behind, so a link the deployment's
+    # own auth gate refuses is refused here instead of being mailed. Loud in the
+    # log, where the operator who can act on it reads; deliberately vague in the
+    # response, which a stranger reads (see _EMAIL_SUBSCRIPTIONS_UNAVAILABLE).
+    if not is_webhook:
+        unreachable = await _verification_link_rejected(http_request)
+        if unreachable:
+            log.error("refusing email subscription: %s", unreachable)
+            raise HTTPException(503, _EMAIL_SUBSCRIPTIONS_UNAVAILABLE)
 
     # The preferences and the auto-verify go in with the row. They used to be
     # assigned to the returned object afterwards, which only stored anything

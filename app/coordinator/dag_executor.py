@@ -609,6 +609,14 @@ class DAGExecutor:
             execution = await self._load_checkpoint(resume_from)
             if not execution:
                 raise ValueError(f"Checkpoint {resume_from} not found")
+            self._restore_level_plan(dag, execution)
+            if execution_id:
+                # The caller that handed us an id has already written a record
+                # under it and is polling it. Resumes used to keep the
+                # checkpoint's own id, so the run was filed under the *old* id
+                # and the row the caller was watching sat at "running" for ever.
+                # `resumed_from` still says which checkpoint this continues.
+                execution.id = execution_id
         else:
             execution = DAGExecution(
                 id=execution_id or f"exec_{uuid.uuid4().hex[:8]}",
@@ -642,6 +650,54 @@ class DAGExecutor:
             await self._save_checkpoint(execution)
 
         return execution
+
+    @staticmethod
+    def _restore_level_plan(dag: TaskDAG, execution: DAGExecution) -> None:
+        """Give a resumed execution back the level plan it was part-way through.
+
+        Checkpoints never carried `execution_levels`, so a resumed run arrived
+        with an empty plan and `_execute_dag`'s
+        `range(current_level, len(execution_levels))` was an empty range: not one
+        handler was called, every task kept whatever state it had when the run
+        was interrupted, and the execution was recorded as COMPLETED. An operator
+        resuming an interrupted remediation was told it had finished while
+        nothing at all had been done.
+
+        Checkpoints now persist the plan. Ones written before that carry none, so
+        it is recomputed from the DAG supplied with the resume request — the same
+        deterministic `get_execution_levels()` that produced it in the first
+        place.
+
+        A plan that does not describe that DAG is refused instead of run: it
+        would either fail on a task id the graph does not have or, worse, quietly
+        leave the tasks it omits unexecuted while the run still reported success.
+        """
+        if not execution.execution_levels:
+            execution.execution_levels = dag.get_execution_levels()
+
+        planned = {task_id for level in execution.execution_levels for task_id in level}
+        known = set(dag.tasks)
+        if planned != known:
+            details = []
+            if planned - known:
+                details.append(
+                    f"plan references tasks the DAG does not have: {sorted(planned - known)}"
+                )
+            if known - planned:
+                details.append(
+                    f"DAG tasks the plan would never run: {sorted(known - planned)}"
+                )
+            raise ValueError(
+                f"Checkpoint {execution.resumed_from} does not match DAG "
+                f"{dag.id}: " + "; ".join(details)
+            )
+
+        if not execution.execution_levels:
+            raise ValueError(
+                f"Checkpoint {execution.resumed_from} cannot be resumed: no "
+                f"execution levels could be rebuilt for DAG {dag.id}, so the "
+                "resumed run would do nothing"
+            )
 
     async def _execute_dag(self, dag: TaskDAG, execution: DAGExecution) -> None:
         """Execute DAG level by level."""
@@ -976,7 +1032,16 @@ class DAGExecutor:
             "execution_id": execution.id,
             "dag_id": execution.dag_id,
             "state": execution.state.value,
+            # The level plan is part of the resume state, not a derived detail:
+            # a checkpoint without it restores an execution that has no work to
+            # iterate over and therefore "completes" instantly without running
+            # anything. `current_level` is only meaningful as an index into it.
+            "execution_levels": [list(level) for level in execution.execution_levels],
             "current_level": execution.current_level,
+            # The context the run was started with, kept for the same reason: a
+            # resumed execution that restored an empty one overwrote the stored
+            # record's context with `{}`, losing the incident it was about.
+            "initial_context": self._serialize_context(execution.initial_context),
             "accumulated_context": self._serialize_context(execution.accumulated_context),
             "task_executions": {
                 task_id: {
@@ -1024,7 +1089,15 @@ class DAGExecutor:
             id=checkpoint["execution_id"],
             dag_id=checkpoint["dag_id"],
             state=ExecutionState(checkpoint["state"]),
+            # Restored rather than left to default to `[]`, which is what made a
+            # resume iterate over nothing. Checkpoints written before the plan
+            # was persisted have no key here; `_restore_level_plan` recomputes
+            # it from the DAG for those.
+            execution_levels=[
+                list(level) for level in (checkpoint.get("execution_levels") or [])
+            ],
             current_level=checkpoint["current_level"],
+            initial_context=dict(checkpoint.get("initial_context") or {}),
             accumulated_context=checkpoint["accumulated_context"],
             resumed_from=checkpoint_id,
         )

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Iterable, Iterator
 from typing import Any
 import hashlib
 import hmac
@@ -49,6 +50,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Match
 
 from app.security.headers import SecurityHeadersMiddleware
 
@@ -272,6 +274,39 @@ _OPERATOR_PATHS = frozenset(
 # spam endpoint. These skip only the credential check.
 _PUBLIC_PATHS = frozenset({"/signup", "/waitlist", "/waitlist/position"})
 
+# The status page's public half. A status page is the address customers are sent
+# to when the product is down, and the verification link in a subscription email
+# is opened by a mail client that holds no credential at all — the single-use
+# random token in that link's query string is the route's credential. Every one
+# of these answered 401 on any deployment with a token configured, so nobody
+# outside the tenant could read the page, nobody could subscribe, and no emailed
+# address could ever be verified (`notify_subscribers` skips unverified rows, so
+# the subscription was kept forever and told about nothing).
+#
+# Scoped by method, not by prefix, because the same router hangs its admin writes
+# off the same paths: POST/DELETE on /api/status/components|incidents|maintenances
+# create and delete them and POST /api/status/refresh forces a health sync, and
+# none of those carry a guard of their own. Only reads plus the two subscriber
+# routes are opened. `DELETE /api/status/subscribe/{id}` stays closed: nothing
+# emails an unsubscribe link, so no anonymous flow needs it. A new *read* route
+# under this prefix that is not meant for the public has to be excluded here.
+#
+# Not in _OPEN_PATHS, for the same reason as the paths above: that set also
+# bypasses LimitsMiddleware, and an unauthenticated POST with neither a per-IP
+# rate limit nor a body cap is a spam endpoint.
+_STATUS_PAGE_PREFIX = "/api/status"
+_PUBLIC_STATUS_POSTS = frozenset({"/api/status/subscribe"})
+
+
+def _is_public_status_page(method: str, path: str) -> bool:
+    """True for the anonymously reachable part of the status page router."""
+    if path != _STATUS_PAGE_PREFIX and not path.startswith(f"{_STATUS_PAGE_PREFIX}/"):
+        return False
+    if method in ("GET", "HEAD"):
+        return True
+    return method == "POST" and path in _PUBLIC_STATUS_POSTS
+
+
 # --- In-memory per-IP fixed-window rate limiter (single-instance only) ---
 # {ip: (window_start_epoch, count)}. Good enough for one process; a multi-instance
 # deployment should front this with a shared limiter (e.g. Redis / a gateway).
@@ -404,6 +439,37 @@ async def _drain_and_close() -> None:
     _SESSIONS.clear()
 
 
+# How often the deduplication engine's digest buffer is drained. Well inside the
+# shortest digest window the business rules use (1 hour; the longest is 4), so a
+# group waits a fraction of its own window rather than most of another one.
+_DEDUP_DIGEST_FLUSH_INTERVAL_S = 300.0
+
+
+async def _dedup_digest_loop() -> None:
+    """Drain every org's Layer 6 digest buffer on a timer.
+
+    The same argument as the notification digest loop below, about a different
+    buffer. `SuppressionEngine` collects a repeating non-critical alert into a
+    digest group instead of dropping it, and that buffer is emptied by the next
+    alert that arrives (POST /deduplication/process) or by an explicit POST
+    /deduplication/digests/flush. A digest window closes with time, not with
+    traffic, so on a deployment that goes quiet the last group of a burst sat
+    there until the 24-hour expiry deleted it: alerts deliberately collected for a
+    digest that nobody was ever sent. `flush_all_due_digests()` exists for exactly
+    this caller — it skips orgs with nothing due and restores each pipeline's own
+    tenant before delivering, which is what makes a flush with no request behind
+    it safe.
+    """
+    from app.deduplication.api_router import flush_all_due_digests
+
+    while True:
+        await asyncio.sleep(_DEDUP_DIGEST_FLUSH_INTERVAL_S)
+        try:
+            await flush_all_due_digests()
+        except Exception:  # noqa: BLE001 — a bad flush must not stop the timer
+            log.exception("deduplication digest flush failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Multi-tenant: ensure the tenant store schema exists before serving.
@@ -502,6 +568,10 @@ async def lifespan(app: FastAPI):
 
     digest_task = asyncio.create_task(_digest_loop())
 
+    # The deduplication engine's own digest buffer, which nothing else drains on a
+    # timer — see `_dedup_digest_loop` above for why traffic is not enough.
+    dedup_digest_task = asyncio.create_task(_dedup_digest_loop())
+
     # Live status page health check polling
     from app.status_page import start_live_status_polling, stop_live_status_polling
     await start_live_status_polling()
@@ -514,7 +584,7 @@ async def lifespan(app: FastAPI):
     await audit.stop_drain()
     # Stop live status polling first
     await stop_live_status_polling()
-    for _task in (digest_task, escalation_task, slo_task, job_task):
+    for _task in (digest_task, dedup_digest_task, escalation_task, slo_task, job_task):
         if _task:
             _task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -589,15 +659,19 @@ async def require_auth(conn: HTTPConnection) -> None:
     # secret as X-Webhook-Secret, bearer or basic-auth password. Skipping here
     # moves the credential check, it does not remove it.
     #
-    # Both prefixes, because there are two mounts: `POST /webhooks/stripe` is
-    # declared on the app directly, while app/webhooks/router.py (Alertmanager,
-    # Grafana, Datadog, PagerDuty, the generic receiver) carries its own
-    # `/webhooks` prefix and is included with `prefix="/api"` — so it really
-    # lives at /api/webhooks/*. Only the first prefix was listed, so on any
-    # deployment with COPILOT_API_TOKEN set every alert delivery was rejected
-    # 401 before reaching its signature check, and no alert ever became an
-    # incident.
-    if conn.url.path.startswith(("/webhooks/", "/api/webhooks/")):
+    # All three prefixes, because there are three mounts of the same receivers:
+    # `POST /webhooks/stripe` is declared on the app directly; app/webhooks/router.py
+    # (Alertmanager, Grafana, Datadog, PagerDuty, the generic receiver) carries its
+    # own `/webhooks` prefix and is included with `prefix="/api"`, so it really lives
+    # at /api/webhooks/*; and app/api/v1/webhooks.py mirrors the GitHub, GitLab,
+    # PagerDuty and Stripe receivers at /v1/webhooks/* by calling the very same
+    # handlers. Only the first prefix was listed once, so on any deployment with
+    # COPILOT_API_TOKEN set every alert delivery was rejected 401 before reaching
+    # its signature check, and no alert ever became an incident. The /v1 mirror was
+    # in the same state the moment its router was mounted: GitHub cannot be told to
+    # send a bearer token, so a signed delivery to /v1/webhooks/github would have
+    # been refused before the signature it *does* carry was ever looked at.
+    if conn.url.path.startswith(("/webhooks/", "/api/webhooks/", "/v1/webhooks/")):
         return
     # The Slack bot router is mounted at /api/slack and is the same case: Slack
     # signs every request with X-Slack-Signature and never sends an Authorization
@@ -623,6 +697,15 @@ async def require_auth(conn: HTTPConnection) -> None:
     # rate-limiter still applies (abuse guard); /signup's handler additionally
     # enforces multi-tenant + the enabled flag.
     if conn.url.path in _PUBLIC_PATHS:
+        return
+    # The public status page (see _is_public_status_page). Only when the caller
+    # presents no credential at all: the status page store is scoped to the org on
+    # the tenant context, so returning early for a request that *did* carry a
+    # tenant key would silently serve that tenant the default org's components
+    # instead of their own. A credential that is present still has to be valid.
+    if not _auth_header(conn) and _is_public_status_page(
+        conn.scope.get("method", ""), conn.url.path
+    ):
         return
 
     s = get_settings()
@@ -870,6 +953,65 @@ _DEFAULT_HISTORY_ORG = tenant_context.DEFAULT_STORAGE_ORG
 
 def _history_org_id() -> str:
     return tenant_context.storage_org_id()
+
+
+async def _investigation_confidence(thread_id: str) -> tuple[str, str]:
+    """The confidence tier an investigation actually reached, read from its row.
+
+    The autonomy gate is documented as "gated on HIGH investigation confidence",
+    but the only thing it ever saw was a `confidence` string lifted straight out
+    of the remediation request body — so the entire safety check was typing the
+    word "high". This reads the tier back off the stored report instead, which is
+    the only copy of it nobody outside the graph can write.
+
+    The lookup is scoped to the caller's org, which is also what stops one tenant
+    quoting another's investigation to justify a write: an id that belongs to
+    somebody else simply does not resolve.
+
+    Returns `(tier, provenance)`. The tier is `autonomy.UNMEASURED` whenever we
+    could not read one — no id, no such investigation, a report with no tier, or
+    a store we could not reach. That is deliberately not reported as "low":
+    nothing measured it, and the caller is told which of those it was.
+    """
+    from app.autonomy import CONFIDENCE_TIERS, UNMEASURED
+
+    tid = (thread_id or "").strip()
+    if not tid:
+        return UNMEASURED, (
+            "no thread_id was supplied, so there is no investigation to read a confidence tier from"
+        )
+    try:
+        from sqlalchemy import select
+
+        from app.database.engine import get_session
+        from app.database.models import Investigation
+
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(Investigation).where(
+                        Investigation.org_id == _history_org_id(),
+                        Investigation.thread_id == tid,
+                    )
+                )
+            ).scalars().first()
+    except Exception:  # noqa: BLE001 — an unreadable store is unmeasured, not zero
+        log.exception("could not read investigation %s while gating a remediation", tid)
+        return UNMEASURED, (
+            f"the investigation store could not be read, so the confidence of '{tid}' is unknown"
+        )
+    if row is None:
+        return UNMEASURED, f"no investigation '{tid}' belongs to this organization"
+    report = row.report or {}
+    # The calibrated tier is the one the graph stands behind: `_calibrate_confidence`
+    # and the adversarial review can both downgrade the model's self-reported
+    # `confidence`, and acting on the un-calibrated value would undo that.
+    tier = str(report.get("calibrated_confidence") or report.get("confidence") or "").strip().lower()
+    if tier not in CONFIDENCE_TIERS:
+        return UNMEASURED, (
+            f"investigation '{tid}' finished without recording a confidence tier"
+        )
+    return tier, f"read from the stored report of investigation '{tid}'"
 
 
 def _outcome_of(result: Any) -> Any:
@@ -1293,9 +1435,18 @@ class FeedbackRequest(BaseModel):
 class RemediateRequest(BaseModel):
     action: str                  # reversible only: rollback_deployment | restart_deployment
     target: str                  # deployment/service name
-    confidence: str = "low"      # investigation confidence; must be "high" to act
+    # The investigation this remediation follows from. The confidence tier is read
+    # off that investigation's stored report, server-side and org-scoped — see
+    # `_investigation_confidence`. Without it there is no measured confidence and
+    # the autonomy gate refuses.
+    thread_id: str = ""
     reason: str = ""
     namespace: str = ""
+    # Callers used to declare their own confidence here and the gate believed the
+    # string: typing "high" was the entire safety check. The field is kept, and
+    # rejected, so that a client still sending it gets told what changed instead
+    # of having its declared tier silently ignored.
+    confidence: str | None = None
 
 
 # --- admin / tenant-management request bodies (multi-tenant) --------------- #
@@ -1474,9 +1625,29 @@ async def healthz() -> dict:
         "websocket": ws_stats,
         "mcp": {
             "status": mcp_health.overall_status.value,
+            # healthy + degraded + unhealthy == measured, always: the three
+            # verdicts partition the rows something is observing right now.
+            # Publishing them without `measured` made "no MCP session is open"
+            # and "every server is broken and none is healthy" the same payload —
+            # three zeros either way — so a reader had no way to tell an
+            # unmeasured deployment from a measured verdict of zero.
+            "measured": mcp_health.measured_count,
             "healthy": mcp_health.healthy_count,
             "degraded": mcp_health.degraded_count,
             "unhealthy": mcp_health.unhealthy_count,
+            # Servers this process has run whose sessions have all closed. Real
+            # history, no current observation, so they carry no verdict and are
+            # counted apart from the three above rather than folded into them.
+            "unmeasured": len(mcp_health.unmeasured),
+            # What this build ships, from the same catalog /config serves. It
+            # needs no subprocess and no session, so it is the one MCP number
+            # that is always available: `configured: 0` says this deployment has
+            # no MCP servers at all, which is a different fact from `measured: 0`
+            # on a deployment that has them and is merely idle. Marketplace
+            # agents add to the running set at session time; reading that here
+            # would mean a file read and a module resolve inside a liveness
+            # probe, so this counts the built-ins only.
+            "configured": len(MCP_CATALOG),
         },
     }
 
@@ -3657,15 +3828,101 @@ async def _handle_job(job) -> None:
 
 async def _enqueue_investigation(incident: dict) -> None:
     """Queue a triggered/proactive investigation (falls back to a detached task if the
-    worker isn't up, e.g. under TestClient without lifespan)."""
+    worker isn't up, e.g. under TestClient without lifespan).
+
+    The org the incident belongs to is stamped onto the payload here, while the
+    request that triggered it is still on the stack. The worker drains the queue
+    from the lifespan task, which has no request context at all, so whatever is
+    not captured at this moment is gone by the time the investigation runs.
+    """
     from app.jobqueue import Job
+
+    cfg = tenant_context.get_tenant()
+    if cfg is not None and not str(incident.get("org") or "").strip():
+        incident = {**incident, "org": cfg.org_id}
     if _JOBQ is not None:
         await _JOBQ.enqueue(Job(kind="investigate", payload=incident, id=str(incident.get("id", ""))))
     else:
         asyncio.create_task(_run_triggered_investigation(incident))
 
 
+async def _tenant_for_org(org_id: str) -> tenant_context.TenantConfig | None:
+    """Rebuild a tenant's config (plan + decrypted credentials) from its org id.
+
+    Only the org id travels on the job payload: the queue is a Redis list on the
+    production path, and a tenant's decrypted integration secrets have no business
+    sitting in it. The credentials are re-read from the tenant store here, at the
+    moment the job runs, which also means a revoked or rotated secret takes effect
+    on the next job rather than at enqueue time.
+
+    The role is fixed at `responder` — the least privilege that may run an
+    investigation. A background job has no human actor whose seat could be
+    consulted, and inheriting `owner` from whoever clicked Investigate would hand
+    the job more authority than the work needs.
+    """
+    try:
+        store = tenant_auth.get_store()
+        org = await store.get_org(org_id)
+        if org is None:
+            return None
+        secrets = await store.get_integration_secrets(org_id)
+        return tenant_auth.build_tenant_config(org, "responder", secrets)
+    except Exception:  # noqa: BLE001 — a resolution failure must not run as the host
+        log.exception("could not rebuild tenant context for org %s", org_id)
+        return None
+
+
 async def _run_triggered_investigation(incident: dict) -> None:
+    """Re-establish the incident's tenant, then investigate it.
+
+    The worker that calls this runs as a lifespan task, so `current_tenant` is
+    None no matter which org's request queued the job. Everything downstream
+    reads that contextvar: `runtime.github_token()` and `provider_key()` fall
+    back to the host's .env, and `tenant_context.storage_org_id()` files the
+    history row under "default". Left unset, org A's incident was investigated
+    with the operator's GitHub token against the operator's repo, the RCA quoted
+    another party's private code, the row never appeared on A's history page, and
+    `metering.record_investigation` returned early so the run was never billed.
+
+    So the tenant named on the payload is re-established for the whole run, the
+    same way `EscalationSweeper._announce_escalation` does it for the timer path.
+    If it cannot be re-established the job is refused: running it with the host's
+    credentials is the failure being fixed, not a degraded success.
+    """
+    org = str(incident.get("org") or "").strip()
+    multi_tenant = get_settings().copilot_multi_tenant
+    if not multi_tenant or not org or org == "-":
+        # Single-tenant, or a deployment-level trigger such as the SLO poller,
+        # which belongs to no org: there is no tenant to restore and the host's
+        # own configuration is the right one. On a multi-tenant deployment say so
+        # out loud, because there the run really is unattributed.
+        if multi_tenant:
+            log.warning(
+                "triggered investigation for incident %s carries no org — it will run "
+                "with the deployment's own credentials and be filed under %s",
+                incident.get("id"),
+                tenant_context.DEFAULT_STORAGE_ORG,
+            )
+        await _investigate_incident(incident)
+        return
+
+    cfg = await _tenant_for_org(org)
+    if cfg is None:
+        log.error(
+            "refusing triggered investigation for incident %s: org %s could not be "
+            "resolved, and running it with no tenant would use the deployment's "
+            "credentials and file the result under the wrong org",
+            incident.get("id"),
+            org,
+        )
+        await webhook_receivers.record_incident_outcome(
+            incident, None, error=f"unknown organisation '{org}' — investigation not run"
+        )
+        return
+    await tenant_context.run_with_tenant(cfg, _investigate_incident(incident))
+
+
+async def _investigate_incident(incident: dict) -> None:
     # "pd" unless the trigger says otherwise — alert webhooks and CI receivers
     # feed this too, and a thread named pd-<x> for a GitLab pipeline is a lie.
     source = str(incident.get("source") or "pd")
@@ -3681,12 +3938,17 @@ async def _run_triggered_investigation(incident: dict) -> None:
         "then propose a fix."
     )
     _t0 = time.monotonic()
+    # The internal session key is tenant-namespaced, exactly as the interactive
+    # /chat path does it: two orgs whose providers both number an incident 123
+    # would otherwise resume each other's checkpointed thread. History and the
+    # dashboard keep the plain id — those rows already carry org_id.
+    tid = _scoped(thread_id)
     try:
-        async with _running_turn(thread_id):
-            session = await _get_session(thread_id)
+        async with _running_turn(tid):
+            session = await _get_session(tid)
             result = await session.ask(seed)
             if result.status == "awaiting_approval":
-                _AWAITING.add(thread_id)
+                _AWAITING.add(tid)
                 # Also announced on the org's own channels, not just via
                 # `_post_to_slack` below: that posts with the deployment's bot
                 # token to the deployment's channel, which on a multi-tenant
@@ -3712,7 +3974,9 @@ async def _run_triggered_investigation(incident: dict) -> None:
                     latency_ms=int(elapsed * 1000),
                 )
                 await _record_dashboard_history(thread_id, result, elapsed)
-        await _post_to_slack(thread_id, title, result)
+        # The scoped key, because the approval block puts it on the button and
+        # `_resume_triggered` has to find this exact session again.
+        await _post_to_slack(tid, title, result)
         # An alert-ingested incident carries the row it came from: write the real
         # verdict back onto it, so the stored investigation reflects this run
         # rather than the placeholder values it was created with.
@@ -3746,9 +4010,12 @@ Execute an autonomous remediation action with observation and auto-revert.
 
 **Safety Gates:**
 1. COPILOT_AUTONOMY must be enabled
-2. Confidence must be "high" for execution
-3. Only reversible actions allowed (rollback, restart)
-4. Dry-run mode by default (COPILOT_AUTONOMY_DRYRUN=true)
+2. The caller must hold `approve_action` (responder or above) — a viewer seat cannot remediate
+3. Confidence is read from the investigation named by `thread_id`, server-side, and must be `high`.
+   A `confidence` value in the request body is ignored; it is not a credential.
+4. Only reversible actions allowed (rollback, restart)
+5. Multi-tenant: the namespace is pinned to the organization's own `KUBE_NAMESPACE`
+6. Dry-run mode by default (COPILOT_AUTONOMY_DRYRUN=true)
 
 **Observation Loop:**
 After executing, watches metrics for regression. If burn rate increases,
@@ -3758,6 +4025,7 @@ automatically reverts to the previous state.
 - `rollback_deployment`: Roll back to previous revision
 - `restart_deployment`: Restart deployment pods
 """,
+    dependencies=[Depends(require_perm("approve_action"))],
     responses={
         200: {
             "description": "Remediation executed",
@@ -3773,8 +4041,13 @@ automatically reverts to the previous state.
                 }
             },
         },
-        400: {"description": "Ineligible for remediation"},
-        403: {"description": "Autonomous remediation disabled"},
+        400: {
+            "description": "Ineligible for remediation, or the body declared a `confidence` "
+            "(the tier is read from the investigation named by `thread_id`)"
+        },
+        403: {"description": "Autonomous remediation disabled, or the caller's role may not remediate"},
+        409: {"description": "The organization has no namespace this remediation could act in"},
+        501: {"description": "The tenant's own cluster credential cannot be honoured by this process"},
     },
 )
 async def remediate(req: RemediateRequest) -> dict:
@@ -3782,14 +4055,28 @@ async def remediate(req: RemediateRequest) -> dict:
 
     Applies a reversible fix, observes metrics, and auto-reverts on regression.
 
+    Three things used to be missing, and all three are enforced here now. The
+    route carried no RBAC at all, so a read-only `viewer` seat could fire a
+    cluster write while merely *approving* one needed `approve_action`. The
+    confidence gate read `req.confidence` — a request-body string — so the
+    documented "confidence must be high" check was satisfied by typing the word;
+    the tier is now read off the stored investigation and a body that still
+    declares one is refused rather than silently ignored.
+    And `namespace` was an unvalidated free string on a deployment whose
+    Kubernetes client is process-wide, so one tenant could name another's
+    namespace.
+
     Args:
-        req: Action, target, confidence, and optional namespace.
+        req: Action, target, the investigation to draw confidence from, and an
+            optional namespace.
 
     Returns:
-        dict: Remediation result with status and observations.
+        dict: Remediation result, plus the confidence tier used and where it came
+            from — so the caller can see which investigation authorised this.
 
     Raises:
-        HTTPException: If autonomy is disabled or action is ineligible.
+        HTTPException: If autonomy is disabled, the role may not remediate, the
+            action is ineligible, or the namespace cannot be resolved safely.
     """
     from app.autonomy import AutonomyController, RemediationPlan, is_eligible
     from app.mcp.servers.datadog import server as _dd
@@ -3798,9 +4085,27 @@ async def remediate(req: RemediateRequest) -> dict:
     settings = get_settings()
     if not settings.copilot_autonomy:
         raise HTTPException(403, "Autonomous remediation is disabled (set COPILOT_AUTONOMY=true).")
-    ok, why = is_eligible(req.action, req.confidence, settings.copilot_autonomy)
+
+    # A caller that still declares its own confidence is refused outright rather
+    # than having the field quietly dropped. Ignoring it would let an integration
+    # keep sending confidence='high' and keep believing that string is what
+    # authorises the write, and the one time the stored investigation disagrees it
+    # would look like an unexplained refusal. The error says where the tier comes
+    # from instead.
+    if req.confidence is not None:
+        raise HTTPException(
+            400,
+            f"`confidence` is no longer accepted in the request body (got {req.confidence!r}). "
+            "The tier is read server-side from the stored investigation named by `thread_id`; "
+            "resend without the field.",
+        )
+
+    tier, provenance = await _investigation_confidence(req.thread_id)
+    ok, why = is_eligible(req.action, tier, settings.copilot_autonomy)
     if not ok:
-        raise HTTPException(400, f"Ineligible for autonomous remediation: {why}")
+        raise HTTPException(400, f"Ineligible for autonomous remediation: {why} ({provenance}).")
+
+    namespace = _remediation_namespace(req.namespace, _k8s)
 
     action_fns = {
         "rollback_deployment": _k8s.rollback_deployment,
@@ -3808,10 +4113,10 @@ async def remediate(req: RemediateRequest) -> dict:
     }
 
     async def _execute(action: str, target: str) -> dict:
-        return action_fns[action](target, req.namespace)
+        return action_fns[action](target, namespace)
 
     async def _revert(action: str, target: str) -> dict:
-        return action_fns[action](target, req.namespace)
+        return action_fns[action](target, namespace)
 
     controller = AutonomyController(
         observe_fn=lambda svc: _dd.compute_burn_rate(svc),
@@ -3824,15 +4129,85 @@ async def remediate(req: RemediateRequest) -> dict:
     revert = "restart_deployment" if req.action == "rollback_deployment" else None
     plan = RemediationPlan(
         action=req.action, target=req.target, reason=req.reason,
-        revert_action=revert, namespace=req.namespace,
+        revert_action=revert, namespace=namespace,
     )
     result = await controller.remediate(plan)
     audit.record("autonomy.remediation", action=req.action, target=req.target,
+                 namespace=namespace, thread_id=req.thread_id, confidence=tier,
                  status=result.get("status"), dry_run=settings.copilot_autonomy_dryrun)
-    return result
+    # Report the evidence the write rested on, not just that it happened: the
+    # tier and the investigation it was read from are the audit trail a reviewer
+    # needs to tell an authorised remediation from a guessed one.
+    return {**result, "confidence": tier, "confidence_source": provenance}
+
+
+def _remediation_namespace(requested: str, k8s_server: Any) -> str:
+    """Resolve the namespace a remediation may act in, refusing rather than guessing.
+
+    Single-tenant deployments keep whatever the caller asked for: the cluster and
+    the operator are the same party. Multi-tenant is the case that was broken —
+    `app/mcp/servers/kubernetes/server.py` binds its client to the *process*
+    KUBE_CONFIG_PATH at import time, so this route always talks to the
+    deployment's own cluster no matter whose key is on the request. With
+    `namespace` a free string, tenant A could restart tenant B's workload.
+
+    So on a multi-tenant deployment the namespace is pinned to the one the
+    operator configured for that org, and an org with none configured is refused
+    outright. If the org has its own KUBE_CONFIG_PATH we refuse too: this process
+    cannot honour a per-tenant kubeconfig, and silently acting on the operator's
+    cluster instead would be the wrong cluster reported as a success.
+    """
+    requested = (requested or "").strip()
+    if not get_settings().copilot_multi_tenant:
+        return requested
+
+    org_kubeconfig = tenant_context.integration_secret("KUBE_CONFIG_PATH", "").strip()
+    if org_kubeconfig and org_kubeconfig != getattr(k8s_server, "KUBE_CONFIG_PATH", ""):
+        raise HTTPException(
+            501,
+            "This deployment runs one process-wide Kubernetes client, so it cannot execute a "
+            "remediation against your organization's own kubeconfig. Remediation is unavailable "
+            "for this organization rather than being run against the wrong cluster.",
+        )
+    allowed = tenant_context.integration_secret("KUBE_NAMESPACE", "").strip()
+    if not allowed:
+        raise HTTPException(
+            409,
+            "No Kubernetes namespace is configured for this organization, so there is no scope "
+            "this remediation could safely act in. Set KUBE_NAMESPACE on the organization's "
+            "integrations first.",
+        )
+    if requested and requested != allowed:
+        raise HTTPException(
+            403,
+            f"This organization may only remediate in its own namespace '{allowed}'; "
+            f"'{requested}' belongs to someone else.",
+        )
+    return allowed
 
 
 async def _resume_triggered(thread_id: str, approved: bool) -> None:
+    """Resume a paused investigation from a Slack button press.
+
+    The button carries the internal session key, which on a multi-tenant
+    deployment is tenant-namespaced (`<org>:<thread>`). Slack presents no
+    credential we could map to an org, so the tenant is restored from that prefix
+    before the graph runs again: the resumed turn executes the approved tool call,
+    and doing that with the deployment's own tokens would act on the operator's
+    systems instead of the org's.
+    """
+    if get_settings().copilot_multi_tenant and ":" in thread_id:
+        org = thread_id.split(":", 1)[0]
+        cfg = await _tenant_for_org(org)
+        if cfg is None:
+            log.error("refusing Slack resume of %s: org %s could not be resolved", thread_id, org)
+            return
+        await tenant_context.run_with_tenant(cfg, _resume_triggered_now(thread_id, approved))
+        return
+    await _resume_triggered_now(thread_id, approved)
+
+
+async def _resume_triggered_now(thread_id: str, approved: bool) -> None:
     try:
         async with _running_turn(thread_id):
             session = await _get_session(thread_id)
@@ -3926,20 +4301,82 @@ async def pagerduty_webhook(request: Request):
     return {"status": "accepted", "incident": incident["id"]}
 
 
+async def _record_stripe_delivery(raw: bytes, signature: str) -> dict[str, str]:
+    """Hand a verified Stripe delivery to the billing store as well as the tenant plan.
+
+    Two different records are made from one payment. `orgs.plan` (below) is the
+    quota bracket the app enforces; `billing_subscriptions` is the subscription
+    itself — the Stripe ids, the period, the status and the catalog tier that was
+    actually bought. Only the first was ever written: `BillingAPI.handle_webhook`
+    is the sole entry point to the second and no route reached it, so after a real
+    payment `GET /billing/subscription` answered null and change/cancel/reactivate
+    raised "No subscription for org". The money moved and nothing recorded it.
+
+    Returns what happened rather than raising. A store this receiver cannot reach
+    must not turn a delivery Stripe successfully signed into a 500 — Stripe would
+    retry the whole event, including the tenant-plan half that already landed. The
+    caller reports this alongside the tenant-plan outcome so a delivery that moved
+    only one of the two is visible instead of reading as a clean success.
+
+    `BillingAPI.handle_webhook` re-verifies the signature through the SDK (which is
+    why it takes the raw body and the header, not the parsed event) and raises
+    BillingUnavailableError when Stripe is unconfigured.
+    """
+    from app.billing import runtime as billing_runtime
+    from app.billing.api import BillingUnavailableError
+
+    try:
+        service = billing_runtime.get_stripe_service()
+    except Exception as exc:  # noqa: BLE001 — a broken billing config is not a bad delivery
+        log.exception("could not build the Stripe billing service for a webhook delivery")
+        return {"status": "unavailable", "detail": f"{type(exc).__name__}: {exc}"}
+    if service is None:
+        # Not an error and not a success: STRIPE_API_KEY is unset (or the SDK is
+        # missing), so this deployment has no billing store leg at all and
+        # `billing_subscriptions` stays empty by configuration.
+        return {
+            "status": "not_configured",
+            "detail": "no Stripe API key is configured, so billing_subscriptions was not written",
+        }
+    try:
+        result = await billing_runtime.get_billing_api().handle_webhook(raw, signature)
+    except BillingUnavailableError as exc:
+        return {"status": "not_configured", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — reported to the caller, never a 500 here
+        log.exception("billing store rejected a verified Stripe delivery")
+        return {"status": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+    return {
+        "status": str(result.get("status") or "unknown"),
+        "event_type": str(result.get("event_type") or ""),
+    }
+
+
 @app.post(
     "/webhooks/stripe",
     tags=["Webhooks"],
     summary="Stripe webhook receiver",
     description="Receive Stripe subscription events. Maps subscription created/updated/deleted "
-    "to tenant plan changes. Requires valid signature (STRIPE_WEBHOOK_SECRET).",
+    "to tenant plan changes and records the subscription itself in the billing store. "
+    "Requires valid signature (STRIPE_WEBHOOK_SECRET). `status` is the tenant-plan outcome; "
+    "`billing_store` reports the same delivery's effect on billing_subscriptions "
+    "(`processed`, `ignored`, `not_configured`, `unavailable` or `failed`).",
     responses={
         200: {
             "description": "Webhook processed",
             "content": {
                 "application/json": {
                     "examples": {
-                        "applied": {"value": {"status": "applied", "org_id": "org_123", "plan": "team"}},
-                        "ignored": {"value": {"status": "ignored", "type": "payment_intent.created"}}
+                        "applied": {"value": {
+                            "status": "applied", "org_id": "org_123", "plan": "team",
+                            "billing_store": {
+                                "status": "processed",
+                                "event_type": "customer.subscription.updated",
+                            },
+                        }},
+                        "ignored": {"value": {
+                            "status": "ignored", "type": "payment_intent.created",
+                            "billing_store": {"status": "ignored", "event_type": "payment_intent.created"},
+                        }},
                     }
                 }
             },
@@ -3951,10 +4388,17 @@ async def pagerduty_webhook(request: Request):
 async def stripe_webhook(request: Request) -> dict:
     """Receive Stripe webhook events.
 
-    Verifies the signature and updates tenant plans based on subscription events.
+    Verifies the signature, then files the delivery in both places a payment has
+    to land: the tenant's quota plan (`orgs.plan`, via `set_plan`) and the billing
+    store's subscription row (via `_record_stripe_delivery`). They are two records
+    with two readers, and the reply names both — `status` is the tenant-plan
+    outcome the receiver has always reported, `billing_store` is the other half.
+    A delivery that moved one and not the other now says so instead of answering
+    a bare "applied".
 
     Returns:
-        dict: Processing status, org ID, and new plan.
+        dict: Tenant-plan status, org ID, new plan, and the billing store's own
+            outcome for the same delivery.
     """
     import json as _json
     import time as _time
@@ -3962,15 +4406,21 @@ async def stripe_webhook(request: Request) -> dict:
     from app import billing
     s = get_settings()
     raw = await request.body()
+    signature = request.headers.get("stripe-signature", "")
     if not billing.verify_stripe_signature(
-        raw, request.headers.get("stripe-signature", ""), s.stripe_webhook_secret,
-        now=int(_time.time()),
+        raw, signature, s.stripe_webhook_secret, now=int(_time.time()),
     ):
         raise HTTPException(401, "Invalid Stripe signature.")
     try:
         event = _json.loads(raw)
     except ValueError:
         raise HTTPException(400, "Malformed Stripe event.") from None
+    # Before the tenant-plan mapping, not after: the billing store handles event
+    # types this mapping has nothing to say about (checkout.session.completed,
+    # invoice.paid, customer.updated), and those all return early below. Every
+    # signature-verified delivery reaches the store; the store decides what it
+    # has a handler for.
+    store_leg = await _record_stripe_delivery(raw, signature)
     try:
         mapping = billing.plan_from_stripe_event(event)
     except billing.UnknownPlan as exc:
@@ -3979,14 +4429,14 @@ async def stripe_webhook(request: Request) -> dict:
         # created with metadata the product does not recognise.
         raise HTTPException(400, f"Unknown plan in subscription metadata: {exc.plan!r}") from None
     if mapping is None:
-        return {"status": "ignored", "type": event.get("type")}
+        return {"status": "ignored", "type": event.get("type"), "billing_store": store_leg}
     org_id, plan = mapping
     if not await tenant_auth.get_store().set_plan(org_id, plan):
         # Report the failure so Stripe retries rather than recording a change
         # that never landed on any row.
         raise HTTPException(404, f"No such organization: {org_id}")
     audit.record("billing.plan_changed", org_id=org_id, plan=plan, via="stripe")
-    return {"status": "applied", "org_id": org_id, "plan": plan}
+    return {"status": "applied", "org_id": org_id, "plan": plan, "billing_store": store_leg}
 
 
 @app.post(
@@ -4825,6 +5275,34 @@ async def dashboard_trends(period_days: int = 30) -> dict:
     return generate_trend_report(trends)
 
 
+# Include the versioned /v1 surface: chat, config, admin and webhook mirrors of
+# the root routes, plus the decision engine, the policy engine and the digital
+# twin, which exist ONLY under /v1 and have no root equivalent at all.
+#
+# The package was written, given its own RBAC dependencies and never included,
+# so `app.api.v1` had exactly one reference in the whole tree — its own
+# `__init__`. `app.openapi()` reported 303 paths, none of them starting with
+# /v1: the 20 digital-twin endpoints and the 29 decision/policy endpoints were
+# unreachable, and every `Depends(require_perm(...))` and `Depends(quota_gate)`
+# in v1/chat.py, v1/config.py and v1/admin.py was dead code guarding a router
+# nothing served. A `GET /v1/health` still answered 200 in a TestClient, which
+# is what hid this: the SPA catch-all below serves index.html for unknown paths,
+# so the reply was HTML from the static mount, not the route.
+#
+# Included here rather than up with the other routers at the top of this file
+# because v1/chat.py, v1/config.py and v1/admin.py delegate to the root handlers
+# and import them from this module at import time. Those handlers are defined
+# above; importing the package any earlier would resolve against a half-built
+# `app.api.main`. It also has to land BEFORE the SPA mount, so that "v1" is in
+# `_API_SEGMENTS` and a mistyped /v1 path keeps answering 404 JSON.
+#
+# No prefix argument: the router carries prefix="/v1" itself, and auth comes
+# from the app-level Depends(require_auth), same as every other included router.
+from app.api.v1 import router as v1_router  # noqa: E402
+
+app.include_router(v1_router)
+
+
 # --------------------------------------------------------------------------- #
 # Static SPA — serve the built frontend so the whole app is one deployable.
 # --------------------------------------------------------------------------- #
@@ -4835,13 +5313,44 @@ async def dashboard_trends(period_days: int = 30) -> dict:
 # build) the dist dir is absent and this mount is simply skipped.
 _FRONTEND_DIST = ROOT / "frontend" / "dist"
 if _FRONTEND_DIST.is_dir():
+
+    def _served_paths(routes: Iterable[Any], prefix: str = "") -> Iterator[str]:
+        """Every path the app serves, including the ones behind include_router.
+
+        FastAPI 0.137 stopped flattening `include_router` into `app.routes` and
+        now leaves one `_IncludedRouter` per call instead — an object with no
+        `.path`. Reading only the top level therefore saw 85 of the 347 paths
+        this app actually serves, and `_API_SEGMENTS` below silently lost
+        `oncall`, `billing`, `teams`, `ws` and every other included namespace.
+        The SPA fallback then answered `200 text/html` for a mistyped call under
+        any of them, which is exactly the failure this whole block exists to
+        prevent. tests/test_route_smoke.py hit the same wall and documents it;
+        the production side was never updated.
+
+        Recursing through `original_router` rather than asking for
+        `effective_candidates()` on purpose: the latter is HTTP-only and returns
+        a bare "" for the WebSocket router, so /ws/* would still have fallen
+        through to index.html.
+        """
+        for route in routes:
+            path = getattr(route, "path", None)
+            if path is not None:
+                yield prefix + path
+                continue
+            included = getattr(route, "original_router", None)
+            if included is not None:
+                context = getattr(route, "include_context", None)
+                yield from _served_paths(
+                    included.routes, prefix + (getattr(context, "prefix", "") or "")
+                )
+
     # First path segment of every route registered above. An unknown path under
     # one of these is a mistyped API call, not a client-side route, and should
     # keep answering 404 JSON rather than 200 HTML — otherwise a typo'd endpoint
     # looks like a success to any client that only checks the status code.
     _API_SEGMENTS = {
         p.split("/")[1]
-        for p in (getattr(r, "path", "") for r in app.routes)
+        for p in _served_paths(app.routes)
         if p.count("/") >= 1 and len(p.split("/")) > 1 and p.split("/")[1]
     }
 
@@ -4850,6 +5359,27 @@ if _FRONTEND_DIST.is_dir():
     # There is no backend route at this path — `auth` is a segment because of
     # /auth/providers, /auth/{provider}/login and friends.
     _SPA_PATHS = {"auth/callback"}
+
+    def _a_real_route_owns(scope, path: str) -> bool:
+        """Does any route other than this catch-all mount answer this path?
+
+        Starlette tries routes in order, and a Mount at "/" matches everything —
+        so a request whose *path* matches a real route but whose *method* does
+        not never reaches that route to collect its 405. It lands in this mount
+        instead. `POST /healthz` is the case in point: the route exists, the verb
+        is wrong, and 405 is the honest answer. Asking the routes directly is the
+        only way to tell that apart from a path nothing serves at all, which must
+        be 404.
+        """
+        probe = dict(scope)
+        probe["path"] = "/" + path
+        probe["root_path"] = ""
+        for route in app.routes:
+            if getattr(route, "name", None) == "spa":
+                continue
+            if route.matches(probe)[0] is not Match.NONE:
+                return True
+        return False
 
     class _SPAStaticFiles(StaticFiles):
         """StaticFiles that falls back to index.html for unknown paths.
@@ -4866,6 +5396,25 @@ if _FRONTEND_DIST.is_dir():
             try:
                 return await super().get_response(path, scope)
             except StarletteHTTPException as exc:
+                if exc.status_code == 405:
+                    # StaticFiles answers 405 for any verb other than GET/HEAD
+                    # *before* it looks for the file, so this mount — which is
+                    # the catch-all, not a resource — claimed that every
+                    # mistyped path exists. `POST /api/knowledge-graph/graphql`
+                    # came back 405 with the schema not mounted at all, and any
+                    # caller that distinguishes "gone" from "wrong verb" by
+                    # checking for 404 read that as reachable. 405 stays only
+                    # when the file is really there.
+                    _full, stat_result = await anyio.to_thread.run_sync(
+                        self.lookup_path, path
+                    )
+                    if stat_result is not None or _a_real_route_owns(scope, path):
+                        # Either the file is really there or a real route owns
+                        # the path — the resource exists and the verb is what is
+                        # wrong, so 405 is the truth. Answering 404 here would be
+                        # the same lie in reverse.
+                        raise
+                    raise StarletteHTTPException(status_code=404) from None
                 if exc.status_code != 404:
                     raise
                 # Real missing assets should still 404 — falling back for them

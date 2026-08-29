@@ -12,6 +12,12 @@ from app.connectors.base import Connector, ConnectorConfig, ConnectorError, Quer
 
 log = logging.getLogger("omnipotent.connectors.kubernetes")
 
+# The kubelet projects these two files into every pod that has a ServiceAccount
+# mounted. The token authenticates us to the apiserver; ca.crt is the *cluster*
+# CA that signed the apiserver's serving certificate.
+SERVICEACCOUNT_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+SERVICEACCOUNT_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
 
 @dataclass
 class PodInfo:
@@ -78,14 +84,26 @@ class KubernetesConnector(Connector):
         self._apps_api_version = "apps/v1"
 
     def _load_config_from_environment(self) -> ConnectorConfig:
-        """Load configuration from environment or in-cluster config."""
-        if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
-            with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+        """Load configuration from environment or in-cluster config.
+
+        The in-cluster branch used to set ``verify_ssl`` to the *result* of
+        ``os.path.exists(ca.crt)``, i.e. the bare boolean ``True``. httpx reads
+        ``verify=True`` as "trust the certifi public root bundle", but the
+        apiserver at kubernetes.default.svc presents a certificate signed by the
+        cluster's own CA, which no public bundle contains. Every in-cluster call
+        therefore died in the TLS handshake and surfaced as a generic connection
+        error, quietly degrading chaos experiments, rollback simulation and
+        infrastructure cloning to "no resources found". We now hand httpx the CA
+        *path*, which is what the file was mounted for, so the handshake
+        validates against the authority that actually signed the apiserver.
+        """
+        if os.path.exists(SERVICEACCOUNT_TOKEN_PATH):
+            with open(SERVICEACCOUNT_TOKEN_PATH) as f:
                 token = f.read().strip()
             return ConnectorConfig(
                 url="https://kubernetes.default.svc",
                 api_key=token,
-                verify_ssl=os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
+                verify_ssl=self._resolve_ca_bundle(SERVICEACCOUNT_CA_PATH),
             )
 
         kube_host = os.environ.get("KUBERNETES_SERVICE_HOST", "localhost")
@@ -93,8 +111,61 @@ class KubernetesConnector(Connector):
         return ConnectorConfig(
             url=f"https://{kube_host}:{kube_port}",
             api_key=os.environ.get("KUBE_TOKEN", ""),
-            verify_ssl=False,
+            # This branch used to hardcode verify_ssl=False while still sending
+            # "Authorization: Bearer $KUBE_TOKEN", which hands a cluster credential
+            # to anyone able to intercept the connection. Verification now stays on;
+            # an operator with a private CA points KUBE_CA_BUNDLE at it.
+            verify_ssl=self._resolve_ca_bundle(None),
         )
+
+    @staticmethod
+    def _resolve_ca_bundle(default_path: str | None) -> bool | str:
+        """Pick what httpx should verify the apiserver certificate against.
+
+        Returns the path of a CA bundle when we have one, otherwise ``True`` --
+        never ``False``. Falling back to the public trust store makes a
+        privately-signed apiserver fail loudly in the handshake, which is the
+        honest outcome; disabling verification would instead leak the bearer token
+        to whatever answered. ``KUBE_CA_BUNDLE`` wins over the mounted bundle so an
+        operator can correct a broken or rotated cluster CA without a rebuild.
+
+        Only an override that *exists* wins. The first cut of this helper branched
+        on the variable being set at all, so a typo'd or stale ``KUBE_CA_BUNDLE``
+        discarded a perfectly good projected ServiceAccount bundle sitting right
+        there and re-created the very handshake failure this connector was fixed
+        for. Now a broken override degrades to the mounted bundle, and only an
+        override with nothing to fall back to reaches the public roots.
+        """
+        override = os.environ.get("KUBE_CA_BUNDLE", "").strip()
+        mounted = default_path if default_path and os.path.exists(default_path) else None
+
+        if override and os.path.exists(override):
+            return override
+
+        if override and mounted:
+            log.warning(
+                "KUBE_CA_BUNDLE points at %s, which does not exist; verifying the apiserver "
+                "against the mounted cluster CA at %s instead.",
+                override,
+                mounted,
+            )
+        elif override:
+            log.warning(
+                "KUBE_CA_BUNDLE points at %s, which does not exist, and no cluster CA bundle "
+                "is mounted; falling back to the public trust store, which will reject a "
+                "privately-signed apiserver.",
+                override,
+            )
+        elif default_path and not mounted:
+            log.warning(
+                "A ServiceAccount token is mounted but the cluster CA bundle at %s is "
+                "missing, so TLS to the apiserver is being verified against public roots "
+                "and is expected to fail. Fix the projected ServiceAccount volume or set "
+                "KUBE_CA_BUNDLE.",
+                default_path,
+            )
+
+        return mounted or True
 
     @property
     def connector_type(self) -> str:

@@ -36,6 +36,26 @@ _READ_TOOLS = {
 }
 
 
+def review_summary(proposed_action: Any) -> Any:
+    """The prompt-safe view of a proposed action.
+
+    A proposed action carries its verbatim ``tool_calls`` so the approval gate
+    can actually execute what was approved, and those args are deliberately
+    untruncated — a pull request runs with its whole body and patch or not at
+    all. The display half of the same dict is just as deliberately truncated
+    (``body[:500]``, ``note[:200]``, a ``has_patch`` flag instead of the diff),
+    because that half is what gets stringified into the reviewer model's prompt.
+
+    Stringifying the whole dict puts both halves in the prompt and silently
+    undoes the truncation, so every caller that renders an action for a model
+    renders this view instead. Truncation is a prompt concern, and this is the
+    prompt boundary.
+    """
+    if isinstance(proposed_action, dict) and "tool_calls" in proposed_action:
+        return {k: v for k, v in proposed_action.items() if k != "tool_calls"}
+    return proposed_action
+
+
 class RemediationAgent(BaseAgent):
     """Agent specialized in proposing and preparing fixes.
 
@@ -99,8 +119,12 @@ class RemediationAgent(BaseAgent):
             # Identify write actions that need review
             write_calls = [c for c in tool_calls if c.get("name") in _WRITE_TOOLS]
             if write_calls:
-                # Send to reviewer before executing
-                proposed_action = self._format_proposed_action(write_calls)
+                # Send to reviewer before executing. The description covers every
+                # call on the message, not only the write: the tool node runs the
+                # whole message once approved, so a read co-bundled with a
+                # rollback executes with it. Describing only the write would have
+                # shown the approver a strict subset of what their "yes" runs.
+                proposed_action = self._format_proposed_action(tool_calls)
                 self.send_message(
                     to_agent=AgentRole.REVIEWER,
                     message_type=MessageType.HANDOFF,
@@ -113,12 +137,28 @@ class RemediationAgent(BaseAgent):
                     context=context,
                     requires_response=True,
                 )
+                # The calls also travel at the top level, exactly where the
+                # `needs_tools` branch below puts them. They used to exist only
+                # under `result["tool_calls"]`, and every caller of this method —
+                # the orchestrator's remediation handoff and the multi-agent
+                # graph's remediation node — reads a *top-level* `tool_calls` key
+                # and nothing else. So the very calls a human was about to be
+                # asked to approve were dropped on the floor: the run carried a
+                # `pending_action` summary and nothing executable, the approval
+                # prompt listed no actions at all, and an approved fix silently
+                # never ran. A caller that still ignores this key is now visibly
+                # ignoring populated data rather than never being handed any.
+                #
+                # It is the whole `tool_calls` list for the same reason the
+                # proposed action describes them all. `result["tool_calls"]`
+                # stays the write subset — that is the part under review.
                 return {
                     "status": "needs_review",
                     "result": {
                         "proposed_action": proposed_action,
                         "tool_calls": write_calls,
                     },
+                    "tool_calls": list(tool_calls),
                     "messages": [response],
                     "tokens_used": tokens,
                 }
@@ -178,7 +218,22 @@ Propose a concrete fix that addresses this root cause.
 """
 
     def _format_proposed_action(self, tool_calls: list[dict]) -> dict[str, Any]:
-        """Format tool calls into a proposed action description."""
+        """Format tool calls into a proposed action description.
+
+        The returned dict is both what a human is shown before approving and the
+        only description of the fix that survives into graph state, so it carries
+        two things side by side: a per-action display summary (truncated, renamed
+        for readability) and, under ``tool_calls``, the verbatim calls including
+        their tool-call ids and untruncated arguments. The summary alone was not
+        enough to act on — an approval surface reading it could name neither the
+        real tool nor the arguments that would run, and nothing downstream could
+        execute or reject the call because the id had been discarded.
+
+        The two halves have different audiences and must not be confused:
+        ``actions`` is display text and safe to put in a prompt, ``tool_calls``
+        is an executable payload that may hold a whole PR body or patch. Use
+        :func:`review_summary` to render this dict into anything a model reads.
+        """
         actions = []
         for call in tool_calls:
             name = call.get("name", "unknown")
@@ -211,9 +266,26 @@ Propose a concrete fix that addresses this root cause.
                     "args": args,
                 })
 
+            # Each display entry points back at the call it summarizes. `type` is
+            # a label — create_pull_request is shown as "pull_request" — so on its
+            # own it identifies neither the tool that would run nor which of
+            # several calls an approver is answering.
+            actions[-1]["tool"] = name
+            actions[-1]["id"] = call.get("id")
+            actions[-1]["write"] = name in _WRITE_TOOLS
+
         return {
             "actions": actions,
-            "count": len(actions),
+            # Every call on the message is described above, because approving
+            # runs all of them. `count` stays what it has always meant — how
+            # many *write* actions are under review — so a co-bundled read
+            # cannot inflate it into reporting two writes where there is one.
+            "count": sum(1 for a in actions if a["write"]),
+            # Verbatim and untruncated: this is what would actually execute.
+            "tool_calls": [
+                {"id": c.get("id"), "name": c.get("name", "unknown"), "args": c.get("args", {})}
+                for c in tool_calls
+            ],
             "has_code_change": any(a["type"] == "pull_request" for a in actions),
             "has_infra_change": any(a["type"] in ("scale_deployment", "rollback_deployment", "restart_deployment") for a in actions),
         }

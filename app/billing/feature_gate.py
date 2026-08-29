@@ -83,6 +83,15 @@ class FeatureGateService:
         billing store is keyed by an org UUID derived one-way from the tenant's
         string id (`org_uuid_for`), so there is no route back. The org guard
         below is what keeps this from reporting one tenant's plan for another.
+
+        `cfg.plan` is `orgs.plan` verbatim, so this can only ever resolve tiers
+        the tenancy vocabulary is able to store. While that vocabulary was
+        free/team/enterprise, a Growth or Business subscription arrived here
+        spelled "team" and every feature above Team was refused to a customer
+        who had paid for exactly those features — the plan had not been read
+        wrongly, it had already been destroyed on the way into the database.
+        `app.tenancy.models.PLAN_QUOTAS` now has a bracket for each of those
+        tiers, which is what makes this lookup able to return them.
         """
         from app.database.orgs import org_uuid_for
         from app.tenant_context import get_tenant

@@ -134,6 +134,63 @@ def _safe_path(relative: str) -> Path:
     return candidate
 
 
+def _safe_glob(pattern: str) -> str:
+    """Reject glob patterns that would steer a scan outside REPO_PATH.
+
+    Only the `path` argument used to be sandboxed; the caller-supplied glob
+    went straight to `Path.glob`, so "../../*.yaml" read manifests from outside
+    the repo and an absolute pattern crashed the tool with pathlib's
+    NotImplementedError instead of reporting a refusal. Patterns must be
+    relative and free of ".." segments before they reach the filesystem.
+    """
+    if os.path.isabs(pattern) or pattern.startswith("~"):
+        raise ValueError(f"pattern '{pattern}' must be relative to the repository root")
+    if ".." in Path(pattern).parts:
+        raise ValueError(f"pattern '{pattern}' escapes the repository sandbox")
+    return pattern
+
+
+def _contained(file_path: Path) -> str | None:
+    """Return the repo-relative path of a file, or None if it is outside.
+
+    `Path.relative_to` is purely lexical, so it relabelled an escaped file as
+    "../creds.yaml" rather than raising. Resolving with realpath first closes
+    that and also catches the remaining route into another tree: a file inside
+    the repo that is itself a symlink to somewhere else.
+    """
+    root = Path(os.path.realpath(REPO_PATH))
+    try:
+        return str(Path(os.path.realpath(file_path)).relative_to(root))
+    except ValueError:
+        return None
+
+
+# Keys whose value is a credential rather than a setting; matched per line so a
+# manifest finding can point at the problem without quoting the secret itself.
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"""^(?P<prefix>\s*[\w.\-/]*(?:password|passwd|pwd|token|secret|api[_-]?key)[\w.\-/]*\s*:\s*)
+         (?P<quote>["']?)(?P<value>.*?)(?P=quote)\s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _redact_manifest_line(line: str) -> str:
+    """Mask the value of a credential assignment before reporting the line.
+
+    scan_secrets already funnels every match through _redact_secret, but
+    scan_kubernetes echoed `line.strip()[:100]` verbatim, so a "Hardcoded
+    password" finding published the password it was complaining about. The
+    key, quoting and surrounding text are kept so the finding still reads as
+    the offending line.
+    """
+    stripped = line.strip()
+    match = _SENSITIVE_ASSIGNMENT.match(stripped)
+    if not match or not match.group("value"):
+        return stripped
+    quote = match.group("quote")
+    return f"{match.group('prefix')}{quote}{_redact_secret(match.group('value'))}{quote}"
+
+
 def _scan_file_for_secrets(file_path: Path) -> list[dict]:
     """Scan a single file for secret patterns."""
     findings = []
@@ -427,11 +484,14 @@ def scan_kubernetes(path: str = ".", manifest_pattern: str = "*.yaml") -> dict:
 
     Args:
         path: Path to scan for manifests
-        manifest_pattern: Glob pattern for manifest files
+        manifest_pattern: Glob pattern for manifest files. Must be relative and
+            free of ".." — a pattern that would leave the repo is refused.
 
     Returns:
-        Security findings organized by manifest file
+        Security findings organized by manifest file, with credential values
+        redacted
     """
+    manifest_pattern = _safe_glob(manifest_pattern)
     target = _safe_path(path)
     if not target.exists():
         return {"error": f"path '{path}' not found"}
@@ -440,30 +500,35 @@ def scan_kubernetes(path: str = ".", manifest_pattern: str = "*.yaml") -> dict:
     scanned_files: list[str] = []
 
     k8s_dirs = ["k8s", "kubernetes", "manifests", "deploy", "deployments", "."]
-    manifest_files: list[Path] = []
+    manifest_files: list[tuple[Path, str]] = []
 
     for k8s_dir in k8s_dirs:
         dir_path = target / k8s_dir if k8s_dir != "." else target
         if dir_path.exists():
-            manifest_files.extend(dir_path.glob(manifest_pattern))
-            manifest_files.extend(dir_path.glob("*.yml"))
+            globbed = list(dir_path.glob(manifest_pattern)) + list(dir_path.glob("*.yml"))
+            # Filter before the 20-file cap, so out-of-repo matches cannot push
+            # the real manifests out of the budget.
+            for candidate in globbed:
+                rel_path = _contained(candidate)
+                if rel_path is not None:
+                    manifest_files.append((candidate, rel_path))
 
-    for manifest in manifest_files[:20]:
+    for manifest, rel_path in manifest_files[:20]:
         try:
             content = manifest.read_text()
             if "kind:" not in content:
                 continue
-            scanned_files.append(str(manifest.relative_to(REPO_PATH)))
+            scanned_files.append(rel_path)
 
             lines = content.split("\n")
             for i, line in enumerate(lines, 1):
                 for pattern, issue, recommendation, severity in K8S_ISSUES:
                     if re.search(pattern, line, re.IGNORECASE):
                         findings.append({
-                            "file": str(manifest.relative_to(REPO_PATH)),
+                            "file": rel_path,
                             "line": i,
                             "issue": issue,
-                            "content": line.strip()[:100],
+                            "content": _redact_manifest_line(line)[:100],
                             "severity": severity,
                             "recommendation": recommendation,
                         })

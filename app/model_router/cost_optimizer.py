@@ -122,6 +122,12 @@ class UsageRecord:
 # exactly $0.00; after it, the cheap fast model (plan/reflect/report/verify) was
 # billed at the fallback Opus-3 rate, ~15x its real price. Both are wrong, and
 # both are fixed by naming the ids here so the catalog prices them properly.
+#
+# Enumerating ids is no longer what makes a spelling priceable — `get_model_cost`
+# resolves through the catalog on every miss, so a snapshot nobody listed here
+# still gets its real rate. The list stays because it is the drift guard
+# tests/test_model_router_pricing.py checks, and because a table entry is one
+# dict lookup where a resolution is a scan.
 _DEFAULT_COST_MODEL_IDS = (
     # `-latest` spellings the /model-router API already receives.
     "claude-3-5-sonnet-latest",
@@ -161,6 +167,37 @@ _DEFAULT_COST_MODEL_IDS = (
 # warned about, which is a visible gap rather than a confident wrong number.
 
 
+def _catalog_cost_for(model_id: str) -> ModelCost | None:
+    """The catalog's verified rate for `model_id`, as a per-1k `ModelCost`.
+
+    `model_catalog.resolve` is the only thing in the codebase that understands
+    the spellings model ids actually arrive in — `-latest` aliases and dated
+    snapshot stamps — so it has to be reachable at *lookup* time, not only when
+    the default table is built. It used to be called only from
+    `_catalog_costs()`, which meant the table's keys were exactly the literal
+    strings in `_DEFAULT_COST_MODEL_IDS`; a provider that answered with the
+    snapshot it resolved to (`claude-haiku-4-5-20251001` for the fast model
+    every plan/reflect/report/verify call runs on) missed the table and was
+    billed at the Opus-3 fallback, up to 15x its real rate, in the same
+    deployment where the observability path priced it correctly.
+
+    None means the catalog does not price this id. It never means free — see
+    `_cost_for` for what an id nobody can price is charged at.
+    """
+    info = model_catalog.resolve(model_id)
+    if info is None or not info.has_pricing:
+        return None
+    return ModelCost(
+        model_id=model_id,
+        input_cost_per_1k=info.input_per_1k,  # type: ignore[arg-type]
+        output_cost_per_1k=info.output_per_1k,  # type: ignore[arg-type]
+        # Passed through as None when the catalog has no cache-read rate:
+        # `or 0.0` quietly priced cached input at free for gemini-1.5-pro,
+        # gemini-1.5-flash and claude-3-haiku.
+        cached_input_cost_per_1k=info.cached_input_per_1k,
+    )
+
+
 def _catalog_costs() -> dict[str, ModelCost]:
     """Build the per-1k default cost table from the per-1M catalog.
 
@@ -171,23 +208,15 @@ def _catalog_costs() -> dict[str, ModelCost]:
     """
     costs: dict[str, ModelCost] = {}
     for model_id in _DEFAULT_COST_MODEL_IDS:
-        info = model_catalog.resolve(model_id)
-        if info is None or not info.has_pricing:
+        cost = _catalog_cost_for(model_id)
+        if cost is None:
             log.warning(
                 "model %r has no verified price in the model catalog; "
                 "omitting it from the default cost table",
                 model_id,
             )
             continue
-        costs[model_id] = ModelCost(
-            model_id=model_id,
-            input_cost_per_1k=info.input_per_1k,  # type: ignore[arg-type]
-            output_cost_per_1k=info.output_per_1k,  # type: ignore[arg-type]
-            # Passed through as None when the catalog has no cache-read rate:
-            # `or 0.0` quietly priced cached input at free for gemini-1.5-pro,
-            # gemini-1.5-flash and claude-3-haiku.
-            cached_input_cost_per_1k=info.cached_input_per_1k,
-        )
+        costs[model_id] = cost
     return costs
 
 
@@ -246,9 +275,27 @@ class CostOptimizer:
         self._customer_budgets: dict[str, float] = {}
         self._customer_usage: dict[str, list[UsageRecord]] = defaultdict(list)
 
+        # Memo for ids priced through the catalog rather than found in the
+        # table. It caches the misses too, because "the catalog does not price
+        # this" is as worth remembering on a hot request path as a hit, and the
+        # catalog is a static table that cannot change under us.
+        self._catalog_cost_cache: dict[str, ModelCost | None] = {}
+
     def get_model_cost(self, model_id: str) -> ModelCost | None:
-        """Get cost structure for a model, if it is one we have a price for."""
-        return self.model_costs.get(model_id)
+        """Get cost structure for a model, if it is one we have a price for.
+
+        Still None for a model nobody prices — the callers that render this
+        (`/model-router/models`, `AdaptiveRouter`) report `None` rather than a
+        made-up figure, and `_cost_for`'s fallback is a guess, not a price. But
+        a verified rate reached through an alias or a dated snapshot is a price,
+        so it is returned as one instead of being reported as unknown.
+        """
+        cost = self.model_costs.get(model_id)
+        if cost is not None:
+            return cost
+        if model_id not in self._catalog_cost_cache:
+            self._catalog_cost_cache[model_id] = _catalog_cost_for(model_id)
+        return self._catalog_cost_cache[model_id]
 
     def _cost_for(self, model_id: str, action: str = "pricing") -> ModelCost:
         """A price for `model_id`, guessing high rather than free.
@@ -262,10 +309,19 @@ class CostOptimizer:
         that reports zero is worse than one that reports nothing, because the
         number looks like an answer.
 
-        An unknown model is priced at the most expensive one we know, and
+        The table is consulted first so a caller-supplied rate (or one
+        registered with `add_model_cost`) still wins, then the catalog, which
+        is what resolves `-latest` aliases and dated snapshot stamps to a
+        verified rate. Skipping that second step is how the id the provider
+        actually reports — `claude-haiku-4-5-20251001`, not the
+        `claude-haiku-4-5` we asked for — fell through to the fallback below
+        and was billed at 15x, tripping budget gates at a fifteenth of the real
+        spend and inflating every spend dashboard by the same factor.
+
+        A model neither knows is priced at the most expensive one we know, and
         logged (once per model id) so the table can be corrected.
         """
-        cost_info = self.model_costs.get(model_id)
+        cost_info = self.get_model_cost(model_id)
         if cost_info is not None:
             return cost_info
 
@@ -493,7 +549,11 @@ class CostOptimizer:
         best_cost = float("inf")
 
         for model_id in candidates:
-            if model_id not in self.model_costs:
+            # `get_model_cost`, not `in self.model_costs`: a candidate the
+            # catalog prices under an alias is a candidate we can rank, and
+            # skipping it would drop it from the recommendation for no better
+            # reason than how its id happens to be spelled here.
+            if self.get_model_cost(model_id) is None:
                 continue
 
             estimate = self.estimate_cost(

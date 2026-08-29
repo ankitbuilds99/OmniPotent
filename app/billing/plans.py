@@ -329,25 +329,37 @@ PLAN_TIER_HIERARCHY = [
 # unrecognised value straight back to `free` and quietly downgraded a customer
 # who had just paid.
 #
-# One map, in both directions, is the reconciliation. Growth and Business are
-# priced above Team but the enforcement layer has no bracket between Team and
-# unlimited, so they take Team's quota rather than being silently granted
-# Enterprise's; Scale, which is priced just under Enterprise, takes Enterprise's.
+# One map, in both directions, is the reconciliation. Growth and Business used to
+# collapse onto `team` here because the enforcement layer had no bracket between
+# Team and unlimited — and since this map's output is what `set_plan` stores, that
+# collapse was not a quota approximation, it erased the tier. `orgs.plan` is the
+# only record of what a customer bought on every deployment that upgrades by
+# webhook, and `FeatureGateService._plan_from_tenant_context` resolves
+# entitlements straight from it, so a Growth customer came back as Team and every
+# feature Growth exists to sell was refused. `app.tenancy.models.PLAN_QUOTAS` now
+# carries both brackets, so the tier survives the round trip.
+#
+# Scale still collapses onto `enterprise`: that direction only ever grants more
+# than was bought, so it is not the same failure, and narrowing it would take
+# seats away from customers who have them today.
 CATALOG_TO_QUOTA_PLAN: dict[str, str] = {
     "starter": "free",
     "team": "team",
-    "growth": "team",
-    "business": "team",
+    "growth": "growth",
+    "business": "business",
     "scale": "enterprise",
     "enterprise": "enterprise",
 }
 
 # The catalog entry to show for an enforced plan. Not an inverse of the above —
-# several catalog tiers collapse onto one quota plan — but the representative
-# one, so the Billing page names the tier whose quota the customer actually has.
+# `starter` is spelled `free` in the enforcement vocabulary and Scale has no
+# bracket of its own — but the representative one, so the Billing page names the
+# tier whose quota the customer actually has.
 QUOTA_PLAN_TO_CATALOG: dict[str, str] = {
     "free": "starter",
     "team": "team",
+    "growth": "growth",
+    "business": "business",
     "enterprise": "enterprise",
 }
 
@@ -361,10 +373,41 @@ def quota_plan_for(catalog_plan: str) -> str | None:
     return CATALOG_TO_QUOTA_PLAN.get((catalog_plan or "").strip().lower())
 
 
-def catalog_plan_for(quota_plan: str) -> PricingPlan:
-    """The catalog entry to display for an enforced plan value."""
-    name = QUOTA_PLAN_TO_CATALOG.get((quota_plan or "").strip().lower(), "starter")
-    return PRICING_PLANS[name]
+def catalog_plan_for(plan: str) -> PricingPlan:
+    """The catalog tier a stored plan value entitles an organization to.
+
+    Takes a value from either vocabulary. A value that is already a catalog tier
+    is returned as itself; this used to send every argument through
+    `QUOTA_PLAN_TO_CATALOG`, whose default is Starter, so asking it about the
+    tier a customer had actually bought — "growth" — answered "starter" and
+    withdrew every paid feature at once. That is not a display detail: this is
+    the entitlement path, because `FeatureGateService._plan_from_tenant_context`
+    calls it and its answer is what `/dependency-graph/*`, `/billing/features`
+    and every `require_feature` gate enforce.
+
+    Accepting a catalog tier was only half of it, because for a long time no
+    caller could pass one: the sole caller reads `orgs.plan`, and every write to
+    that column goes through `app.tenancy.models.normalize_plan`, whose
+    vocabulary had no Growth or Business to keep. Both brackets now exist, so a
+    Growth subscription is stored as "growth" and resolves here to Growth. Only
+    Scale is still lossy, and only upwards: it shares Enterprise's bracket, so it
+    resolves to Enterprise rather than to something lesser.
+    """
+    name = (plan or "").strip().lower()
+    if name in PRICING_PLANS:
+        return PRICING_PLANS[name]
+    mapped = QUOTA_PLAN_TO_CATALOG.get(name)
+    if mapped is None:
+        # Report the value that was not understood instead of silently serving
+        # the free tier: on this path a stored plan nobody recognises looks
+        # exactly like a customer who never paid.
+        log.warning(
+            "No catalog tier for stored plan %r; falling back to the free tier. "
+            "Expected one of %s (catalog) or %s (enforced).",
+            plan, ", ".join(sorted(PRICING_PLANS)), ", ".join(sorted(QUOTA_PLAN_TO_CATALOG)),
+        )
+        mapped = "starter"
+    return PRICING_PLANS[mapped]
 
 
 FEATURE_TO_MIN_TIER: dict[str, PlanTier] = {

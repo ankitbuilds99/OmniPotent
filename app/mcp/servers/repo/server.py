@@ -54,6 +54,23 @@ def _safe_path(relative: str) -> Path:
     return candidate
 
 
+def _safe_glob(pattern: str) -> str:
+    """Reject glob patterns that can steer the search outside REPO_PATH.
+
+    `Path.rglob` silently prefixes its argument with "**/", so a pattern such
+    as "../.env*" matches the parent of every directory in the repo and walks
+    straight out of the sandbox. Nothing downstream used to catch that, because
+    `Path.relative_to` is purely lexical: it happily relabelled the escaped hit
+    as "../.env" instead of refusing it. A pattern must therefore be relative
+    and free of ".." segments before it is allowed near the filesystem.
+    """
+    if os.path.isabs(pattern) or pattern.startswith("~"):
+        raise ValueError(f"glob '{pattern}' must be relative to the repository root")
+    if ".." in Path(pattern).parts:
+        raise ValueError(f"glob '{pattern}' escapes the repository sandbox")
+    return pattern
+
+
 @mcp.tool()
 def list_dir(path: str = ".") -> list[str]:
     """List files and directories under a path, relative to the repo root."""
@@ -92,21 +109,33 @@ def grep(pattern: str, glob: str = "*", max_results: int | str = 50) -> list[str
     """Search the repo for a regex pattern.
 
     Returns matches as "relative/path:line: matched text". `glob` restricts the
-    filename pattern (e.g. "*.js", "*.py").
+    filename pattern (e.g. "*.js", "*.py") and must stay inside the repo:
+    absolute patterns and ".." segments are refused rather than searched.
     """
     max_results = _as_int(max_results, 50)
+    glob = _safe_glob(glob)
     try:
         regex = re.compile(pattern)
     except re.error as exc:
         return [f"error: invalid regex: {exc}"]
 
+    root = Path(os.path.realpath(REPO_PATH))
     results: list[str] = []
     for file in REPO_PATH.rglob(glob):
         if not file.is_file() or file.is_symlink():
             continue
+        # Containment is re-checked per match against the *real* path, not the
+        # lexical one. The pattern is already known to be clean, but a
+        # symlinked directory inside the repo still hands back files that live
+        # outside it, and the `is_symlink()` test above only sees symlinked
+        # files, not symlinked parents. Deriving `rel` from the realpath also
+        # means the reported location is the file actually read.
+        try:
+            rel = Path(os.path.realpath(file)).relative_to(root)
+        except ValueError:
+            continue
         # Ignore based on path *relative to the repo* — otherwise an ancestor
         # directory named e.g. "venv" above REPO_PATH would skip the whole repo.
-        rel = file.relative_to(REPO_PATH)
         if any(part in _IGNORE for part in rel.parts):
             continue
         try:

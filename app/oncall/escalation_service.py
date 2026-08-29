@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import aiohttp
@@ -22,15 +23,25 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.database.models import Member
 from app.oncall.models import (
+    DEFAULT_ESCALATION_CHANNELS,
     OncallTeam,
+    OncallTeamMember,
     OncallEscalationPolicy,
     OncallEscalationStep,
     OncallAlert,
     OncallNotification,
+    contact_addresses,
 )
 from app.config import get_settings
 from app.oncall.schedule_service import ScheduleService
+
+if TYPE_CHECKING:
+    from app.notifications.dispatcher import (
+        NotificationChannel,
+        NotificationPreferences,
+    )
 
 log = logging.getLogger("omnipotent.oncall.escalation")
 
@@ -76,6 +87,82 @@ def _target_uuid(target: Mapping[str, Any], *keys: str) -> UUID | None:
         return None
 
 
+# Escalation policies name their channels in the product's vocabulary, which does
+# not quite match the dispatcher's enum. "phone" is the case that mattered: it is
+# what the built-in policy templates ask for, what `contact_methods` records a
+# number under, and what plenty of stored policies name — and the dispatcher
+# spells that channel VOICE, so a commonly configured escalation channel was
+# rejected on every page as "unknown notification channel 'phone'". Translating
+# is the fix; the stored policies cannot be rewritten out from under the
+# customers who wrote them.
+_CHANNEL_ALIASES = {"phone": "voice"}
+
+
+# What a page on each channel needs before it can be addressed to a person, and
+# the exact request that puts it there. The operator reading a failed page needs
+# to know either what to go and enter or that nothing they enter will help, and
+# the dispatcher's own answer ("No email configured") reads like a preference
+# somebody forgot rather than an empty store.
+#
+# Every one of these used to end "and this build has nowhere to store one",
+# because at the time nothing wrote a per-responder address of any kind. Adding
+# the responder to a team now records both — an email that becomes their
+# `members` row and a number or Slack id that becomes their `contact_methods` —
+# so these say where to put it. Push is the one that is still genuinely
+# impossible: there is no endpoint through which a browser could register a
+# device, so no request an operator can make will make a push page deliver.
+_NO_PHONE = (
+    "no phone number on file for this responder: record one as a "
+    "`contact_methods` entry of type sms/phone with a `value` on "
+    "POST /oncall/teams/{team_id}/members — for a responder who is on no "
+    "on-call team there is nowhere to store one"
+)
+_MISSING_ROUTING: dict[str, str] = {
+    "email": (
+        "no email address on file for this responder: there is no `members` row "
+        "with this id (POST /oncall/teams/{team_id}/members with an `email` "
+        "creates one) and no `contact_methods` entry of type email carries one"
+    ),
+    "sms": _NO_PHONE,
+    "voice": _NO_PHONE,
+    "whatsapp": _NO_PHONE,
+    "slack": (
+        "no Slack user id on file for this responder: record one as a "
+        "`contact_methods` entry of type slack with a `value` on "
+        "POST /oncall/teams/{team_id}/members — for a responder who is on no "
+        "on-call team there is nowhere to store one"
+    ),
+    "push": (
+        "no registered device for this responder, and this build has no endpoint "
+        "through which a browser could register one"
+    ),
+}
+
+# Channels addressed to the person rather than to the deployment. A webhook, a
+# Teams connector or a Discord hook is configured once for the org and carries
+# the same URL whoever is on call, so there is nothing to look up about the
+# responder and nothing missing to report when there is no row for them.
+_PERSONALLY_ADDRESSED = frozenset({"email", "sms", "voice", "whatsapp", "slack"})
+
+
+@dataclass(frozen=True)
+class _PageRoute:
+    """Where one page is about to be addressed, and what is stopping it.
+
+    `missing` is filled in *before* the send is attempted, from what the build
+    stores rather than from what the send returned. It exists because the
+    dispatcher's own answer for an unaddressable page ("No email configured") is
+    indistinguishable from a mis-set preference: it names a symptom the operator
+    would go looking for a setting to fix, when the real answer is that nothing
+    in this deployment has ever written the row it reads.
+    """
+
+    channel: "NotificationChannel | None"
+    preferences: "NotificationPreferences | None" = None
+    destination: str = ""
+    missing: str = ""
+
+
 class EscalationService:
     """Manages alert escalation through escalation policies."""
 
@@ -109,7 +196,7 @@ class EscalationService:
                     {"type": "schedule", "schedule_id": "...", "layer": "primary"},
                     {"type": "user", "user_id": "..."},
                 ],
-                "notification_channels": ["push", "sms", "phone"],
+                "notification_channels": ["email", "sms", "phone"],
             },
             {
                 "delay_minutes": 5,
@@ -156,7 +243,7 @@ class EscalationService:
                 delay_minutes=step_config.get("delay_minutes", 0),
                 targets=step_config["targets"],
                 notification_channels=step_config.get(
-                    "notification_channels", ["push", "sms", "phone"]
+                    "notification_channels", list(DEFAULT_ESCALATION_CHANNELS)
                 ),
                 skip_if=step_config.get("skip_if"),
             )
@@ -394,14 +481,29 @@ class EscalationService:
 
         target_users = await self._resolve_targets(step.targets, alert.team_id)
 
+        reached = False
+        reasons: list[str] = []
+
+        if not target_users and not step.targets:
+            reasons.append("the step has no targets")
+        elif not target_users:
+            reasons.append(
+                "none of the step's targets resolved to a person (empty schedule, "
+                "no team members, or an unusable target id)"
+            )
+
         for user_id in target_users:
             for channel in step.notification_channels:
-                await self._send_alert_notification(
+                note = await self._send_alert_notification(
                     alert=alert,
                     user_id=user_id,
                     channel=channel,
                     escalation_step=step_number,
                 )
+                if note.status == "sent":
+                    reached = True
+                elif note.error_message:
+                    reasons.append(f"{channel} to {user_id}: {note.error_message}")
 
         for target in step.targets:
             if not isinstance(target, Mapping):
@@ -410,17 +512,28 @@ class EscalationService:
             if target_type == "webhook":
                 url = _target_value(target, "url", "webhook_url", "target_id", "id")
                 if url:
-                    await self._send_webhook(url, alert)
+                    if await self._send_webhook(url, alert):
+                        reached = True
+                    else:
+                        reasons.append(f"webhook {url} did not accept the alert")
                 else:
                     log.warning("Webhook target on step %d has no URL", step_number)
+                    reasons.append("a webhook target on this step has no URL")
             elif target_type == "slack_channel":
                 channel = _target_value(
                     target, "channel_id", "slack_channel_id", "target_id", "id"
                 )
                 if channel:
-                    await self._send_slack_alert(channel, alert)
+                    if await self._send_slack_alert(channel, alert):
+                        reached = True
+                    else:
+                        reasons.append(f"Slack channel {channel} was not posted to")
                 else:
                     log.warning("Slack target on step %d has no channel", step_number)
+                    reasons.append("a Slack target on this step has no channel id")
+
+        if not reached:
+            await self._nobody_was_reached(alert, step_number, reasons)
 
         # Arm the next step. Two bugs lived here: the arming was skipped entirely
         # once `step_number` reached the last step — so `repeat_enabled` policies
@@ -519,20 +632,127 @@ class EscalationService:
         return list(user_ids)
 
     async def _notify_current_oncall(self, alert: OncallAlert) -> None:
-        """Fallback: notify current on-call when no policy exists."""
+        """Fallback: notify current on-call when no policy exists.
+
+        Every branch that ends without a page ends in `_nobody_was_reached`
+        instead of a bare `return`. An alert whose team has no schedule, or whose
+        rotation has nobody on it right now, used to leave no page, no log line
+        and no notification row — the alert simply sat there looking triggered.
+        """
         if not alert.team_id:
+            await self._nobody_was_reached(
+                alert, 0, ["the alert has no team, so there is no rotation to page"]
+            )
             return
 
         oncall = await self.schedule_service.get_current_oncall(alert.team_id)
 
-        if oncall.get("primary"):
-            for channel in ["push", "sms", "phone"]:
-                await self._send_alert_notification(
-                    alert=alert,
-                    user_id=oncall["primary"],
-                    channel=channel,
-                    escalation_step=0,
-                )
+        if not oncall.get("primary"):
+            await self._nobody_was_reached(
+                alert,
+                0,
+                [
+                    f"no policy for this alert and nobody is currently on call for "
+                    f"team {alert.team_id}"
+                ],
+            )
+            return
+
+        reasons: list[str] = []
+        reached = False
+        for channel in DEFAULT_ESCALATION_CHANNELS:
+            note = await self._send_alert_notification(
+                alert=alert,
+                user_id=oncall["primary"],
+                channel=channel,
+                escalation_step=0,
+            )
+            if note.status == "sent":
+                reached = True
+            elif note.error_message:
+                reasons.append(f"{channel} to {oncall['primary']}: {note.error_message}")
+
+        if not reached:
+            await self._nobody_was_reached(alert, 0, reasons)
+
+    async def _nobody_was_reached(
+        self,
+        alert: OncallAlert,
+        step_number: int,
+        reasons: list[str],
+    ) -> None:
+        """An escalation step paged nobody. Say so, and try the org's channels.
+
+        A page that reaches no human is the failure this whole subsystem exists
+        to prevent, so it is logged at error level with every reason collected —
+        not left to be inferred from a row in `oncall_notifications` that nothing
+        watches.
+
+        Then the alert is put out over the channels the org configured on its
+        Notification Preferences page (`app/notifications/delivery.py`), which is
+        the one place in this build where a *deliverable* destination — an email
+        address, a Slack webhook, a PagerDuty routing key — is both stored and
+        written by a real request. Those channels belong to the org rather than
+        to the chosen responder, so this is not the page it replaces and does not
+        make the notification rows read as sent; it is the difference between an
+        incident nobody hears about and one the team hears about on the channels
+        it asked to hear about things on.
+
+        Sent as critical so quiet hours and digest batching cannot swallow it:
+        the notification the org most needs at 3am is the one saying its pager
+        did not work. Never raises — a broken webhook must not roll back an
+        escalation that has already happened.
+        """
+        detail = "; ".join(r for r in reasons if r) or "no reason was recorded"
+        log.error(
+            "Escalation step %d for alert %s reached nobody: %s",
+            step_number,
+            alert.id,
+            detail,
+        )
+
+        from app.notifications.delivery import notify
+        from app.tenant_context import TenantConfig, run_with_tenant
+
+        cfg = TenantConfig(org_id=str(alert.org_id)) if alert.org_id else None
+        try:
+            result = await run_with_tenant(
+                cfg,
+                notify(
+                    "escalation",
+                    f"[{str(alert.severity).upper()}] NOT PAGED: {alert.title}",
+                    f"Escalation step {step_number + 1} for alert {alert.id} could "
+                    f"not page anyone, so this is going to the org's own channels "
+                    f"instead. Reason: {detail}.",
+                    critical=True,
+                    data={
+                        "alert_id": str(alert.id),
+                        "severity": alert.severity,
+                        "step": step_number + 1,
+                        "url": alert.source_url,
+                        "reason": detail,
+                    },
+                    dedupe_key=f"oncall-unpaged:{alert.id}:{step_number}",
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            log.error(
+                "Alert %s paged nobody and the org's channels could not be reached "
+                "either", alert.id, exc_info=True,
+            )
+            return
+
+        if result.get("status") != "sent":
+            # `deliver()` reports its own outcome per channel; repeating it here
+            # is what makes "we told nobody, twice" visible in the log of the
+            # service that owns the page rather than only in the notifier's.
+            log.error(
+                "Alert %s paged nobody and the org's own channels delivered "
+                "nothing either (%s): %s",
+                alert.id,
+                result.get("status"),
+                result.get("results"),
+            )
 
     async def _send_alert_notification(
         self,
@@ -558,7 +778,14 @@ class EscalationService:
         self.db.add(notification)
         await self.db.flush()
 
-        delivered, error = await self._deliver(alert, user_id, channel)
+        # Resolved once and passed down, so the row can record the address the
+        # page was addressed to. `contact_value` is on this table for exactly
+        # that and was never written: "we sent an email" with no record of where
+        # is not something anyone can check after the fact.
+        route = await self._page_route_for(user_id, channel)
+        notification.contact_value = route.destination[:255] or None
+
+        delivered, error = await self._deliver(alert, user_id, channel, route=route)
 
         notification.status = "sent" if delivered else "failed"
         notification.sent_at = datetime.now(timezone.utc) if delivered else None
@@ -569,7 +796,11 @@ class EscalationService:
         if delivered:
             log.info("Sent %s notification to user %s for alert %s", channel, user_id, alert.id)
         else:
-            log.warning(
+            # Error, not warning: this is a page that did not reach the person it
+            # was aimed at, which is the failure the on-call product exists to
+            # prevent. A warning is what the pre-existing code logged, and it is
+            # below the level most deployments alert on.
+            log.error(
                 "Failed to send %s notification to user %s for alert %s: %s",
                 channel, user_id, alert.id, error,
             )
@@ -580,24 +811,38 @@ class EscalationService:
         alert: OncallAlert,
         user_id: UUID,
         channel: str,
+        route: _PageRoute | None = None,
     ) -> tuple[bool, str | None]:
         """Hand the page to the notification dispatcher.
 
         Returns (delivered, error). Never raises: a channel that is not
         configured is a delivery failure to be recorded, not an exception that
         aborts the remaining targets on this escalation step.
+
+        The recipient's routing is resolved here and handed to the dispatcher.
+        It used to be left to the dispatcher's own `_USER_PREFERENCES`, a
+        process-local dictionary that nothing in the application ever writes: every
+        responder came back as the same anonymous default — no address, no phone
+        number, and only EMAIL and PUSH enabled — so the channel the escalation
+        policy had chosen was filtered out before it was ever attempted and the
+        page died as "suppressed by the recipient's notification preferences",
+        whatever the deployment or the customer had configured. `_page_routing`
+        below reads what is actually stored about the person instead.
+
+        The send is attempted even when the routing is known to be incomplete —
+        the dispatcher is the authority on whether a channel can deliver, and a
+        deployment that has wired one up differently must not be pre-empted here
+        — but a failure is reported with what `_page_routing` already knows is
+        missing rather than with the dispatcher's terse symptom.
         """
-        from app.notifications.dispatcher import (
-            NotificationChannel,
-            NotificationPriority,
-            notify,
-        )
+        from app.notifications.dispatcher import NotificationPriority, notify
 
-        try:
-            dispatch_channel = NotificationChannel(channel)
-        except ValueError:
-            return False, f"unknown notification channel {channel!r}"
+        if route is None:
+            route = await self._page_route_for(user_id, channel)
+        if route.channel is None:
+            return False, route.missing
 
+        dispatch_channel = route.channel
         priority = (
             NotificationPriority.CRITICAL
             if alert.severity in ("critical", "high")
@@ -622,21 +867,184 @@ class EscalationService:
                 # window; the escalation step is part of the key so a genuine
                 # escalation is never mistaken for a duplicate.
                 dedupe_key=f"alert:{alert.id}:{channel}:{alert.current_escalation_step}",
+                preferences=route.preferences,
             )
         except Exception as e:  # noqa: BLE001 — recorded, not raised
             return False, str(e)
 
         if not results:
-            # The dispatcher filtered it (quiet hours, disabled channel,
-            # duplicate). Nothing was delivered, so it must not read as sent.
-            return False, "suppressed by the recipient's notification preferences"
+            # The routing handed over above enables exactly the requested channel
+            # and sets no quiet hours or filters, so the dispatcher has only one
+            # remaining reason to return nothing, and naming it beats the old
+            # guess at the recipient's preferences. "Delivered", not "attempted":
+            # the dispatcher only opens its dedupe window on a send a channel
+            # accepted, so this reason can no longer stand in for a page that
+            # failed a few seconds ago — that one is retried and reports its own
+            # failure.
+            return False, (
+                f"deduplicated: a {dispatch_channel.value} page for this alert at "
+                f"escalation step {alert.current_escalation_step} was already "
+                f"delivered inside the dispatcher's dedupe window"
+            )
 
         if any(r.success for r in results):
             return True, None
-        return False, "; ".join(r.error or "delivery failed" for r in results)
 
-    async def _send_webhook(self, url: str, alert: OncallAlert) -> None:
-        """Send alert to webhook."""
+        attempted = "; ".join(r.error or "delivery failed" for r in results)
+        if route.missing:
+            # What the dispatcher reports for an unaddressed page ("No email
+            # configured") reads like a setting somebody forgot. Lead with the
+            # store that is actually empty and keep the dispatcher's answer after
+            # it, so the log line says both what failed and what to do about it.
+            return False, f"{route.missing} (dispatcher: {attempted})"
+        return False, attempted
+
+    async def _page_route_for(self, user_id: UUID, channel: str) -> _PageRoute:
+        """Translate a policy's channel name and resolve the responder's routing."""
+        from app.notifications.dispatcher import NotificationChannel
+
+        requested = str(channel or "").strip().lower()
+        try:
+            dispatch_channel = NotificationChannel(
+                _CHANNEL_ALIASES.get(requested, requested)
+            )
+        except ValueError:
+            return _PageRoute(
+                channel=None, missing=f"unknown notification channel {channel!r}"
+            )
+        return await self._page_routing(user_id, dispatch_channel)
+
+    async def _page_routing(
+        self,
+        user_id: UUID,
+        dispatch_channel: NotificationChannel,
+    ) -> _PageRoute:
+        """Where this responder can be reached, from what the deployment stores.
+
+        Only the channel the escalation policy asked for is enabled: the policy is
+        the authority on how this step pages, and the dispatcher's job here is to
+        deliver on that channel or to say why it could not — not to substitute a
+        default set of channels nobody chose.
+
+        Two stores hold what a responder can be reached at, and both are read:
+
+        * `members.email`, which is what every on-call `user_id` foreign key
+          points at. This used to be the only one consulted, and nothing in
+          `app/` wrote it — `/admin/members` and SCIM add people to the separate
+          aiosqlite tenancy store — so on a deployment provisioned only through
+          this product's own API the select returned nothing for every responder
+          and every targeted page went unaddressed. Adding a responder to an
+          on-call team by email now writes that row.
+        * `OncallTeamMember.contact_methods`, which is where a phone number or a
+          Slack id goes. It had neither reader nor writer before, which is why
+          sms, voice, whatsapp and Slack pages could not be addressed at all,
+          however the deployment was configured. Memberships are read across all
+          of the responder's teams: a phone number is a property of the person,
+          not of one team, and a page must not fail because it was entered
+          against a different team of theirs.
+
+        Push remains unaddressable and says so — no endpoint in this build lets a
+        browser register a device — and channels that are not per-responder at all
+        (webhook, teams, discord, telegram) are addressed by deployment
+        configuration, so nothing is claimed to be missing about the person.
+
+        Whatever is absent is reported through `_PageRoute.missing`, which becomes
+        the recorded failure reason on the notification row; a step where no target
+        could be reached then goes through `_nobody_was_reached`, so the alert
+        still reaches the org's own configured channels rather than nobody. What
+        this will not do is invent a personal address: a responder nobody has
+        recorded an address for produces the reason, never a reported send that
+        did not happen.
+        """
+        from app.notifications.dispatcher import NotificationChannel, NotificationPreferences
+
+        # Skipped entirely for webhook/teams/discord/telegram: those are addressed
+        # by deployment configuration, so there is nothing about the responder to
+        # look up and no reason to spend a query on every page.
+        addresses: dict[str, str] = {}
+        if dispatch_channel.value in _PERSONALLY_ADDRESSED:
+            addresses = await self._recorded_contact_addresses(user_id)
+
+        email = ""
+        if dispatch_channel is NotificationChannel.EMAIL:
+            email = (
+                await self.db.execute(select(Member.email).where(Member.id == user_id))
+            ).scalar_one_or_none() or ""
+            # `members.email` is the address of record; a contact method of type
+            # email is a per-team override for people who page to a different
+            # mailbox than the one they sign in with.
+            email = email or addresses.get("email", "")
+
+        phone = ""
+        if dispatch_channel in (
+            NotificationChannel.SMS,
+            NotificationChannel.VOICE,
+            NotificationChannel.WHATSAPP,
+        ):
+            phone = addresses.get("phone", "")
+
+        slack_user_id = ""
+        if dispatch_channel is NotificationChannel.SLACK:
+            slack_user_id = addresses.get("slack", "")
+
+        destination = email or phone or slack_user_id
+        missing = ""
+        if not destination:
+            # Channels absent from the table — webhook, teams, discord, telegram —
+            # are addressed by deployment configuration rather than by anything
+            # about the responder, so there is nothing missing here to report and
+            # the dispatcher's own answer is the accurate one.
+            missing = _MISSING_ROUTING.get(dispatch_channel.value, "")
+            if missing:
+                log.warning("Cannot address a %s page to user %s: %s",
+                            dispatch_channel.value, user_id, missing)
+
+        return _PageRoute(
+            channel=dispatch_channel,
+            preferences=NotificationPreferences(
+                user_id=str(user_id),
+                email=email or None,
+                phone=phone or None,
+                slack_user_id=slack_user_id or None,
+                enabled_channels={dispatch_channel},
+            ),
+            destination=destination,
+            missing=missing,
+        )
+
+    async def _recorded_contact_addresses(self, user_id: UUID) -> dict[str, str]:
+        """Every address recorded for this responder, by kind, first one wins.
+
+        One query per page rather than per channel, and the memberships are
+        ordered oldest-first so that which address answers is stable rather than
+        whatever the database happened to return.
+        """
+        rows = (
+            await self.db.execute(
+                select(OncallTeamMember.contact_methods)
+                .where(
+                    OncallTeamMember.user_id == user_id,
+                    OncallTeamMember.is_active.is_(True),
+                )
+                .order_by(OncallTeamMember.joined_at)
+            )
+        ).scalars().all()
+
+        addresses: dict[str, str] = {}
+        for methods in rows:
+            for kind, value in contact_addresses(methods).items():
+                addresses.setdefault(kind, value)
+        return addresses
+
+    async def _send_webhook(self, url: str, alert: OncallAlert) -> bool:
+        """Send alert to webhook. True when the far end accepted it.
+
+        The answer matters beyond the log line: a webhook target is one of the
+        ways an escalation step can reach a human, so whether it worked is part
+        of deciding whether this step reached anybody at all. The status code
+        used to be discarded — the response was entered and left without being
+        read — so a 500 from the customer's endpoint was logged as "Sent".
+        """
         payload = {
             "event": "alert.triggered",
             "alert": {
@@ -657,14 +1065,29 @@ class EscalationService:
                     url,
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=10),
-                ):
-                    pass
-            log.info("Sent webhook for alert %s to %s", alert.id, url)
+                ) as response:
+                    accepted = response.status < 400
+                    status = response.status
         except Exception as e:
             log.error("Failed to send webhook for alert %s: %s", alert.id, e)
+            return False
 
-    async def _send_slack_alert(self, channel_id: str, alert: OncallAlert) -> None:
-        """Send alert to Slack channel."""
+        if accepted:
+            log.info("Sent webhook for alert %s to %s", alert.id, url)
+        else:
+            log.error(
+                "Webhook for alert %s to %s was rejected with HTTP %s",
+                alert.id, url, status,
+            )
+        return accepted
+
+    async def _send_slack_alert(self, channel_id: str, alert: OncallAlert) -> bool:
+        """Send alert to Slack channel. True when Slack accepted the message.
+
+        As with `_send_webhook`, the caller needs the answer to know whether this
+        escalation step reached anybody; an unset bot token or a rejected post
+        must not count as somebody having been told.
+        """
         severity_emoji = {
             "critical": ":rotating_light:",
             "high": ":warning:",
@@ -725,7 +1148,7 @@ class EscalationService:
                 "Slack escalation target for alert %s skipped: SLACK_BOT_TOKEN is not set",
                 alert.id,
             )
-            return
+            return False
 
         try:
             response = await post_message(
@@ -736,15 +1159,17 @@ class EscalationService:
             )
         except Exception as e:  # noqa: BLE001 — one target must not stop the page
             log.error("Slack alert for %s failed: %s", alert.id, e)
-            return
+            return False
 
         if response.get("ok"):
             log.info("Sent Slack alert for %s to channel %s", alert.id, channel_id)
-        else:
-            log.error(
-                "Slack rejected the alert for %s to channel %s: %s",
-                alert.id, channel_id, response.get("error") or response.get("skipped"),
-            )
+            return True
+
+        log.error(
+            "Slack rejected the alert for %s to channel %s: %s",
+            alert.id, channel_id, response.get("error") or response.get("skipped"),
+        )
+        return False
 
     async def _schedule_next_escalation(
         self,

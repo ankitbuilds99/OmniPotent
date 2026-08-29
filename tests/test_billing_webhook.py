@@ -47,12 +47,23 @@ def test_plan_mapping_created_updated_deleted():
 
 
 def test_plan_mapping_translates_catalog_tiers():
-    """Stripe metadata carries a catalog tier; `orgs.plan` holds a quota plan."""
+    """Stripe metadata carries a catalog tier; `orgs.plan` holds a quota plan.
+
+    Growth and Business are sold tiers and `PLAN_QUOTAS` now has a bracket for
+    each, so they are kept. This used to assert that Growth arrived as "team":
+    the enforced vocabulary had three values, so the tier the customer paid for
+    was destroyed on the way in and every entitlement above Team was withheld
+    from them. Only Starter and Scale are still translated — Starter is spelled
+    `free` in the enforcement vocabulary, and Scale shares Enterprise's bracket,
+    which is lossy only upwards.
+    """
     def evt(t, meta):
         return {"type": t, "data": {"object": {"metadata": meta}}}
 
     assert plan_from_stripe_event(evt("customer.subscription.updated",
-                                      {"org_id": "o1", "plan": "growth"})) == ("o1", "team")
+                                      {"org_id": "o1", "plan": "growth"})) == ("o1", "growth")
+    assert plan_from_stripe_event(evt("customer.subscription.updated",
+                                      {"org_id": "o1", "plan": "business"})) == ("o1", "business")
     assert plan_from_stripe_event(evt("customer.subscription.updated",
                                       {"org_id": "o1", "plan": "scale"})) == ("o1", "enterprise")
     assert plan_from_stripe_event(evt("customer.subscription.updated",

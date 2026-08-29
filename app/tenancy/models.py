@@ -6,7 +6,10 @@ unit-testable in isolation. The store (store.py) persists these.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+log = logging.getLogger("omnipotent.tenancy.models")
 
 # --- Roles & RBAC ---------------------------------------------------------- #
 # Ranked least → most privileged. A permission requires a minimum role.
@@ -45,17 +48,57 @@ def normalize_role(role: str) -> str:
 
 # --- Plans & quotas -------------------------------------------------------- #
 # -1 == unlimited.
+#
+# This table is the *vocabulary* of `orgs.plan`, not just a list of limits:
+# `normalize_plan` turns anything absent from it into "free", so a plan value
+# with no bracket here cannot be stored at all. It held three brackets while the
+# catalog (app/billing/plans.py) sold six tiers, so Growth and Business — the two
+# tiers whose whole pitch is the features above Team — had nowhere to land. They
+# were translated to "team" on the way in and the org record then had no way to
+# say which of the two the customer had bought, which is what
+# `FeatureGateService._plan_from_tenant_context` reads: every Growth and Business
+# entitlement was withheld from customers paying $699 and $1,499 a month for
+# exactly those entitlements, and the meter capped them at Team's 1000
+# investigations when both tiers sell unlimited.
+#
+# The numbers come from the catalog entries of the same name: seats is
+# `max_users`, and unlimited investigations/integrations is what those two tiers
+# advertise (`max_ai_investigations_monthly=None`, `limit_integrations=None`).
+# The catalog prices no API-key allowance, so those keep the seats-to-keys ratio
+# the Team bracket already sets rather than inventing an entitlement.
+#
+# Scale still maps onto "enterprise" (app/billing/plans.py): that collapse only
+# ever grants more than was bought, so it is not this failure, and narrowing it
+# would start refusing seats that are allowed today.
 PLAN_QUOTAS: dict[str, dict[str, int]] = {
     "free": {"investigations_per_month": 50, "seats": 3, "integrations": 2, "api_keys": 2},
     "team": {"investigations_per_month": 1000, "seats": 25, "integrations": 10, "api_keys": 20},
+    "growth": {"investigations_per_month": -1, "seats": 25, "integrations": -1, "api_keys": 20},
+    "business": {"investigations_per_month": -1, "seats": 50, "integrations": -1, "api_keys": 40},
     "enterprise": {"investigations_per_month": -1, "seats": -1, "integrations": -1, "api_keys": -1},
 }
 PLANS = tuple(PLAN_QUOTAS)
 
 
 def normalize_plan(plan: str) -> str:
+    """The stored plan value for `plan`, defaulting to free.
+
+    The default is a downgrade, so it is said out loud: an org whose plan value
+    is not in the table is metered exactly like one that never paid, and the only
+    difference between "the operator typed 'Growth ' with a trailing space" and
+    "this customer is on the free plan" used to be invisible.
+    """
     p = (plan or "").strip().lower()
-    return p if p in PLAN_QUOTAS else "free"
+    if p in PLAN_QUOTAS:
+        return p
+    if p:
+        log.warning(
+            "Plan %r is not one this deployment enforces (%s); treating it as "
+            "free, which caps the org at the free tier's quotas",
+            plan,
+            ", ".join(PLAN_QUOTAS),
+        )
+    return "free"
 
 
 def quota(plan: str, key: str) -> int:

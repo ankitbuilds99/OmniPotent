@@ -5,6 +5,17 @@ stable release and should be used for production integrations.
 
 Breaking changes will NOT be made to v1. New features may be added
 in a backwards-compatible manner.
+
+Import order matters: reach this package through ``app.api.main``, never the
+other way round. ``.chat``, ``.config`` and ``.admin`` below delegate to the
+root handlers and import them from ``app.api.main`` at module scope, while
+``app.api.main`` includes ``router`` at the end of its own module body. That is
+the ordinary FastAPI shape and it works in one direction only -- importing
+``app.api.v1`` (or one of its submodules) as the entry point re-enters this
+half-built ``__init__`` from main's include line and raises "cannot import name
+'router' from partially initialized module". If you hit that, import
+``app.api.main`` first; the served ASGI app lives there, so every real process
+already does.
 """
 
 from fastapi import APIRouter

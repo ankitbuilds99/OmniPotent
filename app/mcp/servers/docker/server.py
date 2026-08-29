@@ -420,6 +420,26 @@ volumes:
 }
 
 
+def _safe_path(relative: str) -> Path:
+    """Resolve a caller-supplied path and ensure it stays inside REPO_PATH.
+
+    This server used to join the argument onto REPO_PATH with no check at all,
+    so "../other-repo" walked into a sibling checkout and an absolute path
+    replaced the root entirely ("REPO_PATH / '/etc'" is just "/etc"). It is the
+    same helper the repo, docs, architect and security servers already carry:
+    realpath first, so a symlinked child pointing out of the repo is rejected
+    too, then a containment check that raises instead of quietly reading on.
+    """
+    root = Path(os.path.realpath(REPO_PATH))
+    candidate = Path(os.path.realpath(REPO_PATH / relative))
+    if candidate != root:
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ValueError(f"path '{relative}' escapes the repository sandbox")
+    return candidate
+
+
 def _detect_language(repo_path: Path) -> dict:
     """Detect the primary language and framework of a repository."""
     indicators = {
@@ -543,13 +563,14 @@ def analyze_for_docker(path: str = ".") -> dict:
     recommends the best Dockerfile template and configuration.
 
     Args:
-        path: Path to analyze (relative to repo root, default ".")
+        path: Path to analyze (relative to repo root, default "."). Paths that
+            resolve outside the repo are refused, not analysed.
 
     Returns:
         Analysis with detected language, framework, recommended template,
         and suggested configuration values.
     """
-    target = REPO_PATH / path
+    target = _safe_path(path)
     if not target.exists():
         return {"error": f"path '{path}' not found"}
 

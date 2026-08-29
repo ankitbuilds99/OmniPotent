@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
-from app import incident_memory, policy, replay, routing
+from app import incident_memory, policy, replay, routing, runtime
 from app.config import get_settings
 from app.graph.prompts import (
     AGENT_SYSTEM,
@@ -29,7 +29,7 @@ from app.graph.prompts import (
     VERIFY_SYSTEM,
 )
 from app.graph.sandbox import run_counterfactual
-from app.graph.state import AgentState
+from app.graph.state import AgentState, RunStart
 from app.llm import cached_system, get_llm
 from app.model_router import usage_ledger
 
@@ -154,10 +154,18 @@ def make_plan_node():
         plan = [ln.strip() for ln in str(resp.content).splitlines() if ln.strip()]
         return {
             "plan": plan,
+            # This node runs exactly once per turn, first, and is the one node an
+            # approval resume does NOT re-run — so it is where the per-run counters
+            # are zeroed, `iteration` as always and now the two RunScopedSum ones.
+            # `RunStart` is what says "a new turn begins here": without it the run
+            # boundary depended entirely on the previous run reaching finish(), and
+            # a run that died mid-way left its partial token total for this turn to
+            # be billed for a second time.
             "iteration": 0,
             "status": "investigating",
             "feedback": "",
-            "tokens_used": tokens,
+            "tokens_used": RunStart(tokens),
+            "verify_attempts": RunStart(0),
         }
 
     return plan_node
@@ -253,9 +261,37 @@ def approval_node(state: AgentState) -> dict:
       - approved  -> let the message stand so the ToolNode executes it
       - rejected  -> answer the tool calls with rejection ToolMessages and
                      hand control back to the agent to choose another path
+
+    The calls under approval are normally carried by the last message, because
+    the single-agent graph runs `agent -> approval` with nothing in between. The
+    multi-agent graph does not: it runs `remediation -> reviewer -> approval`,
+    so by the time this node sees state the last message is the reviewer's own
+    verdict and the proposal is two messages back. Reading only the last message
+    meant the operator was interrupted with `actions: []` — an approval prompt
+    naming no tool, no arguments and no preview — and, whatever they answered,
+    nothing could be executed or rejected because the tool-call ids were gone
+    too. `pending_action` is the record of exactly that proposal, so it is the
+    fallback, and approving through it queues the calls explicitly in
+    `pending_tool_calls` because the router after this node cannot recover them
+    from the message history either.
     """
     last = state["messages"][-1]
     all_calls = list(getattr(last, "tool_calls", []))
+    queued_from_pending = False
+    if not all_calls:
+        pending = state.get("pending_action")
+        if isinstance(pending, dict):
+            all_calls = [
+                {
+                    "name": c["name"],
+                    "args": c.get("args") or {},
+                    "id": c.get("id"),
+                    "type": "tool_call",
+                }
+                for c in (pending.get("tool_calls") or [])
+                if c.get("name") and c.get("id")
+            ]
+            queued_from_pending = bool(all_calls)
 
     # Surface EVERY tool call that will run (the ToolNode executes the whole
     # message on approval), each classified by the policy engine: decision class
@@ -300,10 +336,23 @@ def approval_node(state: AgentState) -> dict:
 
     approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
     if approved:
+        if queued_from_pending:
+            # The approved calls are not on the last message, so hand them
+            # forward as state: the queue is what routes this to the tool node
+            # and what the tool node runs. `multi_agent_agent` marks the tool
+            # node's return path — control belongs to the write-up, not to the
+            # agent that proposed the fix, which would simply propose it again.
+            return {
+                "pending_action": None,
+                "pending_tool_calls": all_calls,
+                "multi_agent_agent": "approval",
+            }
         # Leave the AIMessage untouched -> routed to ToolNode for execution.
         return {"pending_action": None}
 
-    # Rejected: every tool_call id must still be answered to keep history valid.
+    # Rejected: every tool_call id must still be answered to keep history valid —
+    # including the ids recovered from `pending_action`, whose tool_use blocks are
+    # just as unanswered for sitting further back in the transcript.
     reason = (decision or {}).get("reason", "Rejected by human reviewer.") if isinstance(
         decision, dict
     ) else "Rejected by human reviewer."
@@ -313,7 +362,7 @@ def approval_node(state: AgentState) -> dict:
             f"action; summarize findings or propose an alternative.",
             tool_call_id=c["id"],
         )
-        for c in last.tool_calls
+        for c in all_calls
     ]
     return {"messages": rejections, "pending_action": None}
 
@@ -941,8 +990,14 @@ def make_report_node():
     # avoids the adaptive-thinking + forced-tool conflict on the main model.
     llm = get_llm(fast=True)
     settings = get_settings()
-    # Groq doesn't support structured output reliably - skip it
-    skip_structured = settings.copilot_provider == "groq"
+    # Groq doesn't support structured output reliably - skip it. Ask
+    # runtime.provider(), not the frozen .env value: the UI "Connect" flow and a
+    # tenant's own provider both override it, and get_llm() above already builds
+    # the model from runtime.provider(). Reading the static setting here meant a
+    # deployment whose .env said groq kept skipping structured output after the
+    # operator switched to Anthropic, and a groq tenant on an Anthropic host got
+    # structured output attempted against a provider that mangles it.
+    skip_structured = runtime.provider() == "groq"
 
     def report_node(state: AgentState) -> dict:
         request = _last_user_text(state)

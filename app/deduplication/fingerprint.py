@@ -357,6 +357,34 @@ class FingerprintMatcher:
             return max(len(s1), len(s2))
         return sum(c1 != c2 for c1, c2 in zip(s1, s2))
 
+    def forget_incident(self, incident_id: UUID) -> int:
+        """Drop every indexed alert that belongs to `incident_id`.
+
+        Layer 1's index was write-only: nothing ever told it an incident had been
+        closed, so a resolved incident kept answering `find_match` and the pipeline
+        had to refuse the merge afterwards. That refusal is correct but it is
+        cleanup at the wrong end — the entries stayed in memory for the process's
+        lifetime, and any future caller of `find_match` had to know to re-check the
+        incident's status. Resolving an incident now removes its entries, so the
+        index only ever offers candidates a merge could actually use.
+
+        Returns the number of index entries removed, so a caller can tell "nothing
+        was indexed for that incident" from "I did not look".
+        """
+        fingerprints = self._incident_fingerprints.pop(incident_id, set())
+        removed = 0
+        for fp in fingerprints:
+            entries = self._fingerprint_index.get(fp)
+            if entries is None:
+                continue
+            kept = [e for e in entries if e[2] != incident_id]
+            removed += len(entries) - len(kept)
+            if kept:
+                self._fingerprint_index[fp] = kept
+            else:
+                del self._fingerprint_index[fp]
+        return removed
+
     def cleanup_old_entries(self, before: datetime) -> int:
         """Remove entries older than specified time."""
         removed = 0

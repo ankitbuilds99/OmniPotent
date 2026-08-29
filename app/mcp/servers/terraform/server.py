@@ -62,6 +62,30 @@ def _headers() -> dict:
     }
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live Terraform read.
+
+    With no TERRAFORM_CLOUD_TOKEN — the default for this repo — every read tool
+    below answered from the _DEMO_* tables in exactly the shape Terraform Cloud
+    uses, with no marker anywhere. An invented workspace list, state serial 42
+    and an errored run blaming an ECS health check therefore entered
+    investigations as measured infrastructure fact, and the incident report that
+    came out the far end looked identical to one built against a real org.
+
+    Marking is what the other connectors already do (argocd, datadog,
+    kubernetes, pagerduty, sentry); mark_demo copies rather than mutates, so the
+    module-level fixture tables stay clean across calls.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "terraform")
+
+
+def _demo_notice_comment() -> str:
+    """The same marker for tools whose return type has nowhere to hang a key."""
+    from app.mcp.fixtures import demo_notice
+    return f"# {demo_notice('terraform')}"
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures (simulate a checkout-svc infrastructure workspace)
 # --------------------------------------------------------------------------- #
@@ -329,7 +353,7 @@ def list_workspaces(search: str = "", environment: str = "") -> list[dict]:
             result = [ws for ws in result if search.lower() in str(ws["name"]).lower()]
         if environment:
             result = [ws for ws in result if str(ws.get("environment", "")).lower() == environment.lower()]
-        return result
+        return _demo(result)
 
     import httpx
 
@@ -379,11 +403,13 @@ def get_workspace(name: str) -> dict:
     if OFFLINE:
         ws = _find_workspace(name)
         if not ws:
-            return {"error": f"workspace '{name}' not found (offline demo)",
-                    "available": [w["name"] for w in _DEMO_WORKSPACES]}
+            # The error reply lists the invented workspace names, so it is
+            # fixture data too and gets the same marker.
+            return _demo({"error": f"workspace '{name}' not found (offline demo)",
+                          "available": [w["name"] for w in _DEMO_WORKSPACES]})
         if name == "checkout-prod" or name == "ws-checkout-prod":
-            return dict(_DEMO_WORKSPACE_DETAIL)
-        return {**ws, "last_run": None}
+            return _demo(dict(_DEMO_WORKSPACE_DETAIL))
+        return _demo({**ws, "last_run": None})
 
     import httpx
 
@@ -437,15 +463,15 @@ def get_state(workspace: str) -> dict:
     if OFFLINE:
         ws = _find_workspace(workspace)
         if not ws:
-            return {"error": f"workspace '{workspace}' not found (offline demo)",
-                    "available": [w["name"] for w in _DEMO_WORKSPACES]}
+            return _demo({"error": f"workspace '{workspace}' not found (offline demo)",
+                          "available": [w["name"] for w in _DEMO_WORKSPACES]})
         if workspace in ("checkout-prod", "ws-checkout-prod"):
             # Count resources by type
             type_counts: dict[str, int] = {}
             for r in _DEMO_STATE_RESOURCES:
                 rtype = str(r["type"])
                 type_counts[rtype] = type_counts.get(rtype, 0) + 1
-            return {
+            return _demo({
                 "workspace": workspace,
                 "serial": 42,
                 "terraform_version": "1.6.0",
@@ -455,9 +481,9 @@ def get_state(workspace: str) -> dict:
                     "service_endpoint": "https://checkout.acme.com",
                     "database_endpoint": "checkout-db-prod.xxx.us-east-1.rds.amazonaws.com",
                 },
-            }
-        return {"workspace": workspace, "serial": 1, "resource_count": ws.get("resource_count", 0),
-                "resources_by_type": {}, "outputs": {}}
+            })
+        return _demo({"workspace": workspace, "serial": 1, "resource_count": ws.get("resource_count", 0),
+                      "resources_by_type": {}, "outputs": {}})
 
     import httpx
 
@@ -509,14 +535,22 @@ def list_state_resources(workspace: str, resource_type: str = "") -> list[dict]:
     if OFFLINE:
         ws = _find_workspace(workspace)
         if not ws:
-            return [{"error": f"workspace '{workspace}' not found (offline demo)",
-                     "available": [w["name"] for w in _DEMO_WORKSPACES]}]
+            return _demo([{"error": f"workspace '{workspace}' not found (offline demo)",
+                           "available": [w["name"] for w in _DEMO_WORKSPACES]}])
         if workspace in ("checkout-prod", "ws-checkout-prod"):
             resources = list(_DEMO_STATE_RESOURCES)
             if resource_type:
                 resources = [r for r in resources if r["type"] == resource_type]
-            return resources
-        return []
+            return _demo(resources)
+        # The workspace is real in the fixture list but no state was authored
+        # for it. A bare [] would read as a measured "this workspace manages
+        # nothing"; say the state was never captured instead.
+        return _demo([{
+            "workspace": workspace,
+            "resources": "unmeasured",
+            "note": f"no fixture state exists for workspace '{workspace}' in this offline demo; "
+                    "this is not a measurement that the workspace has zero resources",
+        }])
 
     import httpx
 
@@ -585,11 +619,18 @@ def get_run_history(workspace: str, limit: int | str = 10) -> list[dict]:
     if OFFLINE:
         ws = _find_workspace(workspace)
         if not ws:
-            return [{"error": f"workspace '{workspace}' not found (offline demo)",
-                     "available": [w["name"] for w in _DEMO_WORKSPACES]}]
+            return _demo([{"error": f"workspace '{workspace}' not found (offline demo)",
+                           "available": [w["name"] for w in _DEMO_WORKSPACES]}])
         if workspace in ("checkout-prod", "ws-checkout-prod"):
-            return _DEMO_RUN_HISTORY[:limit]
-        return []
+            return _demo(_DEMO_RUN_HISTORY[:limit])
+        # Same reasoning as list_state_resources: no run history was authored
+        # for this workspace, which is not the same fact as "it has never run".
+        return _demo([{
+            "workspace": workspace,
+            "runs": "unmeasured",
+            "note": f"no fixture run history exists for workspace '{workspace}' in this offline "
+                    "demo; this is not a measurement that the workspace has never run",
+        }])
 
     import httpx
 
@@ -644,13 +685,13 @@ def get_run_details(run_id: str) -> dict:
     """
     if OFFLINE:
         if run_id == "run-abc123" or run_id == "":
-            return dict(_DEMO_RUN_DETAILS)
+            return _demo(dict(_DEMO_RUN_DETAILS))
         # Check if it's in history
         for run in _DEMO_RUN_HISTORY:
             if run["id"] == run_id:
-                return {**run, "workspace": {"id": "ws-checkout-prod", "name": "checkout-prod"}}
-        return {"error": f"run '{run_id}' not found (offline demo)",
-                "available": [r["id"] for r in _DEMO_RUN_HISTORY]}
+                return _demo({**run, "workspace": {"id": "ws-checkout-prod", "name": "checkout-prod"}})
+        return _demo({"error": f"run '{run_id}' not found (offline demo)",
+                      "available": [r["id"] for r in _DEMO_RUN_HISTORY]})
 
     import httpx
 
@@ -688,6 +729,54 @@ def get_run_details(run_id: str) -> dict:
     }
 
 
+def _fetch_plan_log(plan_id: str, run_id: str, why: str) -> str:
+    """Read the human-readable plan log when the JSON plan is not available.
+
+    The old fallback fetched the plan record and returned `log-read-url`, i.e.
+    the signed archivist URL as a string. That is not a plan diff: the caller is
+    an LLM that cannot fetch a URL, so the tool answered a question about what
+    would change with a link, and the answer read like success. This follows the
+    URL and returns the log body instead, and when a step fails it says which
+    endpoint answered what rather than the old flat "Plan output not available".
+    """
+    import httpx
+
+    plan_resp = httpx.get(
+        f"{BASE_URL}/plans/{plan_id}",
+        headers=_headers(),
+        timeout=30,
+        follow_redirects=True,
+    )
+    if plan_resp.status_code != 200:
+        return (
+            f"Plan output unavailable for run {run_id}: {why}, and the plan record at "
+            f"/plans/{plan_id} answered HTTP {plan_resp.status_code}."
+        )
+
+    attrs = plan_resp.json().get("data", {}).get("attributes", {})
+    log_url = attrs.get("log-read-url")
+    if not log_url:
+        return (
+            f"Plan output unavailable for run {run_id}: {why}, and the plan record for "
+            f"{plan_id} carries no log-read-url to fall back to."
+        )
+
+    # The log URL is pre-signed and lives on a different origin (archivist), so
+    # it is sent without the Terraform Cloud token rather than leaking it.
+    log_resp = httpx.get(log_url, timeout=30, follow_redirects=True)
+    if log_resp.status_code != 200:
+        return (
+            f"Plan output unavailable for run {run_id}: {why}, and the log-read-url for "
+            f"{plan_id} answered HTTP {log_resp.status_code}."
+        )
+    if not log_resp.text.strip():
+        return (
+            f"Plan output unavailable for run {run_id}: {why}, and the log-read-url for "
+            f"{plan_id} returned an empty body."
+        )
+    return log_resp.text
+
+
 @mcp.tool()
 def get_plan_output(run_id: str) -> str:
     """Get the plan output (diff) for a run.
@@ -698,9 +787,16 @@ def get_plan_output(run_id: str) -> str:
     Returns the terraform plan output showing what will change.
     """
     if OFFLINE:
+        # A bare string has nowhere to hang the _simulated key the dict-returning
+        # tools carry, so the notice goes in as a leading comment line — the same
+        # convention the datadog server uses for its log text.
         if run_id == "run-abc123" or run_id == "":
-            return _DEMO_PLAN_OUTPUT
-        return f"Plan output not available for run '{run_id}' (offline demo)"
+            return f"{_demo_notice_comment()}\n{_DEMO_PLAN_OUTPUT}"
+        return (
+            f"{_demo_notice_comment()}\n"
+            f"No fixture plan output exists for run '{run_id}' in this offline demo. "
+            "This is not a measurement that the run produced an empty plan."
+        )
 
     import httpx
 
@@ -716,26 +812,46 @@ def get_plan_output(run_id: str) -> str:
     if not plan_id:
         return f"No plan found for run {run_id}"
 
-    # Get the plan JSON output
+    # Terraform Cloud answers the JSON-plan endpoint with a 307 to a temporary
+    # archivist URL, and that redirect *is* the documented success path. httpx
+    # does not follow redirects by default and raise_for_status() rejects a 3xx,
+    # so this call used to raise HTTPStatusError on every live run and only the
+    # offline fixture path ever returned a plan. httpx drops the Authorization
+    # header when a redirect crosses origins, which is what we want: the
+    # archivist URL is pre-signed and must not receive the org token.
     resp = httpx.get(
         f"{BASE_URL}/plans/{plan_id}/json-output",
         headers=_headers(),
         timeout=30,
+        follow_redirects=True,
     )
 
-    if resp.status_code == 404:
-        # Try getting the text output instead
-        text_resp = httpx.get(
-            f"{BASE_URL}/plans/{plan_id}",
-            headers=_headers(),
-            timeout=30,
+    # 204 means the plan is still running. It is a success status, so the old
+    # code sailed past raise_for_status and returned "" — an empty diff, which
+    # reads as "nothing will change" instead of "not measured yet".
+    if resp.status_code == 204:
+        return (
+            f"Plan output for run {run_id} is not ready: Terraform Cloud answered HTTP 204 "
+            f"for plan {plan_id}, meaning the plan is still running. Retry once the run "
+            "leaves the planning phase."
         )
-        if text_resp.status_code == 200:
-            attrs = text_resp.json().get("data", {}).get("attributes", {})
-            return attrs.get("log-read-url", "Plan output not available")
-        return f"Plan output not available for run {run_id}"
+
+    # 403/404/422 are the documented "no JSON plan for this run" answers (422 is
+    # returned for pre-0.12 Terraform). Those fall back to the text log; anything
+    # else that failed is a genuine error and still raises.
+    if resp.status_code in (403, 404, 422):
+        return _fetch_plan_log(
+            plan_id,
+            run_id,
+            f"the JSON plan endpoint answered HTTP {resp.status_code}",
+        )
 
     resp.raise_for_status()
+    if not resp.text.strip():
+        return (
+            f"Plan output for run {run_id} could not be read: the JSON plan endpoint for "
+            f"{plan_id} answered HTTP {resp.status_code} with an empty body."
+        )
     return resp.text
 
 
@@ -756,15 +872,17 @@ def trigger_plan(workspace: str, message: str = "", speculative: bool = False) -
     if OFFLINE:
         ws = _find_workspace(workspace)
         if not ws:
-            return {"error": f"workspace '{workspace}' not found (offline demo)",
-                    "available": [w["name"] for w in _DEMO_WORKSPACES]}
-        return {
+            return _demo({"error": f"workspace '{workspace}' not found (offline demo)",
+                          "available": [w["name"] for w in _DEMO_WORKSPACES]})
+        # The prose already said "(simulated ...)"; the marker means a consumer
+        # never has to string-match to find that out.
+        return _demo({
             "status": "plan queued (simulated - offline demo, no actual plan triggered)",
             "run_id": "run-demo-new",
             "workspace": workspace,
             "speculative": speculative,
             "message": message,
-        }
+        })
 
     import httpx
 
@@ -827,13 +945,13 @@ def trigger_apply(run_id: str, comment: str = "") -> dict:
     """
     if OFFLINE:
         if run_id not in [r["id"] for r in _DEMO_RUN_HISTORY] and run_id != "run-abc123":
-            return {"error": f"run '{run_id}' not found (offline demo)",
-                    "available": [r["id"] for r in _DEMO_RUN_HISTORY]}
-        return {
+            return _demo({"error": f"run '{run_id}' not found (offline demo)",
+                          "available": [r["id"] for r in _DEMO_RUN_HISTORY]})
+        return _demo({
             "status": "apply queued (simulated - offline demo, no actual apply triggered)",
             "run_id": run_id,
             "comment": comment,
-        }
+        })
 
     import httpx
 

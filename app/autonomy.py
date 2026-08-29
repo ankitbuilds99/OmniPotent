@@ -18,14 +18,26 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, get_args
 
+from app import policy
 from app.slo_poller import is_page_worthy
 
 log = logging.getLogger("omnipotent.autonomy")
 
 # The only actions autonomy may take unattended — reversible, bounded blast radius.
 REVERSIBLE_ACTIONS: set[str] = {"rollback_deployment", "restart_deployment"}
+
+# The confidence tiers an investigation can actually reach. Read off
+# `policy.Confidence` rather than re-typed here: `is_eligible` refuses anything
+# outside this tuple as never-measured, so a fourth tier added to the policy
+# engine and not mirrored here would start reporting a real, measured confidence
+# as one nobody measured. Deriving it means the two cannot disagree.
+#
+# Anything outside it — including the caller having no investigation to quote —
+# is UNMEASURED, which is deliberately not a tier: it is the absence of one.
+CONFIDENCE_TIERS: tuple[str, ...] = get_args(policy.Confidence)
+UNMEASURED = "unmeasured"
 
 
 @dataclass
@@ -41,13 +53,28 @@ class RemediationPlan:
 
 def is_eligible(action: str, confidence: str, enabled: bool) -> tuple[bool, str]:
     """Pure gate: may autonomy take `action` at this investigation `confidence`?
-    Returns (ok, reason-when-not)."""
+    Returns (ok, reason-when-not).
+
+    `confidence` must be a tier that something actually measured — the caller is
+    expected to have read it off a stored investigation, not off a request body.
+    This function cannot tell the difference, so it refuses anything that is not
+    one of the three real tiers and says *that* rather than reporting the value
+    as a confidence too low to act on: "we never measured it" and "we measured it
+    and it was weak" are different facts, and only the second is a tier.
+    """
     if not enabled:
         return False, "autonomy is disabled (COPILOT_AUTONOMY=false)"
     if action not in REVERSIBLE_ACTIONS:
         return False, f"'{action}' is not a reversible auto-remediation ({sorted(REVERSIBLE_ACTIONS)})"
-    if confidence != "high":
-        return False, f"investigation confidence is '{confidence}', not high enough to act autonomously"
+    tier = (confidence or "").strip().lower()
+    if tier not in CONFIDENCE_TIERS:
+        return False, (
+            "no investigation confidence was measured for this remediation "
+            f"({tier or UNMEASURED!r}); autonomy acts only on a tier read off a completed "
+            "investigation, never on one supplied by the caller"
+        )
+    if tier != "high":
+        return False, f"investigation confidence is '{tier}', not high enough to act autonomously"
     return True, ""
 
 

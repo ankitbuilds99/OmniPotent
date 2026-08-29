@@ -209,8 +209,8 @@ class DeduplicationPipeline:
             )
             if fp_match:
                 layers_applied.append("fingerprint")
-                incident = self._incidents.get(fp_match.incident_id)
-                if incident and len(incident.alerts) < self.config.max_alerts_per_incident:
+                incident = self._mergeable_incident(fp_match.incident_id)
+                if incident:
                     decision = DeduplicationDecision(
                         raw_alert_id=alert.alert_id,
                         decision=Decision.ADD_TO_EXISTING,
@@ -228,8 +228,8 @@ class DeduplicationPipeline:
             semantic_match = self._semantic_engine.find_similar(alert)
             if semantic_match and semantic_match.similarity_score >= self.config.min_confidence_to_merge:
                 layers_applied.append("semantic")
-                incident = self._incidents.get(semantic_match.incident_id)
-                if incident and len(incident.alerts) < self.config.max_alerts_per_incident:
+                incident = self._mergeable_incident(semantic_match.incident_id)
+                if incident:
                     decision = DeduplicationDecision(
                         raw_alert_id=alert.alert_id,
                         decision=Decision.ADD_TO_EXISTING,
@@ -248,13 +248,9 @@ class DeduplicationPipeline:
             temporal_match = self._temporal_correlator.find_correlated(alert)
             if temporal_match and temporal_match.incident_id:
                 layers_applied.append("temporal")
-                incident = self._incidents.get(temporal_match.incident_id)
+                incident = self._mergeable_incident(temporal_match.incident_id)
                 confidence = 0.9 if temporal_match.confidence == "high" else 0.75
-                if (
-                    incident
-                    and confidence >= self.config.min_confidence_to_merge
-                    and len(incident.alerts) < self.config.max_alerts_per_incident
-                ):
+                if incident and confidence >= self.config.min_confidence_to_merge:
                     decision = DeduplicationDecision(
                         raw_alert_id=alert.alert_id,
                         decision=Decision.ADD_TO_EXISTING,
@@ -272,7 +268,7 @@ class DeduplicationPipeline:
             cascade = self._cascade_detector.detect_cascade(alert)
             if cascade and cascade.root_alert_id:
                 root_incident_id = self._alert_to_incident.get(cascade.root_alert_id)
-                if root_incident_id:
+                if root_incident_id and self._mergeable_incident(root_incident_id):
                     layers_applied.append("cascade")
                     decision = DeduplicationDecision(
                         raw_alert_id=alert.alert_id,
@@ -292,12 +288,8 @@ class DeduplicationPipeline:
             topo_match = self._topology_correlator.find_upstream_incident(alert.service)
             if topo_match:
                 layers_applied.append("topology")
-                incident = self._incidents.get(topo_match.upstream_incident_id)
-                if (
-                    incident
-                    and topo_match.confidence >= self.config.min_confidence_to_merge
-                    and len(incident.alerts) < self.config.max_alerts_per_incident
-                ):
+                incident = self._mergeable_incident(topo_match.upstream_incident_id)
+                if incident and topo_match.confidence >= self.config.min_confidence_to_merge:
                     decision = DeduplicationDecision(
                         raw_alert_id=alert.alert_id,
                         decision=Decision.ADD_TO_EXISTING,
@@ -318,12 +310,8 @@ class DeduplicationPipeline:
             )
             if cluster and cluster.incident_id:
                 layers_applied.append("ml")
-                incident = self._incidents.get(cluster.incident_id)
-                if (
-                    incident
-                    and confidence >= self.config.min_confidence_to_merge
-                    and len(incident.alerts) < self.config.max_alerts_per_incident
-                ):
+                incident = self._mergeable_incident(cluster.incident_id)
+                if incident and confidence >= self.config.min_confidence_to_merge:
                     decision = DeduplicationDecision(
                         raw_alert_id=alert.alert_id,
                         decision=Decision.ADD_TO_EXISTING,
@@ -350,6 +338,35 @@ class DeduplicationPipeline:
         )
         self._record_decision(alert, decision, start_time)
         return decision
+
+    def _mergeable_incident(self, incident_id: UUID | None) -> IncidentGroup | None:
+        """The incident a layer's match may join, or None if it may not.
+
+        Every layer keeps its own index of past alerts and hands back the incident
+        the matching alert belonged to; none of those indexes are told when an
+        incident is resolved. The layers used to check only that the incident still
+        existed and had room, so an alert that fired again five minutes after its
+        incident was closed was added to the *resolved* incident: the operator saw
+        `add_to_existing` with an incident id, `GET /deduplication/incidents`
+        returned nothing, and a live outage had no open incident anywhere.
+
+        A resolved incident is closed. Refusing the merge here rather than at each
+        call site means a stale match falls through to the next layer and, if
+        nothing live claims the alert, opens a new incident — which is what a fresh
+        occurrence of a closed problem is. The capacity limit lives here for the
+        same reason: it is the same question, "can this incident take the alert".
+        """
+        if incident_id is None:
+            return None
+
+        incident = self._incidents.get(incident_id)
+        if incident is None:
+            return None
+        if incident.status != "active":
+            return None
+        if len(incident.alerts) >= self.config.max_alerts_per_incident:
+            return None
+        return incident
 
     def _create_incident(
         self,
@@ -449,13 +466,37 @@ class DeduplicationPipeline:
         return None
 
     def resolve_incident(self, incident_id: UUID) -> bool:
-        """Mark incident as resolved."""
+        """Mark incident as resolved and take its alerts out of every index.
+
+        Resolving used to tell only the topology correlator, because it was the
+        only layer with an API for forgetting an incident. The fingerprint,
+        semantic, temporal, cascade and ML indexes went on holding the incident's
+        alerts, so a closed incident stayed a match candidate forever:
+        `_mergeable_incident` refused each stale match at merge time, which kept
+        the answer correct but did the same work again on every alert and let the
+        indexes grow for the life of the process. Worse, Layer 3 picks the incident
+        with the most matching alerts in the window, so a long-lived resolved
+        incident could out-vote a live one and cost a correlation that was right.
+
+        Layers 1 to 4 now forget the incident outright, which is why a critical
+        that re-fires afterwards opens a new incident rather than landing on the
+        closed one. `_mergeable_incident` stays as the backstop: `MLCorrelationEngine`
+        has no forget API — its clusters are learned state, not an index of alerts —
+        so its stale matches still have to be refused at merge time.
+        """
         incident = self._incidents.get(incident_id)
         if not incident:
             return False
 
         incident.status = "resolved"
         incident.resolved_at = datetime.utcnow()
+
+        evicted = {
+            "fingerprint": self._fingerprint_matcher.forget_incident(incident_id),
+            "semantic": self._semantic_engine.forget_incident(incident_id),
+            "temporal": self._temporal_correlator.forget_incident(incident_id),
+            "cascade": self._cascade_detector.forget_incident(incident_id),
+        }
 
         if incident.root_cause_service:
             self._topology_correlator.clear_incident(incident.root_cause_service)
@@ -467,7 +508,7 @@ class DeduplicationPipeline:
             incident.root_cause_service,
         )
 
-        log.info("Resolved incident %s", incident_id)
+        log.info("Resolved incident %s; evicted from indexes: %s", incident_id, evicted)
         return True
 
     def get_active_incidents(self) -> list[IncidentGroup]:

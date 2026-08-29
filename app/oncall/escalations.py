@@ -20,6 +20,8 @@ from uuid import UUID
 
 from zoneinfo import ZoneInfo
 
+from app.oncall.models import DEFAULT_ESCALATION_CHANNELS
+
 log = logging.getLogger("omnipotent.oncall.escalations")
 
 
@@ -61,6 +63,19 @@ class NotificationChannel(Enum):
     SLACK = "slack"
     TEAMS = "teams"
     WEBHOOK = "webhook"
+
+
+#: What a step pages on when its author named no channels, as this module's own
+#: enum. Derived from the one definition in `app/oncall/models.py` rather than
+#: restated, because a second literal is how this drifted in the first place:
+#: every default here was [PUSH, SMS] while the column default and the service
+#: default had already moved to something deliverable. `EscalationStep.to_dict()`
+#: writes `notification_channels` out explicitly, so whatever these builders
+#: chose was what got persisted — the deliverable default downstream never had a
+#: chance to apply.
+DEFAULT_CHANNELS: tuple[NotificationChannel, ...] = tuple(
+    NotificationChannel(c) for c in DEFAULT_ESCALATION_CHANNELS
+)
 
 
 @dataclass
@@ -128,10 +143,7 @@ class EscalationStep:
     delay_minutes: int
     targets: list[EscalationTarget]
     notification_channels: list[NotificationChannel] = field(
-        default_factory=lambda: [
-            NotificationChannel.PUSH,
-            NotificationChannel.SMS,
-        ]
+        default_factory=lambda: list(DEFAULT_CHANNELS)
     )
 
     # Conditions to skip this step
@@ -527,14 +539,14 @@ class EscalationPolicyBuilder:
                 targets=[
                     EscalationTarget(TargetType.SCHEDULE, "schedule-id", schedule_layer="primary")
                 ],
-                channels=[NotificationChannel.PUSH, NotificationChannel.SMS]
+                channels=[NotificationChannel.EMAIL, NotificationChannel.SMS]
             )
             .add_step(
                 delay_minutes=5,
                 targets=[
                     EscalationTarget(TargetType.SCHEDULE, "schedule-id", schedule_layer="secondary")
                 ],
-                channels=[NotificationChannel.PHONE]
+                channels=[NotificationChannel.PHONE, NotificationChannel.EMAIL]
             )
             .add_step(
                 delay_minutes=10,
@@ -586,7 +598,7 @@ class EscalationPolicyBuilder:
     ) -> "EscalationPolicyBuilder":
         """Add an escalation step."""
         if channels is None:
-            channels = [NotificationChannel.PUSH, NotificationChannel.SMS]
+            channels = list(DEFAULT_CHANNELS)
 
         step_list = self.steps
         if self._building_high_urgency:
@@ -894,6 +906,14 @@ def create_critical_alerts_policy(
     - Multiple notification channels
     - Slack notification
     - Faster escalation
+
+    Every step here keeps EMAIL alongside the loud channels. sms and phone reach
+    the responder only once somebody has recorded their number in
+    `contact_methods`, and this template is created before anyone has had the
+    chance — so a template whose first step was push/sms/phone was a template
+    that paged nobody on the day it was created. PUSH is dropped outright: this
+    build has no endpoint through which a browser can register a device, so
+    listing it only guarantees an extra failed notification row per page.
     """
     builder = EscalationPolicyBuilder(name, policy_id)
     if team_id:
@@ -909,7 +929,7 @@ def create_critical_alerts_policy(
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="primary")
             ],
             channels=[
-                NotificationChannel.PUSH,
+                NotificationChannel.EMAIL,
                 NotificationChannel.SMS,
                 NotificationChannel.PHONE,
             ],
@@ -922,7 +942,7 @@ def create_critical_alerts_policy(
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="secondary"),
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="primary"),
             ],
-            channels=[NotificationChannel.PHONE],
+            channels=[NotificationChannel.PHONE, NotificationChannel.EMAIL],
             description="Call both primary and secondary",
         )
         .add_team_step(str(team_id) if team_id else "team", delay_minutes=5)
@@ -943,6 +963,11 @@ def create_business_hours_policy(
 
     During business hours: slack first, then escalate
     After hours: immediate phone call
+
+    As in the critical template, every step keeps EMAIL: Slack, sms and phone
+    each need an address recorded against the responder, and a freshly created
+    policy has none. PUSH is gone — no browser can register a device in this
+    build, so the "Slack and push" step could only ever have been Slack.
     """
     builder = EscalationPolicyBuilder(name, policy_id)
     if team_id:
@@ -957,15 +982,19 @@ def create_business_hours_policy(
             targets=[
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="primary")
             ],
-            channels=[NotificationChannel.SLACK, NotificationChannel.PUSH],
-            description="Slack and push during business hours",
+            channels=[NotificationChannel.SLACK, NotificationChannel.EMAIL],
+            description="Slack and email during business hours",
         )
         .add_step(
             delay_minutes=10,
             targets=[
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="primary")
             ],
-            channels=[NotificationChannel.SMS, NotificationChannel.PHONE],
+            channels=[
+                NotificationChannel.SMS,
+                NotificationChannel.PHONE,
+                NotificationChannel.EMAIL,
+            ],
             description="Escalate to SMS/phone if no response",
         )
         # After hours: more aggressive
@@ -981,7 +1010,11 @@ def create_business_hours_policy(
             targets=[
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="primary")
             ],
-            channels=[NotificationChannel.PHONE, NotificationChannel.SMS],
+            channels=[
+                NotificationChannel.PHONE,
+                NotificationChannel.SMS,
+                NotificationChannel.EMAIL,
+            ],
             description="Immediate phone call after hours",
         )
         .add_step(
@@ -989,7 +1022,7 @@ def create_business_hours_policy(
             targets=[
                 EscalationTarget(TargetType.SCHEDULE, schedule_id, schedule_layer="secondary")
             ],
-            channels=[NotificationChannel.PHONE],
+            channels=[NotificationChannel.PHONE, NotificationChannel.EMAIL],
             description="Escalate to secondary quickly",
         )
         .build()

@@ -11,9 +11,14 @@ def test_reads_are_allowed_no_approval():
     assert policy.requires_approval("search_logs") is False
 
 
-def test_unknown_tool_defaults_to_allow():
-    # Opt-out-safe: an unlisted tool is treated as a read, never silently a write.
-    assert policy.classify("some_future_read_tool")["decision"] == "allow"
+def test_unknown_tool_defaults_to_approve():
+    # Fail-closed: an unlisted tool has never been analysed, so it is gated as a
+    # consequential write. The old default (allow) meant a newly wired server's
+    # mutating tools auto-ran and were audited as "read-only".
+    cls = policy.classify("some_future_tool")
+    assert cls["decision"] == "approve"
+    assert cls["risk"] == "high"
+    assert "UNCLASSIFIED" in cls["why"]
 
 
 def test_create_pull_request_requires_approval():

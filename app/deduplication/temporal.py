@@ -252,6 +252,39 @@ class TemporalCorrelator:
 
         return timeline
 
+    def forget_incident(self, incident_id: UUID) -> int:
+        """Drop every indexed alert that belongs to `incident_id`.
+
+        Same reason as Layer 1's: nothing told this index an incident had closed,
+        so `find_correlated` kept returning it and `DeduplicationPipeline` had to
+        throw the answer away afterwards. Worse here than there, because
+        `_find_in_window` picks the incident with the *most* matching alerts — a
+        long-running resolved incident could out-vote a live one and cost a
+        correlation that would otherwise have been right. Its entries are removed
+        when it is resolved, so it stops voting.
+
+        Returns the number of entries removed.
+        """
+        removed = [e for e in self._time_index if e.incident_id == incident_id]
+        if not removed:
+            self._incident_first_alert.pop(incident_id, None)
+            return 0
+
+        self._time_index = [
+            e for e in self._time_index if e.incident_id != incident_id
+        ]
+        for service in list(self._service_index.keys()):
+            kept = [
+                e for e in self._service_index[service] if e.incident_id != incident_id
+            ]
+            if kept:
+                self._service_index[service] = kept
+            else:
+                del self._service_index[service]
+
+        self._incident_first_alert.pop(incident_id, None)
+        return len(removed)
+
     def cleanup_old_entries(self, before: datetime) -> int:
         """Remove entries older than specified time."""
         original_count = len(self._time_index)
@@ -546,6 +579,48 @@ class CascadeDetector:
             if alert_id in chain.cascade_alerts:
                 return chain
         return None
+
+    def forget_incident(self, incident_id: UUID) -> int:
+        """Drop this incident's alerts, and any chain rooted in one of them.
+
+        The pipeline's cascade branch resolves `chain.root_alert_id` back to an
+        incident and merges into it, so an alert of a resolved incident left in
+        this index goes on being offered as somebody else's root cause. Chains
+        rooted in a forgotten alert are deleted outright — a root cause that is no
+        longer on file is not a root cause — and forgotten alerts are stripped out
+        of the chains that merely mention them, so no chain keeps a dangling id.
+
+        Returns the number of registered alerts removed.
+        """
+        forgotten: set[UUID] = set()
+        for service in list(self._service_alerts.keys()):
+            kept = []
+            for entry in self._service_alerts[service]:
+                if entry.incident_id == incident_id:
+                    forgotten.add(entry.alert_id)
+                else:
+                    kept.append(entry)
+            if kept:
+                self._service_alerts[service] = kept
+            else:
+                del self._service_alerts[service]
+
+        if not forgotten:
+            return 0
+
+        for chain_id in [
+            cid
+            for cid, chain in self._cascade_chains.items()
+            if chain.root_alert_id in forgotten
+        ]:
+            del self._cascade_chains[chain_id]
+
+        for chain in self._cascade_chains.values():
+            chain.cascade_alerts = [
+                aid for aid in chain.cascade_alerts if aid not in forgotten
+            ]
+
+        return len(forgotten)
 
     def get_cascade_chain(self, chain_id: UUID) -> CascadeChain | None:
         """Get a cascade chain by ID."""

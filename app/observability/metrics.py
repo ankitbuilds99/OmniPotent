@@ -284,7 +284,9 @@ def _init_metrics() -> None:
     r.register(
         "copilot_mcp_tool_errors_total",
         MetricType.COUNTER,
-        "MCP tool call errors",
+        "MCP tool call errors, labelled by failure kind (tool_error, rpc_error, "
+        "timeout, transport). Only timeout and transport mean the server itself "
+        "is in trouble; the other two are a working server answering with an error.",
     )
 
     r.register(
@@ -499,6 +501,63 @@ def _estimate_llm_cost(
     return cost
 
 
+# `error` becomes a Prometheus label, and this registry never evicts a series, so
+# its value set has to stay small. The call site (app/mcp/client.py) classifies
+# every failure into a closed set of four kinds before calling; this is the
+# backstop for everyone else, because the value that must never arrive here is an
+# exception *message* — MCP failures quote what the model asked for, so a path or
+# a query would become a permanent new time series per distinct request.
+#
+# Admitting anything that "reads like an identifier" was too weak to be that
+# backstop. `[A-Za-z0-9_.-]` up to 48 characters also describes a UUID, a git
+# branch name and a request id, each of which still minted one permanent series
+# per distinct value — the exact failure this is here to prevent, so the bound
+# held only because the one in-tree caller was already careful.
+#
+# Two things are admitted now, and nothing else. The four classified kinds, which
+# alert rules group by and which must survive verbatim; and a bare Python
+# exception class name, which `record_mcp_tool_call` documents as accepted and
+# which is drawn from the finite set of classes in a program rather than from
+# request data. Requiring CamelCase with no separator is what tells `TimeoutError`
+# apart from `550e8400-e29b-41d4-a716-446655440000`, `release-2026.08` and
+# `req_9f2c`: an identifier built out of a value carries a separator, a class name
+# does not.
+_ERROR_LABEL_MAX_LEN = 48
+_ERROR_LABEL_KINDS = frozenset({"tool_error", "rpc_error", "timeout", "transport"})
+_ERROR_LABEL_UNCLASSIFIED = "unclassified"
+
+
+def _looks_like_an_exception_class(error: str) -> bool:
+    """`ConnectionTimeout` yes, `550e8400-e29b-41d4-...` no.
+
+    A leading capital and letters-and-digits only. Separators are what values get
+    joined with, so refusing them is what keeps the set finite.
+    """
+    return (
+        len(error) <= _ERROR_LABEL_MAX_LEN
+        and error[0].isupper()
+        and error.isalnum()
+        and error.isascii()
+    )
+
+
+def _bounded_error_label(error: str | None) -> str:
+    """An `error` label value safe to mint a time series for.
+
+    Anything outside the admitted set is counted under "unclassified" rather than
+    dropped: the failure still shows up, and the bucket name says the detail was
+    withheld instead of implying there was none.
+    """
+    if not error:
+        # Absent, not zero: something failed and the caller said nothing about
+        # what. "unknown" is the long-standing value for that and alert rules
+        # group on it.
+        return "unknown"
+    if error in _ERROR_LABEL_KINDS or _looks_like_an_exception_class(error):
+        return error
+    return _ERROR_LABEL_UNCLASSIFIED
+
+
 def record_mcp_tool_call(
     server: str,
     tool: str,
@@ -506,7 +565,12 @@ def record_mcp_tool_call(
     success: bool = True,
     error: str | None = None,
 ) -> None:
-    """Record an MCP tool invocation."""
+    """Record an MCP tool invocation.
+
+    `error` is a metric label, not a message: pass a failure *kind* (see
+    `app.mcp.client._ERROR_KINDS`) or an exception class name. Free-form text is
+    bucketed as "unclassified" rather than being turned into its own series.
+    """
     labels = {"server": server, "tool": tool}
     status = "success" if success else "error"
 
@@ -520,7 +584,7 @@ def record_mcp_tool_call(
     if not success:
         _registry.counter_inc(
             "copilot_mcp_tool_errors_total",
-            labels={**labels, "error": error or "unknown"},
+            labels={**labels, "error": _bounded_error_label(error)},
         )
 
 
