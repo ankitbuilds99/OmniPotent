@@ -44,15 +44,18 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
         return
       }
 
-      const configured = await checkSupabaseConfigured()
-      if (!configured) {
-        setStatus('error')
-        setMessage('Supabase is not configured')
-        setTimeout(onError, 2000)
-        return
-      }
-
+      // Inside the try: this awaits the network, and a rejection outside it
+      // left the page on "Completing sign in..." for good, with no error and no
+      // redirect back to the form.
       try {
+        const configured = await checkSupabaseConfigured()
+        if (!configured) {
+          setStatus('error')
+          setMessage('Supabase is not configured')
+          setTimeout(onError, 2000)
+          return
+        }
+
         const supabase = await initSupabase()
         if (!supabase) {
           setStatus('error')
@@ -73,7 +76,7 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
         if (data.session) {
           // Persist it where every API call looks; Supabase keeps its own copy
           // under a different key that the fetch wrapper does not read.
-          setSessionToken(data.session.access_token)
+          setSessionToken(data.session.access_token, 'supabase')
           setStatus('success')
           setMessage('Welcome! Redirecting to console...')
           setTimeout(onSuccess, 1500)

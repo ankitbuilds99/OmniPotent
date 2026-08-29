@@ -52,7 +52,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Match
 
-from app.security.headers import SecurityHeadersMiddleware
+from app.security.headers import SecurityHeadersMiddleware, csp_connect_sources
 
 from app import (
     audit,
@@ -1269,9 +1269,16 @@ app.add_middleware(
 # header for a host it refuses plain HTTP to that host until max-age expires,
 # and a year of that pointed at localhost breaks every developer who ever runs
 # the app over http://localhost.
+#
+# /frontend-config hands the SPA a Supabase address to authenticate against, so
+# the policy has to allow it. It did not: the browser blocked every call to that
+# host, sign-in failed with "Failed to fetch", and a stored session could never
+# be refreshed — which left the login form disabled behind a spinner with no
+# message anywhere but the developer console.
 app.add_middleware(
     SecurityHeadersMiddleware,
     enable_hsts=get_settings().copilot_hsts_enabled and get_settings().is_production,
+    extra_connect_src=csp_connect_sources(get_settings().supabase_url),
 )
 
 # Include WebSocket router for real-time communication (alternative to SSE).

@@ -14,6 +14,7 @@ import {
   User
 } from 'lucide-react'
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { fetchSupabaseProviders } from '../lib/supabase'
 import { getAuthToken, setSessionToken } from '../lib/authToken'
 
 type AuthMode = 'login' | 'signup' | 'forgot'
@@ -42,6 +43,8 @@ export function Login({ onBack, onSuccess }: LoginProps) {
   const [success, setSuccess] = useState<string | null>(null)
   const [backendProviders, setBackendProviders] = useState<AuthProvider[]>([])
   const [checkingProviders, setCheckingProviders] = useState(true)
+  // null = not known yet, or the probe failed. See fetchSupabaseProviders.
+  const [supabaseProviders, setSupabaseProviders] = useState<Set<string> | null>(null)
 
   const {
     signInWithGitHub,
@@ -76,6 +79,22 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     checkProviders()
   }, [])
 
+  // Which social logins the Supabase project will actually accept.
+  useEffect(() => {
+    if (!supabaseConfigured) return
+    let mounted = true
+    fetchSupabaseProviders()
+      .then((names) => {
+        if (mounted) setSupabaseProviders(names)
+      })
+      .catch(() => {
+        // Unknown, which leaves every button on offer.
+      })
+    return () => {
+      mounted = false
+    }
+  }, [supabaseConfigured])
+
   // Check for token in URL (from OAuth callback)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -87,33 +106,44 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     }
   }, [onSuccess])
 
-  // Redirect if user is already logged in (Supabase). useSupabaseAuth mirrors the
-  // access token into the shared token store, so the app is authenticated too.
-  if (user) {
-    onSuccess()
-    return null
-  }
-
-  // Check if user has a session token (backend auth)
-  if (getAuthToken()) {
-    onSuccess()
-    return null
-  }
+  // Leaving this page is a side effect, so it belongs in an effect — the old
+  // `if (user) { onSuccess(); return null }` updated the router from inside this
+  // component's render.
+  //
+  // It also waits for the auth bootstrap to finish. A stored token is not proof
+  // of a usable session: until the hook has tried to restore it, redirecting on
+  // one can land the user in a console that cannot authenticate, with no way
+  // back to the form.
+  useEffect(() => {
+    if (authLoading) return
+    if (user || getAuthToken()) onSuccess()
+  }, [authLoading, user, onSuccess])
 
   const handleBackendOAuth = (provider: string) => {
     const redirectUri = encodeURIComponent(window.location.origin + '/auth/callback')
     window.location.href = `${API_BASE}/auth/${provider}/login?redirect_uri=${redirectUri}`
   }
 
+  // Offer a provider only where something can actually complete it. Supabase
+  // being configured says nothing about which social logins the project has
+  // switched on, and a button for one that is off just returns "Unsupported
+  // provider". While the answer is unknown, show it — a slow probe should not
+  // take away a working button.
+  const viaSupabase = (id: string) =>
+    supabaseConfigured && (supabaseProviders === null || supabaseProviders.has(id))
+
   const handleOAuthLogin = async (provider: 'github' | 'google') => {
     setLocalError(null)
 
-    // Try Supabase first if configured
-    if (supabaseConfigured) {
-      if (provider === 'github') {
-        await signInWithGitHub()
-      } else {
-        await signInWithGoogle()
+    // Try Supabase first, but only where the project accepts this provider —
+    // otherwise fall through to a backend that might.
+    if (viaSupabase(provider)) {
+      try {
+        await (provider === 'github' ? signInWithGitHub() : signInWithGoogle())
+      } catch (err) {
+        // Without this the button just went quiet: the redirect never happened
+        // and the page gave no sign that anything had gone wrong.
+        setLocalError(err instanceof Error ? err.message : `Could not start ${provider} sign-in.`)
       }
       return
     }
@@ -152,14 +182,22 @@ export function Login({ onBack, onSuccess }: LoginProps) {
 
     try {
       if (supabaseConfigured) {
-        // Use Supabase auth
+        // Use Supabase auth. Each call below throws when the user was not signed
+        // in, which is what keeps a rejected password from reaching onSuccess().
         if (mode === 'login') {
           await signInWithEmail(email, password)
           onSuccess()
         } else if (mode === 'signup') {
           await signUp(email, password)
-          setSuccess('Check your email to confirm your account!')
-          setMode('login')
+          // A project with email confirmation switched off signs the account in
+          // immediately; telling that user to go and check their mail would
+          // strand them on the login form.
+          if (getAuthToken()) {
+            onSuccess()
+          } else {
+            setSuccess('Check your email to confirm your account!')
+            setMode('login')
+          }
         } else if (mode === 'forgot') {
           // This used to print "link sent" without sending anything, so a
           // locked-out user waited for mail that was never requested — and
@@ -198,8 +236,8 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     onSuccess()
   }
 
-  const hasGitHub = supabaseConfigured || backendProviders.some(p => p.id === 'github')
-  const hasGoogle = supabaseConfigured || backendProviders.some(p => p.id === 'google')
+  const hasGitHub = viaSupabase('github') || backendProviders.some(p => p.id === 'github')
+  const hasGoogle = viaSupabase('google') || backendProviders.some(p => p.id === 'google')
 
   if (checkingProviders) {
     return (
@@ -493,15 +531,12 @@ export function Login({ onBack, onSuccess }: LoginProps) {
               whileHover={{ scale: 1.01 }}
               whileTap={{ scale: 0.99 }}
             >
-              {loading ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                <>
-                  {mode === 'login' && 'Sign in'}
-                  {mode === 'signup' && 'Create account'}
-                  {mode === 'forgot' && 'Send reset link'}
-                </>
-              )}
+              {/* Keep the label while busy. A bare spinner cannot say whether it
+                  is checking a saved session, signing in, or stuck. */}
+              {loading && <Loader2 className="w-5 h-5 animate-spin" />}
+              {mode === 'login' && (loading ? 'Signing in…' : 'Sign in')}
+              {mode === 'signup' && (loading ? 'Creating account…' : 'Create account')}
+              {mode === 'forgot' && (loading ? 'Sending…' : 'Send reset link')}
             </motion.button>
           </form>
 

@@ -122,3 +122,105 @@ class TestSecurityHeaders:
         middleware = SecurityHeadersMiddleware(MockApp(), csp_policy=custom_csp)
 
         assert middleware.csp_policy == custom_csp
+
+
+class TestConnectSrcFollowsConfiguration:
+    """The policy has to allow the hosts this deployment hands the SPA.
+
+    /frontend-config gives the browser a Supabase address to authenticate
+    against while connect-src named only 'self' and the two model APIs. The
+    browser blocked every call to it: sign-in failed with "Failed to fetch", a
+    stored session could not be refreshed, and the login form sat disabled
+    behind a spinner with the reason visible only in the developer console.
+    """
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://abc.supabase.co", ("https://abc.supabase.co", "wss://abc.supabase.co")),
+            # Ports belong to the origin; dropping one would not match.
+            ("http://localhost:54321", ("http://localhost:54321", "ws://localhost:54321")),
+            # A path is not part of a CSP source expression.
+            ("https://abc.supabase.co/auth/v1", ("https://abc.supabase.co", "wss://abc.supabase.co")),
+            # "Not configured", and things no browser would connect to anyway.
+            ("", ()),
+            ("   ", ()),
+            ("abc.supabase.co", ()),
+            ("file:///etc/passwd", ()),
+        ],
+    )
+    def test_sources_derived_from_a_url(self, url, expected):
+        from app.security.headers import csp_connect_sources
+
+        assert csp_connect_sources(url) == expected
+
+    def test_duplicates_collapse(self):
+        from app.security.headers import csp_connect_sources
+
+        assert csp_connect_sources("https://a.co", "https://a.co/x") == (
+            "https://a.co",
+            "wss://a.co",
+        )
+
+    def test_extra_sources_join_the_defaults(self):
+        from app.security.headers import SecurityHeadersMiddleware
+
+        class MockApp:
+            pass
+
+        middleware = SecurityHeadersMiddleware(
+            MockApp(), extra_connect_src=("https://abc.supabase.co",)
+        )
+
+        assert (
+            "connect-src 'self' https://api.anthropic.com https://api.openai.com "
+            "https://abc.supabase.co" in middleware.csp_policy
+        )
+
+    def test_the_app_wires_the_configured_auth_host_into_the_policy(self):
+        """The wiring, not just the helper.
+
+        Asserted against the installed middleware rather than a served response,
+        because the app builds its middleware stack once at import: rebuilding it
+        for a different setting means reloading the module, and every other test
+        holds a reference to the app that reload replaces.
+        """
+        from app.security.headers import SecurityHeadersMiddleware, csp_connect_sources
+
+        installed = [
+            mw for mw in api.app.user_middleware if mw.cls is SecurityHeadersMiddleware
+        ]
+        assert len(installed) == 1, "security headers middleware is not installed exactly once"
+
+        expected = csp_connect_sources(cfg.get_settings().supabase_url)
+        assert tuple(installed[0].kwargs.get("extra_connect_src", ())) == expected
+
+    def test_a_configured_host_reaches_the_served_header(self, monkeypatch):
+        """The same construction the app performs, exercised through a response."""
+        monkeypatch.setenv("SUPABASE_URL", "https://abc.supabase.co")
+        cfg.get_settings.cache_clear()
+        try:
+            from fastapi import FastAPI
+
+            from app.security.headers import SecurityHeadersMiddleware, csp_connect_sources
+
+            probe = FastAPI()
+
+            @probe.get("/ping")
+            async def ping() -> dict:
+                return {"ok": True}
+
+            probe.add_middleware(
+                SecurityHeadersMiddleware,
+                extra_connect_src=csp_connect_sources(cfg.get_settings().supabase_url),
+            )
+
+            csp = TestClient(probe).get("/ping").headers["Content-Security-Policy"]
+
+            connect_src = next(
+                part for part in csp.split("; ") if part.startswith("connect-src ")
+            )
+            assert "https://abc.supabase.co" in connect_src.split()
+            assert "wss://abc.supabase.co" in connect_src.split()
+        finally:
+            cfg.get_settings.cache_clear()
