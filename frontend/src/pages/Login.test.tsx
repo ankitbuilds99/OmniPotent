@@ -10,7 +10,14 @@ import { Login } from './Login'
 import { clearAuthToken } from '../lib/authToken'
 
 const resetPassword = vi.fn()
+const signInWithEmail = vi.fn()
+const signInWithGitHub = vi.fn()
+const fetchSupabaseProviders = vi.fn(async (): Promise<Set<string> | null> => null)
 let supabaseConfigured = true
+
+vi.mock('../lib/supabase', () => ({
+  fetchSupabaseProviders: () => fetchSupabaseProviders(),
+}))
 
 vi.mock('../hooks/useSupabaseAuth', () => ({
   useSupabaseAuth: () => ({
@@ -18,9 +25,9 @@ vi.mock('../hooks/useSupabaseAuth', () => ({
     session: null,
     loading: false,
     error: null,
-    signInWithGitHub: vi.fn(),
+    signInWithGitHub,
     signInWithGoogle: vi.fn(),
-    signInWithEmail: vi.fn(),
+    signInWithEmail,
     signUp: vi.fn(),
     resetPassword,
     signOut: vi.fn(),
@@ -52,6 +59,121 @@ async function requestReset(email = 'dana@acme.test') {
   fireEvent.change(screen.getByPlaceholderText('you@company.com'), { target: { value: email } })
   fireEvent.click(screen.getByRole('button', { name: 'Send reset link' }))
 }
+
+/** Fill in the login form and submit it. */
+async function signIn(onSuccess: () => void, password = 'correct horse') {
+  render(<Login onBack={() => {}} onSuccess={onSuccess} />)
+  fireEvent.change(await screen.findByPlaceholderText('you@company.com'), {
+    target: { value: 'dana@acme.test' },
+  })
+  fireEvent.change(screen.getByPlaceholderText('••••••••'), { target: { value: password } })
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+}
+
+describe('Sign in', () => {
+  beforeEach(() => {
+    supabaseConfigured = true
+    signInWithEmail.mockReset()
+    signInWithGitHub.mockReset()
+    clearAuthToken()
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('does not let a rejected password through', async () => {
+    // The page treated a resolved promise as success while the hook reported
+    // failure only by setting `error`, so a wrong password still navigated on
+    // — to a console holding no credential, where every request came back 401.
+    installFetch()
+    signInWithEmail.mockRejectedValue(new Error('Invalid login credentials'))
+    const onSuccess = vi.fn()
+
+    await signIn(onSuccess, 'wrong')
+
+    expect(await screen.findByText('Invalid login credentials')).toBeInTheDocument()
+    expect(onSuccess).not.toHaveBeenCalled()
+  })
+
+  it('lets a successful sign-in through', async () => {
+    installFetch()
+    signInWithEmail.mockResolvedValue(undefined)
+    const onSuccess = vi.fn()
+
+    await signIn(onSuccess)
+
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled())
+  })
+
+  it('says so when the OAuth redirect cannot be started', async () => {
+    installFetch()
+    signInWithGitHub.mockRejectedValue(new Error('Provider not enabled'))
+
+    render(<Login onBack={() => {}} onSuccess={() => {}} />)
+    fireEvent.click(await screen.findByText('Continue with GitHub'))
+
+    // Without this the button went quiet: no redirect, and no explanation.
+    expect(await screen.findByText('Provider not enabled')).toBeInTheDocument()
+  })
+})
+
+describe('Social login buttons', () => {
+  beforeEach(() => {
+    supabaseConfigured = true
+    fetchSupabaseProviders.mockReset().mockResolvedValue(null)
+    clearAuthToken()
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('does not offer a provider the Supabase project has switched off', async () => {
+    // The deployed project has only GitHub enabled, yet the page offered
+    // "Continue with Google" because Supabase was configured at all. Clicking it
+    // came back "Unsupported provider" from a project that was never going to
+    // accept it.
+    installFetch()
+    fetchSupabaseProviders.mockResolvedValue(new Set(['github', 'email']))
+
+    render(<Login onBack={() => {}} onSuccess={() => {}} />)
+
+    expect(await screen.findByText('Continue with GitHub')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByText('Continue with Google')).not.toBeInTheDocument()
+    )
+  })
+
+  it('still offers a provider the backend can complete', async () => {
+    // Supabase has Google off, but the backend OAuth route serves it — the
+    // button works, it just takes the other path.
+    installFetch([{ id: 'google', name: 'Google', icon: 'google' }])
+    fetchSupabaseProviders.mockResolvedValue(new Set(['github']))
+
+    render(<Login onBack={() => {}} onSuccess={() => {}} />)
+
+    expect(await screen.findByText('Continue with Google')).toBeInTheDocument()
+  })
+
+  it('shows every button while the answer is unknown', async () => {
+    // A probe that fails is not evidence a provider is off, and hiding the
+    // buttons on it would leave no way to sign in.
+    installFetch()
+    fetchSupabaseProviders.mockResolvedValue(null)
+
+    render(<Login onBack={() => {}} onSuccess={() => {}} />)
+
+    expect(await screen.findByText('Continue with GitHub')).toBeInTheDocument()
+    expect(screen.getByText('Continue with Google')).toBeInTheDocument()
+  })
+})
 
 describe('Password reset', () => {
   beforeEach(() => {

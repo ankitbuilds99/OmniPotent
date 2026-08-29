@@ -97,6 +97,42 @@ export async function checkSupabaseConfigured(): Promise<boolean> {
   return Boolean(supabaseUrl && supabaseAnonKey)
 }
 
+let providersPromise: Promise<Set<string> | null> | null = null
+
+/**
+ * Which social providers this Supabase project actually has switched on.
+ *
+ * A provider button used to appear whenever Supabase was configured at all, so
+ * a project with only GitHub enabled still offered "Continue with Google" — and
+ * the click came back "Unsupported provider" from a project that was never
+ * going to accept it. /auth/v1/settings is public and answers the question.
+ *
+ * Returns null when the answer is unknown, which callers should read as "show
+ * them all": a failed probe is not evidence that a provider is off, and hiding
+ * every button would leave no way to sign in.
+ */
+export async function fetchSupabaseProviders(): Promise<Set<string> | null> {
+  if (providersPromise) return providersPromise
+
+  providersPromise = (async () => {
+    await fetchRuntimeConfig()
+    if (!supabaseUrl || !supabaseAnonKey) return null
+    try {
+      const res = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/auth/v1/settings`, {
+        headers: { apikey: supabaseAnonKey },
+      })
+      if (!res.ok) return null
+      const settings = await res.json()
+      const external: Record<string, unknown> = settings?.external ?? {}
+      return new Set(Object.keys(external).filter((name) => external[name] === true))
+    } catch {
+      return null
+    }
+  })()
+
+  return providersPromise
+}
+
 // Auto-init on load
 if (typeof window !== 'undefined') {
   initSupabase()

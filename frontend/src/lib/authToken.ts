@@ -6,7 +6,13 @@
 // itself no matter how the user logged in.
 
 const SESSION_TOKEN_KEY = "session_token"; // OAuth / Supabase session JWT
+const SESSION_SOURCE_KEY = "session_token_source"; // which flow wrote it
 const API_KEY_KEY = "api_key"; // tenant API key (dcp_…) from self-serve signup
+
+/** Which login flow produced the stored session token. Two flows write to the
+ *  same slot, and one of them must be able to retract its own credential
+ *  without signing out a session the other established. */
+export type TokenSource = "supabase" | "oauth";
 
 // Build-time fallback, still useful for local dev against a backend with
 // COPILOT_API_TOKEN set and no login flow in the way.
@@ -38,8 +44,25 @@ export function getAuthToken(): string {
 }
 
 /** Persist the session token issued by an OAuth callback or Supabase login. */
-export function setSessionToken(token: string): void {
+export function setSessionToken(
+  token: string,
+  source: TokenSource = "oauth"
+): void {
   write(SESSION_TOKEN_KEY, token);
+  write(SESSION_SOURCE_KEY, token ? source : "");
+}
+
+/** Drop the stored session token, but only if `source` is what wrote it.
+ *
+ *  Supabase reporting "no session" means its own token is dead; it says nothing
+ *  about a token the backend OAuth callback put here. Clearing unconditionally
+ *  would sign out a perfectly good backend session every time a Supabase-enabled
+ *  deployment loaded with no Supabase session of its own. */
+export function clearSessionTokenFrom(source: TokenSource): void {
+  if (read(SESSION_SOURCE_KEY) === source) {
+    write(SESSION_TOKEN_KEY, "");
+    write(SESSION_SOURCE_KEY, "");
+  }
 }
 
 /** Persist the tenant API key returned by self-serve signup. */
@@ -50,6 +73,7 @@ export function setApiKey(key: string): void {
 /** Drop every stored credential (logout). */
 export function clearAuthToken(): void {
   write(SESSION_TOKEN_KEY, "");
+  write(SESSION_SOURCE_KEY, "");
   write(API_KEY_KEY, "");
 }
 
