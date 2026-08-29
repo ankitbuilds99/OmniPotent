@@ -18,7 +18,7 @@ from app.api.main import (
     require_perm,
 )
 
-router = APIRouter(prefix="/chat", tags=["Chat"])
+router: APIRouter = APIRouter(prefix="/chat", tags=["Chat"])
 
 # These handlers call the root handlers as plain functions, which means the
 # dependencies declared on the root *routes* never run for a /v1 request. Every

@@ -6,7 +6,7 @@ from fastapi import APIRouter
 
 from app.health import get_health_checker
 
-router = APIRouter(tags=["Health"])
+router: APIRouter = APIRouter(tags=["Health"])
 
 
 @router.get("/health")

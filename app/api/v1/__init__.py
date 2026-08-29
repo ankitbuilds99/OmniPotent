@@ -16,6 +16,15 @@ half-built ``__init__`` from main's include line and raises "cannot import name
 'router' from partially initialized module". If you hit that, import
 ``app.api.main`` first; the served ASGI app lives there, so every real process
 already does.
+
+Each submodule spells out ``router: APIRouter = APIRouter(...)`` rather than
+letting the type be inferred. Mounting v1 gave ``app.api.main`` its first import
+of this package, which closed the cycle described above; a type checker resolves
+a cycle as a unit and cannot always infer a name defined inside one, so
+``include_router(chat.router)`` below became "Cannot determine type of router"
+for the submodules that import main at module scope. The annotation states the
+type instead of asking for it to be inferred through the cycle. Dropping it puts
+those errors back.
 """
 
 from fastapi import APIRouter

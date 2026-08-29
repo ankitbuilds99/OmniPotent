@@ -68,7 +68,7 @@ _MANAGE = [Depends(require_perm("manage_integrations"))]
 _APPROVE = [Depends(require_perm("approve_action"))]
 _AUDIT = [Depends(require_perm("view_audit"))]
 
-router = APIRouter(
+router: APIRouter = APIRouter(
     prefix="/policy",
     tags=["policy-engine"],
     dependencies=[Depends(require_perm("view"))],

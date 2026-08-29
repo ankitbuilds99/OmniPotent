@@ -54,7 +54,7 @@ log = logging.getLogger("omnipotent.api.decision")
 # demo is unaffected.
 _RECORD = [Depends(require_perm("approve_action"))]
 
-router = APIRouter(
+router: APIRouter = APIRouter(
     prefix="/decision",
     tags=["decision-engine"],
     dependencies=[Depends(require_perm("view"))],

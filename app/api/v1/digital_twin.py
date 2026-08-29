@@ -52,7 +52,7 @@ log = logging.getLogger("omnipotent.api.digital_twin")
 # single-tenant mode, so the offline demo keeps working unchanged.
 _RUN = [Depends(require_perm("approve_action"))]
 
-router = APIRouter(
+router: APIRouter = APIRouter(
     prefix="/digital-twin",
     tags=["digital-twin"],
     dependencies=[Depends(require_perm("view"))],
