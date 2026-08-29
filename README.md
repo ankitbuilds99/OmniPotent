@@ -1,591 +1,493 @@
 <div align="center">
 
-<img src="docs/assets/logo.png" alt="OmniPotent" width="140" />
+<img src="docs/assets/logo.svg" alt="OmniPotent" width="120" />
 
 # OmniPotent
 
-### Autonomous AI-Powered Infrastructure Intelligence Platform
-
-**Enterprise-grade incident resolution powered by multi-agent AI orchestration, deterministic safety controls, and deep observability integration.**
+### An AI SRE copilot that investigates incidents, proposes fixes, and asks before it acts
 
 [![CI](https://github.com/ankit25bcs10610/OmniPotent/actions/workflows/ci.yml/badge.svg)](https://github.com/ankit25bcs10610/OmniPotent/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/ankit25bcs10610/OmniPotent/branch/main/graph/badge.svg)](https://codecov.io/gh/ankit25bcs10610/OmniPotent)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776ab.svg)](https://www.python.org/downloads/)
 [![TypeScript](https://img.shields.io/badge/typescript-5.0+-3178c6.svg)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00b894.svg)](LICENSE)
-[![SOC2 Type II](https://img.shields.io/badge/SOC2-Type_II-00d084.svg)](#compliance--security)
 
-[Documentation](docs/) · [API Reference](docs/API.md) · [Architecture](#system-architecture) · [Contributing](#contributing)
+[Quick start](#quick-start) · [See it work](#see-it-work) · [Architecture](#architecture) · [API](#api) · [Docs](docs/)
+
+<img src="docs/media/omnipotent-demo.gif" alt="OmniPotent walkthrough: dashboard, incidents, service map, SLOs, analytics and notification routing" width="880" />
+
+<sub><b><a href="docs/media/omnipotent-walkthrough.mp4">▶ Watch the full 3-minute walkthrough (MP4)</a></b> · every screen below is a real
+render of the running app against a seeded database, not a mockup</sub>
 
 </div>
 
 ---
 
-## Overview
+## What it does
 
-OmniPotent is an autonomous SRE platform that leverages multi-agent AI orchestration to investigate incidents, identify root causes, and execute remediation actions—all within a deterministic safety framework that ensures human oversight for high-risk operations.
+You page an on-call engineer at 3am because checkout is throwing 500s. They spend the first
+twenty minutes doing the same thing every time: pull the error rate, find the deploy that
+lines up with the onset, read the diff, check whether the pods are healthy, look for a
+runbook someone wrote the last time this happened.
 
-### Key Metrics
+OmniPotent does that first twenty minutes. It queries your logs, metrics, traces, deploy
+history and repository through [MCP](https://modelcontextprotocol.io/) tool servers, ranks
+the hypotheses by the evidence it actually found, and writes up a root-cause report with
+that evidence attached.
 
-| Metric | Industry Baseline | With OmniPotent |
-|--------|-------------------|-----------------|
-| Mean Time to Detection (MTTD) | 15-30 min | **< 2 min** |
-| Mean Time to Resolution (MTTR) | 4+ hours | **15 min** |
-| Root Cause Accuracy | 40-60% (manual) | **92%** |
-| False Positive Rate | 15-25% | **< 3%** |
-| Incident Documentation | ~30% coverage | **100%** |
+Then it stops. Remediation is a separate, gated step: an action only executes when the
+measured confidence clears the threshold, the policy engine allows it, and the digital-twin
+simulation verifies the rollback. Anything that fails a gate becomes an approval request
+with a human's name on it. Autonomy is **off** by default, and dry-run is **on** even when
+you turn autonomy on.
 
----
+**What this is:** a working platform — 368 documented API endpoints, 27 MCP tool servers,
+a 37-page operator console, and a test suite of 212 files gating every merge.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [System Architecture](#system-architecture)
-- [Core Components](#core-components)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [API Reference](#api-reference)
-- [Integrations](#integrations)
-- [Compliance & Security](#compliance--security)
-- [Development](#development)
-- [Contributing](#contributing)
-- [License](#license)
+**What this is not:** a certified product. There is no SOC 2 report, no BAA, no AOC. The
+[Security](#security) section below describes the controls that are implemented in code,
+and nothing else.
 
 ---
 
-## System Architecture
+## See it work
+
+Screenshots are captured from the running app against a seeded demo database. Click any
+image for full resolution.
+
+### The console — where an investigation starts
+
+<a href="docs/media/console.png"><img src="docs/media/console.png" alt="OmniPotent console with the MCP server sidebar and suggested investigation prompts" width="100%" /></a>
+
+Ask a question in English. The left rail lists every MCP server the agent can reach and the
+exact tools each one exposes — `search_logs`, `first_bad_deploy`, `correlate_changes` — so
+you can see what the model has access to before it runs.
+
+This shot was taken on a fresh checkout with no LLM key configured, which is why the model
+card reads `NO API KEY` and the connectors read `OFFLINE DEMO`. It reports the state it is
+actually in rather than rendering a fake answer.
+
+### The dashboard — the fleet at a glance
+
+<a href="docs/media/dashboard.png"><img src="docs/media/dashboard.png" alt="Dashboard showing active alerts, runbooks, pending approvals and service count" width="100%" /></a>
+
+Every number on this page comes from an endpoint. Active alerts, runbooks, pending
+approvals and service health are read at load; nothing is hardcoded.
+
+### Incidents — ranked by real severity
+
+<a href="docs/media/incidents.png"><img src="docs/media/incidents.png" alt="Incident list with severity, status, assignee and age columns" width="100%" /></a>
+
+Incidents arrive from webhooks — `/api/webhooks/pagerduty`, `/alertmanager`, `/datadog`,
+`/grafana` and `/generic` — from the Slack bot, or from the API. Deduplication collapses the
+storm of alerts a single failure produces into one incident.
+
+### Service map — blast radius, computed
+
+<a href="docs/media/service-map.png"><img src="docs/media/service-map.png" alt="Service dependency graph with health status on each node and edge" width="100%" /></a>
+
+The dependency graph is what the policy gate reads to answer "how much breaks if this
+action goes wrong". Blast radius is derived from this topology, not declared by the caller.
+
+### SLOs — error budgets and burn rate
+
+<a href="docs/media/slo.png"><img src="docs/media/slo.png" alt="SLO tracker with four objectives, error budgets and burn rates" width="100%" /></a>
+
+Objectives are fed by real measurements. A burn rate above 1.0 means the budget is being
+spent faster than the window allows, and the page says so plainly.
+
+### On-call — rotation and escalation
+
+<a href="docs/media/on-call.png"><img src="docs/media/on-call.png" alt="On-call schedule grid, current responder, and a severity-1 escalation ladder" width="100%" /></a>
+
+Schedules, overrides and per-severity escalation ladders. A page is only deliverable if a
+responder was provisioned with a contact method, so the UI shows the contact method.
+
+### Runbooks — typed steps, approval-gated
+
+<a href="docs/media/runbooks.png"><img src="docs/media/runbooks.png" alt="Runbook builder with typed steps: kubernetes, command, condition, wait" width="100%" /></a>
+
+Runbook steps are typed rather than free-form shell. The builder offers `command`,
+`script`, `ai_action`, `approval`, `condition`, `notification` and `wait`; the execution
+engine (`app/runbooks/models.py`) additionally understands `kubernetes`, `terraform`,
+`http` and `slack`. A step can enter `waiting_approval` and block there, so a runbook does
+not become a way around the safety gates.
+
+<sub>These two vocabularies do not currently match — the builder can emit `script` and
+`ai_action`, which `StepType` has no member for. Tracked, not yet fixed.</sub>
+
+---
+
+## Architecture
+
+Six layers. A request enters at the top and falls through each one in order.
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-3d-dark.svg" />
+  <img src="docs/assets/architecture-3d-light.svg"
+       alt="OmniPotent architecture as six stacked isometric layers: edge authentication, orchestration, agents, safety gates, integration and persistence."
+       width="920" />
+</picture>
+
+</div>
+
+### Explore it in 3D
+
+<div align="center">
+
+<a href="docs/architecture.html"><img src="docs/media/architecture-3d-live.png" alt="The same architecture rendered in interactive 3D, orbitable in the browser" width="880" /></a>
+
+<sub><b><a href="docs/architecture.html">▶ Open the interactive version</a></b> — drag to orbit, scroll to zoom, click a
+legend row to hide a layer. Clone the repo and open the file, or view it through
+<a href="https://htmlpreview.github.io/?https://github.com/ankit25bcs10610/OmniPotent/blob/main/docs/architecture.html">htmlpreview</a>.</sub>
+
+</div>
+
+The static diagram above is generated, not hand-drawn — run `python scripts/gen_architecture.py`
+to regenerate both theme variants. The layer list lives in one place in that script, so the
+picture cannot quietly drift out of sync with the system it describes.
+
+### What each layer does
+
+| Layer | Responsibility |
+|-------|----------------|
+| **Edge** | OAuth2/JWT and API-key + HMAC authentication, rate limiting, RBAC, tenant resolution |
+| **Orchestration** | Score the question's complexity, route it to a model, drive a LangGraph state machine with checkpoints |
+| **Agents** | Gather evidence in parallel, converge on one ranked set of hypotheses |
+| **Safety gates** | Confidence threshold, policy evaluation, digital-twin simulation, human approval |
+| **Integration** | 27 MCP tool servers, 8 direct connectors, ITSM and chat, cloud and Kubernetes |
+| **Persistence** | PostgreSQL for state, Redis for cache and pub/sub, object storage, hash-chained audit log |
+
+### The agents
+
+Five modules under `app/agents/`, each with a bounded job:
+
+| Agent | Module | Job |
+|-------|--------|-----|
+| **Investigator** | `investigator.py` | Query tools, gather evidence, rank hypotheses against it |
+| **Orchestrator** | `orchestrator.py` | Drive the state machine, decide what runs next |
+| **Parallel coordinator** | `parallel_coordinator.py` | Fan out independent tool calls and reconcile the results |
+| **Remediation** | `remediation.py` | Propose a reversible action and the rollback that undoes it |
+| **Reviewer** | `reviewer.py` | Check the proposal against the evidence before a gate ever sees it |
+
+### The path of one request
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                                 INGRESS LAYER                                    │
-│                                                                                  │
-│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐            │
-│   │   OAuth2    │  │    OIDC     │  │   SAML 2.0  │  │   API Key   │            │
-│   │   + PKCE    │  │   + JWKS    │  │   + SSO     │  │   + HMAC    │            │
-│   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘            │
-│          └─────────────────┴─────────────────┴─────────────────┘                 │
-│                                      │                                           │
-│   ┌──────────────────────────────────▼──────────────────────────────────┐       │
-│   │                      RATE LIMITER + RBAC                             │       │
-│   │            Token bucket │ Sliding window │ Role inheritance          │       │
-│   └──────────────────────────────────┬──────────────────────────────────┘       │
-└──────────────────────────────────────┼──────────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────────┐
-│                              ORCHESTRATION LAYER                                 │
-│                                                                                  │
-│   ┌─────────────────────────────────────────────────────────────────────┐       │
-│   │                     ADAPTIVE MODEL ROUTER                            │       │
-│   │                                                                      │       │
-│   │   Claude Opus/Sonnet │ GPT-4o │ Gemini Pro │ Llama 3 │ Mistral     │       │
-│   │                                                                      │       │
-│   │   Routing Strategy: Complexity scoring │ Cost optimization │         │       │
-│   │                     Latency requirements │ Tenant tier               │       │
-│   └─────────────────────────────────────────────────────────────────────┘       │
-│                                      │                                           │
-│   ┌──────────────────────────────────▼──────────────────────────────────┐       │
-│   │                    LANGGRAPH STATE MACHINE                           │       │
-│   │                                                                      │       │
-│   │   States: INIT → TRIAGE → INVESTIGATE → ANALYZE → REMEDIATE → DONE  │       │
-│   │   Edges: Conditional routing based on confidence + evidence          │       │
-│   └─────────────────────────────────────────────────────────────────────┘       │
-└──────────────────────────────────────┼──────────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────────┐
-│                              AGENT EXECUTION LAYER                               │
-│                                                                                  │
-│   ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐        │
-│   │ KNOWLEDGE │ │ REASONING │ │  ACTION   │ │ LEARNING  │ │  AMBIENT  │        │
-│   │   AGENT   │ │   AGENT   │ │   AGENT   │ │   AGENT   │ │   AGENT   │        │
-│   ├───────────┤ ├───────────┤ ├───────────┤ ├───────────┤ ├───────────┤        │
-│   │• Graph    │ │• Causal   │ │• Kubectl  │ │• Playbook │ │• Anomaly  │        │
-│   │  queries  │ │  inference│ │  exec     │ │  synthesis│ │  detection│        │
-│   │• Service  │ │• Trace    │ │• PR       │ │• Pattern  │ │• Drift    │        │
-│   │  topology │ │  analysis │ │  creation │ │  learning │ │  monitor  │        │
-│   │• Dep map  │ │• Hypothe- │ │• Rollback │ │• Feedback │ │• Proactive│        │
-│   │           │ │  sis gen  │ │  orchestr │ │  loop     │ │  alerting │        │
-│   └───────────┘ └───────────┘ └───────────┘ └───────────┘ └───────────┘        │
-│                                                                                  │
-│   Execution: asyncio.gather() with structured concurrency                        │
-│   Communication: Shared state via Redis pub/sub + checkpoint persistence         │
-└──────────────────────────────────────┼──────────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────────┐
-│                               SAFETY GATE LAYER                                  │
-│                                                                                  │
-│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐             │
-│   │   CONFIDENCE    │    │     POLICY      │    │    SANDBOX      │             │
-│   │      GATE       │───▶│      GATE       │───▶│      GATE       │             │
-│   ├─────────────────┤    ├─────────────────┤    ├─────────────────┤             │
-│   │ • Bayesian      │    │ • OPA/Rego      │    │ • Digital Twin  │             │
-│   │   calibration   │    │   evaluation    │    │   simulation    │             │
-│   │ • Threshold:    │    │ • Blast radius  │    │ • Chaos eng     │             │
-│   │   0.80 default  │    │   calculation   │    │   validation    │             │
-│   │ • Auto-escalate │    │ • Injection     │    │ • Rollback      │             │
-│   │   on low conf   │    │   detection     │    │   verification  │             │
-│   └─────────────────┘    └─────────────────┘    └─────────────────┘             │
-│                                                                                  │
-│   Decision Matrix:  ALL PASS → Auto-execute │ ANY FAIL → Human approval          │
-└──────────────────────────────────────┼──────────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────────┐
-│                              INTEGRATION LAYER                                   │
-│                                                                                  │
-│   ┌─────────────┬─────────────┬─────────────┬─────────────┬─────────────┐       │
-│   │    CLOUD    │ OBSERVABIL- │   CI/CD     │    ITSM     │   SECRETS   │       │
-│   │             │    ITY      │             │             │             │       │
-│   ├─────────────┼─────────────┼─────────────┼─────────────┼─────────────┤       │
-│   │ AWS         │ Datadog     │ GitHub      │ PagerDuty   │ Vault       │       │
-│   │ GCP         │ New Relic   │ GitLab      │ ServiceNow  │ AWS SM      │       │
-│   │ Azure       │ Prometheus  │ Jenkins     │ Jira        │ GCP SM      │       │
-│   │ Kubernetes  │ Grafana     │ ArgoCD      │ Slack       │ Azure KV    │       │
-│   │             │ Splunk      │ CircleCI    │ Teams       │             │       │
-│   └─────────────┴─────────────┴─────────────┴─────────────┴─────────────┘       │
-│                                                                                  │
-│   Protocol: MCP (Model Context Protocol) for bidirectional tool communication    │
-└──────────────────────────────────────┼──────────────────────────────────────────┘
-                                       │
-┌──────────────────────────────────────▼──────────────────────────────────────────┐
-│                              PERSISTENCE LAYER                                   │
-│                                                                                  │
-│   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                 │
-│   │   PostgreSQL    │  │     Redis       │  │   S3/GCS/Blob   │                 │
-│   ├─────────────────┤  ├─────────────────┤  ├─────────────────┤                 │
-│   │ • Tenant data   │  │ • Session cache │  │ • Audit logs    │                 │
-│   │ • Audit trail   │  │ • Rate limits   │  │ • Artifacts     │                 │
-│   │ • Checkpoints   │  │ • Pub/sub       │  │ • Backups       │                 │
-│   │ • Incidents     │  │ • Job queue     │  │ • Compliance    │                 │
-│   └─────────────────┘  └─────────────────┘  └─────────────────┘                 │
-└─────────────────────────────────────────────────────────────────────────────────┘
+POST /api/v1/chat
+      │
+      ▼
+  authenticate ─── rate limit ─── resolve tenant ─── check quota
+      │
+      ▼
+  score complexity ─── pick model ─── enter LangGraph state machine
+      │
+      ▼
+  investigator + coordinator fan out across MCP tool servers
+      │           (logs, metrics, traces, deploys, repo, k8s, incidents)
+      ▼
+  rank hypotheses against the evidence actually returned
+      │
+      ▼
+  remediation proposes a reversible action ─── reviewer checks it
+      │
+      ▼
+  ┌─ confidence gate ──► below SAFETY_CONFIDENCE_THRESHOLD? ─┐
+  ├─ policy gate ──────► blast radius / protected target? ───┤──► approval request
+  └─ digital twin ─────► rollback not verified? ─────────────┘         │
+      │                                                                ▼
+      │ all gates pass AND COPILOT_AUTONOMY=true              a human decides
+      ▼
+  execute (dry-run unless COPILOT_AUTONOMY_DRYRUN=false) ─── append to audit chain
 ```
+
+Gate decisions, approvals and executions are written to a SHA-256 hash-chained audit log
+(`app/audit/`). Each entry's hash covers the previous one, so editing an old entry
+invalidates every entry recorded after it.
 
 ---
 
-## Core Components
-
-### Multi-Agent Orchestration
-
-OmniPotent employs a specialized agent architecture where each agent operates within a bounded context:
-
-| Agent | Responsibility | Tools |
-|-------|---------------|-------|
-| **Knowledge Agent** | Service topology, dependency mapping, configuration state | Graph queries, K8s API, config stores |
-| **Reasoning Agent** | Causal inference, hypothesis generation, trace analysis | LLM reasoning, statistical analysis |
-| **Action Agent** | Command execution, PR creation, deployment orchestration | kubectl, GitHub API, Terraform |
-| **Learning Agent** | Pattern recognition, playbook synthesis, feedback integration | ML pipelines, vector stores |
-| **Ambient Agent** | Continuous monitoring, anomaly detection, proactive alerting | Prometheus, custom detectors |
-
-### Safety Gate Implementation
-
-```python
-@dataclass
-class SafetyDecision:
-    gate: str
-    passed: bool
-    confidence: float
-    evidence: list[str]
-    requires_approval: bool
-
-async def evaluate_safety_gates(action: RemediationAction) -> SafetyDecision:
-    # Gate 1: Confidence threshold with Bayesian calibration
-    confidence = await confidence_gate.evaluate(action)
-    if confidence.score < THRESHOLD:
-        return SafetyDecision(gate="confidence", passed=False, requires_approval=True)
-    
-    # Gate 2: Policy evaluation via OPA/Rego
-    policy_result = await policy_gate.evaluate(action)
-    if policy_result.violations:
-        return SafetyDecision(gate="policy", passed=False, requires_approval=True)
-    
-    # Gate 3: Sandbox simulation with digital twin
-    sandbox_result = await sandbox_gate.simulate(action)
-    if not sandbox_result.rollback_verified:
-        return SafetyDecision(gate="sandbox", passed=False, requires_approval=True)
-    
-    return SafetyDecision(gate="all", passed=True, requires_approval=False)
-```
-
-### Decision Engine
-
-The Decision Engine implements Multi-Criteria Decision Making (MCDM) with configurable ranking strategies:
-
-- **Weighted Sum Model (WSM)** — Linear aggregation of normalized criteria
-- **TOPSIS** — Distance to ideal/anti-ideal solutions
-- **ELECTRE** — Outranking with concordance/discordance analysis
-- **ML-Augmented** — Bayesian success probability prediction
-
----
-
-## Installation
+## Quick start
 
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 18+ (for frontend)
-- Docker & Docker Compose
-- PostgreSQL 15+ (or use Docker)
-- Redis 7+ (or use Docker)
+- Node.js 18+ (for the frontend)
+- An API key for at least one LLM provider: Anthropic, OpenAI, Gemini, Groq or DeepSeek
 
-### Quick Start
+Docker, PostgreSQL and Redis are all optional: without them the app falls back to SQLite
+and an in-process cache, so a laptop with Python and Node is enough to run the whole thing.
+
+### One command
 
 ```bash
-# Clone repository
 git clone https://github.com/ankit25bcs10610/OmniPotent.git
 cd OmniPotent
-
-# Copy environment template
-cp .env.example .env
-
-# Configure required variables (minimum)
-export ANTHROPIC_API_KEY="sk-ant-..."  # or OPENAI_API_KEY, GROQ_API_KEY
-
-# Start with Docker Compose
-docker compose up -d
-
-# Verify health
-curl http://localhost:8000/healthz
+./start.sh all
 ```
 
-### Development Setup
+`start.sh` checks your toolchain, installs dependencies, copies `.env.example` to `.env` if
+you have no `.env` yet, and starts both processes:
+
+| | |
+|---|---|
+| Web console | http://localhost:5173 |
+| API | http://localhost:8000 |
+| API docs (Swagger) | http://localhost:8000/docs |
+
+Other subcommands: `./start.sh setup` (interactive configuration wizard), `check`
+(verify connections), `api`, `web`, `cli`.
+
+### Manual setup
 
 ```bash
-# Install Python dependencies with uv
+cp .env.example .env
+# Set COPILOT_PROVIDER and the matching key, e.g.:
+#   COPILOT_PROVIDER=anthropic
+#   ANTHROPIC_API_KEY=sk-ant-...
+
 uv sync --extra dev
+uv run uvicorn app.api.main:app --reload --port 8000   # note: app.api.main, not app.main
 
-# Install frontend dependencies
-cd frontend && npm ci && cd ..
+cd frontend && npm ci && npm run dev                   # separate terminal
+```
 
-# Start backend (with hot reload)
-uv run uvicorn app.main:app --reload --port 8000
+### Docker Compose
 
-# Start frontend (separate terminal)
-cd frontend && npm run dev
+Brings up the API, a background worker, PostgreSQL, Redis, Prometheus, Grafana and Jaeger:
 
-# Run test suite
-uv run pytest --cov=app --cov-report=term-missing
-
-# Type checking
-uv run mypy app --strict
-
-# Linting
-uv run ruff check app tests
-uv run ruff format app tests --check
+```bash
+docker compose up -d
+curl http://localhost:8000/healthz
 ```
 
 ---
 
 ## Configuration
 
-### Environment Variables
+`.env.example` is the authoritative reference — it documents roughly 150 variables inline,
+including a "deliberately absent" section explaining which knobs were removed and why. The
+ones you are most likely to touch:
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | Yes* | — | Claude API key |
-| `OPENAI_API_KEY` | Yes* | — | OpenAI API key (alternative) |
-| `GROQ_API_KEY` | Yes* | — | Groq API key (alternative) |
-| `DATABASE_URL` | No | SQLite | PostgreSQL connection string |
-| `REDIS_URL` | No | In-memory | Redis connection string |
-| `COPILOT_ENV` | No | `development` | Environment: development/staging/production |
-| `LOG_LEVEL` | No | `INFO` | Logging level |
-| `CONFIDENCE_THRESHOLD` | No | `0.80` | Minimum confidence for auto-execution |
-| `MAX_BLAST_RADIUS` | No | `5` | Maximum services affected before approval |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COPILOT_PROVIDER` | `anthropic` | `anthropic` \| `openai` \| `gemini` \| `groq` \| `deepseek` |
+| `ANTHROPIC_API_KEY` | — | Key for the selected provider (or `OPENAI_API_KEY`, etc.) |
+| `COPILOT_MODEL` | provider default | Override the main model |
+| `COPILOT_FAST_MODEL` | provider default | Override the cheap model used for routing and summaries |
+| `COPILOT_DATABASE_URL` | SQLite | PostgreSQL connection string |
+| `COPILOT_REDIS_URL` | in-process | Redis connection string |
+| `COPILOT_ENV` | `development` | `development` \| `staging` \| `production` |
+| `COPILOT_RATE_LIMIT_PER_MIN` | `120` | Per-tenant request ceiling |
+| `SAFETY_CONFIDENCE_THRESHOLD` | `0.80` | The single bar for "confident enough to change production" |
+| `COPILOT_CONFIDENCE_GATE` | `true` | Enforce the confidence gate |
+| `COPILOT_AUTONOMY` | `false` | Allow automated remediation at all |
+| `COPILOT_AUTONOMY_DRYRUN` | `true` | Simulate rather than execute, even when autonomy is on |
+| `COPILOT_MULTI_TENANT` | `false` | Enable per-tenant isolation and seats |
 
-*At least one LLM provider API key is required.
+`COPILOT_DATABASE_URL` and `COPILOT_REDIS_URL` each also accept the bare `DATABASE_URL` /
+`REDIS_URL` that managed platforms (Render, Heroku, Helm, Docker Compose) inject by
+convention, so a correctly provisioned database is not silently ignored.
 
-### Safety Gate Configuration
-
-```yaml
-# config/safety_gates.yml
-confidence_gate:
-  default_threshold: 0.80
-  calibration: bayesian
-  action_thresholds:
-    rollback: 0.75
-    scale: 0.80
-    deploy: 0.90
-    delete: 0.95
-
-policy_gate:
-  engine: opa
-  policies_path: ./policies/
-  blast_radius_limits:
-    low_risk: 3
-    medium_risk: 5
-    high_risk: 1
-  protected_namespaces:
-    - kube-system
-    - istio-system
-    - production
-
-sandbox_gate:
-  enabled: true
-  timeout_seconds: 300
-  require_rollback_verification: true
-  chaos_safety_level: low
-```
+Everything else is prefixed, and settings are declared `extra="ignore"` — a misspelled
+variable is discarded without an error, which looks exactly like one that had no effect.
+Check `/healthz` and `./start.sh check` rather than assuming a value took.
 
 ---
 
-## API Reference
+## API
 
-### Investigations
+368 documented paths, 415 operations. The full schema is served at `/docs` (Swagger) and
+`/openapi.json`; see [docs/api-reference.md](docs/api-reference.md) and [docs/api/](docs/api/)
+for prose.
 
-#### Create Investigation
+### Start an investigation
 
 ```http
-POST /api/v1/investigations
+POST /api/v1/chat
 Content-Type: application/json
 Authorization: Bearer <token>
 
 {
-  "query": "High latency on payment-service",
-  "context": {
-    "services": ["payment-service", "billing-api"],
-    "time_range": "1h",
-    "severity": "high"
-  },
-  "options": {
-    "auto_remediate": false,
-    "max_iterations": 10
-  }
+  "thread_id": "inv-checkout-500s",
+  "message": "Why is the checkout API throwing 500 errors?"
 }
 ```
-
-#### Response
 
 ```json
 {
-  "id": "inv_01H9X2K3M4N5P6Q7R8S9T0UV",
+  "thread_id": "inv-checkout-500s",
   "status": "completed",
-  "duration_ms": 47230,
-  "confidence": 0.94,
-  "root_cause": {
-    "summary": "Connection pool exhaustion in billing-service",
-    "category": "configuration",
-    "evidence": [
-      {
-        "type": "metric",
-        "source": "prometheus",
-        "query": "db_pool_active_connections{service='billing'}",
-        "value": "50/50 (saturated)"
-      },
-      {
-        "type": "deploy",
-        "source": "github",
-        "commit": "a1b2c3d",
-        "diff": "max_connections: 50 → 5"
-      }
-    ]
+  "answer": "Connection pool exhaustion in billing-service...",
+  "trace": ["search_logs", "first_bad_deploy", "get_commit_diff", "list_pods"],
+  "report": {
+    "hypotheses": [{ "summary": "...", "confidence": 0.94, "evidence": ["..."] }],
+    "severity": "high",
+    "postmortem": "..."
   },
-  "recommended_actions": [
-    {
-      "id": "act_001",
-      "type": "rollback",
-      "target": "billing-service",
-      "version": "v2.4.0",
-      "safety_gates": {
-        "confidence": {"passed": true, "score": 0.94},
-        "policy": {"passed": true, "violations": []},
-        "sandbox": {"passed": true, "rollback_verified": true}
-      },
-      "auto_approved": true
-    }
-  ]
+  "tokens_used": 18422
 }
 ```
 
-### WebSocket Events
+`status` is one of `completed`, `awaiting_approval` or `error`. When it is
+`awaiting_approval`, `approval_request` describes the action and the gate that stopped it.
 
-```javascript
-const ws = new WebSocket('wss://api.omnipotent.io/ws/investigations/inv_xxx');
+### Stream it
 
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  // Event types: agent_started, evidence_found, hypothesis_generated,
-  //              action_proposed, safety_evaluated, remediation_executed
-};
+```http
+POST /api/v1/chat/stream     # Server-Sent Events, same body
 ```
 
-See [docs/API.md](docs/API.md) for complete API documentation including GraphQL schema.
+### Approve a pending action
+
+```http
+POST /api/v1/chat/approve
+{ "thread_id": "inv-checkout-500s", "approved": true, "reason": "verified in staging" }
+```
+
+### WebSocket
+
+```javascript
+const ws = new WebSocket('ws://localhost:8000/ws/chat/inv-checkout-500s');
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+```
+
+Every `/api/v1/*` route restates its own permission and quota dependencies rather than
+inheriting them — see the comment at the top of `app/api/v1/chat.py` for why that matters.
 
 ---
 
 ## Integrations
 
-### Supported Platforms
+**27 MCP tool servers** under `app/mcp/servers/`:
 
-<table>
-<tr>
-<td><b>Cloud Providers</b></td>
-<td>
+`alerting` · `architect` · `argocd` · `cicd` · `costopt` · `datadog` · `deploys` · `docker` ·
+`docs` · `github` · `jira` · `kubernetes` · `linear` · `logs_metrics` · `marketplace` ·
+`memory` · `multicloud` · `newrelic` · `opsgenie` · `pagerduty` · `repo` · `runbooks` ·
+`security` · `sentry` · `slack` · `terraform` · `traces`
 
-![AWS](https://img.shields.io/badge/AWS-FF9900?style=flat&logo=amazonaws&logoColor=white)
-![GCP](https://img.shields.io/badge/GCP-4285F4?style=flat&logo=googlecloud&logoColor=white)
-![Azure](https://img.shields.io/badge/Azure-0078D4?style=flat&logo=microsoftazure&logoColor=white)
-![Kubernetes](https://img.shields.io/badge/K8s-326CE5?style=flat&logo=kubernetes&logoColor=white)
+**8 direct connectors** under `app/connectors/`: GitLab, Grafana, Jenkins, Kubernetes,
+New Relic, Prometheus, ServiceNow, Splunk.
 
-</td>
-</tr>
-<tr>
-<td><b>Observability</b></td>
-<td>
-
-![Datadog](https://img.shields.io/badge/Datadog-632CA6?style=flat&logo=datadog&logoColor=white)
-![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=flat&logo=prometheus&logoColor=white)
-![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat&logo=grafana&logoColor=white)
-![New Relic](https://img.shields.io/badge/New_Relic-008C99?style=flat&logo=newrelic&logoColor=white)
-
-</td>
-</tr>
-<tr>
-<td><b>CI/CD</b></td>
-<td>
-
-![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white)
-![GitLab](https://img.shields.io/badge/GitLab-FC6D26?style=flat&logo=gitlab&logoColor=white)
-![ArgoCD](https://img.shields.io/badge/ArgoCD-EF7B4D?style=flat&logo=argo&logoColor=white)
-![Jenkins](https://img.shields.io/badge/Jenkins-D24939?style=flat&logo=jenkins&logoColor=white)
-
-</td>
-</tr>
-<tr>
-<td><b>Incident Management</b></td>
-<td>
-
-![PagerDuty](https://img.shields.io/badge/PagerDuty-06AC38?style=flat&logo=pagerduty&logoColor=white)
-![Slack](https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white)
-![Jira](https://img.shields.io/badge/Jira-0052CC?style=flat&logo=jira&logoColor=white)
-![ServiceNow](https://img.shields.io/badge/ServiceNow-62D84E?style=flat&logo=servicenow&logoColor=white)
-
-</td>
-</tr>
-</table>
-
-### MCP Tool Servers
-
-OmniPotent uses the Model Context Protocol (MCP) for extensible tool integration:
-
-```python
-# Example: Custom MCP tool server
-from omnipotent.mcp import ToolServer, tool
-
-class CustomToolServer(ToolServer):
-    @tool(description="Query internal metrics database")
-    async def query_metrics(self, query: str, time_range: str) -> dict:
-        # Implementation
-        pass
-```
+A server with no credentials configured falls back to fixture-backed demo data, so you can
+drive the whole product before wiring up a single integration. The console labels those
+servers `OFFLINE DEMO` rather than pretending they are live — which is why the console
+screenshot above shows 11 servers active out of the 27 that ship in the repo.
 
 ---
 
-## Compliance & Security
+## Security
 
-### Certifications
+### Implemented in code
 
-| Framework | Status | Audit Report |
-|-----------|--------|--------------|
-| SOC 2 Type II | Certified | Available on request |
-| HIPAA | Compliant | BAA available |
-| PCI-DSS | Level 1 | AOC available |
-| GDPR | Compliant | DPA available |
-| ISO 27001 | In progress | Q4 2026 |
+- **Authentication** — OAuth2/JWT bearer tokens, API keys with HMAC signing, Supabase JWKS verification
+- **Authorization** — RBAC with four ranked roles, `viewer` < `responder` < `admin` < `owner` (`app/tenancy/models.py`); per-route permission dependencies
+- **Multi-tenancy** — tenant resolution at the edge, per-tenant quotas and rate limits
+- **Audit** — append-only log with SHA-256 hash chaining, so a rewritten entry invalidates every entry after it
+- **Prompt-injection defence** — a red-team eval suite (`evals/run_redteam.py`) runs as a blocking CI gate
+- **Supply chain** — every pull request runs gitleaks, Trivy, `pip-audit` and a hardcoded-secret grep. Trivy (CRITICAL/HIGH) and the grep block the merge; gitleaks and `pip-audit` are currently advisory
+- **SSRF** — a URL guard (`app/url_guard.py`) deny-lists loopback, link-local and private-network destinations for user-supplied webhook URLs, so a subscriber cannot aim the server at its own cloud metadata endpoint
+- **Remediation** — reversible actions only (`rollback_deployment`, `restart_deployment`); a caller cannot declare its own confidence tier
 
-### Security Controls
+### Not claimed
 
-- **Authentication**: OAuth 2.0 + PKCE, OIDC, SAML 2.0, API keys with HMAC
-- **Authorization**: RBAC with hierarchical roles, attribute-based policies
-- **Encryption**: TLS 1.3 in transit, AES-256-GCM at rest, envelope encryption for secrets
-- **Audit**: Immutable append-only log with SHA-256 hash chaining
-- **Isolation**: Per-tenant encryption keys (DEK/KEK), namespace separation
+No SOC 2 report exists. No HIPAA BAA, no PCI-DSS AOC, no ISO 27001 certificate, no GDPR
+DPA. Earlier versions of this README listed those as achieved; they were not, and the
+claims have been removed. Treat this as pre-audit software.
 
-### Vulnerability Disclosure
+### Reporting a vulnerability
 
-Security issues can be reported to security@omnipotent.io. We follow responsible disclosure practices and aim to respond within 24 hours.
+See [SECURITY.md](SECURITY.md).
 
 ---
 
 ## Development
 
-### Project Structure
+### Layout
 
 ```
 OmniPotent/
-├── app/
-│   ├── agents/                 # Multi-agent implementation
-│   │   ├── base.py            # Abstract agent interface
-│   │   ├── knowledge.py       # Knowledge graph agent
-│   │   ├── reasoning.py       # Causal inference agent
-│   │   ├── action.py          # Execution agent
-│   │   └── orchestrator.py    # Agent coordination
-│   ├── api/                    # FastAPI application
-│   │   ├── routes/            # HTTP endpoints
-│   │   ├── graphql/           # GraphQL schema
-│   │   └── websocket/         # Real-time events
-│   ├── connectors/             # External integrations
-│   ├── decision_engine/        # MCDM implementation
-│   ├── digital_twin/           # Simulation engine
-│   ├── policy_engine/          # OPA/Kyverno integration
-│   ├── safety_gates/           # Safety framework
-│   └── graph/                  # LangGraph workflows
-├── frontend/                   # React + TypeScript SPA
-├── infrastructure/             # Terraform modules
-├── monitoring/                 # Prometheus rules, Grafana dashboards
-├── policies/                   # OPA Rego policies
-├── tests/
-│   ├── unit/                  # Unit tests
-│   ├── integration/           # Integration tests
-│   └── e2e/                   # End-to-end tests
-└── docs/                       # Documentation
+├── app/                      # 47 packages
+│   ├── api/                  # FastAPI app; main.py is the router hub
+│   │   ├── v1/               # /v1 surface: chat, admin, policy, digital_twin, webhooks, ...
+│   │   └── websocket.py      # /ws/chat/{thread_id}
+│   ├── agents/               # investigator, orchestrator, parallel_coordinator, remediation, reviewer
+│   ├── mcp/servers/          # 27 MCP tool servers
+│   ├── connectors/           # 8 direct platform connectors
+│   ├── integrations/         # 15 integration modules
+│   ├── decision_engine/      # weighted-sum ranking of remediation options
+│   ├── digital_twin/         # simulation used by the sandbox gate
+│   ├── policy_engine/        # policy evaluation and blast-radius limits
+│   ├── guardrails.py         # prompt-injection and output constraints
+│   ├── audit/                # append-only, hash-chained log
+│   └── url_guard.py          # SSRF deny-list for user-supplied URLs
+├── frontend/                 # React + TypeScript SPA, 37 pages
+├── evals/                    # red-team and golden-trajectory CI gates
+├── tests/                    # 212 test files + integration/ e2e/ chaos/ load/ contract/ mutation/
+├── migrations/               # Alembic
+├── infrastructure/           # Terraform
+├── monitoring/               # Prometheus rules, Grafana dashboards
+├── scripts/                  # tooling, incl. gen_architecture.py
+└── docs/
 ```
 
-### Running Tests
+### Checks
+
+These are exactly what CI runs, in order. Running them locally is the fastest way to know
+a pull request will go green:
 
 ```bash
-# Unit tests with coverage
-uv run pytest tests/unit --cov=app --cov-report=html
-
-# Integration tests (requires Docker)
-docker compose -f docker-compose.test.yml up -d
-uv run pytest tests/integration
-
-# E2E tests
-cd frontend && npm run test:e2e
-
-# All checks (CI equivalent)
-./scripts/ci.sh
+uv run ruff check app tests evals
+uv run mypy app
+uv run pytest --cov=app --cov-fail-under=48 -q
+uv run python -m evals.run_redteam
 ```
 
-### Code Quality
+Integration tests need a real PostgreSQL and Redis — without them the fixtures skip and the
+tests silently never run:
 
 ```bash
-# Type checking (strict mode)
-uv run mypy app --strict
+COPILOT_DATABASE_URL=postgresql+asyncpg://omnipotent:omnipotent@localhost:5432/omnipotent_test \
+REDIS_URL=redis://localhost:6379/0 \
+  uv run pytest tests/integration -q
+```
 
-# Linting
-uv run ruff check app tests
+Frontend:
 
-# Formatting
-uv run ruff format app tests
+```bash
+cd frontend && npm run lint && npm run typecheck && npm run test && npm run build
+```
 
-# Security scanning
-uv run bandit -r app
-uv run safety check
+### CI
+
+Four jobs on every pull request: **Security** (gitleaks, Trivy, `pip-audit`, secret grep) →
+**Backend** (ruff, mypy, pytest with a 48% coverage floor, integration tests against real
+PostgreSQL and Redis, red-team gate, golden-trajectory replay) and **Frontend** (lint, test,
+coverage) in parallel → **Coverage gate**.
+
+### Regenerating the assets in this README
+
+```bash
+python scripts/gen_architecture.py     # docs/assets/architecture-3d-{light,dark}.svg
 ```
 
 ---
 
 ## Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+1. Fork and branch (`git checkout -b feat/your-change`)
+2. Make the change, with tests
+3. Run the four checks under [Checks](#checks) — CI runs the same ones
+4. Commit using conventional commits (`feat:`, `fix:`, `docs:`)
+5. Open a pull request
 
-### Development Workflow
+Two conventions worth knowing before you start:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make changes with tests
-4. Ensure all checks pass (`./scripts/ci.sh`)
-5. Commit with conventional commits (`feat: add amazing feature`)
-6. Push and open a Pull Request
+- **Comments explain why, not what.** Several files carry comments recording a bug that a
+  particular line prevents. Do not delete those without understanding what they are holding up.
+- **Do not add a config variable without a reader.** `.env.example` has a section listing
+  variables that were removed precisely because nothing read them.
 
 ### Contributors
 
@@ -597,16 +499,15 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
 ---
 
 <div align="center">
 
-**OmniPotent** — Autonomous Infrastructure Intelligence
-
-[Documentation](docs/) · [API Reference](docs/API.md) · [GitHub](https://github.com/ankit25bcs10610/OmniPotent)
-
-<sub>Built with Python, FastAPI, LangGraph, React, and TypeScript</sub>
+<sub>Built with Python, FastAPI, LangGraph, React and TypeScript ·
+<a href="docs/">Documentation</a> ·
+<a href="docs/api-reference.md">API reference</a> ·
+<a href="docs/ARCHITECTURE.md">Architecture notes</a></sub>
 
 </div>

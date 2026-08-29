@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>OmniPotent — architecture in 3D</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #070a10; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Arial, sans-serif; }
+  #stage { position: fixed; inset: 0; }
+  .hud { position: fixed; z-index: 10; color: #e2e8f0; }
+  /* Kept narrow on purpose: the top layer's label projects into this corner,
+     and a wider paragraph runs straight through it. */
+  #title { top: 22px; left: 26px; max-width: 290px; }
+  #title h1 { margin: 0; font-size: 21px; letter-spacing: .3px; }
+  #title p { margin: 7px 0 0; font-size: 13px; line-height: 1.5; color: #94a3b8; }
+  #legend { top: 22px; right: 26px; display: grid; gap: 7px; }
+  .row { display: flex; align-items: center; gap: 9px; font-size: 12.5px;
+    color: #cbd5e1; cursor: pointer; user-select: none; opacity: .95; }
+  .row:hover { color: #fff; }
+  .row.off { opacity: .34; }
+  .dot { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  #hint { bottom: 20px; left: 26px; font-size: 12px; color: #64748b; }
+  .lbl { font-size: 12px; color: #e2e8f0; text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    pointer-events: none; white-space: nowrap; }
+  .lbl.layer { font-size: 15px; font-weight: 700; letter-spacing: 1.1px; }
+  #fallback { position: fixed; inset: 0; display: none; place-items: center;
+    padding: 40px; text-align: center; color: #94a3b8; font-size: 14px; line-height: 1.6; }
+  #fallback a { color: #60a5fa; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div class="hud" id="title">
+  <h1>OmniPotent architecture</h1>
+  <p>One request falls through six layers.</p>
+</div>
+<div class="hud" id="legend"></div>
+<div class="hud" id="hint">drag to orbit · scroll to zoom · click a legend row to hide that layer</div>
+
+<div id="fallback">
+  <p>This page needs WebGL and a network connection for the 3D library.<br/>
+     The same diagram is available as a static image in the
+     <a href="../README.md#architecture">README</a>.</p>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// Same six layers as scripts/gen_architecture.py. Keep the two in step.
+const LAYERS = [
+  { title: 'EDGE',          color: 0x38bdf8, nodes: ['OAuth2 / JWT', 'API key + HMAC', 'Rate limiter', 'RBAC + tenancy'] },
+  { title: 'ORCHESTRATION', color: 0x6366f1, nodes: ['Complexity score', 'Adaptive router', 'LangGraph FSM', 'Checkpoints'] },
+  { title: 'AGENTS',        color: 0x10b981, nodes: ['Investigator', 'Remediation', 'Reviewer', 'Coordinator'] },
+  { title: 'SAFETY GATES',  color: 0xf59e0b, nodes: ['Confidence', 'Policy / Rego', 'Digital twin', 'Approval'] },
+  { title: 'INTEGRATION',   color: 0xf43f5e, nodes: ['MCP servers', 'Connectors', 'ITSM + chat', 'Cloud + K8s'] },
+  { title: 'PERSISTENCE',   color: 0xa855f7, nodes: ['PostgreSQL', 'Redis', 'Object store', 'Hash-chained audit'] },
+];
+
+const SLAB_W = 26, SLAB_D = 9, SLAB_H = 0.45;
+const GAP = 5.4;                       // vertical distance between slabs
+const NODE = 2.6, NODE_H = 1.15;
+const TOP_Y = (LAYERS.length - 1) * GAP / 2;
+
+const stage = document.getElementById('stage');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070a10);
+scene.fog = new THREE.Fog(0x070a10, 55, 130);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 400);
+camera.position.set(30, 22, 34);
+
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+} catch (err) {
+  document.getElementById('fallback').style.display = 'grid';
+  throw err;
+}
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+stage.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(innerWidth, innerHeight);
+labelRenderer.domElement.style.cssText = 'position:fixed;inset:0;pointer-events:none';
+stage.appendChild(labelRenderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 18;
+controls.maxDistance = 95;
+controls.maxPolarAngle = Math.PI * 0.49;   // never let the camera go under the floor
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.45;
+controls.target.set(0, 0, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const key = new THREE.DirectionalLight(0xffffff, 1.25);
+key.position.set(22, 34, 18);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x6f8bff, 0.5);
+rim.position.set(-20, 12, -22);
+scene.add(rim);
+
+function label(text, cls, x, y, z) {
+  const el = document.createElement('div');
+  el.className = 'lbl' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+  const obj = new CSS2DObject(el);
+  obj.position.set(x, y, z);
+  return obj;
+}
+
+const groups = [];
+
+LAYERS.forEach((layer, i) => {
+  const g = new THREE.Group();
+  g.position.y = TOP_Y - i * GAP;
+
+  const slab = new THREE.Mesh(
+    new THREE.BoxGeometry(SLAB_W, SLAB_H, SLAB_D),
+    new THREE.MeshStandardMaterial({
+      color: layer.color, roughness: 0.55, metalness: 0.15,
+      transparent: true, opacity: 0.30,
+    }),
+  );
+  g.add(slab);
+
+  // A bright wireframe edge reads as the platform's outline from any angle,
+  // which a translucent solid alone does not.
+  g.add(new THREE.LineSegments(
+    new THREE.EdgesGeometry(slab.geometry),
+    new THREE.LineBasicMaterial({ color: layer.color, transparent: true, opacity: 0.9 }),
+  ));
+
+  const span = SLAB_W - 6;
+  layer.nodes.forEach((name, j) => {
+    const x = -span / 2 + (span / (layer.nodes.length - 1)) * j;
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(NODE, NODE_H, NODE),
+      new THREE.MeshStandardMaterial({ color: layer.color, roughness: 0.35, metalness: 0.35 }),
+    );
+    box.position.set(x, SLAB_H / 2 + NODE_H / 2, 0);
+    g.add(box);
+    g.add(label(name, '', x, SLAB_H / 2 + NODE_H + 0.85, 0));
+  });
+
+  g.add(label(layer.title, 'layer', -SLAB_W / 2 - 5.4, 0.6, 0));
+  scene.add(g);
+  groups.push(g);
+});
+
+// The spine: the path a single request takes, top layer to bottom.
+const spineX = SLAB_W / 2 + 2.4;
+const yTop = TOP_Y, yBot = TOP_Y - (LAYERS.length - 1) * GAP;
+scene.add(new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(spineX, yTop + 1.6, 0), new THREE.Vector3(spineX, yBot - 1.6, 0),
+  ]),
+  new THREE.LineDashedMaterial({ color: 0x64748b, dashSize: 0.5, gapSize: 0.35 }),
+).computeLineDistances());
+
+const pulse = new THREE.Mesh(
+  new THREE.SphereGeometry(0.34, 20, 20),
+  new THREE.MeshBasicMaterial({ color: 0xffffff }),
+);
+scene.add(pulse);
+
+// Legend doubles as a layer filter.
+const legend = document.getElementById('legend');
+LAYERS.forEach((layer, i) => {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<span class="dot" style="background:#${layer.color.toString(16).padStart(6, '0')}"></span>${layer.title}`;
+  row.onclick = () => {
+    groups[i].visible = !groups[i].visible;
+    row.classList.toggle('off', !groups[i].visible);
+  };
+  legend.appendChild(row);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  labelRenderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+const travel = yTop + 1.6 - (yBot - 1.6);
+
+renderer.setAnimationLoop(() => {
+  // Sweep the pulse down the spine on a 4.5s loop, then start over at the top.
+  const t = (clock.getElapsedTime() % 4.5) / 4.5;
+  pulse.position.set(spineX, yTop + 1.6 - travel * t, 0);
+  pulse.material.color.setHex(LAYERS[Math.min(LAYERS.length - 1, Math.floor(t * LAYERS.length))].color);
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

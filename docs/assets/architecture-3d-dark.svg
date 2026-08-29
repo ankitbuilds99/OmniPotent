@@ -1,0 +1,280 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-500 -58 1190 1180"
+     width="1190" height="1180" role="img"
+     aria-label="OmniPotent architecture: six stacked layers, from edge authentication
+     down through orchestration, agents, safety gates, integrations and persistence.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7"
+            markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0.45" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.05"/>
+    </linearGradient>
+  </defs>
+  <rect x="-500" y="-58" width="1190" height="1180" fill="#0b1120"/>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter,
+            "Helvetica Neue", Arial, sans-serif; }
+  </style>
+  <g id="layer-persistence">
+
+    <polygon points="-129.0,895.0 387.0,1075.0 387.0,1089.0 -129.0,909.0" fill="#172033"/>
+    <polygon points="516.0,1030.0 387.0,1075.0 387.0,1089.0 516.0,1044.0" fill="#0f172a"/>
+    <polygon points="0.0,850.0 516.0,1030.0 387.0,1075.0 -129.0,895.0" fill="#1e293b"/>
+    <polygon points="0.0,850.0 516.0,1030.0 387.0,1075.0 -129.0,895.0" fill="#a855f7" opacity="0.26"/>
+    <polygon points="0.0,850.0 516.0,1030.0 387.0,1075.0 -129.0,895.0" fill="url(#sheen)"/>
+    <polygon points="0.0,850.0 516.0,1030.0 387.0,1075.0 -129.0,895.0" fill="none" stroke="#a855f7" stroke-width="1.6" opacity="0.55"/>
+
+    <polygon points="-76.5,866.3 -7.7,890.3 -7.7,916.3 -76.5,892.3" fill="#1e293b"/>
+    <polygon points="61.1,866.3 -7.7,890.3 -7.7,916.3 61.1,892.3" fill="#a855f7" opacity="0.75"/>
+    <polygon points="-7.7,842.3 61.1,866.3 -7.7,890.3 -76.5,866.3" fill="#334155"/>
+    <polygon points="-7.7,842.3 61.1,866.3 -7.7,890.3 -76.5,866.3" fill="#a855f7" opacity="0.45"/>
+    <polygon points="-7.7,842.3 61.1,866.3 -7.7,890.3 -76.5,866.3" fill="none" stroke="#a855f7" stroke-width="1.2" opacity="0.9"/>
+    <text x="-7.7" y="854.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">PostgreSQL</text>
+
+    <polygon points="61.1,914.3 129.9,938.3 129.9,964.3 61.1,940.3" fill="#1e293b"/>
+    <polygon points="198.7,914.3 129.9,938.3 129.9,964.3 198.7,940.3" fill="#a855f7" opacity="0.75"/>
+    <polygon points="129.9,890.3 198.7,914.3 129.9,938.3 61.1,914.3" fill="#334155"/>
+    <polygon points="129.9,890.3 198.7,914.3 129.9,938.3 61.1,914.3" fill="#a855f7" opacity="0.45"/>
+    <polygon points="129.9,890.3 198.7,914.3 129.9,938.3 61.1,914.3" fill="none" stroke="#a855f7" stroke-width="1.2" opacity="0.9"/>
+    <text x="129.9" y="902.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Redis</text>
+
+    <polygon points="198.7,962.3 267.5,986.3 267.5,1012.3 198.7,988.3" fill="#1e293b"/>
+    <polygon points="336.3,962.3 267.5,986.3 267.5,1012.3 336.3,988.3" fill="#a855f7" opacity="0.75"/>
+    <polygon points="267.5,938.3 336.3,962.3 267.5,986.3 198.7,962.3" fill="#334155"/>
+    <polygon points="267.5,938.3 336.3,962.3 267.5,986.3 198.7,962.3" fill="#a855f7" opacity="0.45"/>
+    <polygon points="267.5,938.3 336.3,962.3 267.5,986.3 198.7,962.3" fill="none" stroke="#a855f7" stroke-width="1.2" opacity="0.9"/>
+    <text x="267.5" y="950.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Object store</text>
+
+    <polygon points="336.3,1010.3 405.1,1034.3 405.1,1060.3 336.3,1036.3" fill="#1e293b"/>
+    <polygon points="473.9,1010.3 405.1,1034.3 405.1,1060.3 473.9,1036.3" fill="#a855f7" opacity="0.75"/>
+    <polygon points="405.1,986.3 473.9,1010.3 405.1,1034.3 336.3,1010.3" fill="#334155"/>
+    <polygon points="405.1,986.3 473.9,1010.3 405.1,1034.3 336.3,1010.3" fill="#a855f7" opacity="0.45"/>
+    <polygon points="405.1,986.3 473.9,1010.3 405.1,1034.3 336.3,1010.3" fill="none" stroke="#a855f7" stroke-width="1.2" opacity="0.9"/>
+    <text x="405.1" y="998.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Hash-chained audit</text>
+    <line x1="-150" y1="895.0" x2="-137.0" y2="895.0" stroke="#334155" stroke-width="1.5"/>
+    <circle cx="-150" cy="895.0" r="5" fill="#a855f7"/>
+    <text x="-166" y="889.0" text-anchor="end" font-size="21" font-weight="700" letter-spacing="1.2" fill="#f8fafc">PERSISTENCE</text>
+    <text x="-166" y="911.0" text-anchor="end" font-size="14" fill="#94a3b8">State, cache, and a tamper-evident trail</text>
+  </g>
+  <g id="layer-integration">
+
+    <polygon points="-129.0,725.0 387.0,905.0 387.0,919.0 -129.0,739.0" fill="#172033"/>
+    <polygon points="516.0,860.0 387.0,905.0 387.0,919.0 516.0,874.0" fill="#0f172a"/>
+    <polygon points="0.0,680.0 516.0,860.0 387.0,905.0 -129.0,725.0" fill="#1e293b"/>
+    <polygon points="0.0,680.0 516.0,860.0 387.0,905.0 -129.0,725.0" fill="#f43f5e" opacity="0.26"/>
+    <polygon points="0.0,680.0 516.0,860.0 387.0,905.0 -129.0,725.0" fill="url(#sheen)"/>
+    <polygon points="0.0,680.0 516.0,860.0 387.0,905.0 -129.0,725.0" fill="none" stroke="#f43f5e" stroke-width="1.6" opacity="0.55"/>
+
+    <polygon points="-76.5,696.3 -7.7,720.3 -7.7,746.3 -76.5,722.3" fill="#1e293b"/>
+    <polygon points="61.1,696.3 -7.7,720.3 -7.7,746.3 61.1,722.3" fill="#f43f5e" opacity="0.75"/>
+    <polygon points="-7.7,672.3 61.1,696.3 -7.7,720.3 -76.5,696.3" fill="#334155"/>
+    <polygon points="-7.7,672.3 61.1,696.3 -7.7,720.3 -76.5,696.3" fill="#f43f5e" opacity="0.45"/>
+    <polygon points="-7.7,672.3 61.1,696.3 -7.7,720.3 -76.5,696.3" fill="none" stroke="#f43f5e" stroke-width="1.2" opacity="0.9"/>
+    <text x="-7.7" y="684.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">MCP servers</text>
+
+    <polygon points="61.1,744.3 129.9,768.3 129.9,794.3 61.1,770.3" fill="#1e293b"/>
+    <polygon points="198.7,744.3 129.9,768.3 129.9,794.3 198.7,770.3" fill="#f43f5e" opacity="0.75"/>
+    <polygon points="129.9,720.3 198.7,744.3 129.9,768.3 61.1,744.3" fill="#334155"/>
+    <polygon points="129.9,720.3 198.7,744.3 129.9,768.3 61.1,744.3" fill="#f43f5e" opacity="0.45"/>
+    <polygon points="129.9,720.3 198.7,744.3 129.9,768.3 61.1,744.3" fill="none" stroke="#f43f5e" stroke-width="1.2" opacity="0.9"/>
+    <text x="129.9" y="732.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Connectors</text>
+
+    <polygon points="198.7,792.3 267.5,816.3 267.5,842.3 198.7,818.3" fill="#1e293b"/>
+    <polygon points="336.3,792.3 267.5,816.3 267.5,842.3 336.3,818.3" fill="#f43f5e" opacity="0.75"/>
+    <polygon points="267.5,768.3 336.3,792.3 267.5,816.3 198.7,792.3" fill="#334155"/>
+    <polygon points="267.5,768.3 336.3,792.3 267.5,816.3 198.7,792.3" fill="#f43f5e" opacity="0.45"/>
+    <polygon points="267.5,768.3 336.3,792.3 267.5,816.3 198.7,792.3" fill="none" stroke="#f43f5e" stroke-width="1.2" opacity="0.9"/>
+    <text x="267.5" y="780.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">ITSM + chat</text>
+
+    <polygon points="336.3,840.3 405.1,864.3 405.1,890.3 336.3,866.3" fill="#1e293b"/>
+    <polygon points="473.9,840.3 405.1,864.3 405.1,890.3 473.9,866.3" fill="#f43f5e" opacity="0.75"/>
+    <polygon points="405.1,816.3 473.9,840.3 405.1,864.3 336.3,840.3" fill="#334155"/>
+    <polygon points="405.1,816.3 473.9,840.3 405.1,864.3 336.3,840.3" fill="#f43f5e" opacity="0.45"/>
+    <polygon points="405.1,816.3 473.9,840.3 405.1,864.3 336.3,840.3" fill="none" stroke="#f43f5e" stroke-width="1.2" opacity="0.9"/>
+    <text x="405.1" y="828.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Cloud + K8s</text>
+    <line x1="-150" y1="725.0" x2="-137.0" y2="725.0" stroke="#334155" stroke-width="1.5"/>
+    <circle cx="-150" cy="725.0" r="5" fill="#f43f5e"/>
+    <text x="-166" y="719.0" text-anchor="end" font-size="21" font-weight="700" letter-spacing="1.2" fill="#f8fafc">INTEGRATION</text>
+    <text x="-166" y="741.0" text-anchor="end" font-size="14" fill="#94a3b8">27 MCP servers reach the world outside</text>
+  </g>
+  <g id="layer-safety">
+
+    <polygon points="-129.0,555.0 387.0,735.0 387.0,749.0 -129.0,569.0" fill="#172033"/>
+    <polygon points="516.0,690.0 387.0,735.0 387.0,749.0 516.0,704.0" fill="#0f172a"/>
+    <polygon points="0.0,510.0 516.0,690.0 387.0,735.0 -129.0,555.0" fill="#1e293b"/>
+    <polygon points="0.0,510.0 516.0,690.0 387.0,735.0 -129.0,555.0" fill="#f59e0b" opacity="0.26"/>
+    <polygon points="0.0,510.0 516.0,690.0 387.0,735.0 -129.0,555.0" fill="url(#sheen)"/>
+    <polygon points="0.0,510.0 516.0,690.0 387.0,735.0 -129.0,555.0" fill="none" stroke="#f59e0b" stroke-width="1.6" opacity="0.55"/>
+
+    <polygon points="-76.5,526.3 -7.7,550.3 -7.7,576.3 -76.5,552.3" fill="#1e293b"/>
+    <polygon points="61.1,526.3 -7.7,550.3 -7.7,576.3 61.1,552.3" fill="#f59e0b" opacity="0.75"/>
+    <polygon points="-7.7,502.3 61.1,526.3 -7.7,550.3 -76.5,526.3" fill="#334155"/>
+    <polygon points="-7.7,502.3 61.1,526.3 -7.7,550.3 -76.5,526.3" fill="#f59e0b" opacity="0.45"/>
+    <polygon points="-7.7,502.3 61.1,526.3 -7.7,550.3 -76.5,526.3" fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.9"/>
+    <text x="-7.7" y="514.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Confidence</text>
+
+    <polygon points="61.1,574.3 129.9,598.3 129.9,624.3 61.1,600.3" fill="#1e293b"/>
+    <polygon points="198.7,574.3 129.9,598.3 129.9,624.3 198.7,600.3" fill="#f59e0b" opacity="0.75"/>
+    <polygon points="129.9,550.3 198.7,574.3 129.9,598.3 61.1,574.3" fill="#334155"/>
+    <polygon points="129.9,550.3 198.7,574.3 129.9,598.3 61.1,574.3" fill="#f59e0b" opacity="0.45"/>
+    <polygon points="129.9,550.3 198.7,574.3 129.9,598.3 61.1,574.3" fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.9"/>
+    <text x="129.9" y="562.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Policy / Rego</text>
+
+    <polygon points="198.7,622.3 267.5,646.3 267.5,672.3 198.7,648.3" fill="#1e293b"/>
+    <polygon points="336.3,622.3 267.5,646.3 267.5,672.3 336.3,648.3" fill="#f59e0b" opacity="0.75"/>
+    <polygon points="267.5,598.3 336.3,622.3 267.5,646.3 198.7,622.3" fill="#334155"/>
+    <polygon points="267.5,598.3 336.3,622.3 267.5,646.3 198.7,622.3" fill="#f59e0b" opacity="0.45"/>
+    <polygon points="267.5,598.3 336.3,622.3 267.5,646.3 198.7,622.3" fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.9"/>
+    <text x="267.5" y="610.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Digital twin</text>
+
+    <polygon points="336.3,670.3 405.1,694.3 405.1,720.3 336.3,696.3" fill="#1e293b"/>
+    <polygon points="473.9,670.3 405.1,694.3 405.1,720.3 473.9,696.3" fill="#f59e0b" opacity="0.75"/>
+    <polygon points="405.1,646.3 473.9,670.3 405.1,694.3 336.3,670.3" fill="#334155"/>
+    <polygon points="405.1,646.3 473.9,670.3 405.1,694.3 336.3,670.3" fill="#f59e0b" opacity="0.45"/>
+    <polygon points="405.1,646.3 473.9,670.3 405.1,694.3 336.3,670.3" fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.9"/>
+    <text x="405.1" y="658.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Approval</text>
+    <line x1="-150" y1="555.0" x2="-137.0" y2="555.0" stroke="#334155" stroke-width="1.5"/>
+    <circle cx="-150" cy="555.0" r="5" fill="#f59e0b"/>
+    <text x="-166" y="549.0" text-anchor="end" font-size="21" font-weight="700" letter-spacing="1.2" fill="#f8fafc">SAFETY GATES</text>
+    <text x="-166" y="571.0" text-anchor="end" font-size="14" fill="#94a3b8">Every gate passes, or a human approves it</text>
+  </g>
+  <g id="layer-agents">
+
+    <polygon points="-129.0,385.0 387.0,565.0 387.0,579.0 -129.0,399.0" fill="#172033"/>
+    <polygon points="516.0,520.0 387.0,565.0 387.0,579.0 516.0,534.0" fill="#0f172a"/>
+    <polygon points="0.0,340.0 516.0,520.0 387.0,565.0 -129.0,385.0" fill="#1e293b"/>
+    <polygon points="0.0,340.0 516.0,520.0 387.0,565.0 -129.0,385.0" fill="#10b981" opacity="0.26"/>
+    <polygon points="0.0,340.0 516.0,520.0 387.0,565.0 -129.0,385.0" fill="url(#sheen)"/>
+    <polygon points="0.0,340.0 516.0,520.0 387.0,565.0 -129.0,385.0" fill="none" stroke="#10b981" stroke-width="1.6" opacity="0.55"/>
+
+    <polygon points="-76.5,356.3 -7.7,380.3 -7.7,406.3 -76.5,382.3" fill="#1e293b"/>
+    <polygon points="61.1,356.3 -7.7,380.3 -7.7,406.3 61.1,382.3" fill="#10b981" opacity="0.75"/>
+    <polygon points="-7.7,332.3 61.1,356.3 -7.7,380.3 -76.5,356.3" fill="#334155"/>
+    <polygon points="-7.7,332.3 61.1,356.3 -7.7,380.3 -76.5,356.3" fill="#10b981" opacity="0.45"/>
+    <polygon points="-7.7,332.3 61.1,356.3 -7.7,380.3 -76.5,356.3" fill="none" stroke="#10b981" stroke-width="1.2" opacity="0.9"/>
+    <text x="-7.7" y="344.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Investigator</text>
+
+    <polygon points="61.1,404.3 129.9,428.3 129.9,454.3 61.1,430.3" fill="#1e293b"/>
+    <polygon points="198.7,404.3 129.9,428.3 129.9,454.3 198.7,430.3" fill="#10b981" opacity="0.75"/>
+    <polygon points="129.9,380.3 198.7,404.3 129.9,428.3 61.1,404.3" fill="#334155"/>
+    <polygon points="129.9,380.3 198.7,404.3 129.9,428.3 61.1,404.3" fill="#10b981" opacity="0.45"/>
+    <polygon points="129.9,380.3 198.7,404.3 129.9,428.3 61.1,404.3" fill="none" stroke="#10b981" stroke-width="1.2" opacity="0.9"/>
+    <text x="129.9" y="392.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Remediation</text>
+
+    <polygon points="198.7,452.3 267.5,476.3 267.5,502.3 198.7,478.3" fill="#1e293b"/>
+    <polygon points="336.3,452.3 267.5,476.3 267.5,502.3 336.3,478.3" fill="#10b981" opacity="0.75"/>
+    <polygon points="267.5,428.3 336.3,452.3 267.5,476.3 198.7,452.3" fill="#334155"/>
+    <polygon points="267.5,428.3 336.3,452.3 267.5,476.3 198.7,452.3" fill="#10b981" opacity="0.45"/>
+    <polygon points="267.5,428.3 336.3,452.3 267.5,476.3 198.7,452.3" fill="none" stroke="#10b981" stroke-width="1.2" opacity="0.9"/>
+    <text x="267.5" y="440.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Reviewer</text>
+
+    <polygon points="336.3,500.3 405.1,524.3 405.1,550.3 336.3,526.3" fill="#1e293b"/>
+    <polygon points="473.9,500.3 405.1,524.3 405.1,550.3 473.9,526.3" fill="#10b981" opacity="0.75"/>
+    <polygon points="405.1,476.3 473.9,500.3 405.1,524.3 336.3,500.3" fill="#334155"/>
+    <polygon points="405.1,476.3 473.9,500.3 405.1,524.3 336.3,500.3" fill="#10b981" opacity="0.45"/>
+    <polygon points="405.1,476.3 473.9,500.3 405.1,524.3 336.3,500.3" fill="none" stroke="#10b981" stroke-width="1.2" opacity="0.9"/>
+    <text x="405.1" y="488.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Coordinator</text>
+    <line x1="-150" y1="385.0" x2="-137.0" y2="385.0" stroke="#334155" stroke-width="1.5"/>
+    <circle cx="-150" cy="385.0" r="5" fill="#10b981"/>
+    <text x="-166" y="379.0" text-anchor="end" font-size="21" font-weight="700" letter-spacing="1.2" fill="#f8fafc">AGENTS</text>
+    <text x="-166" y="401.0" text-anchor="end" font-size="14" fill="#94a3b8">Gather evidence in parallel, propose one fix</text>
+  </g>
+  <g id="layer-orchestration">
+
+    <polygon points="-129.0,215.0 387.0,395.0 387.0,409.0 -129.0,229.0" fill="#172033"/>
+    <polygon points="516.0,350.0 387.0,395.0 387.0,409.0 516.0,364.0" fill="#0f172a"/>
+    <polygon points="0.0,170.0 516.0,350.0 387.0,395.0 -129.0,215.0" fill="#1e293b"/>
+    <polygon points="0.0,170.0 516.0,350.0 387.0,395.0 -129.0,215.0" fill="#6366f1" opacity="0.26"/>
+    <polygon points="0.0,170.0 516.0,350.0 387.0,395.0 -129.0,215.0" fill="url(#sheen)"/>
+    <polygon points="0.0,170.0 516.0,350.0 387.0,395.0 -129.0,215.0" fill="none" stroke="#6366f1" stroke-width="1.6" opacity="0.55"/>
+
+    <polygon points="-76.5,186.3 -7.7,210.3 -7.7,236.3 -76.5,212.3" fill="#1e293b"/>
+    <polygon points="61.1,186.3 -7.7,210.3 -7.7,236.3 61.1,212.3" fill="#6366f1" opacity="0.75"/>
+    <polygon points="-7.7,162.3 61.1,186.3 -7.7,210.3 -76.5,186.3" fill="#334155"/>
+    <polygon points="-7.7,162.3 61.1,186.3 -7.7,210.3 -76.5,186.3" fill="#6366f1" opacity="0.45"/>
+    <polygon points="-7.7,162.3 61.1,186.3 -7.7,210.3 -76.5,186.3" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.9"/>
+    <text x="-7.7" y="174.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Complexity score</text>
+
+    <polygon points="61.1,234.3 129.9,258.3 129.9,284.3 61.1,260.3" fill="#1e293b"/>
+    <polygon points="198.7,234.3 129.9,258.3 129.9,284.3 198.7,260.3" fill="#6366f1" opacity="0.75"/>
+    <polygon points="129.9,210.3 198.7,234.3 129.9,258.3 61.1,234.3" fill="#334155"/>
+    <polygon points="129.9,210.3 198.7,234.3 129.9,258.3 61.1,234.3" fill="#6366f1" opacity="0.45"/>
+    <polygon points="129.9,210.3 198.7,234.3 129.9,258.3 61.1,234.3" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.9"/>
+    <text x="129.9" y="222.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Adaptive router</text>
+
+    <polygon points="198.7,282.3 267.5,306.3 267.5,332.3 198.7,308.3" fill="#1e293b"/>
+    <polygon points="336.3,282.3 267.5,306.3 267.5,332.3 336.3,308.3" fill="#6366f1" opacity="0.75"/>
+    <polygon points="267.5,258.3 336.3,282.3 267.5,306.3 198.7,282.3" fill="#334155"/>
+    <polygon points="267.5,258.3 336.3,282.3 267.5,306.3 198.7,282.3" fill="#6366f1" opacity="0.45"/>
+    <polygon points="267.5,258.3 336.3,282.3 267.5,306.3 198.7,282.3" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.9"/>
+    <text x="267.5" y="270.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">LangGraph FSM</text>
+
+    <polygon points="336.3,330.3 405.1,354.3 405.1,380.3 336.3,356.3" fill="#1e293b"/>
+    <polygon points="473.9,330.3 405.1,354.3 405.1,380.3 473.9,356.3" fill="#6366f1" opacity="0.75"/>
+    <polygon points="405.1,306.3 473.9,330.3 405.1,354.3 336.3,330.3" fill="#334155"/>
+    <polygon points="405.1,306.3 473.9,330.3 405.1,354.3 336.3,330.3" fill="#6366f1" opacity="0.45"/>
+    <polygon points="405.1,306.3 473.9,330.3 405.1,354.3 336.3,330.3" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.9"/>
+    <text x="405.1" y="318.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Checkpoints</text>
+    <line x1="-150" y1="215.0" x2="-137.0" y2="215.0" stroke="#334155" stroke-width="1.5"/>
+    <circle cx="-150" cy="215.0" r="5" fill="#6366f1"/>
+    <text x="-166" y="209.0" text-anchor="end" font-size="21" font-weight="700" letter-spacing="1.2" fill="#f8fafc">ORCHESTRATION</text>
+    <text x="-166" y="231.0" text-anchor="end" font-size="14" fill="#94a3b8">Score the ask, pick a model, drive the graph</text>
+  </g>
+  <g id="layer-edge">
+
+    <polygon points="-129.0,45.0 387.0,225.0 387.0,239.0 -129.0,59.0" fill="#172033"/>
+    <polygon points="516.0,180.0 387.0,225.0 387.0,239.0 516.0,194.0" fill="#0f172a"/>
+    <polygon points="0.0,0.0 516.0,180.0 387.0,225.0 -129.0,45.0" fill="#1e293b"/>
+    <polygon points="0.0,0.0 516.0,180.0 387.0,225.0 -129.0,45.0" fill="#38bdf8" opacity="0.26"/>
+    <polygon points="0.0,0.0 516.0,180.0 387.0,225.0 -129.0,45.0" fill="url(#sheen)"/>
+    <polygon points="0.0,0.0 516.0,180.0 387.0,225.0 -129.0,45.0" fill="none" stroke="#38bdf8" stroke-width="1.6" opacity="0.55"/>
+
+    <polygon points="-76.5,16.3 -7.7,40.3 -7.7,66.3 -76.5,42.3" fill="#1e293b"/>
+    <polygon points="61.1,16.3 -7.7,40.3 -7.7,66.3 61.1,42.3" fill="#38bdf8" opacity="0.75"/>
+    <polygon points="-7.7,-7.7 61.1,16.3 -7.7,40.3 -76.5,16.3" fill="#334155"/>
+    <polygon points="-7.7,-7.7 61.1,16.3 -7.7,40.3 -76.5,16.3" fill="#38bdf8" opacity="0.45"/>
+    <polygon points="-7.7,-7.7 61.1,16.3 -7.7,40.3 -76.5,16.3" fill="none" stroke="#38bdf8" stroke-width="1.2" opacity="0.9"/>
+    <text x="-7.7" y="4.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">OAuth2 / JWT</text>
+
+    <polygon points="61.1,64.3 129.9,88.3 129.9,114.3 61.1,90.3" fill="#1e293b"/>
+    <polygon points="198.7,64.3 129.9,88.3 129.9,114.3 198.7,90.3" fill="#38bdf8" opacity="0.75"/>
+    <polygon points="129.9,40.3 198.7,64.3 129.9,88.3 61.1,64.3" fill="#334155"/>
+    <polygon points="129.9,40.3 198.7,64.3 129.9,88.3 61.1,64.3" fill="#38bdf8" opacity="0.45"/>
+    <polygon points="129.9,40.3 198.7,64.3 129.9,88.3 61.1,64.3" fill="none" stroke="#38bdf8" stroke-width="1.2" opacity="0.9"/>
+    <text x="129.9" y="52.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">API key + HMAC</text>
+
+    <polygon points="198.7,112.3 267.5,136.3 267.5,162.3 198.7,138.3" fill="#1e293b"/>
+    <polygon points="336.3,112.3 267.5,136.3 267.5,162.3 336.3,138.3" fill="#38bdf8" opacity="0.75"/>
+    <polygon points="267.5,88.3 336.3,112.3 267.5,136.3 198.7,112.3" fill="#334155"/>
+    <polygon points="267.5,88.3 336.3,112.3 267.5,136.3 198.7,112.3" fill="#38bdf8" opacity="0.45"/>
+    <polygon points="267.5,88.3 336.3,112.3 267.5,136.3 198.7,112.3" fill="none" stroke="#38bdf8" stroke-width="1.2" opacity="0.9"/>
+    <text x="267.5" y="100.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">Rate limiter</text>
+
+    <polygon points="336.3,160.3 405.1,184.3 405.1,210.3 336.3,186.3" fill="#1e293b"/>
+    <polygon points="473.9,160.3 405.1,184.3 405.1,210.3 473.9,186.3" fill="#38bdf8" opacity="0.75"/>
+    <polygon points="405.1,136.3 473.9,160.3 405.1,184.3 336.3,160.3" fill="#334155"/>
+    <polygon points="405.1,136.3 473.9,160.3 405.1,184.3 336.3,160.3" fill="#38bdf8" opacity="0.45"/>
+    <polygon points="405.1,136.3 473.9,160.3 405.1,184.3 336.3,160.3" fill="none" stroke="#38bdf8" stroke-width="1.2" opacity="0.9"/>
+    <text x="405.1" y="148.3" text-anchor="middle" font-size="15" font-weight="600" fill="#e2e8f0">RBAC + tenancy</text>
+    <line x1="-150" y1="45.0" x2="-137.0" y2="45.0" stroke="#334155" stroke-width="1.5"/>
+    <circle cx="-150" cy="45.0" r="5" fill="#38bdf8"/>
+    <text x="-166" y="39.0" text-anchor="end" font-size="21" font-weight="700" letter-spacing="1.2" fill="#f8fafc">EDGE</text>
+    <text x="-166" y="61.0" text-anchor="end" font-size="14" fill="#94a3b8">Authenticate, throttle, resolve the tenant</text>
+  </g>
+  <line x1="585.0" y1="180.0" x2="585.0" y2="1056.0" stroke="#475569" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#arrow)"/>
+  <line x1="516.0" y1="180.0" x2="585.0" y2="180.0" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="585.0" cy="180.0" r="4.5" fill="#38bdf8"/>
+  <line x1="516.0" y1="350.0" x2="585.0" y2="350.0" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="585.0" cy="350.0" r="4.5" fill="#6366f1"/>
+  <line x1="516.0" y1="520.0" x2="585.0" y2="520.0" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="585.0" cy="520.0" r="4.5" fill="#10b981"/>
+  <line x1="516.0" y1="690.0" x2="585.0" y2="690.0" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="585.0" cy="690.0" r="4.5" fill="#f59e0b"/>
+  <line x1="516.0" y1="860.0" x2="585.0" y2="860.0" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="585.0" cy="860.0" r="4.5" fill="#f43f5e"/>
+  <line x1="516.0" y1="1030.0" x2="585.0" y2="1030.0" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="585.0" cy="1030.0" r="4.5" fill="#a855f7"/>
+  <text x="585.0" y="162.0" text-anchor="middle" font-size="13" font-weight="600" letter-spacing="0.6" fill="#94a3b8">one request</text>
+</svg>
