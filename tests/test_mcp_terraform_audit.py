@@ -35,6 +35,25 @@ def _labelled(record: dict) -> bool:
     )
 
 
+@pytest.fixture(autouse=True)
+def _demo_mode(monkeypatch):
+    """Offline fixtures are demo-gated now (fail-closed contract); the labelling
+    assertions below exercise them, so opt into demo mode. The live tests set
+    OFFLINE=False and never reach the gate."""
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+
+
+def test_offline_reads_fail_closed_without_demo_mode(monkeypatch):
+    monkeypatch.delenv("COPILOT_DEMO_MODE", raising=False)
+    err = tf.list_workspaces()[0]["error"]
+    assert "Terraform Cloud is not configured" in err
+    assert "disabled outside COPILOT_DEMO_MODE" in err
+    assert "not configured" in tf.get_run_details("run-abc123")["error"]
+    assert "not configured" in tf.trigger_plan("checkout-prod")["error"]
+    # get_plan_output returns a bare string, so the error is the message itself.
+    assert "not configured" in tf.get_plan_output("run-abc123")
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures must announce themselves
 # --------------------------------------------------------------------------- #

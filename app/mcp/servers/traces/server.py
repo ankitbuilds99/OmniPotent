@@ -41,6 +41,37 @@ def _as_int(value, default: int) -> int:
         return default
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound jaeger-query calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live traces read.
+
+    Offline responses were shaped exactly like live ones, so a fault
+    localization built on invented spans looked identical to one built on real
+    telemetry.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "traces")
+
+
+def _gate() -> dict | None:
+    """Fail closed when no traces API is configured outside demo mode: fixtures
+    are a demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Traces", "TRACES_API_URL")
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures — multi-scenario support via centralized fixture system
 # --------------------------------------------------------------------------- #
@@ -253,7 +284,7 @@ SUMMARY_KEYS = ("trace_id", "root_service", "operation", "duration_ms", "status"
 def _jaeger_get(path: str, params: dict | None = None):
     import httpx
 
-    return httpx.get(f"{TRACES_API_URL}{path}", params=params, timeout=20)
+    return httpx.get(f"{TRACES_API_URL}{path}", params=params, timeout=_mcp_timeout())
 
 
 def _payload_data(resp) -> list:
@@ -474,6 +505,8 @@ def get_exemplars(start: str, end: str, error_only: bool = True, limit: int | st
     Timestamps are ISO-8601 UTC (lexicographic compare is chronological)."""
     limit = _as_int(limit, 5)
     rows = search_traces(error_only=error_only, limit=100)
+    if rows and rows[0].get("error"):  # the fail-closed not-configured error
+        return rows[:1]
     hits = [r for r in rows if start <= str(r.get("start", "")) <= end]
     return hits[:limit]
 
@@ -488,6 +521,9 @@ def search_traces(
     limit = _as_int(limit, 20)
     min_dur = _as_int(min_duration_ms, 0)
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         out = []
         for tr in _get_traces():
             if error_only and tr["status"] != "error":
@@ -497,7 +533,7 @@ def search_traces(
             if service and not any(sp["service"] == service for sp in tr["spans"]):
                 continue
             out.append({k: tr[k] for k in SUMMARY_KEYS})
-        return out[:limit]
+        return _demo(out[:limit])
 
     # Live rows go through the same normaliser as get_trace, so they carry a real
     # root_service and start (they used to be blank and absent, which broke
@@ -512,9 +548,12 @@ def get_trace(trace_id: str) -> dict:
     """Return the full span tree for a trace (service, operation, duration, status,
     parent, error) — to localize exactly which span failed or was slow."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         tr = next((t for t in _get_traces() if t["trace_id"] == trace_id), None)
-        return tr or {"error": f"unknown trace '{trace_id}' (offline demo has "
-                      f"{[t['trace_id'] for t in _get_traces()]})"}
+        return _demo(tr) if tr else {"error": f"unknown trace '{trace_id}' (offline demo has "
+                                     f"{[t['trace_id'] for t in _get_traces()]})"}
 
     resp = _jaeger_get(f"/api/traces/{trace_id}")
     data = _payload_data(resp)
@@ -541,10 +580,15 @@ def get_trace(trace_id: str) -> dict:
 
 
 @mcp.tool()
-def service_dependencies() -> list[list[str]]:
+def service_dependencies() -> list[list[str]] | dict:
     """Return the runtime service dependency graph as caller→callee edges, derived
     from observed spans (not static config)."""
     if OFFLINE:
+        # Edges are bare [caller, callee] pairs with nowhere to hang the
+        # _simulated key; the gate still applies, the label cannot.
+        err = _gate()
+        if err:
+            return err
         return deps_from_traces(_get_traces())
     # jaeger-query's search returns whole trace documents, not summaries, so the
     # spans needed for the edges are already in hand — this used to re-fetch each
@@ -558,6 +602,8 @@ def analyze_blast_radius(failing_service: str) -> dict:
     transitively) vs. its DOWNSTREAM dependencies (candidate causes) — the
     cause-vs-symptom separation that focuses an investigation."""
     edges = service_dependencies()
+    if isinstance(edges, dict):  # the fail-closed not-configured error
+        return edges
     result = blast_radius(edges, failing_service)
     result["edges"] = edges
     return result
@@ -571,7 +617,10 @@ def correlate_incidents(services: list[str]) -> dict:
     candidates and the single most-likely shared root (`likely_root`)."""
     from app.correlation import correlate_storm
 
-    result = correlate_storm(list(services or []), service_dependencies())
+    edges = service_dependencies()
+    if isinstance(edges, dict):  # the fail-closed not-configured error
+        return edges
+    result = correlate_storm(list(services or []), edges)
     return result
 
 

@@ -46,6 +46,36 @@ def _headers() -> dict:
     }
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound Opsgenie API calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live Opsgenie read.
+
+    Offline responses were shaped exactly like real API ones, so an alert
+    "created" offline looked identical to an alert that actually paged someone.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "opsgenie")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Opsgenie", "OPSGENIE_API_KEY")
+
+
 # --- Offline fixtures ---
 def _get_fixture_alerts() -> list[dict]:
     return [
@@ -134,12 +164,16 @@ def create_alert(
         responders: Comma-separated team IDs to notify.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        # The fake id is prefixed so it can never be mistaken for a real alert.
+        return _demo({
             "status": "created (simulated - offline demo)",
-            "id": "alert-uuid-demo",
+            "id": "SIMULATED-alert-uuid-demo",
             "message": message,
             "priority": priority,
-        }
+        })
 
     import httpx
 
@@ -168,7 +202,7 @@ def create_alert(
         f"{OPSGENIE_BASE_URL}/v2/alerts",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -189,9 +223,12 @@ def get_alert(alert_id: str) -> dict:
         alert_id: Alert ID or alias.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         for alert in _get_fixture_alerts():
             if alert["id"] == alert_id or alert["tiny_id"] == alert_id:
-                return alert
+                return _demo(alert)
         return {"error": f"Alert {alert_id} not found (offline demo)"}
 
     import httpx
@@ -199,7 +236,7 @@ def get_alert(alert_id: str) -> dict:
     resp = httpx.get(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}",
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json().get("data", {})
@@ -236,12 +273,15 @@ def list_alerts(
     limit = _as_int(limit, 50)
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         results = _get_fixture_alerts()
         if status:
             results = [a for a in results if a.get("status") == status]
         if priority:
             results = [a for a in results if a.get("priority") == priority]
-        return results[:limit]
+        return _demo(results[:limit])
 
     import httpx
 
@@ -257,7 +297,7 @@ def list_alerts(
         f"{OPSGENIE_BASE_URL}/v2/alerts",
         headers=_headers(),
         params=params,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -291,10 +331,13 @@ def acknowledge_alert(
         user: User performing the action.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "acknowledged (simulated - offline demo)",
             "id": alert_id,
-        }
+        })
 
     import httpx
 
@@ -306,7 +349,7 @@ def acknowledge_alert(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}/acknowledge",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -327,10 +370,13 @@ def close_alert(
         user: User performing the action.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "closed (simulated - offline demo)",
             "id": alert_id,
-        }
+        })
 
     import httpx
 
@@ -342,7 +388,7 @@ def close_alert(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}/close",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -363,10 +409,13 @@ def add_note(
         user: User adding the note.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "note added (simulated - offline demo)",
             "id": alert_id,
-        }
+        })
 
     import httpx
 
@@ -374,7 +423,7 @@ def add_note(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}/notes",
         headers=_headers(),
         json={"note": note, "user": user, "source": "OmniPotent"},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -397,11 +446,14 @@ def escalate_alert(
         user: User performing the action.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "escalated (simulated - offline demo)",
             "id": alert_id,
             "escalation_id": escalation_id,
-        }
+        })
 
     import httpx
 
@@ -417,7 +469,7 @@ def escalate_alert(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}/escalate",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -440,11 +492,14 @@ def assign_alert(
         note: Optional note.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "assigned (simulated - offline demo)",
             "id": alert_id,
             "owner_id": owner_id,
-        }
+        })
 
     import httpx
 
@@ -460,7 +515,7 @@ def assign_alert(
         f"{OPSGENIE_BASE_URL}/v2/alerts/{alert_id}/assign",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -475,7 +530,10 @@ def get_on_call(schedule_id: str = "") -> list[dict]:
         schedule_id: Optional schedule ID to filter by.
     """
     if OFFLINE:
-        return _get_fixture_oncall()
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_fixture_oncall())
 
     import httpx
 
@@ -488,7 +546,7 @@ def get_on_call(schedule_id: str = "") -> list[dict]:
         f"{OPSGENIE_BASE_URL}{endpoint}",
         headers=_headers(),
         params={"flat": "true"},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -506,14 +564,17 @@ def get_on_call(schedule_id: str = "") -> list[dict]:
 def list_schedules() -> list[dict]:
     """List all on-call schedules."""
     if OFFLINE:
-        return _get_fixture_schedules()
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_fixture_schedules())
 
     import httpx
 
     resp = httpx.get(
         f"{OPSGENIE_BASE_URL}/v2/schedules",
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -532,17 +593,20 @@ def list_schedules() -> list[dict]:
 def list_teams() -> list[dict]:
     """List all Opsgenie teams."""
     if OFFLINE:
-        return [
+        err = _gate()
+        if err:
+            return [err]
+        return _demo([
             {"id": "team-1", "name": "Engineering", "description": "Engineering team"},
             {"id": "team-2", "name": "Platform", "description": "Platform team"},
-        ]
+        ])
 
     import httpx
 
     resp = httpx.get(
         f"{OPSGENIE_BASE_URL}/v2/teams",
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -564,14 +628,17 @@ def get_team_on_call(team_id: str) -> list[dict]:
         team_id: Team ID.
     """
     if OFFLINE:
-        return _get_fixture_oncall()
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_fixture_oncall())
 
     import httpx
 
     resp = httpx.get(
         f"{OPSGENIE_BASE_URL}/v2/teams/{team_id}/on-calls",
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 

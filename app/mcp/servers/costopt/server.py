@@ -30,6 +30,23 @@ AWS_ACCESS_KEY = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
 AWS_SECRET_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
 OFFLINE = not (AWS_ACCESS_KEY and AWS_SECRET_KEY)
 
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a real cost read.
+
+    Offline responses fabricated AWS spend and forecasts shaped exactly like
+    real Cost Explorer output — invented dollars entering a report as fact.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "costopt")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Cost optimization", "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+
 AWS_PRICING: dict[str, dict[str, float]] = {
     "ec2": {
         "t3.micro": 0.0104,
@@ -230,6 +247,9 @@ def analyze_costs(
         Cost breakdown with trends and anomalies
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         by_service_data = DEMO_COSTS["by_service"]
         by_service: dict[str, dict[str, float]] = by_service_data if isinstance(by_service_data, dict) else {}
         total_current = sum(float(s["current_month"]) for s in by_service.values())
@@ -244,7 +264,7 @@ def analyze_costs(
             if float(data["change_pct"]) > 15
         ]
 
-        return {
+        return _demo({
             "period": period,
             "total_cost": round(total_current, 2),
             "previous_period": round(total_previous, 2),
@@ -263,7 +283,7 @@ def analyze_costs(
             )[:5],
             "anomalies": anomalies,
             "mode": "offline_demo",
-        }
+        })
 
     return {
         "error": "Live mode requires AWS credentials",
@@ -289,6 +309,9 @@ def detect_unused(resource_types: list[str] | None = None) -> dict:
         List of unused resources with potential savings
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         unused = []
         for resource in DEMO_RESOURCES:
             is_unused = False
@@ -331,7 +354,7 @@ def detect_unused(resource_types: list[str] | None = None) -> dict:
 
         total_waste = sum(r["monthly_cost"] for r in unused)
 
-        return {
+        return _demo({
             "unused_resources": unused,
             "total_count": len(unused),
             "total_monthly_waste": round(total_waste, 2),
@@ -343,7 +366,7 @@ def detect_unused(resource_types: list[str] | None = None) -> dict:
                 "Consider Reserved Instances for stable workloads",
             ],
             "mode": "offline_demo",
-        }
+        })
 
     return {"error": "Live mode requires AWS credentials"}
 
@@ -386,6 +409,9 @@ def rightsizing_recommendations(
         min_savings = 10.0
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         recommendations = []
 
         for resource in DEMO_RESOURCES:
@@ -430,7 +456,7 @@ def rightsizing_recommendations(
         total_monthly = sum(r["savings"]["monthly_savings"] for r in recommendations)
         total_annual = sum(r["savings"]["annual_savings"] for r in recommendations)
 
-        return {
+        return _demo({
             "recommendations": recommendations,
             "total_recommendations": len(recommendations),
             "total_monthly_savings": round(total_monthly, 2),
@@ -441,7 +467,7 @@ def rightsizing_recommendations(
                 "Review during maintenance windows to minimize disruption",
             ],
             "mode": "offline_demo",
-        }
+        })
 
     return {"error": "Live mode requires AWS credentials"}
 
@@ -466,6 +492,9 @@ def cost_forecast(
         months_ahead = 3
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         by_service_data = DEMO_COSTS["by_service"]
         by_service_typed: dict[str, dict[str, float]] = by_service_data if isinstance(by_service_data, dict) else {}
         current_monthly = sum(float(s["current_month"]) for s in by_service_typed.values())
@@ -503,12 +532,14 @@ def cost_forecast(
                 "optimized_cost": round(projected_float - potential_savings, 2),
             })
 
-        return {
+        return _demo({
             "current_monthly_cost": round(current_monthly, 2),
             "forecast": optimized_forecast,
             "assumptions": {
-                "growth_rate": f"{growth_rate * 100:.0f}% monthly",
-                "based_on": "Historical trend analysis",
+                # Honest provenance: this is demo arithmetic over a bundled
+                # fixture, not an analysis of anyone's billing history.
+                "growth_rate": f"{growth_rate * 100:.0f}% monthly (assumed demo constant)",
+                "based_on": "demo fixture, not derived from your account",
             },
             "potential_monthly_savings": round(potential_savings, 2),
             "recommendations": [
@@ -517,7 +548,7 @@ def cost_forecast(
                 "Review Reserved Instance coverage for predictable workloads",
             ],
             "mode": "offline_demo",
-        }
+        })
 
     return {"error": "Live mode requires AWS credentials"}
 

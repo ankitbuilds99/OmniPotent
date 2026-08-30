@@ -274,6 +274,19 @@ def _server_config() -> dict:
 
     merged = {**installed, **builtin}
 
+    # Every server gets the demo flag and the shared HTTP deadline. A stdio
+    # server inherits only DEFAULT_INHERITED_ENV_VARS plus its own env dict (see
+    # the github entry's comment), so without this the subprocesses could not
+    # tell demo mode from production at all — and the fixture fallback must be
+    # allowed only in demo mode (app/config.py's fail-closed contract). Values
+    # already set (github's explicit timeout, a marketplace agent's own config)
+    # win via setdefault.
+    demo_flag = "true" if s.copilot_demo_mode else "false"
+    for entry in merged.values():
+        env = entry.setdefault("env", {})
+        env.setdefault("COPILOT_DEMO_MODE", demo_flag)
+        env.setdefault("HTTP_TIMEOUT_MCP", str(s.http_timeout_mcp))
+
     # Every session gets a read deadline. Without one, ClientSession waits on a
     # response forever (mcp/shared/session.py does `fail_after(None)`), so a
     # wedged-but-alive subprocess — a kubernetes call against an unresponsive API

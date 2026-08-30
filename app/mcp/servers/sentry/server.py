@@ -59,6 +59,13 @@ def _demo(payload):
     return mark_demo(payload, "sentry")
 
 
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Sentry", "SENTRY_API_TOKEN")
+
+
 # --- Offline fixtures (multi-scenario support) ----------------------------- #
 def _get_issues() -> list:
     from app.mcp.fixtures import get_fixture
@@ -81,6 +88,9 @@ def list_issues(query: str = "is:unresolved", limit: int | str = 10) -> list[dic
     """
     limit = _as_int(limit, 10)
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         items = _get_issues()
         if "level:error" in query:
             items = [i for i in items if i.get("level") == "error"]
@@ -113,6 +123,9 @@ def list_issues(query: str = "is:unresolved", limit: int | str = 10) -> list[dic
 def get_issue(issue_id: str) -> dict:
     """Return one issue's details by id."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         issues = _get_issues()
         found = next((i for i in issues if i.get("id") == issue_id), None)
         if not found:
@@ -138,6 +151,9 @@ def get_latest_event(issue_id: str) -> dict:
     """Return the latest event for an issue — the stack trace (file/function/line),
     release, environment, and tags. This is the exact code location to fix."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         event = _get_latest_event()
         if not event:
             return {"error": "no offline event available for this scenario"}

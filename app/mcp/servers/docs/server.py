@@ -27,6 +27,20 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("docs")
 
+
+def _mcp_timeout() -> float:
+    """Deadline for the git subprocess calls (HTTP_TIMEOUT_MCP — the shared MCP
+    call budget, so operators tune one knob).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
 REPO_PATH = Path(os.environ.get("TARGET_REPO_PATH", "./sample_repo")).resolve()
 
 
@@ -861,7 +875,7 @@ def generate_changelog(
             cwd=target,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_mcp_timeout(),
         )
 
         if result.returncode != 0:

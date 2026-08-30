@@ -56,9 +56,11 @@ def test_cluster_by_time_parses_iso_and_isolates_undated():
     assert ["c"] in ids
 
 
-def test_correlate_incidents_tool_offline_integration():
+def test_correlate_incidents_tool_offline_integration(monkeypatch):
     from app.mcp.servers.traces import server as traces
 
+    # Offline fixtures are demo-gated (fail-closed contract).
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
     out = traces.correlate_incidents(["checkout-svc"])
     assert "likely_root" in out and "ranked" in out
     assert out["failing_services"] == ["checkout-svc"]

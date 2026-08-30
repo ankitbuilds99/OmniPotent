@@ -52,6 +52,36 @@ def _headers() -> dict:
     }
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound Jira API calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live Jira read.
+
+    Offline responses were shaped exactly like real API ones, so a ticket
+    "created" offline looked identical to a ticket that actually exists.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "jira")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Jira", "JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN")
+
+
 # --- Offline fixtures ---
 DEMO_JIRA_URL = os.environ.get("JIRA_BASE_URL", "https://your-domain.atlassian.net")
 
@@ -112,13 +142,17 @@ def create_issue(
         project_key: Project key (defaults to JIRA_PROJECT_KEY env var).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        # The fake key is prefixed so it can never be mistaken for a real ticket.
+        return _demo({
             "status": "created (simulated - offline demo)",
-            "key": "INC-999",
-            "id": "10999",
+            "key": "SIMULATED-INC-999",
+            "id": "SIMULATED-10999",
             "summary": summary,
-            "url": f"{DEMO_JIRA_URL}/browse/INC-999",
-        }
+            "url": f"{DEMO_JIRA_URL}/browse/SIMULATED-INC-999",
+        })
 
     import httpx
 
@@ -146,7 +180,7 @@ def create_issue(
         auth=_auth(),
         headers=_headers(),
         json={"fields": fields},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -164,9 +198,12 @@ def create_issue(
 def get_issue(issue_key: str) -> dict:
     """Get a Jira issue by key (e.g., INC-123)."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         for issue in _get_fixture_issues():
             if issue["key"] == issue_key or issue_key == "":
-                return issue
+                return _demo(issue)
         return {"error": f"Issue {issue_key} not found (offline demo)"}
 
     import httpx
@@ -175,7 +212,7 @@ def get_issue(issue_key: str) -> dict:
         f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}",
         auth=_auth(),
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -233,10 +270,13 @@ def update_issue(
         status: Transition to this status (optional, must be valid transition).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "updated (simulated - offline demo)",
             "key": issue_key,
-        }
+        })
 
     import httpx
 
@@ -262,7 +302,7 @@ def update_issue(
             auth=_auth(),
             headers=_headers(),
             json={"fields": fields},
-            timeout=30,
+            timeout=_mcp_timeout(),
         )
         resp.raise_for_status()
 
@@ -281,7 +321,7 @@ def _transition_issue(issue_key: str, status_name: str) -> bool:
         f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/transitions",
         auth=_auth(),
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -299,7 +339,7 @@ def _transition_issue(issue_key: str, status_name: str) -> bool:
         auth=_auth(),
         headers=_headers(),
         json={"transition": {"id": transition_id}},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     return True
@@ -325,10 +365,13 @@ def search_issues(
     limit = _as_int(limit, 50)
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         results = _get_fixture_issues()
         if status:
             results = [i for i in results if i.get("status", "").lower() == status.lower()]
-        return results[:limit]
+        return _demo(results[:limit])
 
     import httpx
 
@@ -354,7 +397,7 @@ def search_issues(
             "maxResults": limit,
             "fields": ["summary", "status", "priority", "assignee", "labels"],
         },
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -384,11 +427,14 @@ def add_comment(issue_key: str, comment: str) -> dict:
         comment: Comment text to add.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "comment added (simulated - offline demo)",
             "key": issue_key,
             "comment": comment[:100] + "..." if len(comment) > 100 else comment,
-        }
+        })
 
     import httpx
 
@@ -405,7 +451,7 @@ def add_comment(issue_key: str, comment: str) -> dict:
                 ],
             }
         },
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -426,12 +472,15 @@ def link_issues(
         link_type: Type of link (Relates, Blocks, Duplicates, etc.).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "linked (simulated - offline demo)",
             "source": source_key,
             "target": target_key,
             "link_type": link_type,
-        }
+        })
 
     import httpx
 
@@ -444,7 +493,7 @@ def link_issues(
             "inwardIssue": {"key": source_key},
             "outwardIssue": {"key": target_key},
         },
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -464,7 +513,10 @@ def get_project_info(project_key: str = "") -> dict:
         project_key: Project key (defaults to JIRA_PROJECT_KEY env var).
     """
     if OFFLINE:
-        return _get_fixture_project()
+        err = _gate()
+        if err:
+            return err
+        return _demo(_get_fixture_project())
 
     import httpx
 
@@ -473,7 +525,7 @@ def get_project_info(project_key: str = "") -> dict:
         f"{JIRA_BASE_URL}/rest/api/3/project/{key}",
         auth=_auth(),
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()

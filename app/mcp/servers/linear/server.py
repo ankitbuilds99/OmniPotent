@@ -46,6 +46,36 @@ def _headers() -> dict:
     }
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound Linear GraphQL calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live Linear read.
+
+    Offline responses were shaped exactly like real API ones, so an issue
+    "created" offline looked identical to an issue that actually exists.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "linear")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Linear", "LINEAR_API_KEY")
+
+
 # --- Offline fixtures ---
 LINEAR_WORKSPACE = os.environ.get("LINEAR_WORKSPACE", "your-workspace")
 
@@ -97,7 +127,7 @@ async def _graphql(query: str, variables: dict | None = None) -> dict | None:
             API_URL,
             headers=_headers(),
             json={"query": query, "variables": variables or {}},
-            timeout=30,
+            timeout=_mcp_timeout(),
         )
 
         if resp.status_code >= 400:
@@ -128,13 +158,17 @@ def create_issue(
         labels: Comma-separated label IDs (optional).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        # The fake identifier is prefixed so it can never be mistaken for a real issue.
+        return _demo({
             "status": "created (simulated - offline demo)",
-            "id": "issue-uuid-demo",
-            "identifier": "ENG-999",
+            "id": "SIMULATED-issue-uuid-demo",
+            "identifier": "SIMULATED-ENG-999",
             "title": title,
-            "url": f"https://linear.app/{LINEAR_WORKSPACE}/issue/ENG-999",
-        }
+            "url": f"https://linear.app/{LINEAR_WORKSPACE}/issue/SIMULATED-ENG-999",
+        })
 
     import httpx
 
@@ -171,7 +205,7 @@ def create_issue(
         API_URL,
         headers=_headers(),
         json={"query": mutation, "variables": {"input": input_data}},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -197,9 +231,12 @@ def get_issue(issue_id: str) -> dict:
         issue_id: Issue ID or identifier (e.g., ENG-123).
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         for issue in _get_fixture_issues():
             if issue["id"] == issue_id or issue["identifier"] == issue_id:
-                return issue
+                return _demo(issue)
         return {"error": f"Issue {issue_id} not found (offline demo)"}
 
     import httpx
@@ -228,7 +265,7 @@ def get_issue(issue_id: str) -> dict:
         API_URL,
         headers=_headers(),
         json={"query": query, "variables": {"id": issue_id}},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -276,10 +313,13 @@ def update_issue(
         assignee_id: New assignee user ID (optional).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "updated (simulated - offline demo)",
             "id": issue_id,
-        }
+        })
 
     import httpx
 
@@ -310,7 +350,7 @@ def update_issue(
         API_URL,
         headers=_headers(),
         json={"query": mutation, "variables": {"id": issue_id, "input": input_data}},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -342,10 +382,13 @@ def search_issues(
     limit = _as_int(limit, 50)
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         results = _get_fixture_issues()
         if state:
             results = [i for i in results if i.get("state_type", "").lower() == state.lower()]
-        return results[:limit]
+        return _demo(results[:limit])
 
     import httpx
 
@@ -388,7 +431,7 @@ def search_issues(
             "query": gql_query,
             "variables": {"filter": filter_data if filter_data else None, "first": limit},
         },
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -427,10 +470,13 @@ def add_comment(issue_id: str, comment: str) -> dict:
         comment: Comment text (markdown supported).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "comment added (simulated - offline demo)",
             "id": issue_id,
-        }
+        })
 
     import httpx
 
@@ -450,7 +496,7 @@ def add_comment(issue_id: str, comment: str) -> dict:
             "query": mutation,
             "variables": {"input": {"issueId": issue_id, "body": comment}},
         },
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -466,7 +512,10 @@ def add_comment(issue_id: str, comment: str) -> dict:
 def get_teams() -> list[dict]:
     """Get all Linear teams."""
     if OFFLINE:
-        return _get_fixture_teams()
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_fixture_teams())
 
     import httpx
 
@@ -487,7 +536,7 @@ def get_teams() -> list[dict]:
         API_URL,
         headers=_headers(),
         json={"query": query},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -514,13 +563,16 @@ def get_workflow_states(team_id: str = "") -> list[dict]:
         team_id: Team ID (defaults to LINEAR_TEAM_ID env var).
     """
     if OFFLINE:
-        return [
+        err = _gate()
+        if err:
+            return [err]
+        return _demo([
             {"id": "state-1", "name": "Backlog", "type": "backlog", "position": 0},
             {"id": "state-2", "name": "Todo", "type": "unstarted", "position": 1},
             {"id": "state-3", "name": "In Progress", "type": "started", "position": 2},
             {"id": "state-4", "name": "Done", "type": "completed", "position": 3},
             {"id": "state-5", "name": "Canceled", "type": "canceled", "position": 4},
-        ]
+        ])
 
     import httpx
 
@@ -541,7 +593,7 @@ def get_workflow_states(team_id: str = "") -> list[dict]:
         API_URL,
         headers=_headers(),
         json={"query": query, "variables": {"teamId": team_id or LINEAR_TEAM_ID}},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -574,11 +626,14 @@ def link_incident(
         title: Title for the link.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "linked (simulated - offline demo)",
             "issue_id": issue_id,
             "url": incident_url,
-        }
+        })
 
     import httpx
 
@@ -597,7 +652,7 @@ def link_incident(
             "query": mutation,
             "variables": {"input": {"issueId": issue_id, "url": incident_url, "title": title}},
         },
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()

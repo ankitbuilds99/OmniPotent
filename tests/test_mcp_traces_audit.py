@@ -243,12 +243,14 @@ def test_unattributed_span_is_labelled_not_invented(live, monkeypatch):
     assert live.service_dependencies() == []
 
 
-def test_offline_mode_still_analyses_the_bundled_incident():
+def test_offline_mode_still_analyses_the_bundled_incident(monkeypatch):
     """The fixture path must keep working unchanged after the live-mode repair."""
     from app.mcp.servers.traces import server as traces
 
     if not traces.OFFLINE:
         pytest.skip("TRACES_API_URL is set")
+    # Offline fixtures are demo-gated (fail-closed contract).
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
     edges = traces.deps_from_traces(traces._get_traces())
     assert ["api-gateway", "checkout-svc"] in edges
     res = traces.analyze_critical_path("tr-checkout-err-001")

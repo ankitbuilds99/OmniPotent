@@ -52,6 +52,48 @@ def get_fixture(server: str, key: str) -> Any:
 
 
 # --------------------------------------------------------------------------- #
+# Demo-mode gate
+# --------------------------------------------------------------------------- #
+# Truthy spellings accepted for COPILOT_DEMO_MODE, matching how pydantic parses
+# the same flag into Settings.copilot_demo_mode in the parent process.
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def demo_mode_enabled() -> bool:
+    """True when COPILOT_DEMO_MODE is truthy in this process's environment.
+
+    Read per call rather than frozen at import (the servers' _mcp_timeout
+    pattern): tests monkeypatch the env, and a stdio subprocess only sees the
+    flag because app/mcp/client.py forwards it explicitly — nothing here can
+    reach the in-process Settings object.
+    """
+    return os.environ.get("COPILOT_DEMO_MODE", "").strip().lower() in _TRUTHY
+
+
+def offline_gate(server: str, env_vars: str) -> dict | None:
+    """The credential-absence gate every fixture-backed server must pass through.
+
+    The repo contract (app/config.py) is fail-closed: an unconfigured backend
+    may fabricate payloads only in demo mode, labelled as simulated. Falling
+    back to fixtures on credential absence alone meant a production deployment
+    with one missing token silently investigated an invented incident.
+
+    Returns None when fixtures may be served (COPILOT_DEMO_MODE is on), else
+    the not-configured error the tool must return instead of fixtures.
+
+    Args:
+        server: human-readable service name (e.g. "PagerDuty").
+        env_vars: the env var(s) that enable live mode (e.g. "PAGERDUTY_API_TOKEN").
+    """
+    if demo_mode_enabled():
+        return None
+    return {
+        "error": f"{server} is not configured (set {env_vars}); "
+        "demo fixtures are disabled outside COPILOT_DEMO_MODE"
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Labelling offline data
 # --------------------------------------------------------------------------- #
 # Key added to every fixture-derived record. Underscore-prefixed so it reads as

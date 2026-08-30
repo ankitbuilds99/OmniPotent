@@ -98,6 +98,13 @@ def _demo(payload):
     return mark_demo(payload, "datadog")
 
 
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Datadog", "DD_API_KEY and DD_APP_KEY")
+
+
 def _offline_search_logs(service, level, contains, limit):
     out: list[str] = []
     for line in _read_log_lines():
@@ -232,7 +239,7 @@ def search_logs(
     level: str | None = None,
     contains: str | None = None,
     limit: int | str = 50,
-) -> list[str]:
+) -> list[str] | dict:
     """Search application logs (most recent first).
 
     Args:
@@ -244,6 +251,9 @@ def search_logs(
     """
     limit = _as_int(limit, 50)
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         return _offline_search_logs(service, level, contains, limit)
 
     import httpx
@@ -280,6 +290,9 @@ def get_error_summary(service: str | None = None) -> dict:
     """Summarize ERROR-level logs grouped by message, ranked by count — the
     fastest way to spot the dominant failure."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         return _offline_error_summary(service)
 
     import httpx
@@ -315,6 +328,9 @@ def get_metric(service: str, metric: str) -> dict:
     hint (first vs last) and the latest value.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         return _offline_metric(service, metric)
 
     import httpx
@@ -418,6 +434,9 @@ def onset_timeline() -> list[dict]:
     if not OFFLINE:
         return [{"note": "onset_timeline runs over the offline metric fixtures; "
                  "use detect_anomaly per service in live mode."}]
+    err = _gate()
+    if err:
+        return [err]
     metrics_file = DATA_DIR / "metrics.json"
     if not metrics_file.exists():
         return [{"error": "no metrics data available"}]
@@ -482,6 +501,8 @@ def cluster_logs(service: str | None = None, level: str | None = None) -> list[d
     ranked by frequency — far more signal than raw grep, and it surfaces the
     dominant error template fast. Returns {template, count, level, example}."""
     lines = search_logs(service=service, level=level, limit=1000)
+    if isinstance(lines, dict):  # the fail-closed not-configured error
+        return [lines]
     return _mine_templates(lines)
 
 
@@ -504,9 +525,12 @@ def detect_anomaly(service: str, metric: str) -> dict:
 
 
 @mcp.tool()
-def list_services() -> list[str]:
+def list_services() -> list[str] | dict:
     """List the distinct services currently emitting logs."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         return _offline_services()
 
     import httpx

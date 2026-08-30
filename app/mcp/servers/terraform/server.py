@@ -86,6 +86,26 @@ def _demo_notice_comment() -> str:
     return f"# {demo_notice('terraform')}"
 
 
+def _gate() -> dict | None:
+    """Fail closed when no token is set outside demo mode: fixtures are a demo
+    feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Terraform Cloud", "TERRAFORM_CLOUD_TOKEN")
+
+
+def _mcp_timeout() -> float:
+    """Deadline for the outbound Terraform Cloud API calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures (simulate a checkout-svc infrastructure workspace)
 # --------------------------------------------------------------------------- #
@@ -348,6 +368,9 @@ def list_workspaces(search: str = "", environment: str = "") -> list[dict]:
         environment: Filter by environment tag (e.g. "production", "staging").
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         result = list(_DEMO_WORKSPACES)
         if search:
             result = [ws for ws in result if search.lower() in str(ws["name"]).lower()]
@@ -365,7 +388,7 @@ def list_workspaces(search: str = "", environment: str = "") -> list[dict]:
         f"{BASE_URL}/organizations/{TERRAFORM_ORGANIZATION}/workspaces",
         headers=_headers(),
         params=params,
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -401,6 +424,9 @@ def get_workspace(name: str) -> dict:
     Returns workspace settings, VCS configuration, last run status, and more.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ws = _find_workspace(name)
         if not ws:
             # The error reply lists the invented workspace names, so it is
@@ -417,7 +443,7 @@ def get_workspace(name: str) -> dict:
         f"{BASE_URL}/workspaces/{name}" if name.startswith("ws-") else
         f"{BASE_URL}/organizations/{TERRAFORM_ORGANIZATION}/workspaces/{name}",
         headers=_headers(),
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -461,6 +487,9 @@ def get_state(workspace: str) -> dict:
     Returns a summary of the current state including resource counts by type.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ws = _find_workspace(workspace)
         if not ws:
             return _demo({"error": f"workspace '{workspace}' not found (offline demo)",
@@ -493,7 +522,7 @@ def get_state(workspace: str) -> dict:
         ws_resp = httpx.get(
             f"{BASE_URL}/organizations/{TERRAFORM_ORGANIZATION}/workspaces/{workspace}",
             headers=_headers(),
-            timeout=20,
+            timeout=_mcp_timeout(),
         )
         ws_resp.raise_for_status()
         ws_id = ws_resp.json().get("data", {}).get("id")
@@ -502,7 +531,7 @@ def get_state(workspace: str) -> dict:
     resp = httpx.get(
         f"{BASE_URL}/workspaces/{ws_id}/current-state-version",
         headers=_headers(),
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
 
     if resp.status_code == 404:
@@ -533,6 +562,9 @@ def list_state_resources(workspace: str, resource_type: str = "") -> list[dict]:
     Returns details about each managed resource.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         ws = _find_workspace(workspace)
         if not ws:
             return _demo([{"error": f"workspace '{workspace}' not found (offline demo)",
@@ -560,7 +592,7 @@ def list_state_resources(workspace: str, resource_type: str = "") -> list[dict]:
         ws_resp = httpx.get(
             f"{BASE_URL}/organizations/{TERRAFORM_ORGANIZATION}/workspaces/{workspace}",
             headers=_headers(),
-            timeout=20,
+            timeout=_mcp_timeout(),
         )
         ws_resp.raise_for_status()
         ws_id = ws_resp.json().get("data", {}).get("id")
@@ -569,7 +601,7 @@ def list_state_resources(workspace: str, resource_type: str = "") -> list[dict]:
     state_resp = httpx.get(
         f"{BASE_URL}/workspaces/{ws_id}/current-state-version",
         headers=_headers(),
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
 
     if state_resp.status_code == 404:
@@ -583,7 +615,7 @@ def list_state_resources(workspace: str, resource_type: str = "") -> list[dict]:
         f"{BASE_URL}/state-versions/{state_id}/resources",
         headers=_headers(),
         params={"page[size]": 100},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -617,6 +649,9 @@ def get_run_history(workspace: str, limit: int | str = 10) -> list[dict]:
     limit = _as_int(limit, 10)
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         ws = _find_workspace(workspace)
         if not ws:
             return _demo([{"error": f"workspace '{workspace}' not found (offline demo)",
@@ -640,7 +675,7 @@ def get_run_history(workspace: str, limit: int | str = 10) -> list[dict]:
         ws_resp = httpx.get(
             f"{BASE_URL}/organizations/{TERRAFORM_ORGANIZATION}/workspaces/{workspace}",
             headers=_headers(),
-            timeout=20,
+            timeout=_mcp_timeout(),
         )
         ws_resp.raise_for_status()
         ws_id = ws_resp.json().get("data", {}).get("id")
@@ -649,7 +684,7 @@ def get_run_history(workspace: str, limit: int | str = 10) -> list[dict]:
         f"{BASE_URL}/workspaces/{ws_id}/runs",
         headers=_headers(),
         params={"page[size]": limit},
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -684,6 +719,9 @@ def get_run_details(run_id: str) -> dict:
     Returns run details including timestamps, changes, errors, and cost estimate.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         if run_id == "run-abc123" or run_id == "":
             return _demo(dict(_DEMO_RUN_DETAILS))
         # Check if it's in history
@@ -698,7 +736,7 @@ def get_run_details(run_id: str) -> dict:
     resp = httpx.get(
         f"{BASE_URL}/runs/{run_id}",
         headers=_headers(),
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -744,7 +782,7 @@ def _fetch_plan_log(plan_id: str, run_id: str, why: str) -> str:
     plan_resp = httpx.get(
         f"{BASE_URL}/plans/{plan_id}",
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
         follow_redirects=True,
     )
     if plan_resp.status_code != 200:
@@ -763,7 +801,7 @@ def _fetch_plan_log(plan_id: str, run_id: str, why: str) -> str:
 
     # The log URL is pre-signed and lives on a different origin (archivist), so
     # it is sent without the Terraform Cloud token rather than leaking it.
-    log_resp = httpx.get(log_url, timeout=30, follow_redirects=True)
+    log_resp = httpx.get(log_url, timeout=_mcp_timeout(), follow_redirects=True)
     if log_resp.status_code != 200:
         return (
             f"Plan output unavailable for run {run_id}: {why}, and the log-read-url for "
@@ -787,6 +825,9 @@ def get_plan_output(run_id: str) -> str:
     Returns the terraform plan output showing what will change.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err["error"]
         # A bare string has nowhere to hang the _simulated key the dict-returning
         # tools carry, so the notice goes in as a leading comment line — the same
         # convention the datadog server uses for its log text.
@@ -804,7 +845,7 @@ def get_plan_output(run_id: str) -> str:
     run_resp = httpx.get(
         f"{BASE_URL}/runs/{run_id}",
         headers=_headers(),
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     run_resp.raise_for_status()
     plan_id = run_resp.json().get("data", {}).get("relationships", {}).get("plan", {}).get("data", {}).get("id")
@@ -822,7 +863,7 @@ def get_plan_output(run_id: str) -> str:
     resp = httpx.get(
         f"{BASE_URL}/plans/{plan_id}/json-output",
         headers=_headers(),
-        timeout=30,
+        timeout=_mcp_timeout(),
         follow_redirects=True,
     )
 
@@ -870,6 +911,9 @@ def trigger_plan(workspace: str, message: str = "", speculative: bool = False) -
     Returns the new run ID and status.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ws = _find_workspace(workspace)
         if not ws:
             return _demo({"error": f"workspace '{workspace}' not found (offline demo)",
@@ -892,7 +936,7 @@ def trigger_plan(workspace: str, message: str = "", speculative: bool = False) -
         ws_resp = httpx.get(
             f"{BASE_URL}/organizations/{TERRAFORM_ORGANIZATION}/workspaces/{workspace}",
             headers=_headers(),
-            timeout=20,
+            timeout=_mcp_timeout(),
         )
         ws_resp.raise_for_status()
         ws_id = ws_resp.json().get("data", {}).get("id")
@@ -920,7 +964,7 @@ def trigger_plan(workspace: str, message: str = "", speculative: bool = False) -
         f"{BASE_URL}/runs",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
 
@@ -944,6 +988,9 @@ def trigger_apply(run_id: str, comment: str = "") -> dict:
     Returns the run status after triggering apply.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         if run_id not in [r["id"] for r in _DEMO_RUN_HISTORY] and run_id != "run-abc123":
             return _demo({"error": f"run '{run_id}' not found (offline demo)",
                           "available": [r["id"] for r in _DEMO_RUN_HISTORY]})
@@ -959,7 +1006,7 @@ def trigger_apply(run_id: str, comment: str = "") -> dict:
     run_resp = httpx.get(
         f"{BASE_URL}/runs/{run_id}",
         headers=_headers(),
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     run_resp.raise_for_status()
 
@@ -982,7 +1029,7 @@ def trigger_apply(run_id: str, comment: str = "") -> dict:
         f"{BASE_URL}/runs/{run_id}/actions/apply",
         headers=_headers(),
         json=payload,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
 
     if resp.status_code == 409:

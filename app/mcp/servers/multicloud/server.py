@@ -29,6 +29,26 @@ AZURE_SUBSCRIPTION = os.environ.get("AZURE_SUBSCRIPTION_ID", "").strip()
 
 OFFLINE = not any([AWS_ACCESS_KEY, GCP_PROJECT, AZURE_SUBSCRIPTION])
 
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a real cloud read.
+
+    Offline responses fabricated cloud inventories shaped exactly like real
+    ones — invented instances entering an investigation as deployed fact.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "multicloud")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate(
+        "Multi-cloud",
+        "AWS_ACCESS_KEY_ID, GCP_PROJECT_ID or AZURE_SUBSCRIPTION_ID",
+    )
+
 SERVICE_MAPPING: dict[str, dict[str, str]] = {
     "compute": {
         "aws": "EC2",
@@ -458,6 +478,9 @@ def list_cloud_resources(clouds: list[str] | None = None) -> dict:
         Resources organized by cloud provider
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         clouds_to_query = clouds or ["aws", "gcp", "azure"]
         clouds_to_query = [c.lower() for c in clouds_to_query]
 
@@ -469,11 +492,11 @@ def list_cloud_resources(clouds: list[str] | None = None) -> dict:
                     "count": len(DEMO_RESOURCES[cloud]),
                 }
 
-        return {
+        return _demo({
             "mode": "offline_demo",
             "clouds": results,
             "total_resources": sum(r["count"] for r in results.values()),
-        }
+        })
 
     return {
         "error": "Live mode requires cloud credentials",

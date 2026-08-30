@@ -73,6 +73,13 @@ def _demo(payload):
     return mark_demo(payload, "kubernetes")
 
 
+def _gate() -> dict | None:
+    """Fail closed when no kubeconfig is set outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Kubernetes", "KUBE_CONFIG_PATH")
+
+
 def _client():
     """Build (CoreV1Api, AppsV1Api) from the configured kubeconfig (live mode)."""
     from kubernetes import client, config  # lazy: optional dependency
@@ -94,6 +101,9 @@ def list_pods(namespace: str = "", status: str | None = None) -> list[dict]:
     """
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         return _demo([p for p in _get_pods() if not status or str(p["status"]).lower() == status.lower()])
     core, _ = _client()
     out = []
@@ -118,6 +128,9 @@ def describe_pod(name: str, namespace: str = "") -> dict:
     'pod is unhealthy' to *why*."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         pod = next((p for p in _get_pods() if p["name"] == name), None)
         if not pod:
             return {"error": f"pod '{name}' not found (offline demo)",
@@ -144,6 +157,9 @@ def get_events(namespace: str = "", only_warnings: bool = False) -> list[dict]:
     image pull errors, and rollout activity. Set only_warnings to focus on problems."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         return _demo([e for e in _get_events() if not only_warnings or e["type"] == "Warning"])
     core, _ = _client()
     out = []
@@ -162,6 +178,9 @@ def get_deployment_status(name: str, namespace: str = "") -> dict:
     conditions, and image — i.e. is the rollout healthy or stuck?"""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         if name != _get_deployment()["name"]:
             return {"error": f"deployment '{name}' not found (offline demo has '{_get_deployment()['name']}')"}
         return _demo(dict(_get_deployment()))
@@ -183,6 +202,9 @@ def rollout_history(deployment: str, namespace: str = "") -> list[dict]:
     """Revision history of a deployment with change-causes — the 'what changed'
     needed to correlate a bad rollout with the offending release/commit."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         if deployment != _get_deployment()["name"]:
             return [{"error": f"deployment '{deployment}' not found (offline demo)"}]
         return _demo(list(_get_rollout_history()))
@@ -211,8 +233,11 @@ def scale_deployment(deployment: str, replicas: int | str, namespace: str = "") 
         return {"error": "replicas must be a non-negative integer"}
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        return {"status": "scaled (simulated — offline demo, no cluster touched)",
-                "deployment": deployment, "namespace": ns, "replicas": replicas}
+        err = _gate()
+        if err:
+            return err
+        return _demo({"status": "scaled (simulated — offline demo, no cluster touched)",
+                      "deployment": deployment, "namespace": ns, "replicas": replicas})
     _, apps = _client()
     apps.patch_namespaced_deployment_scale(deployment, ns, {"spec": {"replicas": replicas}})
     return {"status": "scaled", "deployment": deployment, "namespace": ns, "replicas": replicas}
@@ -224,11 +249,14 @@ def rollback_deployment(deployment: str, namespace: str = "") -> dict:
     remediation for a change-induced incident. Requires human approval."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         prev = _get_rollout_history()[-2] if len(_get_rollout_history()) >= 2 else None
-        return {"status": "rolled back (simulated — offline demo, no cluster touched)",
-                "deployment": deployment, "namespace": ns,
-                "to_revision": prev["revision"] if prev else None,
-                "to_image": prev["image"] if prev else None}
+        return _demo({"status": "rolled back (simulated — offline demo, no cluster touched)",
+                      "deployment": deployment, "namespace": ns,
+                      "to_revision": prev["revision"] if prev else None,
+                      "to_image": prev["image"] if prev else None})
     # Live rollback = restore the previous ReplicaSet's pod template (kubectl
     # rollout undo semantics). Left to the operator's GitOps in this build.
     return {"status": "not_implemented_live",
@@ -240,8 +268,11 @@ def restart_deployment(deployment: str, namespace: str = "") -> dict:
     """(WRITE) Trigger a rolling restart of a deployment. Requires human approval."""
     ns = namespace or KUBE_NAMESPACE
     if OFFLINE:
-        return {"status": "restart triggered (simulated — offline demo, no cluster touched)",
-                "deployment": deployment, "namespace": ns}
+        err = _gate()
+        if err:
+            return err
+        return _demo({"status": "restart triggered (simulated — offline demo, no cluster touched)",
+                      "deployment": deployment, "namespace": ns})
     import datetime
 
     _, apps = _client()
