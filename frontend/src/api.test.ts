@@ -68,6 +68,8 @@ describe("config and apiClient do not overlap", () => {
   });
 
   it("keeps the credential and the socket URL out of config entirely", () => {
-    expect(Object.keys(config).sort()).toEqual(["API_BASE_URL"]);
+    // CONTACT_EMAIL is deliberate: a mailto address is neither a credential
+    // nor a request base, so it does not re-open the overlap this guards.
+    expect(Object.keys(config).sort()).toEqual(["API_BASE_URL", "CONTACT_EMAIL"]);
   });
 });

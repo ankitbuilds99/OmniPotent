@@ -5,6 +5,7 @@ import { Canvas, useFrame } from '@react-three/fiber'
 import { Float, Sphere, MeshDistortMaterial, Stars } from '@react-three/drei'
 import * as THREE from 'three'
 import { useThemeColors } from '../../hooks/useThemeColors'
+import { useCatalog } from '../../hooks/useCatalog'
 
 const ROTATING_WORDS = ['incidents', 'outages', 'alerts', 'failures', 'pages']
 
@@ -248,6 +249,27 @@ const INTEGRATIONS = [
 export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onTryDemo?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const colors = useThemeColors()
+  const catalog = useCatalog()
+
+  /*
+   * Counted from GET /config (hooks/useCatalog.ts), the same way Metrics.tsx
+   * already does. The literals this replaces said "9 MCP Servers" and
+   * "48 AI Tools" — the build actually ships 11 and 64 — and a fourth card
+   * claimed a "99.9% Uptime SLA" that nobody has ever measured, offered or
+   * signed. The SLA card is gone for good; the counted cards wait for /config
+   * and simply don't render if it never answers. Only the LLM provider count
+   * is a literal, because no endpoint reports the providers that *could* be
+   * configured — it is verified against `_LLM_KEY_ENV` (app/tenancy/auth.py).
+   */
+  const stats = [
+    ...(catalog
+      ? [
+          { value: String(catalog.servers), label: 'MCP Servers' },
+          { value: String(catalog.tools), label: 'AI Tools' }
+        ]
+      : []),
+    { value: '5', label: 'LLM Providers' }
+  ]
   const { scrollYProgress } = useScroll({
     target: containerRef,
     offset: ['start start', 'end start']
@@ -370,20 +392,15 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
           </button>
         </motion.div>
 
-        {/* Stats */}
+        {/* Stats — see the comment on `stats` above; row narrows until /config answers */}
         <motion.div
-          className="grid grid-cols-2 md:grid-cols-4 gap-8 md:gap-12 max-w-3xl mx-auto mb-16"
+          className="flex flex-wrap items-start justify-center gap-8 md:gap-12 max-w-3xl mx-auto mb-16"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.4 }}
         >
-          {[
-            { value: '9', label: 'MCP Servers' },
-            { value: '48', label: 'AI Tools' },
-            { value: '5', label: 'LLM Providers' },
-            { value: '99.9%', label: 'Uptime SLA' }
-          ].map((stat, i) => (
-            <div key={i} className="text-center">
+          {stats.map((stat) => (
+            <div key={stat.label} className="text-center">
               <div className="text-3xl md:text-4xl font-bold text-white mb-1">
                 {stat.value}
               </div>

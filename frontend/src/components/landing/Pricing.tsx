@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Check, Sparkles, Zap, Rocket, Crown, Star, Shield, Loader2 } from 'lucide-react';
+import { Check, Sparkles, Zap, Rocket, Crown, Star, Shield, Loader2, Mail } from 'lucide-react';
 import * as billingApi from '../../api/billing';
 import type { PricingPlan, BillingCycle } from '../../types/billing';
 import { bestAnnualSavingsPercent, describeUserLimit } from '../../lib/planLimits';
+import { CONTACT_EMAIL } from '../../config';
 
 const TIER_ICONS: Record<string, typeof Sparkles> = {
   starter: Sparkles,
@@ -23,220 +24,14 @@ const TIER_COLORS: Record<string, string> = {
   enterprise: '#E91E63',
 };
 
-const FALLBACK_PLANS: PricingPlan[] = [
-  {
-    name: 'starter',
-    display_name: 'Starter',
-    description: 'Perfect for individual developers and small projects',
-    tier: 'starter',
-    monthly_price: 0,
-    annual_price: 0,
-    annual_monthly_price: 0,
-    annual_savings_percent: 0,
-    max_users: 1,
-    max_ai_investigations_monthly: 25,
-    max_alerts_monthly: 100,
-    features: {
-      ai_investigation: true,
-      slack_integration: true,
-      basic_deduplication: true,
-      github_integration: false,
-      multi_llm: false,
-      auto_fix_pr: false,
-      ai_postmortem: false,
-      similar_incident_search: false,
-      advanced_deduplication: false,
-      mtta_mttr_dashboard: false,
-      api_access: false,
-      limit_history_days: 14,
-      limit_llm_providers: 1,
-      limit_integrations: 1,
-    },
-    is_popular: false,
-  },
-  {
-    name: 'team',
-    display_name: 'Team',
-    description: 'For growing teams that need more power',
-    tier: 'team',
-    monthly_price: 299,
-    annual_price: 3048,
-    annual_monthly_price: 254,
-    annual_savings_percent: 15,
-    max_users: 10,
-    max_ai_investigations_monthly: 500,
-    max_alerts_monthly: 5000,
-    features: {
-      ai_investigation: true,
-      slack_integration: true,
-      basic_deduplication: true,
-      github_integration: true,
-      multi_llm: true,
-      auto_fix_pr: true,
-      ai_postmortem: true,
-      similar_incident_search: true,
-      advanced_deduplication: false,
-      mtta_mttr_dashboard: false,
-      api_access: false,
-      limit_history_days: 365,
-      limit_llm_providers: 5,
-      limit_integrations: 15,
-    },
-    is_popular: true,
-  },
-  {
-    name: 'growth',
-    display_name: 'Growth',
-    description: 'For scaling organizations with advanced needs',
-    tier: 'growth',
-    monthly_price: 699,
-    annual_price: 7128,
-    annual_monthly_price: 594,
-    annual_savings_percent: 15,
-    max_users: 25,
-    max_ai_investigations_monthly: null,
-    max_alerts_monthly: null,
-    features: {
-      ai_investigation: true,
-      slack_integration: true,
-      basic_deduplication: true,
-      github_integration: true,
-      multi_llm: true,
-      auto_fix_pr: true,
-      ai_postmortem: true,
-      similar_incident_search: true,
-      advanced_deduplication: true,
-      mtta_mttr_dashboard: true,
-      api_access: true,
-      cascade_detection: true,
-      service_dependency_map: true,
-      pattern_detection: true,
-      limit_history_days: 730,
-      limit_llm_providers: 5,
-      limit_integrations: null,
-    },
-    is_popular: false,
-  },
-  {
-    name: 'business',
-    display_name: 'Business',
-    description: 'For mid-size organizations with compliance needs',
-    tier: 'business',
-    monthly_price: 1499,
-    annual_price: 15288,
-    annual_monthly_price: 1274,
-    annual_savings_percent: 15,
-    max_users: 50,
-    max_ai_investigations_monthly: null,
-    max_alerts_monthly: null,
-    features: {
-      ai_investigation: true,
-      slack_integration: true,
-      basic_deduplication: true,
-      github_integration: true,
-      multi_llm: true,
-      auto_fix_pr: true,
-      ai_postmortem: true,
-      similar_incident_search: true,
-      advanced_deduplication: true,
-      mtta_mttr_dashboard: true,
-      api_access: true,
-      cascade_detection: true,
-      service_dependency_map: true,
-      pattern_detection: true,
-      sso_saml: true,
-      rbac: true,
-      audit_logs: true,
-      priority_support: true,
-      limit_history_days: null,
-      limit_llm_providers: 5,
-      limit_integrations: null,
-    },
-    is_popular: false,
-  },
-  {
-    name: 'scale',
-    display_name: 'Scale',
-    description: 'For larger organizations scaling their AI operations',
-    tier: 'scale',
-    monthly_price: 2499,
-    annual_price: 25488,
-    annual_monthly_price: 2124,
-    annual_savings_percent: 15,
-    max_users: 100,
-    max_ai_investigations_monthly: null,
-    max_alerts_monthly: null,
-    features: {
-      ai_investigation: true,
-      slack_integration: true,
-      basic_deduplication: true,
-      github_integration: true,
-      multi_llm: true,
-      auto_fix_pr: true,
-      ai_postmortem: true,
-      similar_incident_search: true,
-      advanced_deduplication: true,
-      mtta_mttr_dashboard: true,
-      api_access: true,
-      cascade_detection: true,
-      service_dependency_map: true,
-      pattern_detection: true,
-      sso_saml: true,
-      rbac: true,
-      audit_logs: true,
-      priority_support: true,
-      self_hosted: true,
-      dedicated_support_manager: true,
-      limit_history_days: null,
-      limit_llm_providers: null,
-      limit_integrations: null,
-    },
-    is_popular: false,
-  },
-  {
-    name: 'enterprise',
-    display_name: 'Enterprise',
-    description: 'Custom solutions for large organizations',
-    tier: 'enterprise',
-    monthly_price: 0,
-    annual_price: 0,
-    annual_monthly_price: 0,
-    annual_savings_percent: 0,
-    max_users: 999999,
-    max_ai_investigations_monthly: null,
-    max_alerts_monthly: null,
-    features: {
-      ai_investigation: true,
-      slack_integration: true,
-      basic_deduplication: true,
-      github_integration: true,
-      multi_llm: true,
-      auto_fix_pr: true,
-      ai_postmortem: true,
-      similar_incident_search: true,
-      advanced_deduplication: true,
-      mtta_mttr_dashboard: true,
-      api_access: true,
-      cascade_detection: true,
-      service_dependency_map: true,
-      pattern_detection: true,
-      sso_saml: true,
-      rbac: true,
-      audit_logs: true,
-      priority_support: true,
-      self_hosted: true,
-      dedicated_support_manager: true,
-      dedicated_infrastructure: true,
-      hipaa_compliance: true,
-      custom_sla: true,
-      phone_support_24_7: true,
-      limit_history_days: null,
-      limit_llm_providers: null,
-      limit_integrations: null,
-    },
-    is_popular: false,
-  },
-];
+/*
+ * FALLBACK_PLANS used to sit here: six fully-invented plans ($299 Team, $699
+ * Growth, $1499 Business, $2499 Scale, complete with seat caps and feature
+ * matrices) rendered silently whenever GET /billing/plans failed. A visitor
+ * had no way to tell a real price list from one the frontend made up on the
+ * spot. Deleted in the de-faking pass — when the API cannot answer, the
+ * section now says so and offers the contact address instead of a fiction.
+ */
 
 function PricingCard({
   plan,
@@ -379,6 +174,7 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
   const [isYearly, setIsYearly] = useState(false);
   const [plans, setPlans] = useState<PricingPlan[]>([]);
   const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
   useEffect(() => {
@@ -389,27 +185,32 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
           setPlans(
             data.map((p) => ({
               ...p,
-              is_popular: p.tier === 'team',
+              // Honor the API's own flag. It used to be overwritten with
+              // `p.tier === 'team'` unconditionally, so the backend could
+              // never move the "Most Popular" badge; the heuristic now only
+              // covers responses that omit the field.
+              is_popular: p.is_popular ?? p.tier === 'team',
             }))
           );
         } else {
-          setPlans(FALLBACK_PLANS);
+          setUnavailable(true);
         }
       })
       .catch(() => {
-        // Use fallback plans when API is unavailable
-        setPlans(FALLBACK_PLANS);
+        // No invented FALLBACK_PLANS anymore — an honest "unavailable" state
+        // renders instead of prices the backend never quoted.
+        setUnavailable(true);
       })
       .finally(() => setLoading(false));
   }, []);
 
-  // Read off whichever plans are actually on screen, so the badge still matches
-  // when the API is unreachable and FALLBACK_PLANS are showing.
+  // Read off the plans actually on screen; with none loaded this is 0 and the
+  // "Save up to N%" badge stays hidden.
   const savingsPercent = bestAnnualSavingsPercent(plans);
 
   const handlePlanSelect = async (plan: PricingPlan) => {
     if (plan.tier === 'enterprise') {
-      window.open('mailto:sales@omnipotent.ai?subject=Enterprise%20Inquiry', '_blank');
+      window.open(`mailto:${CONTACT_EMAIL}?subject=Enterprise%20Inquiry`, '_blank');
       return;
     }
 
@@ -518,6 +319,31 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
           <div className="flex items-center justify-center py-20">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
           </div>
+        ) : unavailable ? (
+          <motion.div
+            className="floating-card max-w-xl mx-auto p-10 text-center"
+            initial={{ opacity: 0, y: 30 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+          >
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-primary/10 flex items-center justify-center mb-6">
+              <Mail className="w-7 h-7 text-primary" />
+            </div>
+            <h3 className="font-display text-2xl font-bold text-white mb-3">
+              Pricing is temporarily unavailable
+            </h3>
+            <p className="text-white/60 mb-8">
+              We couldn't load the current plans. Reach out and we'll get back
+              to you with pricing for your team.
+            </p>
+            <a
+              href={`mailto:${CONTACT_EMAIL}?subject=OmniPotent%20Pricing%20Inquiry`}
+              className="inline-block px-8 py-4 rounded-xl font-display font-semibold bg-gradient-to-r from-primary to-accent text-background shadow-glow-primary"
+            >
+              Contact Us
+            </a>
+          </motion.div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
             {plans.map((plan, i) => (
@@ -546,7 +372,7 @@ export function Pricing({ onLaunch }: { onLaunch?: () => void }) {
               Check our docs
             </a>{' '}
             or{' '}
-            <a href="mailto:support@omnipotent.ai" className="text-primary hover:underline">
+            <a href={`mailto:${CONTACT_EMAIL}`} className="text-primary hover:underline">
               contact us
             </a>
           </p>

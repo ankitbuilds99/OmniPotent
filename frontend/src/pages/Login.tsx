@@ -591,13 +591,10 @@ export function Login({ onBack, onSuccess }: LoginProps) {
             </p>
           </div>
 
-          {/* Terms */}
-          <p className="mt-6 text-center text-xs" style={{ color: 'var(--text-dim)' }}>
-            By continuing, you agree to our{' '}
-            <a href="#" className="hover:underline" style={{ color: 'var(--accent)' }}>Terms of Service</a>
-            {' '}and{' '}
-            <a href="#" className="hover:underline" style={{ color: 'var(--accent)' }}>Privacy Policy</a>
-          </p>
+          {/* A consent sentence used to sit here, linking "Terms of Service"
+              and "Privacy Policy" to href="#". Neither document exists, so the
+              sentence asked users to agree to nothing and the links went
+              nowhere. Removed until the documents are real. */}
         </div>
       </motion.div>
     </div>

@@ -92,7 +92,7 @@ export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling 
         </section>
 
         {/* AI Chat interface */}
-        <AIChat />
+        <AIChat onLaunch={onLaunch} />
 
         {/* Security Section - Enterprise grade */}
         <SecuritySection />
