@@ -182,7 +182,9 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The full suite under coverage takes ~15m on these runners and grows with
+    # every test added; 15 killed the job at 99% passed. Keep headroom.
+    timeout-minutes: 25
 
     services:
       redis:
