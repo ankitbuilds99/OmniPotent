@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from app import model_catalog
+from app.config import get_settings
 
 log = logging.getLogger("omnipotent.cost.token_optimizer")
 
@@ -25,36 +26,38 @@ log = logging.getLogger("omnipotent.cost.token_optimizer")
 # once per model rather than once per call.
 _UNPRICED_WARNED: set[str] = set()
 
-# The models this optimizer can select between. IDs only — every rate comes from
-# app.model_catalog, so this table can no longer drift from the five others that
-# used to price the same models differently.
-_PRICED_MODEL_IDS = (
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4-turbo",
-    "gpt-3.5-turbo",
-    "claude-3-opus-20240229",
-    "claude-3-sonnet-20240229",
-    "claude-3-haiku-20240307",
-    "claude-3-5-sonnet-20240620",
-    "claude-sonnet-4-20250514",
-    "claude-opus-4-20250514",
-)
+
+def _default_model_id(fast: bool = False) -> str:
+    """The model the deployment actually runs on for the main (or fast) role.
+
+    Operator overrides win when the catalog knows them; otherwise the active
+    provider's catalog default. This keeps every recommendation this module
+    makes inside the set of models the deployment has a key for — the old
+    complexity map suggested gpt-4o to an Anthropic-only deployment and the
+    retired claude-opus-4-20250514 to everyone.
+    """
+    settings = get_settings()
+    override = (settings.copilot_fast_model if fast else settings.copilot_model).strip()
+    if override and model_catalog.is_known(override):
+        return override
+    return model_catalog.default_model(settings.copilot_provider, fast=fast)
 
 
 def _catalog_pricing() -> dict[str, dict[str, float]]:
-    """Per-1M input/output rates for the selectable models, from the catalog.
+    """Per-1M input/output rates for the active provider's selectable models.
 
     Shape is unchanged (``{model: {"input": ..., "output": ...}}``, USD per 1M) so
-    select_model()'s cheapest-model scan keeps working. Unpriced models are left
-    out: select_model() sorts on these numbers, so a placeholder rate would make an
-    unpriced model look like the cheapest option and win.
+    select_model()'s cheapest-model scan keeps working. The IDs come from the
+    catalog filtered by COPILOT_PROVIDER, so the scan can never land on a model
+    the deployment has no key for. Unpriced models are left out: select_model()
+    sorts on these numbers, so a placeholder rate would make an unpriced model
+    look like the cheapest option and win.
     """
     pricing: dict[str, dict[str, float]] = {}
-    for model_id in _PRICED_MODEL_IDS:
+    for model_id in model_catalog.selectable_ids(get_settings().copilot_provider):
         rates = model_catalog.price_per_1m(model_id)
         if rates is None:
-            log.warning(
+            log.debug(
                 "model %r has no verified price in the model catalog; "
                 "excluding it from the token optimizer's pricing table",
                 model_id,
@@ -211,12 +214,17 @@ class TokenOptimizer:
 
         self._model_pricing = _catalog_pricing()
 
+        # The two models this deployment runs on (see _default_model_id): cheap
+        # work goes to the fast model, everything demanding to the main one.
+        self._fast_model = _default_model_id(fast=True)
+        self._main_model = _default_model_id()
+
         self._complexity_models = {
-            TaskComplexity.TRIVIAL: "gpt-4o-mini",
-            TaskComplexity.LOW: "gpt-4o-mini",
-            TaskComplexity.MEDIUM: "gpt-4o",
-            TaskComplexity.HIGH: "claude-3-5-sonnet-20240620",
-            TaskComplexity.CRITICAL: "claude-opus-4-20250514",
+            TaskComplexity.TRIVIAL: self._fast_model,
+            TaskComplexity.LOW: self._fast_model,
+            TaskComplexity.MEDIUM: self._main_model,
+            TaskComplexity.HIGH: self._main_model,
+            TaskComplexity.CRITICAL: self._main_model,
         }
 
     async def initialize(self) -> None:
@@ -447,16 +455,16 @@ class TokenOptimizer:
     ) -> str:
         """Select optimal model for task."""
         if complexity:
-            suggested = self._complexity_models.get(complexity, "gpt-4o")
+            suggested = self._complexity_models.get(complexity, self._main_model)
         else:
             if task_type in ["classification", "yes_no", "lookup", "extraction"]:
-                suggested = "gpt-4o-mini"
+                suggested = self._fast_model
             elif task_type in ["analysis", "summarization", "code_review"]:
-                suggested = "gpt-4o"
+                suggested = self._main_model
             elif task_type in ["reasoning", "planning", "safety_critical", "incident_rca"]:
-                suggested = "claude-opus-4-20250514"
+                suggested = self._main_model
             else:
-                suggested = "gpt-4o"
+                suggested = self._main_model
 
         if max_cost and suggested in self._model_pricing:
             pricing = self._model_pricing[suggested]
@@ -699,6 +707,25 @@ class TokenOptimizer:
             "by_task": by_task,
         }
 
+    def _expensive_models(self) -> list[str]:
+        """Priced models of the active provider that cost at least what the main
+        model does — the ones worth flagging for downgrade recommendations.
+
+        Was a hand-written cross-provider list ("gpt-4-turbo",
+        "claude-3-opus-20240229", "claude-opus-4-20250514") carrying a retired
+        snapshot; now derived from the catalog so it tracks the provider's
+        actual price ladder.
+        """
+        main_rates = model_catalog.price_per_1m(self._main_model)
+        if main_rates is None:
+            return []
+        floor = main_rates[0] + main_rates[1]
+        return [
+            model_id
+            for model_id, rates in self._model_pricing.items()
+            if rates["input"] + rates["output"] >= floor and model_id != self._fast_model
+        ]
+
     def get_optimization_recommendations(
         self,
         usage_stats: dict[str, Any],
@@ -709,12 +736,12 @@ class TokenOptimizer:
         by_model = usage_stats.get("by_model", {})
         by_task = usage_stats.get("by_task", {})
 
-        expensive_models = ["gpt-4-turbo", "claude-3-opus-20240229", "claude-opus-4-20250514"]
-        for model in expensive_models:
+        for model in self._expensive_models():
             if model in by_model and by_model[model]["requests"] > 100:
                 requests = by_model[model]["requests"]
                 recommendations.append(
-                    f"Consider using gpt-4o-mini for simple {model} tasks ({requests} requests)"
+                    f"Consider using {self._fast_model} for simple {model} tasks "
+                    f"({requests} requests)"
                 )
 
         total_cost = usage_stats.get("total_cost", 0)

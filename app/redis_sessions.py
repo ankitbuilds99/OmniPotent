@@ -32,12 +32,22 @@ def get_redis_client():
     try:
         import redis
 
+        from app.redis_pool import RedisPoolType, pool_config
+
+        # app/redis_pool.py's pools are asyncio-only and this module is sync, so
+        # it cannot hand us a client — but its SESSION workload profile is the
+        # operator's tuning for exactly this traffic (REDIS_SOCKET_TIMEOUT /
+        # REDIS_CONNECTION_TIMEOUT scaled per workload), and honouring its
+        # max_connections keeps this pool inside the per-replica connection
+        # budget documented on those settings.
+        cfg = pool_config(RedisPoolType.SESSION)
         _redis_client = redis.from_url(
             redis_url,
             decode_responses=True,
-            socket_timeout=5,
-            socket_connect_timeout=5,
-            retry_on_timeout=True,
+            max_connections=cfg.max_connections,
+            socket_timeout=cfg.socket_timeout,
+            socket_connect_timeout=cfg.connection_timeout,
+            retry_on_timeout=cfg.retry_on_timeout,
         )
         _redis_client.ping()
         log.info("Connected to Redis")

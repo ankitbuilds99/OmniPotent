@@ -53,6 +53,19 @@ def _as_int(value, default: int) -> int:
         return default
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound PagerDuty API calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
 def _demo(payload):
     """Label fixture data so the agent can't mistake it for a live pagerduty read.
 
@@ -62,6 +75,13 @@ def _demo(payload):
     """
     from app.mcp.fixtures import mark_demo
     return mark_demo(payload, "pagerduty")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("PagerDuty", "PAGERDUTY_API_TOKEN")
 
 
 def _headers() -> dict:
@@ -94,6 +114,9 @@ def list_incidents(statuses: str = "triggered,acknowledged", limit: int | str = 
     limit = _as_int(limit, 20)
     wanted = [s.strip() for s in statuses.split(",") if s.strip()]
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         inc = _get_incident()
         items = [inc] if inc and (not wanted or inc.get("status") in wanted) else []
         return _demo(items[:limit])
@@ -104,7 +127,7 @@ def list_incidents(statuses: str = "triggered,acknowledged", limit: int | str = 
         f"{BASE_URL}/incidents",
         headers=_headers(),
         params={"statuses[]": wanted, "limit": limit, "sort_by": "created_at:desc"},
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     return [
@@ -126,6 +149,9 @@ def list_incidents(statuses: str = "triggered,acknowledged", limit: int | str = 
 def get_incident(incident_id: str) -> dict:
     """Return one incident's details by id."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         inc = _get_incident()
         if incident_id in ("", inc.get("id", "")):
             return _demo(dict(inc))
@@ -133,7 +159,7 @@ def get_incident(incident_id: str) -> dict:
 
     import httpx
 
-    resp = httpx.get(f"{BASE_URL}/incidents/{incident_id}", headers=_headers(), timeout=20)
+    resp = httpx.get(f"{BASE_URL}/incidents/{incident_id}", headers=_headers(), timeout=_mcp_timeout())
     resp.raise_for_status()
     inc = resp.json().get("incident", {})
     return {
@@ -154,13 +180,16 @@ def get_incident_alerts(incident_id: str) -> list[dict]:
     """Return the alerts/signals that triggered an incident — the raw symptom the
     investigation should start from (service, metric, threshold, source monitor)."""
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         inc = _get_incident()
         return _demo(_get_alerts()) if incident_id in ("", inc.get("id", "")) else []
 
     import httpx
 
     resp = httpx.get(
-        f"{BASE_URL}/incidents/{incident_id}/alerts", headers=_headers(), timeout=20
+        f"{BASE_URL}/incidents/{incident_id}/alerts", headers=_headers(), timeout=_mcp_timeout()
     )
     resp.raise_for_status()
     out = []
@@ -191,13 +220,16 @@ def add_incident_note(incident_id: str, note: str) -> dict:
     """(WRITE) Post a note to an incident's timeline — e.g. the copilot's RCA
     summary, so responders see the findings where they're already looking."""
     if OFFLINE:
-        return {"status": "note added (simulated — offline demo)", "incident_id": incident_id,
-                "note": note[:500]}
+        err = _gate()
+        if err:
+            return err
+        return _demo({"status": "note added (simulated — offline demo)",
+                      "incident_id": incident_id, "note": note[:500]})
     import httpx
 
     resp = httpx.post(
         f"{BASE_URL}/incidents/{incident_id}/notes",
-        headers=_write_headers(), json={"note": {"content": note}}, timeout=20,
+        headers=_write_headers(), json={"note": {"content": note}}, timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     return {"status": "note added", "incident_id": incident_id}
@@ -217,14 +249,18 @@ def resolve_incident(incident_id: str) -> dict:
 
 def _set_status(incident_id: str, status: str) -> dict:
     if OFFLINE:
-        return {"status": f"incident {status} (simulated — offline demo)", "incident_id": incident_id}
+        err = _gate()
+        if err:
+            return err
+        return _demo({"status": f"incident {status} (simulated — offline demo)",
+                      "incident_id": incident_id})
     import httpx
 
     resp = httpx.put(
         f"{BASE_URL}/incidents/{incident_id}",
         headers=_write_headers(),
         json={"incident": {"type": "incident_reference", "status": status}},
-        timeout=20,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     return {"status": status, "incident_id": incident_id}

@@ -61,6 +61,36 @@ def _headers() -> dict:
     }
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound NerdGraph calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live New Relic read.
+
+    Offline responses were shaped exactly like real API ones, so an RCA built on
+    invented error rates looked identical to one built on real telemetry.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "newrelic")
+
+
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("New Relic", "NEWRELIC_API_KEY and NEWRELIC_ACCOUNT_ID")
+
+
 # --- Offline fixtures ---
 def _get_fixture_apps() -> list[dict]:
     return [
@@ -175,32 +205,35 @@ def nrql(query: str, account_id: str = "") -> dict:
         Query results with data array.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         # Return fixture data for common queries
         query_lower = query.lower()
         if "transaction" in query_lower and "error" in query_lower:
-            return {
+            return _demo({
                 "success": True,
                 "data": [{"errorRate": 0.12}],
                 "query": query,
-            }
+            })
         elif "transaction" in query_lower and "duration" in query_lower:
-            return {
+            return _demo({
                 "success": True,
                 "data": [{"avgDuration": 0.35, "p95": 0.45, "p99": 0.8}],
                 "query": query,
-            }
+            })
         elif "transaction" in query_lower:
-            return {
+            return _demo({
                 "success": True,
                 "data": [{"count": 15000}],
                 "query": query,
-            }
-        return {
+            })
+        return _demo({
             "success": True,
             "data": [],
             "query": query,
             "note": "offline demo - limited fixture data",
-        }
+        })
 
     import httpx
 
@@ -223,7 +256,7 @@ def nrql(query: str, account_id: str = "") -> dict:
         _api_url(),
         headers=_headers(),
         json={"query": graphql_query},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -251,17 +284,20 @@ def get_error_rate(app_name: str, since: str = "1 hour ago") -> dict:
         since: Time range (NRQL syntax, e.g., '1 hour ago', '30 minutes ago').
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         metrics = _get_fixture_metrics()
         if app_name in metrics:
             series = metrics[app_name].get("error_rate", [])
             latest = series[-1]["value"] if series else 0
-            return {
+            return _demo({
                 "app_name": app_name,
                 "error_rate": latest,
                 "series": series,
                 "since": since,
-            }
-        return {"app_name": app_name, "error_rate": 0, "note": "app not found in fixtures"}
+            })
+        return _demo({"app_name": app_name, "error_rate": 0, "note": "app not found in fixtures"})
 
     query = f"""
     SELECT percentage(count(*), WHERE error IS true) as errorRate
@@ -288,17 +324,20 @@ def get_throughput(app_name: str, since: str = "1 hour ago") -> dict:
         since: Time range.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         metrics = _get_fixture_metrics()
         if app_name in metrics:
             series = metrics[app_name].get("throughput", [])
             latest = series[-1]["value"] if series else 0
-            return {
+            return _demo({
                 "app_name": app_name,
                 "rpm": latest,
                 "series": series,
                 "since": since,
-            }
-        return {"app_name": app_name, "rpm": 0, "note": "app not found in fixtures"}
+            })
+        return _demo({"app_name": app_name, "rpm": 0, "note": "app not found in fixtures"})
 
     query = f"""
     SELECT rate(count(*), 1 minute) as rpm
@@ -319,17 +358,20 @@ def get_latency(app_name: str, since: str = "1 hour ago") -> dict:
         since: Time range.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         metrics = _get_fixture_metrics()
         if app_name in metrics:
             series = metrics[app_name].get("latency_p95", [])
             latest = series[-1]["value"] if series else 0
-            return {
+            return _demo({
                 "app_name": app_name,
                 "latency_p95_ms": latest,
                 "series": series,
                 "since": since,
-            }
-        return {"app_name": app_name, "latency_p95_ms": 0, "note": "app not found in fixtures"}
+            })
+        return _demo({"app_name": app_name, "latency_p95_ms": 0, "note": "app not found in fixtures"})
 
     query = f"""
     SELECT average(duration) * 1000 as avgMs,
@@ -370,7 +412,10 @@ def get_errors(
     limit = _as_int(limit, 50)
 
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "errors": [
                 {
                     "message": "Connection refused: redis-cart:6379",
@@ -387,7 +432,7 @@ def get_errors(
             ],
             "count": 2,
             "since": since,
-        }
+        })
 
     where = f"WHERE appName = '{app_name}'" if app_name else ""
     query = f"""
@@ -416,7 +461,10 @@ def get_slowest_transactions(
     limit = _as_int(limit, 10)
 
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "transactions": [
                 {"name": "WebTransaction/checkout", "avgMs": 450, "count": 1200},
                 {"name": "WebTransaction/cart/add", "avgMs": 180, "count": 3500},
@@ -424,7 +472,7 @@ def get_slowest_transactions(
             ],
             "app_name": app_name,
             "since": since,
-        }
+        })
 
     query = f"""
     SELECT average(duration) * 1000 as avgMs, count(*) as count
@@ -441,7 +489,10 @@ def get_slowest_transactions(
 def get_applications() -> list[dict]:
     """Get all APM applications."""
     if OFFLINE:
-        return _get_fixture_apps()
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_fixture_apps())
 
     import httpx
 
@@ -469,7 +520,7 @@ def get_applications() -> list[dict]:
         _api_url(),
         headers=_headers(),
         json={"query": query},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -506,13 +557,16 @@ def get_alerts(state: str = "", priority: str = "") -> list[dict]:
         priority: Filter by priority (critical, high, medium, low).
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         results = _get_fixture_alerts()
         if state:
             state_map = {"open": "ACTIVATED", "closed": "CLOSED"}
             results = [a for a in results if a.get("state") == state_map.get(state, state.upper())]
         if priority:
             results = [a for a in results if a.get("priority", "").lower() == priority.lower()]
-        return results
+        return _demo(results)
 
     import httpx
 
@@ -553,7 +607,7 @@ def get_alerts(state: str = "", priority: str = "") -> list[dict]:
         _api_url(),
         headers=_headers(),
         json={"query": query},
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     data = resp.json()
@@ -592,14 +646,17 @@ def get_hosts(since: str = "10 minutes ago") -> dict:
         since: Time range.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "hosts": [
                 {"hostname": "checkout-prod-1", "cpu": 78.5, "memory": 65.2, "disk": 45.0},
                 {"hostname": "checkout-prod-2", "cpu": 82.1, "memory": 68.8, "disk": 44.5},
                 {"hostname": "payment-prod-1", "cpu": 45.3, "memory": 52.1, "disk": 38.2},
             ],
             "since": since,
-        }
+        })
 
     query = f"""
     SELECT latest(cpuPercent) as cpu, latest(memoryUsedPercent) as memory, latest(diskUsedPercent) as disk
@@ -622,19 +679,22 @@ def get_service_health(app_name: str, since: str = "1 hour ago") -> dict:
         Combined health metrics including error rate, throughput, and latency.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         metrics = _get_fixture_metrics()
         if app_name not in metrics:
             return {"app_name": app_name, "error": "app not found in fixtures"}
 
         app_metrics = metrics[app_name]
-        return {
+        return _demo({
             "app_name": app_name,
             "error_rate": app_metrics.get("error_rate", [])[-1]["value"] if app_metrics.get("error_rate") else 0,
             "throughput": app_metrics.get("throughput", [])[-1]["value"] if app_metrics.get("throughput") else 0,
             "latency_p95_ms": app_metrics.get("latency_p95", [])[-1]["value"] if app_metrics.get("latency_p95") else 0,
             "health_status": "CRITICAL" if app_name == "checkout-svc" else "NOT_ALERTING",
             "since": since,
-        }
+        })
 
     # Get all metrics in parallel
     error_result = get_error_rate(app_name, since)
@@ -663,7 +723,10 @@ def get_deployments(app_name: str, since: str = "7 days ago") -> dict:
         since: Time range.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "deployments": [
                 {
                     "revision": "abc123",
@@ -680,7 +743,7 @@ def get_deployments(app_name: str, since: str = "7 days ago") -> dict:
             ],
             "app_name": app_name,
             "since": since,
-        }
+        })
 
     query = f"""
     SELECT *

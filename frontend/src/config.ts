@@ -86,3 +86,17 @@ function toAbsolute(url: string): string {
 export const API_BASE_URL: string = stripTrailingSlash(
   toAbsolute(envOr(import.meta.env.VITE_API_URL, defaultApiBaseUrl()))
 );
+
+/**
+ * Where "contact us" mailto links point.
+ *
+ * Pricing and Billing used to hardcode `sales@omnipotent.ai` and
+ * `support@omnipotent.ai` — omnipotent.ai is not a domain this project owns,
+ * so mail to those addresses went to nobody (or to whoever does own it). The
+ * footer always used the maintainer's real address; that is now the shared
+ * default, overridable per deployment via VITE_CONTACT_EMAIL.
+ */
+export const CONTACT_EMAIL: string = envOr(
+  import.meta.env.VITE_CONTACT_EMAIL,
+  "ankit25bcs10610@gmail.com"
+);

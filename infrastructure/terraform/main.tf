@@ -61,9 +61,10 @@ variable "environment" {
 }
 
 variable "domain_name" {
+  # No default on purpose: the old one was a real registrable domain the
+  # project does not own. Set it in terraform.tfvars (see variables.tfvars.example).
   description = "Domain name for the application"
   type        = string
-  default     = "devops-copilot.com"
 }
 
 variable "db_password" {

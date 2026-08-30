@@ -50,6 +50,23 @@ OFFLINE = not GITHUB_TOKEN
 mcp = FastMCP("github")
 
 
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live GitHub read.
+
+    Offline responses were shaped exactly like live ones, so an RCA built on
+    invented commits looked identical to one built on the real repository.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "github")
+
+
+def _gate() -> dict | None:
+    """Fail closed when no token is set outside demo mode: fixtures are a demo
+    feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("GitHub", "GITHUB_TOKEN")
+
+
 def _repo_or_error() -> tuple[str | None, dict | None]:
     """Return (repo, None) when configured, else (None, error-dict). Avoids the
     old hardcoded OWNER/REPO placeholders that 404'd on every real-mode call."""
@@ -85,7 +102,10 @@ def list_recent_commits(branch: str = "main", max_count: int | str = 5) -> list[
     """List recent commits on a branch (sha, author, date, message)."""
     max_count = _as_int(max_count, 5)
     if OFFLINE:
-        return _get_commits()[:max_count]
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_commits()[:max_count])
     repo, err = _repo_or_error()
     if err:
         return [err]
@@ -117,7 +137,16 @@ def list_recent_commits(branch: str = "main", max_count: int | str = 5) -> list[
 def get_commit_diff(sha: str) -> str:
     """Return the unified diff/patch introduced by a commit."""
     if OFFLINE:
-        return _get_diff(sha) or "(no diff available for this commit in offline mode)"
+        err = _gate()
+        if err:
+            return err["error"]
+        diff = _get_diff(sha)
+        if not diff:
+            return "(no diff available for this commit in offline mode)"
+        # A bare string has nowhere to hang the _simulated key the dict-returning
+        # tools carry; lead with the notice as a comment line instead.
+        from app.mcp.fixtures import demo_notice
+        return f"# {demo_notice('github')}\n{diff}"
     repo, err = _repo_or_error()
     if err:
         return err["error"]
@@ -262,7 +291,10 @@ def list_workflow_runs(branch: str = "main", max_count: int | str = 10) -> list[
     the 'did the last deploy/CI pass?' signal to correlate with an incident's onset."""
     max_count = _as_int(max_count, 10)
     if OFFLINE:
-        return _get_workflow_runs()[:max_count]
+        err = _gate()
+        if err:
+            return [err]
+        return _demo(_get_workflow_runs()[:max_count])
     repo, err = _repo_or_error()
     if err:
         return [err]
@@ -292,11 +324,14 @@ def get_failed_job_logs(run_id: int | str, max_chars: int | str = 4000) -> dict:
     'why did the deploy/CI fail' and surfaces the failing test/stack trace."""
     max_chars = _as_int(max_chars, 4000)
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "run_id": _as_int(run_id, 0),
             "failed_jobs": [{"name": "test", "conclusion": "failure",
                              "log_tail": _get_failed_job_log()[:max_chars]}],
-        }
+        })
     repo, err = _repo_or_error()
     if err:
         return err
@@ -336,14 +371,17 @@ def create_pull_request(
     concrete code change — a verified fix is far more trustworthy than a described one.
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "created (simulated — offline demo mode, no real PR opened)",
             "url": "https://github.com/<owner>/<repo>/pull/42  (placeholder)",
             "title": title,
             "head": head,
             "base": base,
             "has_patch": bool(patch and patch.strip()),
-        }
+        })
     repo, err = _repo_or_error()
     if err:
         return err

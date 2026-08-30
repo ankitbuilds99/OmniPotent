@@ -265,7 +265,7 @@ function ChatMessage({
   )
 }
 
-export function AIChat() {
+export function AIChat({ onLaunch }: { onLaunch?: () => void }) {
   const [messages, setMessages] = useState<Array<{
     role: 'user' | 'assistant'
     content: string
@@ -608,8 +608,11 @@ export function AIChat() {
               </form>
               <p className="text-center text-xs text-white/30 mt-3">
                 This is a demo. Click prompts above or{' '}
+                {/* De-faked: this button used to call handlePromptClick(DEMO_PROMPTS[0], 0),
+                    replaying the canned demo while labelled "Launch Console". It now takes
+                    the same onLaunch path as every other launch CTA on the page. */}
                 <button
-                  onClick={() => handlePromptClick(DEMO_PROMPTS[0], 0)}
+                  onClick={onLaunch}
                   className="text-primary hover:underline cursor-pointer"
                 >
                   Launch Console

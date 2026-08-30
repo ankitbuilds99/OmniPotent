@@ -383,7 +383,7 @@ async def get_service_metrics() -> dict[str, Any]:
     import httpx
 
     metrics: dict[str, dict[str, float]] = {}
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=get_settings().http_timeout_default) as client:
         for field, promql in _SERVICE_METRIC_QUERIES.items():
             try:
                 response = await client.get(
@@ -655,10 +655,23 @@ async def configure_sync_source(
             trail_name=cfg.get("trail_name"),
         )
     elif source == "prometheus":
-        prometheus_url = cfg.get("prometheus_url", "http://localhost:9090")
-        alertmanager_url = cfg.get("alertmanager_url", "http://localhost:9093")
+        # Request-supplied URLs go through the SSRF allow-list; absent ones fall
+        # back to the operator's own settings (PROMETHEUS_URL / ALERTMANAGER_URL),
+        # which need no allow-listing. With neither, refuse: a localhost default
+        # here only manufactured connection errors that looked like an outage.
+        settings = get_settings()
+        prometheus_url = cfg.get("prometheus_url", "")
+        alertmanager_url = cfg.get("alertmanager_url", "")
         _check_sync_url("prometheus_url", prometheus_url)
         _check_sync_url("alertmanager_url", alertmanager_url)
+        prometheus_url = prometheus_url or settings.prometheus_url
+        alertmanager_url = alertmanager_url or settings.alertmanager_url
+        if not (prometheus_url or alertmanager_url):
+            raise HTTPException(
+                400,
+                "prometheus sync needs prometheus_url/alertmanager_url in the "
+                "request config, or PROMETHEUS_URL / ALERTMANAGER_URL set on the API",
+            )
         engine.add_prometheus(
             prometheus_url=prometheus_url,
             alertmanager_url=alertmanager_url,
@@ -670,8 +683,15 @@ async def configure_sync_source(
             namespace=cfg.get("namespace"),
         )
     elif source == "jaeger":
-        jaeger_url = cfg.get("jaeger_url", "http://localhost:16686")
+        jaeger_url = cfg.get("jaeger_url", "")
         _check_sync_url("jaeger_url", jaeger_url)
+        jaeger_url = jaeger_url or get_settings().traces_api_url
+        if not jaeger_url:
+            raise HTTPException(
+                400,
+                "jaeger sync needs jaeger_url in the request config, or "
+                "TRACES_API_URL set on the API",
+            )
         engine.add_jaeger(jaeger_url=jaeger_url)
     else:
         # A typo'd source used to answer 200, so the caller believed sync was

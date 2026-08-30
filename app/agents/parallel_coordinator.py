@@ -396,12 +396,23 @@ class ParallelInvestigationCoordinator:
     and synthesizes them into a unified root cause hypothesis.
     """
 
-    # Model pricing per 1M tokens
+    # Model pricing per 1M tokens. IDs only — the dated snapshots this
+    # coordinator sends and has sent historically; every rate comes from
+    # app/model_catalog.py so this table cannot drift from the ledger's. A
+    # snapshot the catalog cannot price would be omitted rather than priced by
+    # hand here.
     MODEL_PRICING = {
-        "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-        "claude-3-5-sonnet-20241022": {"input": 3.0, "output": 15.0},
-        "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
-        "claude-3-opus-20240229": {"input": 15.0, "output": 75.0},
+        model_id: {"input": rates[0], "output": rates[1]}
+        for model_id, rates in (
+            (m, model_catalog.price_per_1m(m))
+            for m in (
+                "claude-sonnet-4-20250514",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-haiku-20240307",
+                "claude-3-opus-20240229",
+            )
+        )
+        if rates is not None
     }
 
     # Specialist prompts
@@ -878,11 +889,28 @@ class ParallelInvestigationCoordinator:
         input_tokens: int,
         output_tokens: int,
     ) -> Decimal:
-        """Calculate LLM cost."""
-        pricing = self.MODEL_PRICING.get(model, {"input": 3.0, "output": 15.0})
+        """Calculate LLM cost.
 
-        input_cost = Decimal(str(input_tokens)) / Decimal("1000000") * Decimal(str(pricing["input"]))
-        output_cost = Decimal(str(output_tokens)) / Decimal("1000000") * Decimal(str(pricing["output"]))
+        Rates come from app/model_catalog.py, which also resolves `-latest`
+        aliases and dated snapshots the local table doesn't spell out. A model
+        the catalog cannot price is charged at the most expensive rate we know —
+        the same guess-high-not-free rule as app/model_router's `_cost_for` — and
+        warned about, instead of the old fallback's invented $3/$15.
+        """
+        rates = model_catalog.price_per_1m(model)
+        if rates is None:
+            dearest = max(
+                self.MODEL_PRICING.values(), key=lambda p: p["input"] + p["output"]
+            )
+            log.warning(
+                "no verified price for model %r; charging it at the most "
+                "expensive known rate. Add the model to app/model_catalog.py.",
+                model,
+            )
+            rates = (dearest["input"], dearest["output"])
+
+        input_cost = Decimal(str(input_tokens)) / Decimal("1000000") * Decimal(str(rates[0]))
+        output_cost = Decimal(str(output_tokens)) / Decimal("1000000") * Decimal(str(rates[1]))
 
         return input_cost + output_cost
 

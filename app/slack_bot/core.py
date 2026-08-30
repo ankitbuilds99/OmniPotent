@@ -12,9 +12,22 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from app.config import get_settings
 from app.slack_bot.client import SlackClient, SlackClientConfig
 
 log = logging.getLogger("omnipotent.slack_bot.core")
+
+# Every messaging method used to fall back to a fabricated success payload when
+# SLACK_BOT_TOKEN was unset: `send_message` minted an `ok: True` with a `ts`
+# from the wall clock, `create_channel` invented a channel id, and the war-room
+# and approval flows built on top of them reported messages as posted that were
+# never sent anywhere. Unless the operator opted into demo mode, an
+# unconfigured bot now reports the failure instead of the outcome it would
+# have liked to produce.
+_NO_SLACK = (
+    "Slack client not configured (set SLACK_BOT_TOKEN); refusing to report "
+    "success for a message that was never sent"
+)
 
 
 class BotStatus(str, Enum):
@@ -170,6 +183,40 @@ class SlackBot:
             )
             self._client = SlackClient(client_config)
 
+    def _no_client(
+        self,
+        operation: str,
+        simulated: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The result of ``operation`` when no Slack client is configured.
+
+        In demo mode the simulated payload is returned, explicitly labelled so
+        it can never be mistaken for a real Slack response (same convention as
+        app/mcp/fixtures.mark_demo and the remediation handlers). Otherwise the
+        call fails closed with a not-configured error.
+        """
+        if get_settings().copilot_demo_mode:
+            log.warning(
+                "COPILOT_DEMO_MODE=true - returning a SIMULATED %s result", operation
+            )
+            return {
+                "ok": True,
+                **(simulated or {}),
+                "simulated": True,
+                "notice": (
+                    f"SIMULATED {operation} — no SLACK_BOT_TOKEN is configured; "
+                    "nothing was sent to Slack. Do not present this as a real "
+                    "Slack result."
+                ),
+            }
+
+        log.warning("%s not performed: %s", operation, _NO_SLACK)
+        return {
+            "ok": False,
+            "error": "slack_not_configured",
+            "detail": f"{operation} not performed: {_NO_SLACK}",
+        }
+
     async def start(self) -> None:
         """Start the Slack bot."""
         log.info("Starting Slack bot...")
@@ -261,13 +308,14 @@ class SlackBot:
             )
             return response.data
 
-        # Fallback for offline mode
-        return {
-            "ok": True,
-            "channel": channel_id,
-            "ts": f"{datetime.now(timezone.utc).timestamp()}",
-            "message": {"text": text},
-        }
+        return self._no_client(
+            "send_message",
+            {
+                "channel": channel_id,
+                "ts": f"{datetime.now(timezone.utc).timestamp()}",
+                "message": {"text": text},
+            },
+        )
 
     async def send_ephemeral(
         self,
@@ -288,10 +336,10 @@ class SlackBot:
             )
             return response.data
 
-        return {
-            "ok": True,
-            "message_ts": f"{datetime.now(timezone.utc).timestamp()}",
-        }
+        return self._no_client(
+            "send_ephemeral",
+            {"message_ts": f"{datetime.now(timezone.utc).timestamp()}"},
+        )
 
     async def update_message(
         self,
@@ -312,11 +360,10 @@ class SlackBot:
             )
             return response.data
 
-        return {
-            "ok": True,
-            "channel": channel_id,
-            "ts": message_ts,
-        }
+        return self._no_client(
+            "update_message",
+            {"channel": channel_id, "ts": message_ts},
+        )
 
     async def create_channel(
         self,
@@ -333,15 +380,16 @@ class SlackBot:
             )
             return response.data
 
-        channel_id = f"C{name.upper()[:8]}"
-        return {
-            "ok": True,
-            "channel": {
-                "id": channel_id,
-                "name": name,
-                "is_private": is_private,
+        return self._no_client(
+            "create_channel",
+            {
+                "channel": {
+                    "id": f"C{name.upper()[:8]}",
+                    "name": name,
+                    "is_private": is_private,
+                },
             },
-        }
+        )
 
     async def invite_to_channel(
         self,
@@ -358,7 +406,7 @@ class SlackBot:
             )
             return response.data
 
-        return {"ok": True}
+        return self._no_client("invite_to_channel")
 
     async def set_channel_topic(
         self,
@@ -375,7 +423,7 @@ class SlackBot:
             )
             return response.data
 
-        return {"ok": True, "topic": topic}
+        return self._no_client("set_channel_topic", {"topic": topic})
 
     async def pin_message(
         self,
@@ -392,7 +440,7 @@ class SlackBot:
             )
             return response.data
 
-        return {"ok": True}
+        return self._no_client("pin_message")
 
     async def archive_channel(
         self,
@@ -405,7 +453,7 @@ class SlackBot:
             response = await self._client.archive_channel(channel=channel_id)
             return response.data
 
-        return {"ok": True}
+        return self._no_client("archive_channel")
 
     async def get_user_info(self, user_id: str) -> dict[str, Any]:
         """Get user information."""

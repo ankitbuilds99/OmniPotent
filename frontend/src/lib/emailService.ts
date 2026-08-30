@@ -1,7 +1,12 @@
 import emailjs from '@emailjs/browser'
 
-const SERVICE_ID = import.meta.env.VITE_EMAILJS_SERVICE_ID || 'service_c97omni'
-const TEMPLATE_ID = import.meta.env.VITE_EMAILJS_TEMPLATE_ID || 'template_jeqk7kd'
+// De-faked: SERVICE_ID and TEMPLATE_ID used to default to the developer's
+// personal EmailJS account ('service_c97omni' / 'template_jeqk7kd'), so any
+// deployment that set only VITE_EMAILJS_PUBLIC_KEY silently routed its
+// invitation mail through that account. All three now default to unset, and
+// no mail is attempted unless all three are explicitly configured.
+const SERVICE_ID = import.meta.env.VITE_EMAILJS_SERVICE_ID || ''
+const TEMPLATE_ID = import.meta.env.VITE_EMAILJS_TEMPLATE_ID || ''
 const PUBLIC_KEY = import.meta.env.VITE_EMAILJS_PUBLIC_KEY || ''
 
 interface InvitationEmailParams {
@@ -13,8 +18,8 @@ interface InvitationEmailParams {
 }
 
 export async function sendInvitationEmail(params: InvitationEmailParams): Promise<boolean> {
-  if (!PUBLIC_KEY) {
-    console.warn('EmailJS public key not configured - email not sent')
+  if (!isEmailServiceConfigured()) {
+    console.warn('EmailJS not fully configured (service id, template id and public key are all required) - email not sent')
     return false
   }
 
@@ -49,5 +54,5 @@ export async function sendInvitationEmail(params: InvitationEmailParams): Promis
 }
 
 export function isEmailServiceConfigured(): boolean {
-  return Boolean(PUBLIC_KEY)
+  return Boolean(SERVICE_ID && TEMPLATE_ID && PUBLIC_KEY)
 }

@@ -12,9 +12,11 @@ Advanced features:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
+import operator
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -56,6 +58,62 @@ def _json_safe(value: Any) -> Any:
     except (TypeError, ValueError):
         return {"unserialisable": repr(value)[:500]}
     return value
+
+
+_CONDITION_COMPARATORS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+}
+
+
+def _eval_condition_node(node: ast.expr) -> Any:
+    """Evaluate the AST of a task condition, admitting only literals,
+    comparisons, and/or/not — anything else raises.
+
+    Task conditions come from DAG definitions that may embed model- or
+    request-supplied strings, so this is a security boundary: no names,
+    attributes, subscripts or calls.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        items = [_eval_condition_node(e) for e in node.elts]
+        return set(items) if isinstance(node, ast.Set) else items
+    if isinstance(node, ast.Dict):
+        return {
+            _eval_condition_node(k): _eval_condition_node(v)
+            for k, v in zip(node.keys, node.values)
+            if k is not None
+        }
+    if isinstance(node, ast.UnaryOp):
+        if isinstance(node.op, ast.Not):
+            return not _eval_condition_node(node.operand)
+        if isinstance(node.op, ast.USub):
+            value = _eval_condition_node(node.operand)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return -value
+        raise ValueError(f"disallowed unary op in condition: {ast.dump(node)}")
+    if isinstance(node, ast.BoolOp):
+        values = (_eval_condition_node(v) for v in node.values)
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    if isinstance(node, ast.Compare):
+        left = _eval_condition_node(node.left)
+        for op, comparator in zip(node.ops, node.comparators):
+            fn = _CONDITION_COMPARATORS.get(type(op))
+            if fn is None:
+                raise ValueError(f"disallowed comparator in condition: {type(op).__name__}")
+            right = _eval_condition_node(comparator)
+            if not fn(left, right):
+                return False
+            left = right
+        return True
+    raise ValueError(f"disallowed expression in condition: {type(node).__name__}")
 
 
 class ExecutionState(str, Enum):
@@ -955,7 +1013,13 @@ class DAGExecutor:
         return False
 
     def _evaluate_condition(self, condition: str, context: dict[str, Any]) -> bool:
-        """Safely evaluate a condition expression."""
+        """Evaluate a condition expression without eval().
+
+        Context values are spliced in as repr() literals and the result is
+        parsed to an AST that only admits literals, comparisons and boolean
+        operators — a condition (or a context value smuggled into one) can
+        never reach attribute access, subscripts, calls or imports.
+        """
         safe_context = {
             k: v for k, v in context.items()
             if isinstance(v, (str, int, float, bool, list, dict, type(None)))
@@ -965,7 +1029,8 @@ class DAGExecutor:
             condition = condition.replace(f"${{{key}}}", repr(value))
 
         try:
-            return eval(condition, {"__builtins__": {}}, {})
+            tree = ast.parse(condition, mode="eval")
+            return bool(_eval_condition_node(tree.body))
         except Exception:
             return False
 

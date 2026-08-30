@@ -28,6 +28,7 @@ from app.digital_twin import (
 )
 from app.digital_twin.simulator import SimulationType
 from app.digital_twin.chaos_engine import SafetyLevel
+from app.digital_twin.downtime_predictor import MetricsUnavailableError
 from app.api.main import require_perm
 from app.config import get_settings
 from app import tenant_context
@@ -250,6 +251,12 @@ class RollbackSimulationResponse(BaseModel):
     estimated_downtime_minutes: float
     can_proceed: bool
     requires_approval: bool
+    #: False when the rollback's state changes were never read from a cluster.
+    #: `can_proceed` is False either way — same contract as `simulated` on
+    #: SimulationResultResponse: without this a caller cannot tell a refusal
+    #: backed by evidence from one meaning "nothing was checked".
+    verified: bool
+    unverified_reason: str | None
     issues: list[dict[str, Any]]
     recommendations: list[str]
     simulated_at: str
@@ -313,6 +320,10 @@ class SimulationResultResponse(BaseModel):
     estimated_downtime_minutes: float
     safe_to_proceed: bool
     requires_approval: bool
+    #: True when the run never reached a cluster, so nothing here was measured.
+    #: `safe_to_proceed` is False either way, and without this a caller cannot
+    #: tell a refusal backed by evidence from one meaning "I could not look".
+    simulated: bool
     issues: list[dict[str, Any]]
     recommendations: list[str]
     started_at: str
@@ -331,6 +342,10 @@ class CapacityForecastResponse(BaseModel):
     breach_time: str | None
     recommendations: list[str]
     forecasted_usage: list[dict[str, Any]]
+    #: True only under COPILOT_DEMO_MODE, when the forecast is built from
+    #: placeholder constants rather than measured usage. Without demo mode an
+    #: unmeasured service is a 503, never a forecast.
+    simulated: bool = False
 
 
 # Endpoints - Infrastructure Cloning
@@ -536,8 +551,13 @@ async def forecast_capacity(
                 {"time": t.isoformat(), "usage": v}
                 for t, v in forecast.forecasted_usage
             ],
+            simulated=forecast.simulated,
         )
 
+    except MetricsUnavailableError as e:
+        # Not a crash: there is no measured usage to forecast from. 503 tells
+        # the caller what to configure instead of a 500 hiding the same string.
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         log.error("Capacity forecast failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -593,6 +613,8 @@ async def simulate_rollback(
             estimated_downtime_minutes=result.estimated_downtime.total_seconds() / 60,
             can_proceed=result.can_proceed,
             requires_approval=result.requires_approval,
+            verified=result.verified,
+            unverified_reason=result.unverified_reason,
             issues=[i.to_dict() for i in result.issues],
             recommendations=result.recommendations,
             simulated_at=result.simulated_at.isoformat(),
@@ -790,6 +812,7 @@ async def run_simulation(
             estimated_downtime_minutes=result.estimated_downtime_minutes,
             safe_to_proceed=result.safe_to_proceed,
             requires_approval=result.requires_approval,
+            simulated=result.simulated,
             issues=result.issues,
             recommendations=result.recommendations,
             started_at=result.started_at.isoformat(),

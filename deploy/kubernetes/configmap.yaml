@@ -16,7 +16,8 @@ data:
   # allowed unconditionally), no HSTS, and a /readyz that can never return 503.
   # In production it also makes Settings refuse to start without
   # COPILOT_API_TOKEN, and without COPILOT_SECRET_KEY while COPILOT_MULTI_TENANT
-  # is true — both come from secret.yaml.
+  # is true — both come from the out-of-band `omnipotent-secrets` Secret
+  # (external-secret.yaml or a filled-in copy of secret.yaml.example).
   COPILOT_ENV: "production"
   COPILOT_LOG_LEVEL: "INFO"
   COPILOT_LOG_FORMAT: "json"

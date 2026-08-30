@@ -15,24 +15,24 @@ containers:
       - name: POSTGRESQL_HOST
         valueFrom:
           secretKeyRef:
-            name: copilot-secrets
+            name: omnipotent-secrets
             key: POSTGRES_HOST
       - name: POSTGRESQL_PORT
         value: "5432"
       - name: POSTGRESQL_DATABASE
         valueFrom:
           secretKeyRef:
-            name: copilot-secrets
+            name: omnipotent-secrets
             key: POSTGRES_DB
       - name: POSTGRESQL_USERNAME
         valueFrom:
           secretKeyRef:
-            name: copilot-secrets
+            name: omnipotent-secrets
             key: POSTGRES_USER
       - name: POSTGRESQL_PASSWORD
         valueFrom:
           secretKeyRef:
-            name: copilot-secrets
+            name: omnipotent-secrets
             key: POSTGRES_PASSWORD
       # Transaction pooling for async applications (critical for SQLAlchemy async)
       - name: PGBOUNCER_POOL_MODE

@@ -7,7 +7,7 @@ helm install copilot ./deploy/helm/copilot \
   --set image.tag=1.0.0 \
   --set-string config.COPILOT_REDIS_URL=redis://redis:6379/0 \
   --set-string config.COPILOT_CHECKPOINT_DB=postgresql://user@pg/copilot \
-  --set secret.existingSecret=copilot-secrets
+  --set secret.existingSecret=omnipotent-secrets
 ```
 
 ## What's in the chart

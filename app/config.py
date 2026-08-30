@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # refuse to answer (503) instead of reporting an unverifiable claim as
     # "refuted". Never point these at a stub.
     prometheus_url: str = ""   # Prometheus HTTP API base, e.g. http://prom:9090
+    # Alertmanager HTTP API base, e.g. http://alertmanager:9093. Read by the
+    # knowledge-graph Prometheus sync source; blank means that source skips
+    # alert ingestion rather than guessing a localhost address.
+    alertmanager_url: str = ""
     loki_url: str = ""         # Loki HTTP API base, e.g. http://loki:3100
     elasticsearch_url: str = ""  # Elasticsearch base, e.g. http://es:9200
     # Distributed-traces connector. With a Jaeger-compatible query URL it queries
@@ -142,6 +146,9 @@ class Settings(BaseSettings):
     jira_api_token: str = "" # Jira API token
     # PagerDuty API key for incident management (different from webhook token).
     pagerduty_api_key: str = ""
+    # OpsGenie API key for the alerting engine's OpsGenie notification channel.
+    # Blank = the channel is skipped.
+    opsgenie_api_key: str = ""
 
     # --- API ---
     # Deployment environment: "development" | "staging" | "production".

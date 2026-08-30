@@ -453,15 +453,13 @@ class AlertEngine:
 
         Uses the OpsGenie REST API v2 to create/close alerts with full metadata.
         """
-        import os
-
         from app.integrations.opsgenie_client import (
             OpsGenieClient,
             OpsGenieConfig,
             AlertPriority,
         )
 
-        api_key = os.getenv("OPSGENIE_API_KEY", "")
+        api_key = get_settings().opsgenie_api_key
         if not api_key:
             log.debug("OpsGenie not configured (OPSGENIE_API_KEY not set), skipping notification")
             return False

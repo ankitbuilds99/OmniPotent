@@ -1,25 +1,28 @@
 import { motion } from 'framer-motion'
 import {
-  Calendar,
-  Clock,
   ArrowRight,
   Tag,
-  User,
   TrendingUp,
   Cpu,
   GitMerge,
   Lightbulb
 } from 'lucide-react'
 
-const BLOG_POSTS = [
+/**
+ * De-faked: this used to be `BLOG_POSTS` — four "articles" with invented
+ * publish dates, read-times, author bylines and a "Case Study" claiming MTTR
+ * was "reduced by 98%" at a company that was never named because it never
+ * existed. Every URL already pointed at the repo's own docs, which is what
+ * these entries actually are: guides to the documentation. So that is how
+ * they are presented now — no dates, no read-times, no case-study framing,
+ * just the docs each card links to.
+ */
+const GUIDES = [
   {
     id: 1,
     title: 'Building an AI-Powered OmniPotent with LangGraph',
-    excerpt: 'Learn how we built an intelligent agent that can investigate incidents, analyze logs, and even create pull requests - all powered by LLMs and a graph-based workflow engine.',
-    author: 'Ankit Pandey',
-    date: '2024-07-20',
-    readTime: '8 min read',
-    category: 'Engineering',
+    excerpt: 'How the agent investigates incidents, analyzes logs, and creates pull requests - powered by LLMs and a graph-based workflow engine.',
+    category: 'Architecture',
     icon: Cpu,
     color: '#00E7FF',
     featured: true,
@@ -28,49 +31,40 @@ const BLOG_POSTS = [
   },
   {
     id: 2,
-    title: 'From 4 Hours to 4 Minutes: Automating Incident Response',
-    excerpt: 'How AI-driven root cause analysis reduced our mean time to resolution (MTTR) by 98%. A deep dive into the architecture and lessons learned.',
-    author: 'Ankit Pandey',
-    date: '2024-07-15',
-    readTime: '6 min read',
-    category: 'Case Study',
+    title: 'Automating Incident Response',
+    excerpt: 'A tour of the incident-response features: AI-driven root cause analysis and what the pipeline automates between an alert firing and a fix being proposed.',
+    category: 'Guide',
     icon: TrendingUp,
     color: '#00FFB3',
     featured: false,
-    tags: ['Incident Response', 'Automation', 'Metrics'],
+    tags: ['Incident Response', 'Automation', 'Features'],
     url: 'https://github.com/ankit25bcs10610/OmniPotent#features'
   },
   {
     id: 3,
     title: 'Human-in-the-Loop: Why AI Needs Guardrails',
-    excerpt: 'Exploring the importance of human oversight in AI-powered DevOps automation. How we designed approval workflows that balance speed with safety.',
-    author: 'Ankit Pandey',
-    date: '2024-07-10',
-    readTime: '5 min read',
-    category: 'Best Practices',
+    excerpt: 'How the approval workflows are designed: human oversight before any production change, balancing speed with safety.',
+    category: 'Guide',
     icon: Lightbulb,
     color: '#FF9900',
     featured: false,
-    tags: ['AI Safety', 'Best Practices', 'Security'],
+    tags: ['AI Safety', 'Approvals', 'Security'],
     url: 'https://github.com/ankit25bcs10610/OmniPotent#human-in-the-loop-approval'
   },
   {
     id: 4,
     title: 'Integrating LLMs with Datadog, PagerDuty, and GitHub',
-    excerpt: 'A technical guide to building integrations that let your AI agent read logs, acknowledge alerts, and submit code changes across your DevOps toolchain.',
-    author: 'Ankit Pandey',
-    date: '2024-07-05',
-    readTime: '10 min read',
-    category: 'Tutorial',
+    excerpt: 'The MCP integration layer: how the agent reads logs, acknowledges alerts, and submits code changes across your DevOps toolchain.',
+    category: 'Reference',
     icon: GitMerge,
     color: '#7C3AED',
     featured: false,
-    tags: ['Integration', 'API', 'Tutorial'],
+    tags: ['Integration', 'API', 'MCP'],
     url: 'https://github.com/ankit25bcs10610/OmniPotent/tree/main/app/mcp'
   }
 ]
 
-function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
+function FeaturedPost({ post }: { post: typeof GUIDES[0] }) {
   const Icon = post.icon
 
   return (
@@ -118,10 +112,6 @@ function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
             >
               {post.category}
             </span>
-            <span className="flex items-center gap-1 text-white/40 text-sm">
-              <Clock className="w-3 h-3" />
-              {post.readTime}
-            </span>
           </div>
 
           <h3 className="text-2xl font-bold text-white mb-3 group-hover:text-primary transition-colors">
@@ -132,22 +122,23 @@ function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
             {post.excerpt}
           </p>
 
+          {/* The author byline and publish date that sat here belonged to the
+              fake-blog framing; a guide into the repo docs has neither. */}
           <div className="flex items-center justify-between mt-auto">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-                <User className="w-4 h-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-white text-sm font-medium">{post.author}</p>
-                <p className="text-white/40 text-xs flex items-center gap-1">
-                  <Calendar className="w-3 h-3" />
-                  {new Date(post.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                </p>
-              </div>
+            <div className="flex flex-wrap gap-1">
+              {post.tags.slice(0, 3).map((tag) => (
+                <span
+                  key={tag}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-white/5 rounded text-xs text-white/50"
+                >
+                  <Tag className="w-2.5 h-2.5" />
+                  {tag}
+                </span>
+              ))}
             </div>
 
             <span className="flex items-center gap-1 text-primary text-sm font-medium group-hover:gap-2 transition-all">
-              Read more
+              Read the docs
               <ArrowRight className="w-4 h-4" />
             </span>
           </div>
@@ -158,7 +149,7 @@ function FeaturedPost({ post }: { post: typeof BLOG_POSTS[0] }) {
   )
 }
 
-function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }) {
+function GuideCard({ post, index }: { post: typeof GUIDES[0]; index: number }) {
   const Icon = post.icon
 
   return (
@@ -198,7 +189,6 @@ function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }
           >
             {post.category}
           </span>
-          <span className="text-white/40 text-xs">{post.readTime}</span>
         </div>
 
         <h3 className="font-semibold text-white mb-2 group-hover:text-primary transition-colors line-clamp-2">
@@ -222,11 +212,8 @@ function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }
           ))}
         </div>
 
-        <div className="flex items-center justify-between pt-4 border-t border-white/5">
-          <span className="text-white/40 text-xs flex items-center gap-1">
-            <Calendar className="w-3 h-3" />
-            {new Date(post.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-          </span>
+        {/* The publish date that sat here was invented; guides carry none. */}
+        <div className="flex items-center justify-end pt-4 border-t border-white/5">
           <span className="text-primary text-xs font-medium flex items-center gap-1 group-hover:gap-2 transition-all">
             Read
             <ArrowRight className="w-3 h-3" />
@@ -239,8 +226,8 @@ function BlogCard({ post, index }: { post: typeof BLOG_POSTS[0]; index: number }
 }
 
 export function Blog() {
-  const featuredPost = BLOG_POSTS.find(p => p.featured)
-  const otherPosts = BLOG_POSTS.filter(p => !p.featured)
+  const featuredPost = GUIDES.find(p => p.featured)
+  const otherPosts = GUIDES.filter(p => !p.featured)
 
   return (
     <section id="blog" className="relative py-32 overflow-hidden">
@@ -259,7 +246,7 @@ export function Blog() {
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
           >
-            Blog
+            Docs & Guides
           </motion.span>
           <motion.h2
             className="font-display text-3xl md:text-4xl lg:text-5xl font-bold text-white mb-4"
@@ -268,7 +255,7 @@ export function Blog() {
             viewport={{ once: true }}
             transition={{ delay: 0.1 }}
           >
-            Insights & <span className="gradient-text">Updates</span>
+            Learn how it <span className="gradient-text">works</span>
           </motion.h2>
           <motion.p
             className="text-white/50 text-lg max-w-2xl mx-auto"
@@ -277,21 +264,21 @@ export function Blog() {
             viewport={{ once: true }}
             transition={{ delay: 0.2 }}
           >
-            Technical deep-dives, tutorials, and thoughts on AI-powered DevOps
+            Guides to the architecture, integrations, and safety model — straight from the project docs
           </motion.p>
         </div>
 
-        {/* Featured post */}
+        {/* Featured guide */}
         {featuredPost && (
           <div className="mb-12">
             <FeaturedPost post={featuredPost} />
           </div>
         )}
 
-        {/* Other posts grid */}
+        {/* Other guides grid */}
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
           {otherPosts.map((post, i) => (
-            <BlogCard key={post.id} post={post} index={i} />
+            <GuideCard key={post.id} post={post} index={i} />
           ))}
         </div>
 
@@ -305,7 +292,7 @@ export function Blog() {
           <div className="inline-flex flex-col sm:flex-row items-center gap-4 p-6 bg-white/5 rounded-2xl border border-white/10">
             <div className="text-left">
               <h4 className="font-semibold text-white mb-1">Stay updated</h4>
-              <p className="text-white/50 text-sm">Get notified about new posts and features</p>
+              <p className="text-white/50 text-sm">Get notified about new features and releases</p>
             </div>
             <a
               href="mailto:ankit25bcs10610@gmail.com?subject=Subscribe to OmniPotent updates"

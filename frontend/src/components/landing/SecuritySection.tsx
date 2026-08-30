@@ -1,13 +1,17 @@
 import { motion } from 'framer-motion'
 import { Shield, Lock, Eye, Server, Key, FileCheck, CheckCircle2 } from 'lucide-react'
 
+/** De-faked: this list used to claim 'SOC 2 Type II Compliant' and
+ *  'GDPR & CCPA Ready' — certifications a private-beta project has never
+ *  obtained or been assessed for. What remains are architectural facts
+ *  about how the product is actually built and deployed. */
 const SECURITY_FEATURES = [
-  { icon: Shield, text: 'SOC 2 Type II Compliant' },
-  { icon: Lock, text: 'End-to-End Encryption' },
-  { icon: Eye, text: 'GDPR & CCPA Ready' },
-  { icon: Server, text: 'Data Residency Options' },
-  { icon: Key, text: 'SAML SSO & RBAC' },
-  { icon: FileCheck, text: 'Audit Logging' },
+  { icon: Shield, text: 'Self-hosted deployment' },
+  { icon: Lock, text: 'Human approval before changes' },
+  { icon: Eye, text: 'GDPR-friendly data controls' },
+  { icon: Server, text: 'Your data stays in your cloud' },
+  { icon: Key, text: 'RBAC & SSO support' },
+  { icon: FileCheck, text: 'Audit logging' },
 ]
 
 
@@ -37,8 +41,8 @@ export function SecuritySection() {
               security requirements
             </h2>
             <p className="text-white/60 text-lg mb-10 leading-relaxed">
-              Your infrastructure data never leaves your environment. We follow the strictest
-              security protocols to ensure your data remains protected and compliant.
+              Your infrastructure data never leaves your environment. The architecture is
+              designed so your data stays under your control at every step.
             </p>
 
             <div className="grid sm:grid-cols-2 gap-4">
@@ -78,13 +82,15 @@ export function SecuritySection() {
                 <p className="text-white/50 text-sm">Your data stays in your cloud</p>
               </div>
 
+              {/* De-faked: 'Regular third-party security audits' claimed audits
+                  that have never been commissioned; the remaining items describe
+                  the deployment model as it exists. */}
               <div className="space-y-4">
                 {[
                   'No customer data stored on our servers',
                   'Self-hosted deployment options',
                   'VPC and private network support',
                   'Configurable data retention policies',
-                  'Regular third-party security audits',
                 ].map((item, i) => (
                   <motion.div
                     key={item}
@@ -100,21 +106,12 @@ export function SecuritySection() {
                 ))}
               </div>
 
-              <div className="mt-8 pt-6 border-t border-white/[0.06]">
-                <p className="text-white/40 text-xs uppercase tracking-wider mb-4 text-center">
-                  Compliance Certifications
-                </p>
-                <div className="flex justify-center gap-6">
-                  {['SOC 2', 'ISO 27001', 'GDPR', 'HIPAA'].map((cert) => (
-                    <div
-                      key={cert}
-                      className="px-4 py-2 rounded-lg bg-white/[0.05] border border-white/[0.08] text-white/60 text-xs font-medium"
-                    >
-                      {cert}
-                    </div>
-                  ))}
-                </div>
-              </div>
+              {/* A "Compliance Certifications" badge row used to sit here,
+                  showing SOC 2 / ISO 27001 / GDPR / HIPAA. None of those
+                  certifications exist for this project, and rendering the
+                  logos of audits that never happened is a legal claim, not
+                  decoration. Removed outright in the de-faking pass — it
+                  comes back if and when a real certificate does. */}
             </div>
           </motion.div>
         </div>

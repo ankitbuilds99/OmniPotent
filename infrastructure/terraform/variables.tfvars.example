@@ -3,7 +3,7 @@
 
 aws_region        = "us-east-1"
 environment       = "prod"
-domain_name       = "devops-copilot.com"
+domain_name       = "devops-copilot.example.com"  # REQUIRED — replace with a domain you own
 
 # Sensitive - set via TF_VAR_* environment variables or secrets manager
 # db_password       = ""

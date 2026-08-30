@@ -132,6 +132,36 @@ def _find_channel(channel: str) -> dict[str, object] | None:
     return None
 
 
+def _mcp_timeout() -> float:
+    """Deadline for the outbound Slack API calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
+def _demo(payload):
+    """Label fixture data so the agent can't mistake it for a live Slack read.
+
+    Offline responses were shaped exactly like real API ones, so a message
+    "sent" offline looked identical to one responders actually saw.
+    """
+    from app.mcp.fixtures import mark_demo
+    return mark_demo(payload, "slack")
+
+
+def _gate() -> dict | None:
+    """Fail closed when no bot token is set outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("Slack", "SLACK_BOT_TOKEN")
+
+
 def _slack_api(method: str, **kwargs: object) -> dict:
     """Make Slack API call."""
     import httpx
@@ -140,7 +170,7 @@ def _slack_api(method: str, **kwargs: object) -> dict:
         f"https://slack.com/api/{method}",
         headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
         json=kwargs,
-        timeout=30,
+        timeout=_mcp_timeout(),
     )
     resp.raise_for_status()
     return resp.json()
@@ -165,12 +195,15 @@ def send_message(
         Message details including timestamp
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ch = _find_channel(channel)
         if not ch:
             return {"error": f"Channel '{channel}' not found", "available": [c["name"] for c in DEMO_CHANNELS]}
 
         ts = f"{datetime.now().timestamp():.6f}"
-        return {
+        return _demo({
             "ok": True,
             "channel": ch["id"],
             "ts": ts,
@@ -182,7 +215,7 @@ def send_message(
             },
             "mode": "offline_demo",
             "note": "Message simulated - no actual Slack message sent",
-        }
+        })
 
     kwargs: dict[str, object] = {
         "channel": channel,
@@ -305,6 +338,9 @@ def create_channel(
     name_clean = name.lower().replace(" ", "-").replace("_", "-")
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         if _find_channel(name_clean):
             return {"error": f"Channel '{name_clean}' already exists"}
 
@@ -318,12 +354,12 @@ def create_channel(
             "created": datetime.now().isoformat() + "Z",
         }
 
-        return {
+        return _demo({
             "ok": True,
             "channel": new_channel,
             "mode": "offline_demo",
             "note": "Channel simulated - no actual Slack channel created",
-        }
+        })
 
     result = _slack_api(
         "conversations.create",
@@ -354,15 +390,18 @@ def list_channels(
         List of channels with details
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         channels = DEMO_CHANNELS
         if not include_private:
             channels = [c for c in channels if not c.get("is_private")]
-        return {
+        return _demo({
             "ok": True,
             "channels": channels[:limit],
             "total": len(channels),
             "mode": "offline_demo",
-        }
+        })
 
     types = "public_channel,private_channel" if include_private else "public_channel"
     return _slack_api("conversations.list", types=types, limit=limit)
@@ -383,6 +422,9 @@ def get_channel_history(
         Recent messages with user info
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ch = _find_channel(channel)
         if not ch:
             return {"error": f"Channel '{channel}' not found", "available": [c["name"] for c in DEMO_CHANNELS]}
@@ -390,13 +432,13 @@ def get_channel_history(
         messages = [m for m in DEMO_MESSAGES if m["channel"] == ch["id"]]
         messages = sorted(messages, key=lambda x: str(x["ts"]), reverse=True)[:limit]
 
-        return {
+        return _demo({
             "ok": True,
             "channel": ch,
             "messages": messages,
             "has_more": False,
             "mode": "offline_demo",
-        }
+        })
 
     ch = _find_channel(channel) if not channel.startswith("C") else {"id": channel}
     if not ch:
@@ -424,18 +466,21 @@ def add_reaction(
     emoji_clean = emoji.strip(":")
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ch = _find_channel(channel)
         if not ch:
             return {"error": f"Channel '{channel}' not found"}
 
-        return {
+        return _demo({
             "ok": True,
             "channel": ch["id"],
             "timestamp": timestamp,
             "emoji": emoji_clean,
             "mode": "offline_demo",
             "note": "Reaction simulated - no actual reaction added",
-        }
+        })
 
     ch = _find_channel(channel) if not channel.startswith("C") else {"id": channel}
     return _slack_api("reactions.add", channel=ch["id"] if ch else channel, timestamp=timestamp, name=emoji_clean)
@@ -456,17 +501,20 @@ def invite_to_channel(
         Invitation result
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ch = _find_channel(channel)
         if not ch:
             return {"error": f"Channel '{channel}' not found"}
 
-        return {
+        return _demo({
             "ok": True,
             "channel": ch["id"],
             "invited_users": users,
             "mode": "offline_demo",
             "note": "Invitation simulated - no actual invitations sent",
-        }
+        })
 
     ch = _find_channel(channel) if not channel.startswith("C") else {"id": channel}
     return _slack_api("conversations.invite", channel=ch["id"] if ch else channel, users=",".join(users))
@@ -487,17 +535,20 @@ def set_channel_topic(
         Updated channel details
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         ch = _find_channel(channel)
         if not ch:
             return {"error": f"Channel '{channel}' not found"}
 
-        return {
+        return _demo({
             "ok": True,
             "channel": ch["id"],
             "topic": topic,
             "mode": "offline_demo",
             "note": "Topic simulated - no actual topic change",
-        }
+        })
 
     ch = _find_channel(channel) if not channel.startswith("C") else {"id": channel}
     return _slack_api("conversations.setTopic", channel=ch["id"] if ch else channel, topic=topic)
@@ -553,13 +604,14 @@ def create_incident_channel(
     if invite_users:
         invite_to_channel(channel=channel_id, users=invite_users)
 
-    return {
+    result = {
         "ok": True,
         "channel": create_result.get("channel"),
         "incident_id": incident_id,
         "setup_complete": True,
         "mode": "offline_demo" if OFFLINE else "live",
     }
+    return _demo(result) if OFFLINE else result
 
 
 if __name__ == "__main__":

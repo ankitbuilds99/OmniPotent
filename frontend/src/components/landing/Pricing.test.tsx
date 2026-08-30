@@ -103,12 +103,33 @@ describe('Pricing section', () => {
     expect(screen.getByText(/Save up to 15%/)).toBeInTheDocument()
   })
 
-  it('still quotes a saving that matches the fallback plans when the API is down', async () => {
-    // With no API the section renders FALLBACK_PLANS, which also save 15%.
-    vi.stubGlobal('fetch', vi.fn(async () => json({ detail: 'nope' }, 503)))
+  it('honors the is_popular flag the API sends instead of forcing it onto team', async () => {
+    // Every plan says "not popular". The old code overwrote that with
+    // `tier === 'team'` and badged Team anyway; the API's answer now stands.
+    const flagged = PLANS.map((p) => ({ ...p, is_popular: false }))
+    vi.stubGlobal('fetch', vi.fn(async () => json(flagged)))
     render(<Pricing />)
     await screen.findByText('Unlimited users')
 
-    expect(screen.getByText(/Save up to 15%/)).toBeInTheDocument()
+    expect(screen.queryByText('Most Popular')).not.toBeInTheDocument()
+  })
+
+  it('says pricing is unavailable when the API is down, instead of inventing a price list', async () => {
+    // FALLBACK_PLANS used to render here: six made-up plans ($299/$699/...)
+    // indistinguishable from a real quote. Now the section says so honestly
+    // and offers the contact address.
+    vi.stubGlobal('fetch', vi.fn(async () => json({ detail: 'nope' }, 503)))
+    render(<Pricing />)
+
+    expect(
+      await screen.findByText('Pricing is temporarily unavailable')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Save up to/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Start Free Trial')).not.toBeInTheDocument()
+
+    const contact = screen.getByRole('link', { name: 'Contact Us' })
+    expect(contact.getAttribute('href')).toContain('mailto:')
+    // The old hardcoded addresses pointed at a domain the project doesn't own.
+    expect(contact.getAttribute('href')).not.toContain('omnipotent.ai')
   })
 })

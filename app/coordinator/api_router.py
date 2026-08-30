@@ -49,6 +49,92 @@ log = logging.getLogger("omnipotent.coordinator.api")
 router = APIRouter(prefix="/coordinator", tags=["coordinator"])
 
 
+class _HandlerLLM:
+    """The ``await llm.complete(prompt=...)`` facade the coordinator handlers
+    and replanner expect, over the app's chat-model factory (app/llm.py).
+
+    The model is resolved per call so UI provider/model/key switches apply
+    without a restart, and `invoke` runs in a thread because the resilient
+    wrapper in app/llm.py is synchronous. `temperature` is accepted and
+    ignored: the Anthropic path rejects sampling params (see app/llm.py).
+    """
+
+    async def complete(self, prompt: str, temperature: float = 0.0, **_: Any) -> str:
+        import asyncio
+
+        from app.llm import get_llm
+
+        message = await asyncio.to_thread(get_llm().invoke, prompt)
+        content = getattr(message, "content", message)
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        return str(content)
+
+
+def _build_llm_client() -> _HandlerLLM | None:
+    """An LLM client for the handlers, or None with a log line saying why not.
+
+    None disables LLM hypothesis generation and replanning (the handlers fall
+    back to heuristics and say so in their output). Multi-tenant deployments
+    stay on None deliberately: handlers run in FastAPI background tasks after
+    the tenant contextvar may have been reset, so a per-call key lookup could
+    fall through to the host's key — the isolation rule in app/runtime.py.
+    """
+    settings = get_settings()
+    if settings.copilot_multi_tenant:
+        log.warning(
+            "Coordinator LLM disabled: multi-tenant mode resolves per-tenant "
+            "keys from request context, which background DAG tasks do not have"
+        )
+        return None
+
+    from app import runtime
+
+    if not runtime.provider_key():
+        log.warning(
+            "Coordinator LLM disabled: no API key configured for provider %r "
+            "(set the provider key to enable LLM hypothesis generation and "
+            "replanning; heuristics are used instead)",
+            runtime.provider(),
+        )
+        return None
+    return _HandlerLLM()
+
+
+def _build_knowledge_graph() -> Any | None:
+    """The knowledge graph for deployment correlation, or None saying why not.
+
+    With this hardcoded to None, `DeploymentsHandler` could never read recent
+    deployments and deployment correlation never fired. The client mirrors the
+    per-org registry in app/knowledge_graph/api_router.py: with no
+    COPILOT_NEO4J_URI it reads the org-scoped relational graph store, and with
+    one it connects lazily on first use (`_ensure_connected`). Multi-tenant
+    deployments keep None: DAG handlers run in background tasks without the
+    tenant contextvar, so the relational store could not scope rows to the
+    right org, and a shared live Neo4j is refused for tenants anyway
+    (`_OrgGraph.require_isolated`).
+    """
+    settings = get_settings()
+    if settings.copilot_multi_tenant:
+        log.warning(
+            "Coordinator deployment correlation disabled: the knowledge graph "
+            "cannot be org-scoped from a background DAG task in multi-tenant mode"
+        )
+        return None
+
+    from app.knowledge_graph import Neo4jKnowledgeGraph
+
+    return Neo4jKnowledgeGraph(
+        uri=settings.copilot_neo4j_uri,
+        username=settings.copilot_neo4j_username,
+        password=settings.copilot_neo4j_password,
+        database=settings.copilot_neo4j_database,
+    )
+
+
 class _CoordinatorState:
     """One org's DAG executor, resource pool and replanner.
 
@@ -70,22 +156,33 @@ class _CoordinatorState:
             resource_pool=self.resource_pool,
         )
 
+        # These were hardcoded to None, so deployment correlation and LLM
+        # hypothesis generation could never fire in the production wiring,
+        # whatever the operator configured. The builders return None only when
+        # the config genuinely is absent, and log the limitation when they do.
+        knowledge_graph = _build_knowledge_graph()
+        llm_client = _build_llm_client()
+
         investigation_handlers = create_investigation_handlers(
-            prometheus_url=getattr(settings, "prometheus_url", None),
-            loki_url=getattr(settings, "loki_url", None),
-            knowledge_graph=None,
-            llm_client=None,
+            prometheus_url=settings.prometheus_url or None,
+            loki_url=settings.loki_url or None,
+            elasticsearch_url=settings.elasticsearch_url or None,
+            github_token=settings.github_token or None,
+            knowledge_graph=knowledge_graph,
+            llm_client=llm_client,
         )
         remediation_handlers = create_remediation_handlers(
             k8s_client=None,
-            prometheus_url=getattr(settings, "prometheus_url", None),
-            knowledge_graph=None,
-            llm_client=None,
+            prometheus_url=settings.prometheus_url or None,
+            knowledge_graph=knowledge_graph,
+            llm_client=llm_client,
         )
         for name, handler in {**investigation_handlers, **remediation_handlers}.items():
             self.executor.register_handler(name, handler)
 
-        self.replanner = DynamicReplanner(llm_client=None, knowledge_graph=None)
+        self.replanner = DynamicReplanner(
+            llm_client=llm_client, knowledge_graph=knowledge_graph
+        )
 
 
 _state = scoped(_CoordinatorState)

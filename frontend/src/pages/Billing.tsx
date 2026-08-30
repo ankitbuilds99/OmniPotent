@@ -21,6 +21,7 @@ import { SubscriptionCard } from '../components/billing/SubscriptionCard';
 import { CancelModal } from '../components/billing/CancelModal';
 import * as billingApi from '../api/billing';
 import { bestAnnualSavingsPercent } from '../lib/planLimits';
+import { CONTACT_EMAIL } from '../config';
 import type {
   PricingPlan,
   Subscription,
@@ -398,7 +399,7 @@ export function Billing({ onBack }: BillingProps) {
                   billingCycle={billingCycle}
                   isCurrent={subscription?.plan.name === plan.name}
                   onSelect={handleSelectPlan}
-                  onContact={() => window.open('mailto:sales@omnipotent.ai', '_blank')}
+                  onContact={() => window.open(`mailto:${CONTACT_EMAIL}`, '_blank')}
                   loading={actionLoading}
                   index={index}
                 />

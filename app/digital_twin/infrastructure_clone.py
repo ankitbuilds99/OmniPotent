@@ -155,11 +155,34 @@ class InfrastructureCloner:
     - Cost estimation
     """
 
+    #: Fallback hourly rates, in USD per resource. These are order-of-magnitude
+    #: placeholders, not prices: nobody's bill is derived from them and no
+    #: pricing API stands behind them. They exist so `max_cost_per_hour` still
+    #: caps *something* on a deployment that has not supplied real rates —
+    #: dropping the cap entirely would let a clone run unbounded. Pass
+    #: `cost_rates` to price a clone against what this account actually pays;
+    #: results say which of the two was used via `cost_basis`.
+    DEFAULT_COST_RATES: dict[ResourceType, float] = {
+        ResourceType.KUBERNETES_DEPLOYMENT: 0.05,
+        ResourceType.KUBERNETES_SERVICE: 0.01,
+        ResourceType.DATABASE: 0.50,
+        ResourceType.CACHE: 0.10,
+        ResourceType.QUEUE: 0.05,
+        ResourceType.STORAGE: 0.02,
+        ResourceType.LOAD_BALANCER: 0.025,
+    }
+
+    #: What an unpriced resource type costs. Deliberately the most expensive
+    #: known rate rather than a token 0.01: this feeds a spend cap, so guessing
+    #: low means a resource nobody priced never counts against the limit.
+    _UNPRICED_RATE = max(DEFAULT_COST_RATES.values())
+
     def __init__(
         self,
         k8s_client: Any = None,
         db_client: Any = None,
         redis_client: Any = None,
+        cost_rates: dict[ResourceType, float] | None = None,
     ):
         self.k8s = k8s_client
         self.db = db_client
@@ -168,16 +191,8 @@ class InfrastructureCloner:
         self._environments: dict[str, ClonedEnvironment] = {}
         self._resource_handlers: dict[ResourceType, Any] = {}
 
-        # Cost per resource type per hour (approximate)
-        self._cost_rates = {
-            ResourceType.KUBERNETES_DEPLOYMENT: 0.05,
-            ResourceType.KUBERNETES_SERVICE: 0.01,
-            ResourceType.DATABASE: 0.50,
-            ResourceType.CACHE: 0.10,
-            ResourceType.QUEUE: 0.05,
-            ResourceType.STORAGE: 0.02,
-            ResourceType.LOAD_BALANCER: 0.025,
-        }
+        self._cost_rates = dict(cost_rates) if cost_rates else dict(self.DEFAULT_COST_RATES)
+        self.cost_basis = "operator_configured" if cost_rates else "default_estimate"
 
     async def clone_environment(
         self,
@@ -255,6 +270,7 @@ class InfrastructureCloner:
 
             environment.status = "ready"
             environment.metadata["estimated_cost_per_hour"] = estimated_cost
+            environment.metadata["cost_basis"] = self.cost_basis
 
             log.info(
                 "Environment clone complete: %s (%d resources, $%.2f/hr)",
@@ -528,15 +544,20 @@ class InfrastructureCloner:
         resources: list[dict[str, Any]],
         config: CloneConfig,
     ) -> float:
-        """Estimate hourly cost of cloned resources."""
+        """Estimate hourly cost of cloned resources.
+
+        Only as good as `self._cost_rates` — see `DEFAULT_COST_RATES`. Callers
+        should read `cost_basis` alongside the number rather than presenting it
+        as this account's actual spend.
+        """
         total_cost = 0.0
 
         for resource in resources:
             resource_type = resource.get("type")
             if isinstance(resource_type, ResourceType):
-                rate = self._cost_rates.get(resource_type, 0.01)
+                rate = self._cost_rates.get(resource_type, self._UNPRICED_RATE)
             else:
-                rate = 0.01
+                rate = self._UNPRICED_RATE
             # Apply scale factor for compute resources
             if resource_type == ResourceType.KUBERNETES_DEPLOYMENT:
                 rate *= config.scale_factor

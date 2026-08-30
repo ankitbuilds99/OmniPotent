@@ -17,7 +17,26 @@ from enum import Enum
 from typing import Any
 import math
 
+from app.config import get_settings
+
 log = logging.getLogger("omnipotent.digital_twin.downtime")
+
+
+class MetricsUnavailableError(RuntimeError):
+    """No metrics source is configured (or it returned no data), so there is
+    nothing to forecast from. Raised instead of forecasting from constants —
+    the API layer turns this into a 503, not a fabricated "URGENT" capacity
+    warning."""
+
+
+def _prometheus_url() -> str | None:
+    """The configured Prometheus base URL, or None when there is none.
+
+    This module used to default to ``http://localhost:9090`` when PROMETHEUS_URL
+    was unset, which made "not configured" indistinguishable from "configured
+    but unreachable" — and both fell through to placeholder constants.
+    """
+    return os.environ.get("PROMETHEUS_URL") or get_settings().prometheus_url or None
 
 
 class DowntimeRisk(str, Enum):
@@ -140,6 +159,9 @@ class CapacityForecast:
     forecasted_usage: list[tuple[datetime, float]]
     breach_time: datetime | None
     recommendations: list[str]
+    #: True when the forecast is built from placeholder constants rather than
+    #: measured usage — only ever produced under COPILOT_DEMO_MODE.
+    simulated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +170,7 @@ class CapacityForecast:
             "forecasted_usage": [(t.isoformat(), v) for t, v in self.forecasted_usage],
             "breach_time": self.breach_time.isoformat() if self.breach_time else None,
             "recommendations": self.recommendations,
+            "simulated": self.simulated,
         }
 
 
@@ -327,9 +350,10 @@ class DowntimePredictor:
                 remediation="Renew TLS certificate immediately"
             ))
 
-        # Dependency Health
+        # Dependency Health. None means it could not be observed: no factor is
+        # added either way — an unknown is neither a risk nor a clean bill.
         dep_health = await self._analyze_dependencies(service)
-        if dep_health < self._thresholds["dependency_health"]:
+        if dep_health is not None and dep_health < self._thresholds["dependency_health"]:
             factors.append(RiskFactor(
                 name="Dependency Health",
                 cause=DowntimeCause.DEPENDENCY_FAILURE,
@@ -410,12 +434,22 @@ class DowntimePredictor:
         service: str,
         metric_name: str,
     ) -> dict[str, float] | None:
-        """Get metric data for analysis from Prometheus."""
+        """Metric data for analysis from Prometheus, or None when unmeasured.
+
+        None means "no measurement exists" — no source configured, the query
+        failed, or it matched no series. It is never a value: an empty query
+        result used to become `current=0.5` and get reported as a measured
+        "50.0%".
+        """
+        prometheus_url = _prometheus_url()
+        if prometheus_url is None:
+            log.debug("No Prometheus configured; %s for %s is unmeasured", metric_name, service)
+            return None
+
         try:
             from app.connectors.prometheus import PrometheusConnector
             from app.connectors.base import ConnectorConfig
 
-            prometheus_url = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
             config = ConnectorConfig(url=prometheus_url)
             prometheus = PrometheusConnector(config)
 
@@ -438,10 +472,14 @@ class DowntimePredictor:
             trend_result = await prometheus.query_range(query, one_hour_ago, now, step="5m")
             await prometheus.close()
 
-            current = 0.5
+            current: float | None = None
             if current_result.success and current_result.data:
                 value = current_result.data[0].get("value")
-                current = float(value) if value is not None else 0.5
+                current = float(value) if value is not None else None
+            if current is None:
+                # The query matched no samples: this metric was not measured.
+                log.debug("No data for %s on %s; treating as unmeasured", metric_name, service)
+                return None
 
             trend_rate = 0.0
             if trend_result.success and trend_result.data:
@@ -462,11 +500,14 @@ class DowntimePredictor:
 
     async def _check_certificate_expiry(self, service: str) -> int | None:
         """Check days until certificate expiry by querying Prometheus or checking TLS."""
+        prometheus_url = _prometheus_url()
+        if prometheus_url is None:
+            return None
+
         try:
             from app.connectors.prometheus import PrometheusConnector
             from app.connectors.base import ConnectorConfig
 
-            prometheus_url = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
             config = ConnectorConfig(url=prometheus_url)
             prometheus = PrometheusConnector(config)
 
@@ -484,49 +525,58 @@ class DowntimePredictor:
             log.warning("Failed to check certificate expiry for %s: %s", service, e)
             return None
 
-    async def _analyze_dependencies(self, service: str) -> float:
-        """Analyze health of service dependencies using Kubernetes and Prometheus."""
+    async def _analyze_dependencies(self, service: str) -> float | None:
+        """Health of service dependencies (0-1), or None when it is unknown.
+
+        None means "nothing could be observed" — no pods matched, the clients
+        errored, or no source was configured. It used to be 1.0 in every one of
+        those cases, which reported a service nobody could see as perfectly
+        healthy dependencies.
+        """
         try:
             from app.connectors.kubernetes import KubernetesConnector
             from app.connectors.prometheus import PrometheusConnector
             from app.connectors.base import ConnectorConfig
 
             k8s = KubernetesConnector()
-            prometheus_url = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
-            prometheus = PrometheusConnector(ConnectorConfig(url=prometheus_url))
 
             pods_result = await k8s.list_pods(label_selector=f"app={service}")
             await k8s.close()
 
-            if not pods_result.success or not pods_result.data:
+            k8s_health: float | None = None
+            if pods_result.success and pods_result.data:
+                total_deps = 0
+                healthy_deps = 0
+                for pod in pods_result.data:
+                    for container in pod.get("containers", []):
+                        total_deps += 1
+                        if container.get("ready", False):
+                            healthy_deps += 1
+                if total_deps > 0:
+                    k8s_health = healthy_deps / total_deps
+
+            prom_health: float | None = None
+            prometheus_url = _prometheus_url()
+            if prometheus_url is not None:
+                prometheus = PrometheusConnector(ConnectorConfig(url=prometheus_url))
+                query = f'sum(up{{service=~".*{service}.*"}}) / count(up{{service=~".*{service}.*"}})'
+                prom_result = await prometheus.query(query)
                 await prometheus.close()
-                return 1.0
 
-            total_deps = 0
-            healthy_deps = 0
+                if prom_result.success and prom_result.data:
+                    value = prom_result.data[0].get("value")
+                    prom_health = float(value) if value is not None else None
 
-            for pod in pods_result.data:
-                for container in pod.get("containers", []):
-                    total_deps += 1
-                    if container.get("ready", False):
-                        healthy_deps += 1
-
-            query = f'sum(up{{service=~".*{service}.*"}}) / count(up{{service=~".*{service}.*"}})'
-            prom_result = await prometheus.query(query)
-            await prometheus.close()
-
-            if prom_result.success and prom_result.data:
-                value = prom_result.data[0].get("value")
-                prom_health = float(value) if value is not None else 1.0
-            else:
-                prom_health = 1.0
-
-            k8s_health = healthy_deps / total_deps if total_deps > 0 else 1.0
-            return (k8s_health + prom_health) / 2
+            # Average only what was actually observed; no observation is None,
+            # never a fabricated 1.0.
+            observed = [h for h in (k8s_health, prom_health) if h is not None]
+            if not observed:
+                return None
+            return sum(observed) / len(observed)
 
         except Exception as e:
             log.warning("Failed to analyze dependencies for %s: %s", service, e)
-            return 1.0
+            return None
 
     def _calculate_risk_score(self, factors: list[RiskFactor]) -> float:
         """Calculate composite risk score from factors."""
@@ -592,11 +642,14 @@ class DowntimePredictor:
 
     async def _estimate_affected_users(self, service: str) -> int:
         """Estimate number of affected users from Prometheus metrics."""
+        prometheus_url = _prometheus_url()
+        if prometheus_url is None:
+            return 0
+
         try:
             from app.connectors.prometheus import PrometheusConnector
             from app.connectors.base import ConnectorConfig
 
-            prometheus_url = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
             config = ConnectorConfig(url=prometheus_url)
             prometheus = PrometheusConnector(config)
 
@@ -614,13 +667,17 @@ class DowntimePredictor:
             log.warning("Failed to estimate affected users for %s: %s", service, e)
             return 0
 
-    async def _get_traffic_level(self, service: str, target_time: datetime) -> float:
-        """Get traffic level at a specific time from historical Prometheus data."""
+    async def _get_traffic_level(self, service: str, target_time: datetime) -> float | None:
+        """Traffic level (0-1) at a specific time from historical Prometheus
+        data, or None when there is no data to read."""
+        prometheus_url = _prometheus_url()
+        if prometheus_url is None:
+            return None
+
         try:
             from app.connectors.prometheus import PrometheusConnector
             from app.connectors.base import ConnectorConfig
 
-            prometheus_url = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
             config = ConnectorConfig(url=prometheus_url)
             prometheus = PrometheusConnector(config)
 
@@ -640,13 +697,14 @@ class DowntimePredictor:
             if result.success and result.data and max_result.success and max_result.data:
                 current_val = float(result.data[0].get("value", 0))
                 max_val = float(max_result.data[0].get("value", 1))
-                return min(1.0, current_val / max_val) if max_val > 0 else 0.5
+                if max_val > 0:
+                    return min(1.0, current_val / max_val)
 
-            return 0.5
+            return None
 
         except Exception as e:
             log.warning("Failed to get traffic level for %s: %s", service, e)
-            return 0.5
+            return None
 
     async def suggest_maintenance_windows(
         self,
@@ -729,14 +787,19 @@ class DowntimePredictor:
             score *= 0.8
             impact += 0.2
 
-        # Traffic factor from real metrics
+        # Traffic factor from real metrics; None means there was no data to
+        # read, which the factors say plainly instead of showing a made-up 50%.
         traffic_level = await self._get_traffic_level(service, start)
-        factors["traffic_level"] = f"{traffic_level:.1%}"
-        score *= (1 - traffic_level * 0.5)
-        impact += traffic_level * 0.3
+        if traffic_level is not None:
+            factors["traffic_level"] = f"{traffic_level:.1%}"
+            score *= (1 - traffic_level * 0.5)
+            impact += traffic_level * 0.3
+        else:
+            factors["traffic_level"] = "unknown (no traffic metrics available)"
 
-        # Conflict factor (other scheduled activities)
-        factors["conflicts"] = "none"  # Would check calendar
+        # Conflict factor: no calendar source is wired up, so conflicts are not
+        # checked — which is not the same statement as "none".
+        factors["conflicts"] = "not_checked (no calendar source configured)"
 
         return score, min(1.0, impact), factors
 
@@ -755,11 +818,35 @@ class DowntimePredictor:
 
         Returns:
             CapacityForecast with predictions
+
+        Raises:
+            MetricsUnavailableError: when there is no measured usage to
+                forecast from and COPILOT_DEMO_MODE is off. This used to fall
+                back to `current=0.5, trend_rate=0.01` — constants that
+                produced "URGENT: capacity breach in N days" warnings for
+                services nobody had measured.
         """
         # Get current usage
         metrics = await self._get_metric(service, f"{resource_type}_usage")
-        current = metrics.get("current", 0.5) if metrics else 0.5
-        trend_rate = metrics.get("trend_rate", 0.01) if metrics else 0.01
+        simulated = False
+        if metrics is not None:
+            current = metrics["current"]
+            trend_rate = metrics["trend_rate"]
+        elif get_settings().copilot_demo_mode:
+            log.warning(
+                "COPILOT_DEMO_MODE=true - returning a SIMULATED %s capacity "
+                "forecast for %s (no measured usage)", resource_type, service,
+            )
+            simulated = True
+            current = 0.5
+            trend_rate = 0.01
+        else:
+            raise MetricsUnavailableError(
+                f"No measured {resource_type} usage for {service}: no metrics "
+                "source is configured or the query returned no data (set "
+                "PROMETHEUS_URL); refusing to forecast capacity from placeholder "
+                "constants"
+            )
 
         # Generate forecast points
         now = datetime.now(timezone.utc)
@@ -790,12 +877,20 @@ class DowntimePredictor:
         if trend_rate > 0.02:
             recommendations.append(f"High growth rate detected ({trend_rate*100:.1f}%/hr)")
 
+        if simulated:
+            recommendations.insert(
+                0,
+                "SIMULATED (COPILOT_DEMO_MODE): this forecast is built from "
+                "placeholder constants, not measured usage",
+            )
+
         return CapacityForecast(
             resource_type=resource_type,
             current_usage=current,
             forecasted_usage=forecast,
             breach_time=breach_time,
             recommendations=recommendations,
+            simulated=simulated,
         )
 
     def get_prediction(self, pred_id: str) -> DowntimePrediction | None:

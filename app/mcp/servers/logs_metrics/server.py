@@ -32,7 +32,26 @@ DATA_DIR = Path(
     )
 ).resolve()
 
+# Serving the bundled sample data when LOGS_DATA_PATH is unset is a documented,
+# intentional default (.env.example points LOGS_DATA_PATH at sample_data) — it is
+# not demo-gated like the credential-backed connectors. It still must not read as
+# live telemetry, so responses carry a notice whenever the bundled samples are in
+# use.
+_BUNDLED = "LOGS_DATA_PATH" not in os.environ
+
+_BUNDLED_NOTICE = (
+    "Bundled sample logs (LOGS_DATA_PATH is not set). This is packaged demo "
+    "data, not telemetry from your systems."
+)
+
 mcp = FastMCP("logs-metrics")
+
+
+def _notice(payload: dict) -> dict:
+    """Attach the bundled-samples notice to a dict response."""
+    if _BUNDLED:
+        return {**payload, "_notice": _BUNDLED_NOTICE}
+    return payload
 
 
 def _as_int(value, default: int) -> int:
@@ -99,6 +118,11 @@ def search_logs(
         results.append(line)
         if len(results) >= limit:
             break
+    # list[str] has nowhere to hang a metadata key, so the notice goes in as a
+    # comment line (the datadog server's convention). Added after filtering, so
+    # it never affects the result set.
+    if _BUNDLED:
+        return [f"# {_BUNDLED_NOTICE}", *results]
     return results
 
 
@@ -126,12 +150,12 @@ def get_error_summary(service: str | None = None) -> dict:
         counter[msg] += 1
 
     ranked = [{"message": m, "count": c} for m, c in counter.most_common()]
-    return {
+    return _notice({
         "service": service or "all",
         "total_errors": sum(counter.values()),
         "distinct_errors": len(counter),
         "breakdown": ranked,
-    }
+    })
 
 
 @mcp.tool()
@@ -166,13 +190,13 @@ def get_metric(service: str, metric: str) -> dict:
     else:
         trend = "flat"
 
-    return {
+    return _notice({
         "service": service,
         "metric": metric,
         "series": series,
         "trend": trend,
         "latest": last,
-    }
+    })
 
 
 if __name__ == "__main__":

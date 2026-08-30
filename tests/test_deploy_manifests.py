@@ -348,6 +348,15 @@ def test_base_pods_only_reference_objects_the_kustomization_creates():
         for obj in objects
         if obj["kind"] == "ConfigMap"
     }
+    # `omnipotent-secrets` is intentionally NOT in the kustomization: it is
+    # provisioned out of band (external-secret.yaml via ESO, or a filled-in copy
+    # of secret.yaml.example applied manually). The example file documents the
+    # contract, so its keys count as created.
+    for obj in yaml.safe_load_all((K8S / "secret.yaml.example").read_text()):
+        if obj and obj.get("kind") == "Secret":
+            secret_keys[obj["metadata"]["name"]] = set(obj.get("stringData", {})) | set(
+                obj.get("data", {})
+            )
 
     problems: list[str] = []
     for obj in objects:
@@ -529,7 +538,9 @@ def test_migration_workflow_does_not_reference_a_nonexistent_versions_dir():
 
 def test_deploy_workflow_smoke_tests_hit_the_api(api_routes):
     text = (WORKFLOWS / "deploy.yml").read_text()
-    paths = re.findall(r"""curl -sf https://[^/\s]+(/[^\s;"')]*)""", text)
+    # The API host comes from vars.STAGING_API_URL / vars.PROD_API_URL, so the
+    # smoke tests curl "$API_URL/<path>"; literal https:// hosts still count.
+    paths = re.findall(r"""curl -sf (?:https://[^/\s"]+|"\$API_URL)(/[^\s;"')]*)""", text)
     assert paths, "deploy.yml has no smoke-test curl"
     for path in paths:
         assert path in api_routes, (

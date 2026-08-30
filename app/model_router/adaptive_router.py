@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, TypedDict
 
+from app import model_catalog
 from app.model_router.complexity_analyzer import (
     ComplexityAnalyzer,
     ComplexityScore,
@@ -55,6 +56,80 @@ TIER_ORDER: list["ModelTier"] = [
 def tier_rank(tier: "ModelTier") -> int:
     """Position of `tier` in the weakest-to-strongest order."""
     return TIER_ORDER.index(tier)
+
+
+# Router-owned heuristics per tier: rough latency expectation and the relative
+# quality weight _select_optimal_model scores with. Model IDs, context windows
+# and prices never live here — those belong to app/model_catalog.py.
+_TIER_PROFILES: dict["ModelTier", tuple[int, float]] = {
+    ModelTier.FAST: (500, 0.7),
+    ModelTier.BALANCED: (1500, 0.85),
+    ModelTier.QUALITY: (2000, 0.9),
+    ModelTier.PREMIUM: (5000, 0.95),
+}
+
+
+def _resolve_or_default(model_id: str, provider: str, fast: bool) -> str:
+    """An operator override if the catalog knows it, else the provider default.
+
+    An override the catalog cannot resolve gets the default rather than a
+    guessed tier/context: the router has to be able to describe every model it
+    may answer with.
+    """
+    if model_id and model_catalog.is_known(model_id):
+        return model_id
+    if model_id:
+        log.warning(
+            "COPILOT_%sMODEL=%r is not in the model catalog; the model router "
+            "falls back to the %s provider default",
+            "FAST_" if fast else "", model_id, provider,
+        )
+    return model_catalog.default_model(provider, fast=fast)
+
+
+def _build_model_configs() -> dict[str, "ModelConfig"]:
+    """MODEL_CONFIGS for the active provider, from app.model_catalog.
+
+    The table used to hardcode five model IDs across two providers — including
+    the retired ``claude-3-opus-latest`` — so the router happily answered with
+    models this deployment has no key for. It now names exactly the models the
+    deployment actually runs on: the configured (or catalog-default) fast model
+    on the FAST tier and the main reasoning model on the PREMIUM tier. When a
+    provider uses one model for both roles it sits on the BALANCED tier and
+    serves every request.
+    """
+    settings = _get_settings()
+    provider = settings.copilot_provider
+    fast_id = _resolve_or_default(settings.copilot_fast_model.strip(), provider, fast=True)
+    main_id = _resolve_or_default(settings.copilot_model.strip(), provider, fast=False)
+
+    tiers: dict[str, ModelTier] = (
+        {main_id: ModelTier.BALANCED}
+        if fast_id == main_id
+        else {fast_id: ModelTier.FAST, main_id: ModelTier.PREMIUM}
+    )
+
+    configs: dict[str, ModelConfig] = {}
+    for model_id, tier in tiers.items():
+        info = model_catalog.get(model_id)
+        avg_latency_ms, quality_score = _TIER_PROFILES[tier]
+        configs[model_id] = {
+            "tier": tier,
+            "avg_latency_ms": avg_latency_ms,
+            "quality_score": quality_score,
+            "supports_streaming": True,
+            "supports_function_calling": model_catalog.CAP_TOOLS in info.capabilities,
+            "max_context": info.max_context,
+        }
+    return configs
+
+
+def _get_settings():
+    # Local import so importing this module never freezes settings (tests patch
+    # the environment and clear get_settings' cache).
+    from app.config import get_settings
+
+    return get_settings()
 
 
 class CustomerTier(str, Enum):
@@ -113,50 +188,6 @@ class AdaptiveModelRouter:
     - Cost optimization
     """
 
-    # Model configurations with capabilities
-    MODEL_CONFIGS: dict[str, ModelConfig] = {
-        "claude-3-5-haiku-latest": {
-            "tier": ModelTier.FAST,
-            "avg_latency_ms": 500,
-            "quality_score": 0.7,
-            "supports_streaming": True,
-            "supports_function_calling": True,
-            "max_context": 200000,
-        },
-        "claude-3-5-sonnet-latest": {
-            "tier": ModelTier.BALANCED,
-            "avg_latency_ms": 1500,
-            "quality_score": 0.85,
-            "supports_streaming": True,
-            "supports_function_calling": True,
-            "max_context": 200000,
-        },
-        "claude-3-opus-latest": {
-            "tier": ModelTier.PREMIUM,
-            "avg_latency_ms": 5000,
-            "quality_score": 0.95,
-            "supports_streaming": True,
-            "supports_function_calling": True,
-            "max_context": 200000,
-        },
-        "gpt-4o-mini": {
-            "tier": ModelTier.FAST,
-            "avg_latency_ms": 400,
-            "quality_score": 0.65,
-            "supports_streaming": True,
-            "supports_function_calling": True,
-            "max_context": 128000,
-        },
-        "gpt-4o": {
-            "tier": ModelTier.QUALITY,
-            "avg_latency_ms": 2000,
-            "quality_score": 0.88,
-            "supports_streaming": True,
-            "supports_function_calling": True,
-            "max_context": 128000,
-        },
-    }
-
     # Customer tier restrictions
     TIER_ALLOWED_MODELS = {
         CustomerTier.FREE: [ModelTier.FAST],
@@ -178,11 +209,21 @@ class AdaptiveModelRouter:
         self,
         complexity_analyzer: ComplexityAnalyzer | None = None,
         cost_optimizer: CostOptimizer | None = None,
-        default_model: str = "claude-3-5-sonnet-latest",
+        default_model: str = "",
     ):
         self.complexity_analyzer = complexity_analyzer or ComplexityAnalyzer()
         self.cost_optimizer = cost_optimizer or CostOptimizer()
-        self.default_model = default_model
+        # Built per instance from the catalog + the active provider, not a class
+        # constant: the served path (app/model_router/api_router.py) constructs
+        # this with defaults, so a class-level table hardcoding another
+        # provider's models routed every deployment at models it has no key for.
+        self.MODEL_CONFIGS: dict[str, ModelConfig] = _build_model_configs()
+        settings = _get_settings()
+        self.default_model = (
+            default_model
+            or settings.copilot_model.strip()
+            or model_catalog.default_model(settings.copilot_provider)
+        )
 
         # Runtime state
         self._model_availability: dict[str, bool] = {
@@ -239,12 +280,14 @@ class AdaptiveModelRouter:
 
         # Cap at highest allowed tier
         highest_allowed_idx = max(tier_rank(t) for t in allowed_tiers)
+        max_tier = TIER_ORDER[highest_allowed_idx]
         if tier_rank(target_tier) > highest_allowed_idx:
-            target_tier = TIER_ORDER[highest_allowed_idx]
+            target_tier = max_tier
 
         # Step 5: Find candidate models
         candidates = self._get_candidate_models(
             target_tier=target_tier,
+            max_tier=max_tier,
             sla=sla,
             preferred_provider=preferred_provider,
         )
@@ -329,20 +372,32 @@ class AdaptiveModelRouter:
         target_tier: ModelTier,
         sla: SLARequirements,
         preferred_provider: str | None,
+        max_tier: ModelTier = ModelTier.PREMIUM,
     ) -> list[str]:
-        """Get candidate models matching requirements."""
+        """Get candidate models matching requirements.
+
+        Models above `max_tier` (the customer plan's ceiling) are never
+        candidates: with model rates now coming from the catalog, the scoring in
+        _select_optimal_model can no longer be relied on to keep a premium model
+        away from a capped plan by price alone. If nothing sits inside the
+        [target, max] window — the catalog-derived table has models on two tiers,
+        not four — the strongest allowed models below the target are used, so a
+        capped plan degrades downward rather than escaping upward.
+        """
         candidates = []
+        below_window: dict[int, list[str]] = {}
 
         target_idx = tier_rank(target_tier)
+        max_idx = tier_rank(max_tier)
 
         for model_id, config in self.MODEL_CONFIGS.items():
             # Check availability
             if not self._model_availability.get(model_id, True):
                 continue
 
-            # Check tier (allow target or higher quality)
+            # Check tier ceiling (customer plan)
             model_tier_idx = tier_rank(config["tier"])
-            if model_tier_idx < target_idx:
+            if model_tier_idx > max_idx:
                 continue
 
             # Check latency requirement
@@ -362,7 +417,16 @@ class AdaptiveModelRouter:
                 if preferred_provider == "openai" and not model_id.startswith("gpt"):
                     continue
 
+            # Check tier floor (allow target or higher quality); keep what falls
+            # below as the degrade-downward fallback described above.
+            if model_tier_idx < target_idx:
+                below_window.setdefault(model_tier_idx, []).append(model_id)
+                continue
+
             candidates.append(model_id)
+
+        if not candidates and below_window:
+            candidates = below_window[max(below_window)]
 
         return candidates
 
@@ -526,26 +590,32 @@ class AdaptiveModelRouter:
         Returns:
             Recommendation with reasoning
         """
+        # Weakest and strongest of the models this deployment actually runs on
+        # (see _build_model_configs) — recommending anything else would name a
+        # model the deployment has no key for.
+        by_tier = sorted(self.MODEL_CONFIGS, key=lambda m: tier_rank(self.MODEL_CONFIGS[m]["tier"]))
+        economy_model, top_model = by_tier[0], by_tier[-1]
+
         recommendations = {
             "chat": {
-                "economy": "claude-3-5-haiku-latest",
-                "balanced": "claude-3-5-sonnet-latest",
-                "quality": "claude-3-5-sonnet-latest",
+                "economy": economy_model,
+                "balanced": top_model,
+                "quality": top_model,
             },
             "analysis": {
-                "economy": "gpt-4o-mini",
-                "balanced": "claude-3-5-sonnet-latest",
-                "quality": "claude-3-opus-latest",
+                "economy": economy_model,
+                "balanced": top_model,
+                "quality": top_model,
             },
             "coding": {
-                "economy": "claude-3-5-haiku-latest",
-                "balanced": "claude-3-5-sonnet-latest",
-                "quality": "claude-3-opus-latest",
+                "economy": economy_model,
+                "balanced": top_model,
+                "quality": top_model,
             },
             "incident_response": {
-                "economy": "claude-3-5-sonnet-latest",
-                "balanced": "claude-3-5-sonnet-latest",
-                "quality": "claude-3-opus-latest",
+                "economy": top_model,
+                "balanced": top_model,
+                "quality": top_model,
             },
         }
 

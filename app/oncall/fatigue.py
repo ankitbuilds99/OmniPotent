@@ -134,7 +134,10 @@ class EngineerStats:
 
     engineer_id: str
     name: str
-    email: str
+    #: Empty when unknown. Stats created from a bare engineer id used to invent
+    #: `{engineer_id}@company.com` — a fabricated corporate address served to
+    #: callers as if it were a directory lookup.
+    email: str = ""
     pages_this_week: int = 0
     pages_this_month: int = 0
     sleep_disruptions: int = 0
@@ -188,7 +191,6 @@ class FatigueDetector:
             stats = EngineerStats(
                 engineer_id=event.engineer_id,
                 name=f"Engineer {event.engineer_id}",
-                email=f"{event.engineer_id}@company.com",
             )
             self._engineer_stats[event.engineer_id] = stats
 
@@ -232,7 +234,6 @@ class FatigueDetector:
             stats = EngineerStats(
                 engineer_id=engineer_id,
                 name=f"Engineer {engineer_id}",
-                email=f"{engineer_id}@company.com",
             )
 
         now = datetime.now(timezone.utc)
@@ -434,7 +435,6 @@ class FatigueDetector:
             stats = EngineerStats(
                 engineer_id=engineer_id,
                 name=f"Engineer {engineer_id}",
-                email=f"{engineer_id}@company.com",
             )
             self._engineer_stats[engineer_id] = stats
 

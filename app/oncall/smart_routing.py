@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+from app.config import get_settings
+
 log = logging.getLogger("omnipotent.oncall.routing")
 
 
@@ -107,10 +109,14 @@ class IncidentRouting:
 
 @dataclass
 class RoutingDecision:
-    """Decision on how to route an incident."""
+    """Decision on how to route an incident.
+
+    `primary_responder` is None when nobody is registered with the router —
+    a clear no-responders answer, not an exception and not an invented one.
+    """
 
     incident_id: str
-    primary_responder: ExpertiseMatch
+    primary_responder: ExpertiseMatch | None
     backup_responders: list[ExpertiseMatch]
     reason: str
     confidence: float
@@ -121,7 +127,9 @@ class RoutingDecision:
     def to_dict(self) -> dict[str, Any]:
         return {
             "incident_id": self.incident_id,
-            "primary_responder": self.primary_responder.to_dict(),
+            "primary_responder": (
+                self.primary_responder.to_dict() if self.primary_responder else None
+            ),
             "backup_responders": [r.to_dict() for r in self.backup_responders],
             "reason": self.reason,
             "confidence": round(self.confidence, 2),
@@ -148,10 +156,20 @@ class SmartRouter:
 
         self._engineers: dict[str, EngineerProfile] = {}
         self._routing_history: list[RoutingDecision] = []
-        self._setup_demo_engineers()
+        # The four fictional profiles below ("alice@company.com" and friends)
+        # used to be seeded unconditionally into a router that assigns real
+        # incidents. Outside demo mode the router starts empty and engineers
+        # come from register_engineer(); with nobody registered, route()
+        # returns a no-responders decision rather than inventing one.
+        if get_settings().copilot_demo_mode:
+            log.warning(
+                "COPILOT_DEMO_MODE=true - seeding the smart router with "
+                "fictional demo engineers"
+            )
+            self._setup_demo_engineers()
 
     def _setup_demo_engineers(self) -> None:
-        """Set up demo engineer profiles."""
+        """Set up FICTIONAL demo engineer profiles (COPILOT_DEMO_MODE only)."""
         now = datetime.now(timezone.utc)
 
         engineers = [
@@ -255,10 +273,28 @@ class SmartRouter:
         if not candidates:
             on_call = next(
                 (e for e in self._engineers.values() if e.is_on_call),
-                list(self._engineers.values())[0] if self._engineers else None,
+                next(iter(self._engineers.values()), None),
             )
             if not on_call:
-                raise ValueError("No engineers available for routing")
+                # Nobody is registered: say so instead of raising or inventing
+                # a responder. Not recorded in history — there is no assignment
+                # to account for.
+                log.warning(
+                    "No engineers registered with the smart router; incident %s "
+                    "has no responder to route to",
+                    incident.incident_id,
+                )
+                return RoutingDecision(
+                    incident_id=incident.incident_id,
+                    primary_responder=None,
+                    backup_responders=[],
+                    reason=(
+                        "No engineers are registered with the router; register "
+                        "engineer profiles or escalate this incident manually"
+                    ),
+                    confidence=0.0,
+                    routing_factors={},
+                )
 
             match = ExpertiseMatch(
                 engineer_id=on_call.engineer_id,
@@ -430,8 +466,11 @@ class SmartRouter:
         avg_confidence = 0.0
 
         for decision in self._routing_history:
-            eng_id = decision.primary_responder.engineer_id
-            by_engineer[eng_id] = by_engineer.get(eng_id, 0) + 1
+            # No-responder decisions never enter the history, but the field is
+            # Optional, so guard rather than assume.
+            if decision.primary_responder is not None:
+                eng_id = decision.primary_responder.engineer_id
+                by_engineer[eng_id] = by_engineer.get(eng_id, 0) + 1
             avg_confidence += decision.confidence
 
         if self._routing_history:

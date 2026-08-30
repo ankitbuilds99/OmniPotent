@@ -56,6 +56,26 @@ def _demo(payload):
     return mark_demo(payload, "argocd")
 
 
+def _gate() -> dict | None:
+    """Fail closed when credentials are absent outside demo mode: fixtures are a
+    demo feature, not a production fallback (app/config.py's contract)."""
+    from app.mcp.fixtures import offline_gate
+    return offline_gate("ArgoCD", "ARGOCD_SERVER_URL and ARGOCD_AUTH_TOKEN")
+
+
+def _mcp_timeout() -> float:
+    """Deadline for the outbound ArgoCD API calls (HTTP_TIMEOUT_MCP).
+
+    Read per call rather than frozen at import: tests monkeypatch the env, and a
+    long-lived server process should honour a value set after it started.
+    """
+    try:
+        return float(os.environ.get("HTTP_TIMEOUT_MCP", "") or 20.0)
+    except ValueError:
+        # A malformed override must not take the timeout to infinity.
+        return 20.0
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures — multi-scenario support via centralized fixture system
 # --------------------------------------------------------------------------- #
@@ -182,7 +202,7 @@ async def _get(path: str, params: dict | None = None) -> dict:
     """Make an async GET request to the ArgoCD API."""
     import httpx
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=_mcp_timeout()) as client:
         resp = await client.get(
             f"{ARGOCD_SERVER_URL}{path}",
             headers=_headers(),
@@ -196,7 +216,7 @@ async def _post(path: str, json_body: dict | None = None) -> dict:
     """Make an async POST request to the ArgoCD API."""
     import httpx
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=_mcp_timeout()) as client:
         resp = await client.post(
             f"{ARGOCD_SERVER_URL}{path}",
             headers=_headers(),
@@ -210,7 +230,7 @@ async def _put(path: str, json_body: dict | None = None) -> dict:
     """Make an async PUT request to the ArgoCD API."""
     import httpx
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=_mcp_timeout()) as client:
         resp = await client.put(
             f"{ARGOCD_SERVER_URL}{path}",
             headers=_headers(),
@@ -233,6 +253,9 @@ async def list_applications(project: str = "", health_status: str = "", sync_sta
         sync_status: filter by sync status (Synced, OutOfSync, Unknown).
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         apps = list(_get_apps())
         if project:
             apps = [a for a in apps if a.get("project") == project]
@@ -286,6 +309,9 @@ async def get_application(name: str) -> dict:
         name: the application name.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         if name == "checkout-svc":
             return _demo(dict(_DEMO_APPLICATION_DETAIL))
         matching = [a for a in _get_apps() if a.get("name") == name]
@@ -356,6 +382,9 @@ async def get_application_history(name: str, max_count: int | str = 10) -> list[
     max_count = _as_int(max_count, 10)
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         if name != "checkout-svc":
             return [{"error": f"application '{name}' not found (offline demo has 'checkout-svc')"}]
         return _demo(list(_DEMO_HISTORY[:max_count]))
@@ -393,6 +422,9 @@ async def get_application_resources(name: str) -> list[dict]:
         name: the application name.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return [err]
         if name != "checkout-svc":
             return [{"error": f"application '{name}' not found (offline demo has 'checkout-svc')"}]
         return _demo(list(_DEMO_RESOURCES))
@@ -424,6 +456,9 @@ async def get_sync_status(name: str) -> dict:
         name: the application name.
     """
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         if name == "checkout-svc":
             return _demo({
                 "name": "checkout-svc",
@@ -503,7 +538,10 @@ async def sync_application(name: str, revision: str = "", prune: bool = False, d
         dry_run: simulate the sync without making changes (default False).
     """
     if OFFLINE:
-        return {
+        err = _gate()
+        if err:
+            return err
+        return _demo({
             "status": "sync triggered (simulated - offline demo, no real sync performed)",
             "application": name,
             "revision": revision or "HEAD",
@@ -511,7 +549,7 @@ async def sync_application(name: str, revision: str = "", prune: bool = False, d
             "dry_run": dry_run,
             "message": "In offline mode, no actual sync is performed. In live mode, this "
                       "would trigger ArgoCD to synchronize the application with the Git source.",
-        }
+        })
 
     # Build sync request body
     sync_options = []
@@ -554,6 +592,9 @@ async def rollback_application(name: str, revision: int | str) -> dict:
         return {"error": "revision must be a valid history ID (positive integer)"}
 
     if OFFLINE:
+        err = _gate()
+        if err:
+            return err
         # Find the revision in demo history
         matching = [h for h in _DEMO_HISTORY if h.get("id") == revision_id]
         if name != "checkout-svc":
@@ -562,7 +603,7 @@ async def rollback_application(name: str, revision: int | str) -> dict:
             return {"error": f"revision {revision_id} not found in history",
                     "available_revisions": [h["id"] for h in _DEMO_HISTORY]}
         target = matching[0]
-        return {
+        return _demo({
             "status": "rollback triggered (simulated - offline demo, no real rollback performed)",
             "application": name,
             "target_revision_id": revision_id,
@@ -570,7 +611,7 @@ async def rollback_application(name: str, revision: int | str) -> dict:
             "message": f"In offline mode, no actual rollback is performed. In live mode, this "
                       f"would roll back to revision {target.get('revision')} "
                       f"(deployed at {target.get('deployed_at')}).",
-        }
+        })
 
     # ArgoCD rollback is done via sync to a specific revision from history
     # First, get the application to find the git revision for the history ID

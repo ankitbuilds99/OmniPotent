@@ -13,6 +13,15 @@ from app.mcp.servers.sentry import server as sentry
 from app.mcp.servers.traces import server as traces
 
 
+@pytest.fixture(autouse=True)
+def _demo_mode(monkeypatch):
+    """Offline fixtures are demo-gated now (fail-closed contract): with
+    credentials absent and COPILOT_DEMO_MODE off, every tool returns a
+    not-configured error instead. These tests exercise the fixtures, so they
+    opt into demo mode; the gate reads the env per call."""
+    monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+
+
 # --- Datadog (offline helpers are env-independent) ----------------------- #
 def test_datadog_offline_error_summary_finds_checkout_bug():
     s = dd._offline_error_summary("checkout-svc")

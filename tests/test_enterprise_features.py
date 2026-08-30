@@ -14,6 +14,7 @@ from decimal import Decimal
 from app.oncall.fatigue import FatigueDetector, FatigueLevel, PageEvent
 from app.oncall.smart_routing import (
     AvailabilityStatus,
+    EngineerProfile,
     IncidentRouting,
     SmartRouter,
 )
@@ -63,9 +64,31 @@ class TestFatigueDetector:
         assert score.metrics["pages_this_week"] == 10
 
 
+def _registered_router() -> SmartRouter:
+    """A router with a real (test-registered) engineer, the production path.
+
+    The router used to seed four fictional engineers unconditionally; these
+    tests registered nothing and still routed. Registration is now explicit.
+    """
+    router = SmartRouter()
+    router.register_engineer(EngineerProfile(
+        engineer_id="alice",
+        name="Alice Chen",
+        email="alice@example.test",
+        services=["billing-db"],
+        technologies=["PostgreSQL"],
+        incident_history=[
+            {"service": "billing-db", "resolved": True, "resolution_time_minutes": 20},
+        ],
+        availability=AvailabilityStatus.ONLINE,
+        is_on_call=True,
+    ))
+    return router
+
+
 class TestSmartRouter:
     def test_route_incident(self):
-        router = SmartRouter()
+        router = _registered_router()
 
         incident = IncidentRouting(
             incident_id="inc_1",
@@ -78,14 +101,57 @@ class TestSmartRouter:
         decision = router.route(incident)
 
         assert decision.primary_responder is not None
+        assert decision.primary_responder.engineer_id == "alice"
         assert decision.confidence > 0
 
     def test_update_availability(self):
-        router = SmartRouter()
+        router = _registered_router()
 
         result = router.update_availability("alice", AvailabilityStatus.AWAY)
 
         assert result is True
+
+    def test_starts_empty_without_demo_mode(self, monkeypatch):
+        """Fictional engineers (alice@company.com etc.) must not be seeded into
+        a router that assigns real incidents unless the operator opted into
+        COPILOT_DEMO_MODE."""
+        from app import config as cfg
+
+        monkeypatch.delenv("COPILOT_DEMO_MODE", raising=False)
+        cfg.get_settings.cache_clear()
+        try:
+            router = SmartRouter()
+        finally:
+            cfg.get_settings.cache_clear()
+
+        assert router._engineers == {}
+
+    def test_no_engineers_is_a_clear_no_responders_result(self):
+        router = SmartRouter()
+
+        decision = router.route(IncidentRouting(
+            incident_id="inc_none",
+            title="Anything",
+            service="billing-db",
+            severity="high",
+        ))
+
+        assert decision.primary_responder is None
+        assert decision.confidence == 0.0
+        assert "No engineers are registered" in decision.reason
+        assert decision.to_dict()["primary_responder"] is None
+
+    def test_demo_mode_seeds_labelled_demo_engineers(self, monkeypatch):
+        from app import config as cfg
+
+        monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+        cfg.get_settings.cache_clear()
+        try:
+            router = SmartRouter()
+        finally:
+            cfg.get_settings.cache_clear()
+
+        assert "alice" in router._engineers
 
 
 class TestCompensationTracker:

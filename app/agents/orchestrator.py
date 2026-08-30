@@ -361,11 +361,70 @@ class OrchestratorAgent(BaseAgent):
         messages: list[Any],
         context: SharedContext,
     ) -> dict[str, Any]:
-        """Handle response after human approval decision."""
-        # This would be called after the human approves/rejects
-        # For now, just mark as complete and synthesize report
+        """Handle response after human approval decision.
+
+        This used to force COMPLETE and synthesize the report whatever the
+        human said — a rejection produced the same success report as an
+        approval. Now the decision is read from the response: a rejection ends
+        the run with a clearly-rejected status, and anything ambiguous is
+        treated as a rejection (the safe reading of an unclear answer to "may
+        I change production?"). An approval is recorded honestly too: this
+        orchestrator has no execution step, so the report states the action
+        was approved but NOT executed rather than fabricating completion.
+        """
+        decision_text = (task or "").strip().lower()
+        is_rejected = any(
+            word in decision_text
+            for word in ("reject", "denied", "deny", "declin", "cancel", "veto")
+        )
+        is_approved = not is_rejected and any(
+            word in decision_text
+            for word in ("approve", "lgtm", "yes", "go ahead", "proceed")
+        )
+
+        pending_action = context.metadata.get("pending_action")
+
+        if not is_approved:
+            context.metadata["phase"] = InvestigationPhase.COMPLETE
+            context.metadata["pending_action_status"] = "rejected"
+            context.add_timeline_event(
+                event="Proposed fix rejected by human approver — nothing was executed",
+                source=self.name,
+            )
+            return {
+                "status": "rejected",
+                "agent": "orchestrator",
+                "result": {
+                    "session_id": context.session_id,
+                    "incident_summary": context.incident_summary,
+                    "severity": context.severity,
+                    "confidence": context.confidence,
+                    "root_cause": context.root_cause,
+                    "proposed_action": pending_action,
+                    "action_status": "rejected",
+                    "action_executed": False,
+                    "timeline": context.timeline,
+                },
+                "context": context.to_dict(),
+            }
+
+        # Approved. There is no execution step in this orchestrator (nothing
+        # handles InvestigationPhase.EXECUTING), so say exactly that instead
+        # of implying the fix was applied.
         context.metadata["phase"] = InvestigationPhase.COMPLETE
-        return self._synthesize_final_report(context)
+        context.metadata["pending_action_status"] = "approved_not_executed"
+        context.add_timeline_event(
+            event=(
+                "Proposed fix approved by human approver; this orchestrator has "
+                "no execution step — the action was NOT executed"
+            ),
+            source=self.name,
+        )
+        out = self._synthesize_final_report(context)
+        out["result"]["proposed_action"] = pending_action
+        out["result"]["action_status"] = "approved_not_executed"
+        out["result"]["action_executed"] = False
+        return out
 
     def _synthesize_final_report(self, context: SharedContext) -> dict[str, Any]:
         """Synthesize all agent findings into a final report."""

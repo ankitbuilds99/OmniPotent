@@ -34,7 +34,7 @@ from app.decision_engine.engine import (
     DecisionResult,
     DecisionOutcome,
 )
-from app.decision_engine.success_predictor import ActionType
+from app.decision_engine.success_predictor import ActionType, RiskLevel
 from app.decision_engine.option_ranker import RankingStrategy
 from app.policy_engine import (
     PolicyEngine,
@@ -84,6 +84,10 @@ class EnhancedTaskExecution(TaskExecution):
     decision_gate: DecisionGate | None = None
     policy_violations: list[dict[str, Any]] = field(default_factory=list)
     safeguards_applied: list[str] = field(default_factory=list)
+    # False when the incident context carried too little real signal for the
+    # predictor to say anything — the gate then fails closed to approval
+    # instead of gating on invented feature values.
+    prediction_available: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         base = super().to_dict()
@@ -93,6 +97,7 @@ class EnhancedTaskExecution(TaskExecution):
             "decision_gate": self.decision_gate.to_dict() if self.decision_gate else None,
             "policy_violations": self.policy_violations,
             "safeguards_applied": self.safeguards_applied,
+            "prediction_available": self.prediction_available,
         })
         return base
 
@@ -154,9 +159,11 @@ class DecisionAwareDAGExecutor(DAGExecutor):
 
         # Build incident context
         context = self._build_incident_context(dag, incident_context)
+        prediction_available = self._prediction_available(incident_context)
 
-        # Convert tasks to decision options
-        options = self._tasks_to_options(dag)
+        # Convert tasks to decision options (predicted per option; heuristic
+        # and approval-gated when the context carries no real signal)
+        options = await self._tasks_to_options(dag, incident_context)
 
         # Get decision for the overall DAG
         dag_decision = await self.decision.decide(context, options, ranking_strategy)
@@ -174,13 +181,41 @@ class DecisionAwareDAGExecutor(DAGExecutor):
             log.warning("Decision engine recommends ABORT for DAG %s", dag.id)
             return self._create_aborted_results(dag, dag_decision)
 
-        if dag_decision.outcome == DecisionOutcome.REQUIRE_APPROVAL:
+        # A gate a human has already signed off (via approve_dag) is honoured
+        # on re-submission; anything else that cannot be trusted to proceed
+        # parks the DAG on approval.
+        existing_gate = self._decision_gates.get(dag.id)
+        human_approved = existing_gate is not None and existing_gate.approved
+
+        if not prediction_available and not human_approved:
+            # Fail closed: with no real severity/confidence/evidence in the
+            # incident context, every predictor feature would be invented, so
+            # no invented success_prediction may gate execution.
+            log.warning(
+                "DAG %s has no usable incident context for prediction; "
+                "failing closed to REQUIRE_APPROVAL",
+                dag.id,
+            )
+            gate = DecisionGate(name=f"dag_{dag.id}", decision_result=dag_decision)
+            self._decision_gates[dag.id] = gate
+            return self._create_pending_approval_results(
+                dag, gate, prediction_available=False
+            )
+
+        if dag_decision.outcome == DecisionOutcome.REQUIRE_APPROVAL and not human_approved:
             gate = DecisionGate(name=f"dag_{dag.id}", decision_result=dag_decision)
             self._decision_gates[dag.id] = gate
 
             if self.require_approval:
                 log.info("DAG %s requires approval before execution", dag.id)
                 return self._create_pending_approval_results(dag, gate)
+
+        if human_approved:
+            log.info(
+                "DAG %s proceeding under prior human approval by %s",
+                dag.id,
+                existing_gate.approved_by if existing_gate else None,
+            )
 
         # Check change windows
         window_check = self.policy.windows.check_change_allowed(
@@ -201,7 +236,9 @@ class DecisionAwareDAGExecutor(DAGExecutor):
                 return self._create_simulation_blocked_results(dag, sim_result)
 
         # Execute with enhanced tracking
-        results = await self._execute_dag_with_tracking(dag, dag_decision)
+        results = await self._execute_dag_with_tracking(
+            dag, dag_decision, incident_context
+        )
 
         return results
 
@@ -235,32 +272,74 @@ class DecisionAwareDAGExecutor(DAGExecutor):
             on_call_experience_level=ctx.get("on_call_experience_level", 0.7),
         )
 
-    def _tasks_to_options(self, dag: TaskDAG) -> list[DecisionOption]:
-        """Convert DAG tasks to decision options."""
+    # The incident_context keys the predictor cannot responsibly run without.
+    # When none of them is present, every evidence-strength feature would be
+    # invented, so the gate fails closed instead of predicting.
+    _CRITICAL_CONTEXT_KEYS = ("severity", "root_cause_confidence", "evidence_collected")
+
+    # RiskLevel → the 0-1 risk_score the option ranker consumes.
+    _RISK_LEVEL_SCORES = {
+        RiskLevel.MINIMAL: 0.1,
+        RiskLevel.LOW: 0.3,
+        RiskLevel.MEDIUM: 0.5,
+        RiskLevel.HIGH: 0.7,
+        RiskLevel.CRITICAL: 0.9,
+    }
+
+    def _prediction_available(self, incident_context: dict[str, Any] | None) -> bool:
+        """Whether the incident context carries enough real signal to predict."""
+        ctx = incident_context or {}
+        return any(key in ctx for key in self._CRITICAL_CONTEXT_KEYS)
+
+    async def _tasks_to_options(
+        self,
+        dag: TaskDAG,
+        incident_context: dict[str, Any] | None = None,
+    ) -> list[DecisionOption]:
+        """Convert DAG tasks to decision options.
+
+        success_probability and risk_score come from the predictor run against
+        the real incident context — these used to be hardcoded to 0.8 / 0.3
+        with a comment promising an update that never happened. When the
+        context carries no real signal the ranking is marked heuristic in the
+        option metadata and the option is forced to require approval, so an
+        invented number can never auto-PROCEED.
+        """
         options = []
+        heuristic = not self._prediction_available(incident_context)
 
         for task_id, task in dag.tasks.items():
             # Map handler to action type
             action_type = self._handler_to_action_type(task.handler)
+
+            features, missing = self._build_task_features(task, incident_context)
+            prediction = await self.decision.predictor.predict(features)
 
             options.append(DecisionOption(
                 option_id=task_id,
                 name=task.name,
                 description=task.description or f"Execute {task.handler}",
                 action_type=action_type,
-                success_probability=0.8,  # Will be updated by predictor
-                risk_score=0.3,  # Default, will be adjusted
+                success_probability=prediction.probability,
+                risk_score=self._RISK_LEVEL_SCORES.get(prediction.risk_level, 0.9),
                 estimated_time_minutes=task.estimated_duration_seconds // 60,
                 estimated_cost_usd=0,
+                # No impact model exists for a bare task; a flat value is a
+                # ranking heuristic, declared as such in metadata below.
                 impact_reduction_percent=50,
                 is_reversible=task.is_reversible,
                 is_automated=True,
-                requires_approval=task.requires_approval,
+                requires_approval=task.requires_approval or heuristic,
                 requires_downtime=False,
                 prerequisites=[],
                 side_effects=[],
                 evidence_supporting=[],
                 evidence_against=[],
+                metadata={
+                    "prediction_id": prediction.prediction_id,
+                    "heuristic_ranking": heuristic,
+                    "missing_features": missing,
+                },
             ))
 
         return options
@@ -294,6 +373,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         self,
         dag: TaskDAG,
         decision: DecisionResult,
+        incident_context: dict[str, Any] | None = None,
     ) -> dict[str, EnhancedTaskExecution]:
         """Execute DAG with enhanced tracking."""
         results: dict[str, EnhancedTaskExecution] = {}
@@ -306,7 +386,9 @@ class DecisionAwareDAGExecutor(DAGExecutor):
 
         for level_tasks in levels:
             level_results = await asyncio.gather(*[
-                self._execute_task_with_decision(dag.tasks[tid], safeguards)
+                self._execute_task_with_decision(
+                    dag.tasks[tid], safeguards, incident_context
+                )
                 for tid in level_tasks
             ], return_exceptions=True)
 
@@ -331,6 +413,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         self,
         task: TaskNode,
         safeguards: list[str],
+        incident_context: dict[str, Any] | None = None,
     ) -> EnhancedTaskExecution:
         """Execute a single task with decision integration."""
         execution = EnhancedTaskExecution(
@@ -338,6 +421,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
             state=ExecutionState.RUNNING,
             started_at=datetime.now(timezone.utc),
             safeguards_applied=safeguards,
+            prediction_available=self._prediction_available(incident_context),
         )
 
         try:
@@ -355,13 +439,21 @@ class DecisionAwareDAGExecutor(DAGExecutor):
                     execution.error = f"Blocked by policy: {policy_result.violations[0].message if policy_result.violations else 'Unknown'}"
                     return execution
 
-            # Predict success for this task
+            # Predict success for this task from the real incident context.
+            # Missing features are left conservative, never favourable, so a
+            # thin context lowers the prediction instead of inflating it.
             predictor = self.decision.predictor
-            features = self._build_task_features(task)
+            features, missing = self._build_task_features(task, incident_context)
             prediction = await predictor.predict(features)
 
             execution.success_prediction = prediction.probability
             execution.risk_level = prediction.risk_level.value
+            if missing:
+                log.info(
+                    "Task %s predicted with %d features unavailable "
+                    "(conservative defaults used): %s",
+                    task.id, len(missing), ", ".join(missing),
+                )
 
             # Check if prediction meets thresholds
             if prediction.probability < self.min_success_prob:
@@ -399,8 +491,22 @@ class DecisionAwareDAGExecutor(DAGExecutor):
 
         return execution
 
-    def _build_task_features(self, task: TaskNode) -> PredictionFeatures:
-        """Build prediction features for a task."""
+    def _build_task_features(
+        self,
+        task: TaskNode,
+        incident_context: dict[str, Any] | None = None,
+    ) -> tuple[PredictionFeatures, list[str]]:
+        """Build prediction features for a task from the real incident context.
+
+        Every feature that cannot be derived from ``incident_context`` (the
+        same dict ``_build_incident_context`` reads: severity, duration,
+        affected services, root-cause confidence, evidence, environment flags)
+        is left at a neutral-or-conservative value and named in the returned
+        ``missing`` list. This method used to hardcode a favourable profile —
+        10 similar incidents at an 85% success rate, P2 severity, 0.7
+        root-cause confidence, 5 pieces of evidence — for every task, so the
+        safety gate was deciding on invented inputs.
+        """
         action_type_map = {
             "restart_service": ActionType.RESTART_SERVICE,
             "scale_up": ActionType.SCALE_UP,
@@ -417,29 +523,77 @@ class DecisionAwareDAGExecutor(DAGExecutor):
             ActionType.CUSTOM
         )
 
-        return PredictionFeatures(
+        ctx = incident_context or {}
+        missing: list[str] = []
+
+        def _from_ctx(key: str, fallback: Any) -> Any:
+            """The context's value for ``key``, or a flagged fallback."""
+            if key in ctx:
+                return ctx[key]
+            missing.append(key)
+            return fallback
+
+        evidence = _from_ctx("evidence_collected", [])
+        affected_services = _from_ctx("affected_services", [])
+
+        # Hours since the last deploy: explicit value wins, else derived from
+        # the most recent entry in recent_deployments, else flagged neutral.
+        if "time_since_last_deploy_hours" in ctx:
+            time_since_deploy = float(ctx["time_since_last_deploy_hours"])
+        else:
+            time_since_deploy = 24.0  # neutral: no adjustment either way
+            deploys = ctx.get("recent_deployments") or []
+            try:
+                deployed_ats = [
+                    datetime.fromisoformat(str(d["deployed_at"]).replace("Z", "+00:00"))
+                    for d in deploys
+                    if isinstance(d, dict) and d.get("deployed_at")
+                ]
+                if deployed_ats:
+                    newest = max(deployed_ats)
+                    if newest.tzinfo is None:
+                        newest = newest.replace(tzinfo=timezone.utc)
+                    delta = datetime.now(timezone.utc) - newest
+                    time_since_deploy = max(delta.total_seconds() / 3600, 0.0)
+                else:
+                    missing.append("time_since_last_deploy_hours")
+            except (TypeError, ValueError):
+                missing.append("time_since_last_deploy_hours")
+
+        features = PredictionFeatures(
             action_type=action_type,
+            # Neutral: no per-task complexity model exists.
             action_complexity=0.5,
             is_reversible=task.is_reversible,
             requires_downtime=False,
             estimated_duration_seconds=task.estimated_duration_seconds,
-            incident_severity="P2",
-            incident_duration_minutes=30,
-            affected_services_count=1,
-            is_customer_facing=True,
-            is_revenue_impacting=False,
-            similar_incidents_count=10,
-            similar_action_success_rate=0.85,
-            service_change_frequency=2.0,
-            time_since_last_deploy_hours=24.0,
-            is_peak_traffic=False,
-            is_change_freeze=False,
-            is_maintenance_window=False,
-            on_call_experience_level=0.7,
-            root_cause_confidence=0.7,
-            evidence_count=5,
-            diagnostic_coverage=0.6,
+            # Conservative: an unknown severity is treated as high, not P2.
+            incident_severity=str(_from_ctx("severity", "P1")),
+            incident_duration_minutes=int(_from_ctx("duration_minutes", 30)),
+            affected_services_count=max(len(affected_services), 1),
+            # Conservative: assume visible impact when nobody said otherwise.
+            is_customer_facing=bool(_from_ctx("is_customer_facing", True)),
+            is_revenue_impacting=bool(_from_ctx("is_revenue_impacting", False)),
+            # Honest zeros: no history store is wired into this module, so no
+            # similar incidents are known — not 10 of them at an 85% win rate.
+            similar_incidents_count=int(_from_ctx("similar_incidents_count", 0)),
+            similar_action_success_rate=float(
+                _from_ctx("similar_action_success_rate", 0.5)
+            ),
+            service_change_frequency=float(_from_ctx("service_change_frequency", 0.0)),
+            time_since_last_deploy_hours=time_since_deploy,
+            is_peak_traffic=bool(_from_ctx("is_peak_traffic", False)),
+            is_change_freeze=bool(_from_ctx("is_change_freeze", False)),
+            is_maintenance_window=bool(_from_ctx("is_maintenance_window", False)),
+            # Neutral: 0.5 triggers neither the experienced nor the junior path.
+            on_call_experience_level=float(_from_ctx("on_call_experience_level", 0.5)),
+            # Conservative: unknown confidence and coverage read as none.
+            root_cause_confidence=float(_from_ctx("root_cause_confidence", 0.0)),
+            evidence_count=len(evidence) if isinstance(evidence, list) else 0,
+            diagnostic_coverage=float(_from_ctx("diagnostic_coverage", 0.0)),
         )
+
+        return features, missing
 
     async def _simulate_dag(
         self,
@@ -481,6 +635,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         self,
         dag: TaskDAG,
         gate: DecisionGate,
+        prediction_available: bool = True,
     ) -> dict[str, EnhancedTaskExecution]:
         """Create results for a DAG pending approval."""
         results = {}
@@ -489,6 +644,7 @@ class DecisionAwareDAGExecutor(DAGExecutor):
                 task_id=task_id,
                 state=ExecutionState.WAITING_APPROVAL,
                 decision_gate=gate,
+                prediction_available=prediction_available,
             )
         return results
 
@@ -512,26 +668,62 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         dag: TaskDAG,
         sim_result: Any,
     ) -> dict[str, EnhancedTaskExecution]:
-        """Create results for a DAG blocked by simulation."""
-        results = {}
-        for task_id in dag.tasks:
-            results[task_id] = EnhancedTaskExecution(
+        """Create results for a DAG blocked by simulation.
+
+        The operator reading this has to know whether the twin found a problem
+        or never got to look -- the fix for "your cluster looks unhealthy" and
+        the fix for "KUBE_CONFIG_PATH is unset" are not the same fix.
+        """
+        if getattr(sim_result, "simulated", False):
+            reason = next(
+                (
+                    i.get("description")
+                    for i in getattr(sim_result, "issues", [])
+                    if i.get("severity") == "critical"
+                ),
+                "the simulation did not reach a cluster",
+            )
+            error = f"Blocked by simulation: unverified — {reason}"
+        else:
+            error = (
+                "Blocked by simulation: unsafe to proceed "
+                f"(success={sim_result.success_probability:.0%}, "
+                f"risk={sim_result.risk_score:.2f})"
+            )
+
+        return {
+            task_id: EnhancedTaskExecution(
                 task_id=task_id,
                 state=ExecutionState.BLOCKED,
-                error="Blocked by simulation: unsafe to proceed",
+                error=error,
             )
-        return results
+            for task_id in dag.tasks
+        }
 
     async def approve_dag(
         self,
         dag_id: str,
         approved_by: str,
         reason: str = "",
-    ) -> bool:
-        """Approve a pending DAG for execution."""
+    ) -> dict[str, Any]:
+        """Record a human approval for a DAG that failed its decision gate.
+
+        This does not resume anything by itself, and no longer pretends to:
+        `execute_with_decision` returned before running a single task, so
+        there is no parked execution to release (the future-based
+        `DAGExecutor.approve_task` handles tasks parked mid-run, keyed by
+        execution id — a different mechanism). The approval is recorded on the
+        gate and honoured when the same DAG id is re-submitted through
+        `execute_with_decision`. Returning a bare ``True`` here used to read
+        as "the DAG resumed", which nothing ever did.
+        """
         gate = self._decision_gates.get(dag_id)
         if not gate:
-            return False
+            return {
+                "ok": False,
+                "error": "unknown_dag",
+                "detail": f"no decision gate is recorded for DAG {dag_id}",
+            }
 
         gate.approved = True
         gate.approved_by = approved_by
@@ -539,7 +731,14 @@ class DecisionAwareDAGExecutor(DAGExecutor):
         gate.override_reason = reason
 
         log.info("DAG %s approved by %s: %s", dag_id, approved_by, reason)
-        return True
+        return {
+            "ok": True,
+            "resumed": False,
+            "detail": (
+                "approval recorded; the DAG was not resumed — re-submit it via "
+                "execute_with_decision to execute under this approval"
+            ),
+        }
 
     def get_pending_approvals(self) -> list[dict[str, Any]]:
         """Get all pending approval requests."""
