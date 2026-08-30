@@ -375,7 +375,7 @@ class OPAClient:
                     decision_id=self._generate_decision_id(policy_id, input_data),
                     violations=result_data.get("violations", []),
                     warnings=result_data.get("warnings", []),
-                    metadata={"source": "opa_server"},
+                    metadata={"source": "opa_server", "engine": "opa_server"},
                 )
 
     async def _evaluate_embedded(
@@ -518,7 +518,11 @@ class OPAClient:
             decision_id=decision_id,
             violations=violations,
             warnings=warnings,
-            metadata={"source": "embedded"},
+            # "engine" marks which evaluator answered: this Python subset of
+            # the Rego policies ("embedded") vs a real OPA server
+            # ("opa_server"). The fallback used to be indistinguishable from
+            # an authoritative server evaluation.
+            metadata={"source": "embedded", "engine": "embedded"},
         )
 
     async def evaluate_batch(

@@ -10,6 +10,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import yaml
 from dataclasses import dataclass, field
@@ -133,6 +134,12 @@ class KyvernoResult:
     mutations: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     evaluated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Which evaluator produced this result. "embedded" is the local Python
+    # subset of Kyverno's semantics; "cluster" would be a real apiserver
+    # dry-run through Kyverno's admission controller. The embedded evaluator
+    # used to substitute silently for the cluster path, so a caller had no way
+    # to tell an approximate local answer from an authoritative one.
+    engine: str = "embedded"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -142,6 +149,7 @@ class KyvernoResult:
             "mutations": self.mutations,
             "warnings": self.warnings,
             "evaluated_at": self.evaluated_at.isoformat(),
+            "engine": self.engine,
         }
 
 
@@ -352,6 +360,11 @@ class KyvernoClient:
         self.embedded_mode = embedded_mode
         self._policies: dict[str, KyvernoPolicy] = {}
         self._eval_count = 0
+        # Policies whose cluster apply failed, by name. `register_policy`
+        # schedules the apply as a background task, so this is where the
+        # failure is surfaced (alongside an ERROR log) instead of vanishing
+        # into an unawaited coroutine.
+        self._cluster_apply_errors: dict[str, str] = {}
 
         # Load default policies
         self._load_default_policies()
@@ -428,16 +441,27 @@ class KyvernoClient:
         policy: KyvernoPolicy,
         resource: dict[str, Any],
     ) -> KyvernoResult:
-        """Evaluate policy via Kubernetes API (dry-run)."""
-        # In production, this would use the K8s API with dry-run
-        # to trigger Kyverno's admission controller
-        # For now, fall back to embedded
-        return self._evaluate_embedded(
+        """Evaluate policy via Kubernetes API (dry-run).
+
+        A cluster dry-run through Kyverno's admission controller is not
+        implemented yet, so this substitutes the embedded subset evaluator.
+        The substitution is no longer silent: the result carries
+        ``engine="embedded"`` (a real dry-run would say ``"cluster"``), so a
+        caller can tell an approximate local answer from an authoritative one.
+        """
+        log.warning(
+            "Cluster dry-run not implemented; evaluating policy %s with the "
+            "embedded subset evaluator instead",
+            policy.name,
+        )
+        result = self._evaluate_embedded(
             policy,
             resource,
             resource.get("metadata", {}).get("name", "unknown"),
             resource.get("metadata", {}).get("namespace", "default"),
         )
+        result.engine = "embedded"
+        return result
 
     def _evaluate_embedded(
         self,
@@ -476,6 +500,7 @@ class KyvernoClient:
             violations=violations,
             mutations=mutations,
             warnings=warnings,
+            engine="embedded",
         )
 
     def _check_validation_rule(
@@ -622,21 +647,115 @@ class KyvernoClient:
         return None
 
     def register_policy(self, policy: KyvernoPolicy) -> None:
-        """Register a Kyverno policy."""
+        """Register a Kyverno policy.
+
+        With a k8s client configured the policy is also applied to the cluster
+        in a background task. That apply used to be a log-only no-op ("Would
+        apply policy..."), so every caller believed a ClusterPolicy was
+        enforcing when nothing had been created. It is real now, and a failed
+        apply is logged at ERROR and recorded in ``cluster_apply_errors``
+        (see ``get_stats``) rather than swallowed.
+        """
         self._policies[policy.name] = policy
         log.info("Registered Kyverno policy: %s", policy.name)
 
         # Apply to cluster if K8s client available
         if self.k8s:
-            asyncio.create_task(self._apply_to_cluster(policy))
+            task = asyncio.create_task(self._apply_to_cluster(policy))
+            task.add_done_callback(functools.partial(self._record_apply_result, policy.name))
+
+    def _record_apply_result(self, policy_name: str, task: asyncio.Task[Any]) -> None:
+        """Surface the outcome of a background cluster apply."""
+        if task.cancelled():
+            self._cluster_apply_errors[policy_name] = "apply task cancelled"
+            log.error("Cluster apply of Kyverno policy %s was cancelled", policy_name)
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._cluster_apply_errors[policy_name] = str(exc)
+            log.error(
+                "Failed to apply Kyverno policy %s to cluster: %s — the policy "
+                "is registered locally but is NOT enforcing in the cluster",
+                policy_name,
+                exc,
+            )
+        else:
+            self._cluster_apply_errors.pop(policy_name, None)
+
+    def _custom_objects_api(self) -> Any:
+        """Resolve a CustomObjectsApi from whatever k8s client we were given.
+
+        ``k8s_client`` is documented as ``kubernetes.client`` — but accept the
+        module, an ``ApiClient`` instance, or an already-constructed
+        ``CustomObjectsApi``, and refuse anything else rather than guessing.
+        """
+        if self.k8s is None:
+            raise RuntimeError("no Kubernetes client configured")
+
+        # The kubernetes.client module (or anything exposing the API class).
+        if hasattr(self.k8s, "CustomObjectsApi"):
+            return self.k8s.CustomObjectsApi()
+
+        # Already a CustomObjectsApi (or compatible facade).
+        if hasattr(self.k8s, "create_cluster_custom_object"):
+            return self.k8s
+
+        # An ApiClient instance: wrap it with the official API class.
+        if hasattr(self.k8s, "call_api"):
+            from kubernetes import client as kubernetes_client
+
+            return kubernetes_client.CustomObjectsApi(self.k8s)
+
+        raise RuntimeError(
+            f"unsupported Kubernetes client {type(self.k8s).__name__}: expected "
+            "the kubernetes.client module, an ApiClient, or a CustomObjectsApi"
+        )
 
     async def _apply_to_cluster(self, policy: KyvernoPolicy) -> None:
-        """Apply a policy to the Kubernetes cluster."""
-        try:
-            # In production, use k8s client to create/update ClusterPolicy
-            log.info("Would apply policy %s to cluster", policy.name)
-        except Exception as e:
-            log.warning("Failed to apply policy to cluster: %s", e)
+        """Create or update the policy in the Kubernetes cluster.
+
+        Creates the ``kyverno.io/v1`` ClusterPolicy (or namespaced Policy) via
+        the CustomObjectsApi; a 409 means it already exists and is patched with
+        the new manifest instead. Any failure is raised to the caller — this
+        method never pretends the policy is enforcing when it is not.
+        """
+        api = self._custom_objects_api()
+        manifest = policy.to_k8s_manifest()
+        group, version = "kyverno.io", "v1"
+        plural = "policies" if policy.namespace else "clusterpolicies"
+
+        def _apply() -> str:
+            try:
+                if policy.namespace:
+                    api.create_namespaced_custom_object(
+                        group, version, policy.namespace, plural, manifest
+                    )
+                else:
+                    api.create_cluster_custom_object(group, version, plural, manifest)
+                return "created"
+            except Exception as e:
+                # kubernetes.client.rest.ApiException carries .status; a 409
+                # means the policy already exists — update it in place.
+                if getattr(e, "status", None) != 409:
+                    raise
+                if policy.namespace:
+                    api.patch_namespaced_custom_object(
+                        group, version, policy.namespace, plural, policy.name, manifest
+                    )
+                else:
+                    api.patch_cluster_custom_object(
+                        group, version, plural, policy.name, manifest
+                    )
+                return "patched"
+
+        # The official kubernetes client is synchronous; keep it off the loop.
+        outcome = await asyncio.to_thread(_apply)
+        log.info(
+            "Applied Kyverno %s %s to cluster (%s)",
+            "Policy" if policy.namespace else "ClusterPolicy",
+            policy.name,
+            outcome,
+        )
 
     def get_policy(self, name: str) -> KyvernoPolicy | None:
         """Get a policy by name."""
@@ -661,6 +780,7 @@ class KyvernoClient:
             "policies_registered": len(self._policies),
             "embedded_mode": self.embedded_mode,
             "k8s_connected": self.k8s is not None,
+            "cluster_apply_errors": dict(self._cluster_apply_errors),
         }
 
 
