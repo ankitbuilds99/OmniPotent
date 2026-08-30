@@ -29,8 +29,10 @@ services:
       # accepts the bare names managed platforms inject, but be explicit here.)
       # The ${DATABASE_URL:-...} on the right is the HOST-side override — docker
       # compose interpolation, not what the app reads — and is the same name the
-      # worker service below interpolates, so one host export moves both.
-      COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
+      # worker service below interpolates, so one host export moves both. The
+      # fallback reuses POSTGRES_USER/POSTGRES_PASSWORD from .env (see the
+      # postgres service below) so the credentials live in exactly one place.
+      COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-omnipotent}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/omnipotent}
       COPILOT_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # --- LLM provider + keys ---
       COPILOT_PROVIDER: ${COPILOT_PROVIDER:-anthropic}
@@ -91,7 +93,7 @@ services:
       # The broker. Dramatiq reads this directly (app/tasks/broker.py); without it
       # the worker falls back to a stub broker and silently processes nothing.
       COPILOT_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://omnipotent:omnipotent@postgres:5432/omnipotent}
+      COPILOT_DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-omnipotent}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/omnipotent}
       # --- outbound targets for the two deployable actors ---
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-}
@@ -113,10 +115,14 @@ services:
   postgres:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      # Loopback only — no reason to expose the database to the LAN.
+      - "127.0.0.1:5432:5432"
     environment:
-      POSTGRES_USER: omnipotent
-      POSTGRES_PASSWORD: omnipotent
+      # Both come from .env (see .env.example). POSTGRES_PASSWORD has no
+      # default on purpose: compose fails loudly rather than shipping a
+      # trivial well-known password.
+      POSTGRES_USER: ${POSTGRES_USER:-omnipotent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: omnipotent
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -131,7 +137,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # Loopback only — an unauthenticated Redis must not be LAN-reachable.
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -163,9 +170,11 @@ services:
     image: grafana/grafana:10.2.0
     profiles: ["monitoring"]
     ports:
-      - "3000:3000"
+      # Loopback only — Grafana ships with a default admin login.
+      - "127.0.0.1:3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      # From .env (see .env.example); falls back to Grafana's stock default.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./deploy/grafana:/etc/grafana/provisioning:ro

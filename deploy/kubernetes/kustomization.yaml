@@ -6,7 +6,11 @@ namespace: omnipotent
 resources:
   - namespace.yaml
   - configmap.yaml
-  - secret.yaml
+  # The `omnipotent-secrets` Secret is deliberately NOT a resource here:
+  # shipping one in git means `kubectl apply -k` deploys attacker-known
+  # credentials. Provision it out of band — either via external-secret.yaml
+  # (External Secrets Operator) or by copying secret.yaml.example, filling in
+  # real values, and applying it manually.
   - serviceaccount.yaml
   # Runs `alembic upgrade head` before the Deployment rolls (ArgoCD sync-wave -1).
   - base/migration-job.yaml

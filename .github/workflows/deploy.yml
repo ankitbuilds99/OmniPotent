@@ -184,10 +184,22 @@ jobs:
       (github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging')
     environment:
       name: staging
-      url: https://staging-api.omnipotent.com
+      # Set STAGING_API_URL as a repo/environment variable. There is no
+      # hardcoded fallback: omnipotent.com is not a domain this project owns,
+      # so a default would point health checks at a stranger's server.
+      url: ${{ vars.STAGING_API_URL }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Require STAGING_API_URL
+        env:
+          API_URL: ${{ vars.STAGING_API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "::error::vars.STAGING_API_URL is not set. Define it as a repository or environment variable."
+            exit 1
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -219,12 +231,14 @@ jobs:
           wait-for-service-stability: true
 
       - name: Run smoke tests
+        env:
+          API_URL: ${{ vars.STAGING_API_URL }}
         run: |
           # /healthz, not /health: the SPA catch-all mount answers any unknown
           # extension-less path with index.html, so `curl -sf .../health` returns
           # 200 even when every API route is failing.
           for i in {1..30}; do
-            if curl -sf https://staging-api.omnipotent.com/healthz; then
+            if curl -sf "$API_URL/healthz"; then
               echo "Health check passed"
               exit 0
             fi
@@ -246,7 +260,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*Staging Deploy*\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<https://staging-api.omnipotent.com|View Staging>"
+                    "text": "*Staging Deploy*\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}\n<${{ vars.STAGING_API_URL }}|View Staging>"
                   }
                 }
               ]
@@ -266,12 +280,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Require STAGING_API_URL
+        env:
+          API_URL: ${{ vars.STAGING_API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "::error::vars.STAGING_API_URL is not set. Define it as a repository or environment variable."
+            exit 1
+          fi
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
       - name: Run E2E tests
         env:
-          API_URL: https://staging-api.omnipotent.com
+          API_URL: ${{ vars.STAGING_API_URL }}
           TEST_API_KEY: ${{ secrets.TEST_API_KEY }}
         run: |
           uv sync --extra dev
@@ -287,12 +310,23 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
     environment:
       name: production
-      url: https://api.omnipotent.com
+      # Set PROD_API_URL as a repo/environment variable (see staging above for
+      # why there is no hardcoded fallback).
+      url: ${{ vars.PROD_API_URL }}
     outputs:
       previous_task_def: ${{ steps.save-previous.outputs.task_def_arn }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Require PROD_API_URL
+        env:
+          API_URL: ${{ vars.PROD_API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "::error::vars.PROD_API_URL is not set. Define it as a repository or environment variable."
+            exit 1
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -337,9 +371,11 @@ jobs:
 
       - name: Run smoke tests
         id: smoke-test
+        env:
+          API_URL: ${{ vars.PROD_API_URL }}
         run: |
           for i in {1..30}; do
-            if curl -sf https://api.omnipotent.com/healthz; then
+            if curl -sf "$API_URL/healthz"; then
               echo "Health check passed"
               exit 0
             fi
@@ -375,7 +411,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*Production Deploy*\nVersion: `${{ github.ref_name }}`\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}${{ job.status == 'failure' && '\n:warning: Automatic rollback initiated' || '' }}\n<https://api.omnipotent.com|View Production>"
+                    "text": "*Production Deploy*\nVersion: `${{ github.ref_name }}`\nCommit: `${{ github.sha }}`\nStatus: ${{ job.status }}${{ job.status == 'failure' && '\n:warning: Automatic rollback initiated' || '' }}\n<${{ vars.PROD_API_URL }}|View Production>"
                   }
                 }
               ]
