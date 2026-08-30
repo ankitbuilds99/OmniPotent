@@ -11,6 +11,7 @@ Simulates rollback scenarios before executing:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -113,6 +114,13 @@ class RollbackScenario:
     steps: list[RollbackStep]
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    #: True only when the state changes were read from the live cluster.
+    #: Caller-supplied changes and a failed deployment read are both unverified:
+    #: neither was checked against anything, and a rollback gate must not treat
+    #: "somebody said so" as "the cluster says so".
+    verified: bool = True
+    unverified_reason: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -125,6 +133,8 @@ class RollbackScenario:
             "state_changes": [c.to_dict() for c in self.state_changes],
             "steps": [s.to_dict() for s in self.steps],
             "created_at": self.created_at.isoformat(),
+            "verified": self.verified,
+            "unverified_reason": self.unverified_reason,
         }
 
 
@@ -163,6 +173,13 @@ class RollbackResult:
     can_proceed: bool
     requires_approval: bool
 
+    #: False when the state this simulation analysed was never read from the
+    #: cluster. An unverified result cannot carry `can_proceed=True` — the same
+    #: contract as `SimulationResult.simulated` in simulator.py, which feeds
+    #: this into the remediation gate.
+    verified: bool = True
+    unverified_reason: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "scenario": self.scenario.to_dict(),
@@ -175,6 +192,8 @@ class RollbackResult:
             "recommendations": self.recommendations,
             "can_proceed": self.can_proceed,
             "requires_approval": self.requires_approval,
+            "verified": self.verified,
+            "unverified_reason": self.unverified_reason,
         }
 
 
@@ -239,6 +258,7 @@ class RollbackSimulator:
 
         # Parse state changes
         changes = []
+        unverified_reason: str | None = None
         if state_changes:
             for change in state_changes:
                 changes.append(StateChange(
@@ -252,9 +272,16 @@ class RollbackSimulator:
                     dependencies=change.get("dependencies", []),
                     notes=change.get("notes", ""),
                 ))
+            # The same rule `_simulate_scaling` applies to a caller-supplied
+            # replica count: usable for planning, but not evidence.
+            unverified_reason = (
+                "state changes were supplied by the caller, not read from the cluster"
+            )
         else:
-            # Discover changes from deployment history
-            changes = await self._discover_state_changes(deployment_id, from_version, to_version)
+            # Discover changes from the live cluster
+            changes, unverified_reason = await self._discover_state_changes(
+                deployment_id, from_version, to_version
+            )
 
         # Determine strategy
         strategy = self._determine_strategy(changes)
@@ -272,6 +299,8 @@ class RollbackSimulator:
             strategy=strategy,
             state_changes=changes,
             steps=steps,
+            verified=unverified_reason is None,
+            unverified_reason=unverified_reason,
         )
 
         self._scenarios[scenario_id] = scenario
@@ -284,64 +313,49 @@ class RollbackSimulator:
         deployment_id: str,
         from_version: str,
         to_version: str,
-    ) -> list[StateChange]:
-        """Discover state changes from deployment history using Kubernetes API."""
-        import os
+    ) -> tuple[list[StateChange], str | None]:
+        """State changes read from the live cluster, or why there are none.
+
+        Returns `(changes, None)` when the deployment was actually read, and
+        `([], reason)` otherwise. This used to invent a deployment StateChange
+        (`app:{version}` images, `reversible=True`) whenever the read failed —
+        indistinguishable in shape from a real one, so a rollback of a
+        deployment nobody could see still came out `can_proceed=True`. It also
+        unconditionally appended a `configmap/{deployment_id}-config` change
+        that no code ever read from the cluster; the connector has no configmap
+        read, so that entry is simply gone rather than kept as fiction.
+        """
         from app.connectors.kubernetes import KubernetesConnector
 
-        changes = []
         k8s = KubernetesConnector()
-
         try:
             namespace = os.environ.get("NAMESPACE", "default")
             dep_result = await k8s.get_deployment(deployment_id, namespace)
 
-            if dep_result.success and dep_result.data:
-                changes.append(StateChange(
-                    resource_type="deployment",
-                    resource_id=f"deployment/{deployment_id}",
-                    change_type="update",
-                    before_state={"image": dep_result.data.get("image", f"app:{to_version}")},
-                    after_state={"image": f"app:{from_version}"},
-                    reversible=True,
-                    reversal_complexity=2,
-                ))
-            else:
-                changes.append(StateChange(
-                    resource_type="deployment",
-                    resource_id=f"deployment/{deployment_id}",
-                    change_type="update",
-                    before_state={"image": f"app:{to_version}"},
-                    after_state={"image": f"app:{from_version}"},
-                    reversible=True,
-                    reversal_complexity=2,
-                ))
+            if not dep_result.success or not dep_result.data:
+                reason = (
+                    f"could not read deployment {namespace}/{deployment_id}: "
+                    f"{dep_result.error or 'not found'}"
+                )
+                log.warning("Rollback state discovery is unverified: %s", reason)
+                return [], reason
 
-        except Exception as e:
-            log.warning("Failed to discover state changes: %s", e)
-            changes.append(StateChange(
+            return [StateChange(
                 resource_type="deployment",
                 resource_id=f"deployment/{deployment_id}",
                 change_type="update",
-                before_state={"image": f"app:{to_version}"},
-                after_state={"image": f"app:{from_version}"},
+                before_state={"image": dep_result.data.get("image")},
+                after_state={"target_version": to_version},
                 reversible=True,
                 reversal_complexity=2,
-            ))
+            )], None
+
+        except Exception as e:
+            reason = f"could not read deployment {deployment_id}: {e}"
+            log.warning("Rollback state discovery is unverified: %s", reason)
+            return [], reason
         finally:
             await k8s.close()
-
-        changes.append(StateChange(
-            resource_type="configmap",
-            resource_id=f"configmap/{deployment_id}-config",
-            change_type="update",
-            before_state={"version": to_version},
-            after_state={"version": from_version},
-            reversible=True,
-            reversal_complexity=1,
-        ))
-
-        return changes
 
     def _determine_strategy(self, changes: list[StateChange]) -> RollbackStrategy:
         """Determine optimal rollback strategy based on changes."""
@@ -529,6 +543,25 @@ class RollbackSimulator:
         issues: list[SimulationIssue] = []
         recommendations: list[str] = []
 
+        # A scenario whose state was never read from the cluster analyses
+        # nothing real, so it cannot clear the gate. Blocking makes
+        # `can_proceed` False below without a second code path.
+        if not scenario.verified:
+            issues.append(SimulationIssue(
+                severity=RollbackRisk.CRITICAL,
+                category="verification",
+                description=(
+                    "Rollback state is unverified: "
+                    f"{scenario.unverified_reason or 'unknown reason'}"
+                ),
+                affected_step=None,
+                mitigation=(
+                    "Give the simulator a readable cluster (kubeconfig / in-cluster "
+                    "credentials) so the deployment's real state can be read"
+                ),
+                blocking=True,
+            ))
+
         # Analyze state changes
         for change in scenario.state_changes:
             change_issues = await self._analyze_state_change(change)
@@ -556,10 +589,15 @@ class RollbackSimulator:
         # Generate recommendations
         recommendations = self._generate_recommendations(scenario, issues)
 
-        # Determine if can proceed
+        # Determine if can proceed. `scenario.verified` is checked on its own
+        # as well as via the blocking issue above: an unverified run has no
+        # evidence to proceed on, whatever its scores say.
         blocking_issues = [i for i in issues if i.blocking]
-        can_proceed = len(blocking_issues) == 0
-        requires_approval = risk_level in [RollbackRisk.HIGH, RollbackRisk.CRITICAL]
+        can_proceed = scenario.verified and len(blocking_issues) == 0
+        requires_approval = (
+            not scenario.verified
+            or risk_level in [RollbackRisk.HIGH, RollbackRisk.CRITICAL]
+        )
 
         result = RollbackResult(
             scenario=scenario,
@@ -572,6 +610,8 @@ class RollbackSimulator:
             recommendations=recommendations,
             can_proceed=can_proceed,
             requires_approval=requires_approval,
+            verified=scenario.verified,
+            unverified_reason=scenario.unverified_reason,
         )
 
         self._results[scenario_id] = result
@@ -647,20 +687,52 @@ class RollbackSimulator:
         self,
         scenario: RollbackScenario,
     ) -> list[SimulationIssue]:
-        """Analyze service dependencies for issues."""
+        """Analyze service dependencies for issues.
+
+        With a knowledge graph configured this reads the real upstream
+        dependents of the service being rolled back. Without one, the only
+        signal available is the resource count, and the issue says so — it was
+        previously worded as if interdependencies had been analysed when the
+        check was `len(state_changes) > 5`.
+        """
         issues = []
 
-        # In production, query knowledge graph for dependencies
-        # Check for circular dependencies, missing dependencies, etc.
+        if self.knowledge_graph is not None:
+            try:
+                blast = await self.knowledge_graph.find_blast_radius(scenario.service)
+                affected = blast.get("affected_count", 0)
+                if affected > 0:
+                    issues.append(SimulationIssue(
+                        severity=RollbackRisk.MEDIUM,
+                        category="dependency",
+                        description=(
+                            f"{affected} service(s) depend on {scenario.service} "
+                            "per the knowledge graph and will see the rollback"
+                        ),
+                        affected_step=None,
+                        mitigation="Notify owners of dependent services before proceeding",
+                        blocking=False,
+                    ))
+                return issues
+            except Exception as e:
+                log.warning(
+                    "Dependency analysis via knowledge graph failed for %s: %s",
+                    scenario.service, e,
+                )
+                # Fall through to the labelled heuristic below.
 
-        # Simulated check
+        # Heuristic only — no dependency graph was consulted.
         if len(scenario.state_changes) > 5:
             issues.append(SimulationIssue(
                 severity=RollbackRisk.MEDIUM,
-                category="dependency",
-                description="Multiple resources may have interdependencies",
+                category="dependency_heuristic",
+                description=(
+                    f"Heuristic (resource count): {len(scenario.state_changes)} resources "
+                    "change in this rollback; interdependencies were NOT analysed "
+                    "(no knowledge graph configured)"
+                ),
                 affected_step=None,
-                mitigation="Review dependency graph before proceeding",
+                mitigation="Review the dependency graph by hand before proceeding",
                 blocking=False,
             ))
 

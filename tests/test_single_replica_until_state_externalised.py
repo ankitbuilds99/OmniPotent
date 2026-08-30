@@ -194,10 +194,10 @@ IN_MEMORY_STORES: list[tuple[str, str]] = [
     # Same file, same shape, missed when the first two were listed.
     ("app/cost_optimizer/api_router.py", "_token_optimizers"),
     ("app/cost_optimizer/api_router.py", "_gpu_trackers"),
-    # Read by /investigations in app/api/main.py, which imports it inside the
-    # handler — an import edge no module-level scan would have followed.
-    ("app/api/graphql/schema.py", "_investigations"),
-    ("app/api/graphql/schema.py", "_incidents"),
+    # app/api/graphql/schema.py's _investigations/_incidents used to be listed
+    # here. The module was deleted outright (never mounted, imported strawberry
+    # which is not a core dependency, and served entirely fabricated data), so
+    # there is no store left to externalise.
     # Webhook delivery de-duplication. Per-pod means a redelivery that lands on
     # another replica is processed a second time, which for an incident webhook
     # is a duplicate investigation rather than a duplicate row.

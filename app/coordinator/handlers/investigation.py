@@ -17,9 +17,18 @@ from typing import Any
 
 import httpx
 
+from app.config import get_settings
 from app.coordinator.dag_executor import TaskNode
 
 log = logging.getLogger("omnipotent.coordinator.handlers.investigation")
+
+# Same contract as _no_backend in handlers/remediation.py: with no backend
+# configured, a per-service count of zero is indistinguishable from a clean
+# service, and this feeds hypothesis generation for real incidents.
+_NO_LOG_BACKEND = (
+    "no log backend configured (pass loki_url or elasticsearch_url to "
+    "create_investigation_handlers); log and error counts were not measured"
+)
 
 
 class LogsHandler:
@@ -36,7 +45,9 @@ class LogsHandler:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(
+                timeout=get_settings().http_timeout_default
+            )
         return self._client
 
     async def __call__(
@@ -56,6 +67,35 @@ class LogsHandler:
             "anomalies": [],
         }
 
+        if not self.loki_url and not self.elasticsearch_url:
+            # No backend means no measurement. This used to report
+            # `log_count: 0, error_count: 0` per service — the exact shape of
+            # a clean service — via a `_simulate_logs` stub that returned [].
+            if get_settings().copilot_demo_mode:
+                log.warning(
+                    "COPILOT_DEMO_MODE=true - returning SIMULATED (empty) log "
+                    "analysis; no log backend is configured"
+                )
+                for service in services:
+                    results["services"][service] = {
+                        "log_count": 0,
+                        "error_count": 0,
+                        "warning_count": 0,
+                        "sample_errors": [],
+                        "simulated": True,
+                    }
+                results["simulated"] = True
+                results["total_errors"] = 0
+                return results
+
+            log.warning("Log collection not performed: %s", _NO_LOG_BACKEND)
+            for service in services:
+                results["services"][service] = {"error": _NO_LOG_BACKEND}
+            results["error"] = _NO_LOG_BACKEND
+            # None, not 0: nothing was counted.
+            results["total_errors"] = None
+            return results
+
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(minutes=time_window_minutes)
 
@@ -63,10 +103,8 @@ class LogsHandler:
             try:
                 if self.loki_url:
                     logs = await self._query_loki(service, start_time, end_time)
-                elif self.elasticsearch_url:
-                    logs = await self._query_elasticsearch(service, start_time, end_time)
                 else:
-                    logs = await self._simulate_logs(service, start_time, end_time)
+                    logs = await self._query_elasticsearch(service, start_time, end_time)
 
                 analysis = self._analyze_logs(logs)
                 results["services"][service] = {
@@ -175,15 +213,6 @@ class LogsHandler:
 
         return logs
 
-    async def _simulate_logs(
-        self,
-        service: str,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> list[dict[str, Any]]:
-        """Simulate log data when no backend is available."""
-        return []
-
     def _analyze_logs(self, logs: list[dict[str, Any]]) -> dict[str, Any]:
         """Analyze logs for patterns and anomalies."""
         error_count = 0
@@ -241,7 +270,9 @@ class MetricsHandler:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(
+                timeout=get_settings().http_timeout_default
+            )
         return self._client
 
     async def __call__(
@@ -392,10 +423,12 @@ class DeploymentsHandler:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            headers = {}
+            headers = {"Accept": "application/vnd.github+json"}
             if self.github_token:
                 headers["Authorization"] = f"token {self.github_token}"
-            self._client = httpx.AsyncClient(timeout=30.0, headers=headers)
+            self._client = httpx.AsyncClient(
+                timeout=get_settings().http_timeout_default, headers=headers
+            )
         return self._client
 
     async def __call__(
@@ -435,23 +468,87 @@ class DeploymentsHandler:
                 except Exception as e:
                     log.error("Failed to get deployments for %s: %s", service, e)
 
-        if self.github_token:
-            for service in services:
+        # GitHub changes. `_get_github_changes` used to be `return []` behind a
+        # docstring claiming a fetch, reached exactly when a token WAS
+        # configured — so configured users read "no changes found" for a query
+        # that never happened. GITHUB_REPO names one repository, so the fetch
+        # is per-window, not per-service, and every not-queried outcome leaves
+        # an explicit marker instead of a silent empty list.
+        if not self.github_token:
+            results["changes_source"] = "not_configured"
+        else:
+            repo = get_settings().github_repo
+            if not repo:
+                results["changes_source"] = "unavailable"
+                results["changes_error"] = (
+                    "GITHUB_TOKEN is set but GITHUB_REPO is not; GitHub was not "
+                    "queried for recent changes"
+                )
+                log.warning("%s", results["changes_error"])
+            else:
                 try:
-                    changes = await self._get_github_changes(service, hours)
-                    results["changes"].extend(changes)
+                    results["changes"] = await self._get_github_changes(repo, hours)
+                    results["changes_source"] = f"github:{repo}"
                 except Exception as e:
-                    log.debug("Failed to get GitHub changes for %s: %s", service, e)
+                    results["changes_source"] = "unavailable"
+                    results["changes_error"] = f"GitHub query for {repo} failed: {e}"
+                    log.warning("%s", results["changes_error"])
 
         return results
 
     async def _get_github_changes(
         self,
-        service: str,
+        repo: str,
         hours: int,
     ) -> list[dict[str, Any]]:
-        """Get recent GitHub changes for a service."""
-        return []
+        """Recent commits and pull requests for ``repo`` inside the window."""
+        client = await self._get_client()
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        changes: list[dict[str, Any]] = []
+
+        response = await client.get(
+            f"https://api.github.com/repos/{repo}/commits",
+            params={"since": since.isoformat(), "per_page": 50},
+        )
+        response.raise_for_status()
+        for commit in response.json():
+            detail = commit.get("commit", {})
+            changes.append({
+                "type": "commit",
+                "sha": commit.get("sha"),
+                "message": (detail.get("message") or "").split("\n", 1)[0][:200],
+                "author": (detail.get("author") or {}).get("name"),
+                "timestamp": (detail.get("author") or {}).get("date"),
+                "url": commit.get("html_url"),
+            })
+
+        response = await client.get(
+            f"https://api.github.com/repos/{repo}/pulls",
+            params={
+                "state": "closed",
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": 50,
+            },
+        )
+        response.raise_for_status()
+        for pr in response.json():
+            merged_at = pr.get("merged_at")
+            if not merged_at:
+                continue
+            merged = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+            if merged < since:
+                continue
+            changes.append({
+                "type": "pull_request",
+                "number": pr.get("number"),
+                "title": (pr.get("title") or "")[:200],
+                "author": (pr.get("user") or {}).get("login"),
+                "timestamp": merged_at,
+                "url": pr.get("html_url"),
+            })
+
+        return changes
 
 
 class CorrelationHandler:

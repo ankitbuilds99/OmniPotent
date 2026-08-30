@@ -566,11 +566,17 @@ class VerificationHandler:
         """Verify that remediation was successful."""
         service: str = inputs.get("service", "")
         deployment: str = inputs.get("deployment") or service
+        # The namespace of the target being verified — same key the scale /
+        # restart / rollback handlers read. The k8s checks below used a literal
+        # "default", so a remediation applied in another namespace was verified
+        # against a deployment that does not exist there.
+        namespace: str = inputs.get("namespace", "default")
         checks = inputs.get("checks", ["health", "errors", "latency"])
         wait_seconds = inputs.get("wait_seconds", 60)
 
         result: dict[str, Any] = {
             "service": service,
+            "namespace": namespace,
             "checks_passed": [],
             "checks_failed": [],
             "success": False,
@@ -594,13 +600,13 @@ class VerificationHandler:
         for check in checks:
             try:
                 if check == "health":
-                    passed = await self._check_health(deployment)
+                    passed = await self._check_health(deployment, namespace)
                 elif check == "errors":
                     passed = await self._check_error_rate(service)
                 elif check == "latency":
                     passed = await self._check_latency(service)
                 elif check == "pods":
-                    passed = await self._check_pods_ready(deployment)
+                    passed = await self._check_pods_ready(deployment, namespace)
                 else:
                     # A check we don't know how to run is not a check we passed.
                     passed = self._unchecked(check, "unknown check type")
@@ -635,7 +641,7 @@ class VerificationHandler:
         log.warning("Verification check '%s' could not run: %s", check, missing)
         return False
 
-    async def _check_health(self, deployment: str) -> bool:
+    async def _check_health(self, deployment: str, namespace: str = "default") -> bool:
         """Check if deployment is healthy."""
         if not self.k8s:
             return self._unchecked("health", "no kubernetes client configured")
@@ -643,7 +649,7 @@ class VerificationHandler:
         try:
             status = await self.k8s.read_namespaced_deployment_status(
                 name=deployment,
-                namespace="default",
+                namespace=namespace,
             )
 
             return (
@@ -720,14 +726,14 @@ class VerificationHandler:
             log.warning("Latency check for %s could not reach Prometheus: %s", service, e)
             return False
 
-    async def _check_pods_ready(self, deployment: str) -> bool:
+    async def _check_pods_ready(self, deployment: str, namespace: str = "default") -> bool:
         """Check if all pods are ready."""
         if not self.k8s:
             return self._unchecked("pods", "no kubernetes client configured")
 
         try:
             pods = await self.k8s.list_namespaced_pod(
-                namespace="default",
+                namespace=namespace,
                 label_selector=f"app={deployment}",
             )
 

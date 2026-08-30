@@ -141,17 +141,50 @@ class TestDowntimePredictor:
             assert window.start_time < window.end_time
 
     @pytest.mark.asyncio
-    async def test_forecast_capacity(self, predictor):
-        """Test capacity forecasting."""
-        forecast = await predictor.forecast_capacity(
-            service="api-service",
-            resource_type="cpu",
-            horizon_days=30,
-        )
+    async def test_forecast_capacity_fails_closed_without_metrics(self, predictor, monkeypatch):
+        """No metrics source: refuse to forecast, don't invent one.
 
-        assert forecast.resource_type == "cpu"
-        assert 0 <= forecast.current_usage <= 1
-        assert len(forecast.forecasted_usage) > 0
+        This used to assert the old behaviour — a forecast built from
+        `current=0.5, trend_rate=0.01` constants whenever Prometheus was
+        absent, complete with "URGENT: capacity breach in N days" warnings.
+        """
+        from app import config as cfg
+        from app.digital_twin.downtime_predictor import MetricsUnavailableError
+
+        monkeypatch.delenv("PROMETHEUS_URL", raising=False)
+        monkeypatch.delenv("COPILOT_PROMETHEUS_URL", raising=False)
+        cfg.get_settings.cache_clear()
+        try:
+            with pytest.raises(MetricsUnavailableError):
+                await predictor.forecast_capacity(
+                    service="api-service",
+                    resource_type="cpu",
+                    horizon_days=30,
+                )
+        finally:
+            cfg.get_settings.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_forecast_capacity_demo_mode_is_labelled(self, predictor, monkeypatch):
+        """Demo mode may fabricate, but only labelled as simulated."""
+        from app import config as cfg
+
+        monkeypatch.delenv("PROMETHEUS_URL", raising=False)
+        monkeypatch.delenv("COPILOT_PROMETHEUS_URL", raising=False)
+        monkeypatch.setenv("COPILOT_DEMO_MODE", "true")
+        cfg.get_settings.cache_clear()
+        try:
+            forecast = await predictor.forecast_capacity(
+                service="api-service",
+                resource_type="cpu",
+                horizon_days=30,
+            )
+        finally:
+            cfg.get_settings.cache_clear()
+
+        assert forecast.simulated is True
+        assert forecast.to_dict()["simulated"] is True
+        assert any("SIMULATED" in r for r in forecast.recommendations)
 
 
 class TestRollbackSimulator:
