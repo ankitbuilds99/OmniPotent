@@ -391,7 +391,11 @@ class GPUTracker:
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=30.0)
+            from app.config import get_settings
+
+            self._http_client = httpx.AsyncClient(
+                timeout=get_settings().http_timeout_default
+            )
         return self._http_client
 
     async def close(self) -> None:

@@ -75,7 +75,7 @@ def get_stripe_service() -> StripeBillingService | None:
                 store=get_billing_store(),
                 stripe_client=client,
                 webhook_secret=s.stripe_webhook_secret or "",
-                frontend_url=s.frontend_url or "http://localhost:3000",
+                frontend_url=s.frontend_url,
             )
     return _STRIPE_SERVICE
 

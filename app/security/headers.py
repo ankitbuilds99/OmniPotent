@@ -20,6 +20,31 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+# API origin per LLM provider (the deepseek one matches app/llm.py's
+# _DEEPSEEK_BASE_URL). connect-src names only the provider(s) this deployment
+# is configured for — hardcoding two vendors' origins both blocked the other
+# providers and allowlisted APIs the deployment never calls.
+_PROVIDER_API_ORIGINS: dict[str, str] = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "groq": "https://api.groq.com",
+    "deepseek": "https://api.deepseek.com",
+}
+
+
+def _provider_connect_sources() -> tuple[str, ...]:
+    """API origins for the configured primary (and fallback) LLM providers."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    sources: list[str] = []
+    for provider in (settings.copilot_provider, settings.copilot_fallback_provider):
+        origin = _PROVIDER_API_ORIGINS.get((provider or "").strip().lower())
+        if origin and origin not in sources:
+            sources.append(origin)
+    return tuple(sources)
+
 
 def csp_connect_sources(*urls: str) -> tuple[str, ...]:
     """The ``connect-src`` entries a browser needs to reach ``urls``.
@@ -97,8 +122,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # and the browser reports that only to its own console.
         connect_src = " ".join([
             "'self'",
-            "https://api.anthropic.com",
-            "https://api.openai.com",
+            *_provider_connect_sources(),
             *self.extra_connect_src,
         ])
         return "; ".join([

@@ -323,11 +323,18 @@ class StripeBillingService:
         store: BillingStore,
         stripe_client: StripeClient,
         webhook_secret: str,
-        frontend_url: str = "http://localhost:3000",
+        frontend_url: str = "",
     ):
         self._store = store
         self._stripe = stripe_client
         self._webhook_secret = webhook_secret
+        # FRONTEND_URL owns the default — duplicating its literal here meant a
+        # deployment that changed the setting could still be redirected to
+        # localhost by any caller that skipped this argument.
+        if not frontend_url:
+            from app.config import get_settings
+
+            frontend_url = get_settings().frontend_url
         self._frontend_url = frontend_url
         self._plan_manager = PlanManager()
 

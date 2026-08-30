@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any, Callable, Awaitable
 import json
 
+from app.config import get_settings
 from app.knowledge_graph.neo4j_backend import (
     Neo4jKnowledgeGraph,
     ServiceNode,
@@ -197,7 +198,7 @@ class GitHubSyncer(BaseSyncer):
                         "Accept": "application/vnd.github.v3+json",
                         "X-GitHub-Api-Version": "2022-11-28",
                     },
-                    timeout=30.0,
+                    timeout=get_settings().http_timeout_default,
                 )
             except ImportError:
                 log.warning("httpx not installed, GitHub sync unavailable")
@@ -658,12 +659,17 @@ class PrometheusSyncer(BaseSyncer):
     def __init__(
         self,
         graph: Neo4jKnowledgeGraph,
-        prometheus_url: str = "http://localhost:9090",
-        alertmanager_url: str = "http://localhost:9093",
+        prometheus_url: str = "",
+        alertmanager_url: str = "",
     ):
         super().__init__(graph)
-        self.prometheus_url = prometheus_url.rstrip("/")
-        self.alertmanager_url = alertmanager_url.rstrip("/")
+        # Defaults come from the deployment's settings (PROMETHEUS_URL /
+        # ALERTMANAGER_URL). Left blank, that part of the sync is skipped —
+        # inventing a localhost address only produced connection errors that
+        # looked like an outage of the operator's real Prometheus.
+        settings = get_settings()
+        self.prometheus_url = (prometheus_url or settings.prometheus_url).strip().rstrip("/")
+        self.alertmanager_url = (alertmanager_url or settings.alertmanager_url).strip().rstrip("/")
         self._client: Any = None
 
     @property
@@ -675,7 +681,7 @@ class PrometheusSyncer(BaseSyncer):
         if self._client is None:
             try:
                 import httpx
-                self._client = httpx.AsyncClient(timeout=30.0)
+                self._client = httpx.AsyncClient(timeout=get_settings().http_timeout_default)
             except ImportError:
                 log.warning("httpx not installed, Prometheus sync unavailable")
                 return None
@@ -687,6 +693,13 @@ class PrometheusSyncer(BaseSyncer):
         cursor: str | None = None,
     ) -> tuple[list[SyncEvent], str]:
         """Fetch alerts from Alertmanager."""
+        if not (self.prometheus_url or self.alertmanager_url):
+            log.debug(
+                "Prometheus sync skipped: neither PROMETHEUS_URL nor "
+                "ALERTMANAGER_URL is configured"
+            )
+            return [], ""
+
         client = await self._get_client()
         if not client:
             return [], ""
@@ -694,9 +707,13 @@ class PrometheusSyncer(BaseSyncer):
         events: list[SyncEvent] = []
 
         try:
-            response = await client.get(f"{self.alertmanager_url}/api/v2/alerts")
+            response = (
+                await client.get(f"{self.alertmanager_url}/api/v2/alerts")
+                if self.alertmanager_url
+                else None
+            )
 
-            if response.status_code == 200:
+            if response is not None and response.status_code == 200:
                 alerts = response.json()
 
                 for alert in alerts:
@@ -740,8 +757,12 @@ class PrometheusSyncer(BaseSyncer):
                         raw=alert,
                     ))
 
-            targets_response = await client.get(f"{self.prometheus_url}/api/v1/targets")
-            if targets_response.status_code == 200:
+            targets_response = (
+                await client.get(f"{self.prometheus_url}/api/v1/targets")
+                if self.prometheus_url
+                else None
+            )
+            if targets_response is not None and targets_response.status_code == 200:
                 targets_data = targets_response.json()
                 for target in targets_data.get("data", {}).get("activeTargets", []):
                     labels = target.get("labels", {})
@@ -993,10 +1014,12 @@ class JaegerSyncer(BaseSyncer):
     def __init__(
         self,
         graph: Neo4jKnowledgeGraph,
-        jaeger_url: str = "http://localhost:16686",
+        jaeger_url: str = "",
     ):
         super().__init__(graph)
-        self.jaeger_url = jaeger_url.rstrip("/")
+        # Defaults to the deployment's traces endpoint (TRACES_API_URL). Left
+        # blank, this source skips rather than probing an invented localhost.
+        self.jaeger_url = (jaeger_url or get_settings().traces_api_url).strip().rstrip("/")
         self._client: Any = None
 
     @property
@@ -1008,7 +1031,7 @@ class JaegerSyncer(BaseSyncer):
         if self._client is None:
             try:
                 import httpx
-                self._client = httpx.AsyncClient(timeout=30.0)
+                self._client = httpx.AsyncClient(timeout=get_settings().http_timeout_default)
             except ImportError:
                 log.warning("httpx not installed")
                 return None
@@ -1020,6 +1043,10 @@ class JaegerSyncer(BaseSyncer):
         cursor: str | None = None,
     ) -> tuple[list[SyncEvent], str]:
         """Fetch service dependencies from Jaeger."""
+        if not self.jaeger_url:
+            log.debug("Jaeger sync skipped: TRACES_API_URL is not configured")
+            return [], ""
+
         client = await self._get_client()
         if not client:
             return [], ""
@@ -1179,8 +1206,8 @@ class ContinuousSyncEngine:
 
     def add_prometheus(
         self,
-        prometheus_url: str = "http://localhost:9090",
-        alertmanager_url: str = "http://localhost:9093",
+        prometheus_url: str = "",
+        alertmanager_url: str = "",
     ) -> PrometheusSyncer:
         """Add Prometheus sync source."""
         syncer = PrometheusSyncer(self.graph, prometheus_url, alertmanager_url)
@@ -1200,7 +1227,7 @@ class ContinuousSyncEngine:
 
     def add_jaeger(
         self,
-        jaeger_url: str = "http://localhost:16686",
+        jaeger_url: str = "",
     ) -> JaegerSyncer:
         """Add Jaeger sync source."""
         syncer = JaegerSyncer(self.graph, jaeger_url)

@@ -172,8 +172,10 @@ class TestConnectSrcFollowsConfiguration:
             MockApp(), extra_connect_src=("https://abc.supabase.co",)
         )
 
+        # connect-src is derived from the configured provider (anthropic in the
+        # test env), so only that provider's origin appears alongside the extras.
         assert (
-            "connect-src 'self' https://api.anthropic.com https://api.openai.com "
+            "connect-src 'self' https://api.anthropic.com "
             "https://abc.supabase.co" in middleware.csp_policy
         )
 
