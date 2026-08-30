@@ -466,8 +466,11 @@ class SmartRouter:
         avg_confidence = 0.0
 
         for decision in self._routing_history:
-            eng_id = decision.primary_responder.engineer_id
-            by_engineer[eng_id] = by_engineer.get(eng_id, 0) + 1
+            # No-responder decisions never enter the history, but the field is
+            # Optional, so guard rather than assume.
+            if decision.primary_responder is not None:
+                eng_id = decision.primary_responder.engineer_id
+                by_engineer[eng_id] = by_engineer.get(eng_id, 0) + 1
             avg_confidence += decision.confidence
 
         if self._routing_history:
