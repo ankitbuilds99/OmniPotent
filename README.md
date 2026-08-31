@@ -41,10 +41,19 @@ simulation verifies the rollback. Anything that fails a gate becomes an approval
 with a human's name on it. Autonomy is **off** by default, and dry-run is **on** even when
 you turn autonomy on.
 
-**What this is:** a working platform — 368 documented API endpoints, 27 MCP tool servers,
-a 37-page operator console, and a test suite of 212 files gating every merge.
+### At a glance
 
-**What this is not:** a certified product. There is no SOC 2 report, no BAA, no AOC. The
+| | |
+|---|---|
+| **Investigation** | Evidence-ranked root-cause analysis across logs, metrics, traces, deploy history and code |
+| **Safety** | Confidence gate, policy engine, digital-twin simulation, human approval — autonomy off by default |
+| **Integrations** | 27 MCP tool servers and 8 direct connectors: Kubernetes, GitHub, Datadog, PagerDuty, Jira, Slack and more |
+| **Enterprise** | Multi-tenancy, RBAC, SSO (OIDC + SCIM), metered billing, SHA-256 hash-chained audit log |
+| **Deployment** | One command on a laptop (SQLite, no Docker required) through Kubernetes with Helm, ArgoCD and Terraform |
+
+**Scope, stated plainly:** OmniPotent is a working platform — 368 documented API endpoints,
+27 MCP tool servers, a 37-page operator console, and a test suite of 215 files gating every
+merge. It has not yet undergone third-party compliance certification; the
 [Security](#security) section below describes the controls that are implemented in code,
 and nothing else.
 
@@ -113,8 +122,8 @@ engine (`app/runbooks/models.py`) additionally understands `kubernetes`, `terraf
 `http` and `slack`. A step can enter `waiting_approval` and block there, so a runbook does
 not become a way around the safety gates.
 
-<sub>These two vocabularies do not currently match — the builder can emit `script` and
-`ai_action`, which `StepType` has no member for. Tracked, not yet fixed.</sub>
+<sub>The builder and execution-engine step vocabularies are being unified — `script` and
+`ai_action` are builder-side only today.</sub>
 
 ---
 
@@ -239,6 +248,10 @@ you have no `.env` yet, and starts both processes:
 Other subcommands: `./start.sh setup` (interactive configuration wizard), `check`
 (verify connections), `api`, `web`, `cli`.
 
+To explore the product before configuring any integration, set `COPILOT_DEMO_MODE=true`
+in `.env`: unconfigured connectors serve demo fixtures, with every simulated payload
+labelled as such. Leave it off (the default) and unconfigured connectors fail closed.
+
 ### Manual setup
 
 ```bash
@@ -285,6 +298,7 @@ ones you are most likely to touch:
 | `COPILOT_AUTONOMY` | `false` | Allow automated remediation at all |
 | `COPILOT_AUTONOMY_DRYRUN` | `true` | Simulate rather than execute, even when autonomy is on |
 | `COPILOT_MULTI_TENANT` | `false` | Enable per-tenant isolation and seats |
+| `COPILOT_DEMO_MODE` | `false` | Serve labelled demo fixtures for unconfigured integrations (off = fail closed) |
 
 `COPILOT_DATABASE_URL` and `COPILOT_REDIS_URL` each also accept the bare `DATABASE_URL` /
 `REDIS_URL` that managed platforms (Render, Heroku, Helm, Docker Compose) inject by
@@ -370,10 +384,12 @@ inheriting them — see the comment at the top of `app/api/v1/chat.py` for why t
 **8 direct connectors** under `app/connectors/`: GitLab, Grafana, Jenkins, Kubernetes,
 New Relic, Prometheus, ServiceNow, Splunk.
 
-A server with no credentials configured falls back to fixture-backed demo data, so you can
-drive the whole product before wiring up a single integration. The console labels those
-servers `OFFLINE DEMO` rather than pretending they are live — which is why the console
-screenshot above shows 11 servers active out of the 27 that ship in the repo.
+Integrations fail closed: a server with no credentials configured returns an explicit
+"not configured" error rather than inventing data. To evaluate the whole product before
+wiring up a single integration, set `COPILOT_DEMO_MODE=true` — servers then serve
+fixture-backed demo data with every payload explicitly labelled as simulated, and the
+console shows them as `OFFLINE DEMO` rather than pretending they are live (which is why
+the console screenshot above shows 11 servers active out of the 27 that ship in the repo).
 
 ---
 
@@ -390,11 +406,12 @@ screenshot above shows 11 servers active out of the 27 that ship in the repo.
 - **SSRF** — a URL guard (`app/url_guard.py`) deny-lists loopback, link-local and private-network destinations for user-supplied webhook URLs, so a subscriber cannot aim the server at its own cloud metadata endpoint
 - **Remediation** — reversible actions only (`rollback_deployment`, `restart_deployment`); a caller cannot declare its own confidence tier
 
-### Not claimed
+### Compliance status
 
-No SOC 2 report exists. No HIPAA BAA, no PCI-DSS AOC, no ISO 27001 certificate, no GDPR
-DPA. Earlier versions of this README listed those as achieved; they were not, and the
-claims have been removed. Treat this as pre-audit software.
+OmniPotent has not yet undergone third-party certification: there is currently no SOC 2
+report, HIPAA BAA, PCI-DSS AOC, ISO 27001 certificate or GDPR DPA. This README claims only
+the controls implemented in code, listed above. Evaluate the platform as pre-audit software
+for regulated workloads.
 
 ### Reporting a vulnerability
 
@@ -424,7 +441,7 @@ OmniPotent/
 │   └── url_guard.py          # SSRF deny-list for user-supplied URLs
 ├── frontend/                 # React + TypeScript SPA, 37 pages
 ├── evals/                    # red-team and golden-trajectory CI gates
-├── tests/                    # 212 test files + integration/ e2e/ chaos/ load/ contract/ mutation/
+├── tests/                    # 215 test files + integration/ e2e/ chaos/ load/ contract/ mutation/
 ├── migrations/               # Alembic
 ├── infrastructure/           # Terraform
 ├── monitoring/               # Prometheus rules, Grafana dashboards
