@@ -116,7 +116,7 @@ class DomainContract(BaseModel):
 
     @model_validator(mode="after")
     def validate_forward_extensions(self) -> "DomainContract":
-        adapter = TypeAdapter(JsonValue)
+        adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
         for name, value in (self.__pydantic_extra__ or {}).items():
             try:
                 adapter.validate_python(value)
