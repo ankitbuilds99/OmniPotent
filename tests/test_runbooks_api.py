@@ -51,7 +51,13 @@ def _payload(**over):
 
 
 def test_put_persists_the_edit(client):
-    res = client.put("/api/runbooks/restart-service", json=_payload())
+    res = client.put(
+        "/api/runbooks/restart-service",
+        json=_payload(steps=[{
+            "id": "s1", "name": "Restart", "step_type": "kubernetes",
+            "action": "rollout_restart", "rollback_step": "s0",
+        }]),
+    )
     assert res.status_code == 200, res.text
     assert res.json()["name"] == "Restart service (edited)"
 
@@ -59,7 +65,8 @@ def test_put_persists_the_edit(client):
     assert again.status_code == 200
     body = again.json()
     assert body["name"] == "Restart service (edited)"
-    assert [s["action"] for s in body["steps"]] == ["systemctl restart api"]
+    assert [s["action"] for s in body["steps"]] == ["rollout_restart"]
+    assert body["steps"][0]["rollback_step"] == "s0"
 
 
 def test_put_on_an_unknown_runbook_is_404_not_a_silent_create(client):
