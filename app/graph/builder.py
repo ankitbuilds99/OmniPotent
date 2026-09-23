@@ -90,7 +90,9 @@ def make_guarded_tool_node(tools):
         if queued and not getattr(messages[-1] if messages else None, "tool_calls", None):
             payload = {**state, "messages": [*messages, AIMessage(content="", tool_calls=queued)]}
 
-        with otel.span("mcp.tools"):
+        from app.tool_trust.gateway import approved_tool_execution
+
+        with approved_tool_execution(bool(state.get("tool_execution_approved"))), otel.span("mcp.tools"):
             result = await inner.ainvoke(payload)
         out: list = []
         for m in result.get("messages", []):
@@ -117,7 +119,11 @@ def make_guarded_tool_node(tools):
         # the queue stayed set forever and every agent node bounced straight
         # back to `tools`, burning the recursion limit without ever reaching
         # `report`. Nodes write state; routers read it.
-        return {"messages": out, "pending_tool_calls": None}
+        return {
+            "messages": out,
+            "pending_tool_calls": None,
+            "tool_execution_approved": False,
+        }
 
     return guarded
 

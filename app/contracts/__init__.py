@@ -23,7 +23,7 @@ from app.contracts.common import (
     TrustReasonCode,
     VerificationOutcome,
 )
-from app.contracts.evidence import EvidenceItem, EvidenceReference
+from app.contracts.evidence import EvidenceDomain, EvidenceItem, EvidenceReference, EvidenceTrustLevel
 from app.contracts.hypothesis import Hypothesis
 from app.contracts.receipt import ExecutionReceipt
 from app.contracts.root_cause import RootCauseAssessment, RootCauseStatus
@@ -32,7 +32,7 @@ from app.contracts.verification import ExecutionResult, PredicateResult, Verific
 
 __all__ = [
     "ActionContract", "ActionLifecycleState", "ActionTarget", "ApprovalRequirement",
-    "BlastRadiusAssessment", "Environment", "EvidenceItem", "EvidenceReference",
+    "BlastRadiusAssessment", "Environment", "EvidenceDomain", "EvidenceItem", "EvidenceReference", "EvidenceTrustLevel",
     "ExecutionReceipt", "ExecutionResult", "ExecutionStrategy", "ExpectedOutcome",
     "Hypothesis", "Precondition", "PredicateResult", "RiskLevel", "RollbackPlan",
     "RootCauseAssessment", "RootCauseStatus", "TrustDecision", "TrustDecisionKind",

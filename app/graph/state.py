@@ -219,3 +219,6 @@ class AgentState(TypedDict, total=False):
     # Pending tool calls that need to be executed. Set by agent nodes when they
     # request tool execution; cleared by the tools node after execution.
     pending_tool_calls: list[dict[str, Any]] | None
+
+    # Set by a successful approval interrupt and consumed by the ToolNode.
+    tool_execution_approved: bool

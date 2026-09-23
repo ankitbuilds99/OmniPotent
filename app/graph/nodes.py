@@ -346,9 +346,10 @@ def approval_node(state: AgentState) -> dict:
                 "pending_action": None,
                 "pending_tool_calls": all_calls,
                 "multi_agent_agent": "approval",
+                "tool_execution_approved": True,
             }
         # Leave the AIMessage untouched -> routed to ToolNode for execution.
-        return {"pending_action": None}
+        return {"pending_action": None, "tool_execution_approved": True}
 
     # Rejected: every tool_call id must still be answered to keep history valid —
     # including the ids recovered from `pending_action`, whose tool_use blocks are

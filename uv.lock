@@ -2983,6 +2983,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "icalendar" },
+    { name = "jsonschema" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
