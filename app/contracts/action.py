@@ -15,7 +15,6 @@ from app.contracts.common import (
     utc_now,
     require_aware_datetime,
 )
-from app.contracts.evidence import EvidenceReference
 from app.contracts.root_cause import RootCauseAssessment
 
 

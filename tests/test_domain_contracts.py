@@ -20,7 +20,6 @@ from app.contracts import (
     ExecutionStrategy,
     ExpectedOutcome,
     Hypothesis,
-    Precondition,
     PredicateResult,
     RiskLevel,
     RollbackPlan,
