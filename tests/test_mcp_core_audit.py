@@ -313,7 +313,7 @@ _FAILING_TOOL_SERVER = """
     mcp = FastMCP("boom")
 
     @mcp.tool()
-    def explode() -> str:
+    def get_incident() -> str:
         raise RuntimeError("upstream said no")
 
     mcp.run()
@@ -344,7 +344,7 @@ async def test_tool_failures_are_recorded_and_still_raised(
     async with AsyncExitStack() as stack:
         tools, _client = await mcp_client.load_mcp_tools(stack)
         with pytest.raises(Exception):
-            await {t.name: t for t in tools}["explode"].ainvoke({})
+            await {t.name: t for t in tools}["get_incident"].ainvoke({})
 
         server = {s.name: s for s in (await monitor.check_all()).servers}["boom"]
         assert server.tool_calls_total == 1
@@ -419,7 +419,7 @@ async def test_the_error_reaching_prometheus_is_a_closed_set_not_the_message(
     async with AsyncExitStack() as stack:
         tools, _client = await mcp_client.load_mcp_tools(stack)
         with pytest.raises(Exception):
-            await {t.name: t for t in tools}["explode"].ainvoke({})
+            await {t.name: t for t in tools}["get_incident"].ainvoke({})
 
     assert seen, "no metric was recorded for the failed call"
     for label in seen:

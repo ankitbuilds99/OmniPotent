@@ -320,7 +320,9 @@ def _read_timeout_s(s) -> float:
 WRITE_TOOLS: set[str] = policy.APPROVE_TOOLS
 
 
-async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiServerMCPClient]:
+async def load_mcp_tools(
+    stack: AsyncExitStack, *, incident_id: str = "default"
+) -> tuple[list[BaseTool], MultiServerMCPClient]:
     """Open ONE long-lived MCP session per server and load each server's tools
     bound to that session.
 
@@ -387,13 +389,14 @@ async def load_mcp_tools(stack: AsyncExitStack) -> tuple[list[BaseTool], MultiSe
         # Released before the session's own teardown (exit stacks unwind LIFO), so
         # a server stops counting as live at the moment its owner starts closing.
         stack.callback(monitor.release_session, name)
-        tools.extend(_instrument(loaded, name, monitor))
+        tools.extend(_instrument(loaded, name, monitor, incident_id=incident_id))
 
     return tools, client
 
 
 def _instrument(
-    loaded: list[BaseTool], server_name: str, monitor: MCPHealthMonitor
+    loaded: list[BaseTool], server_name: str, monitor: MCPHealthMonitor,
+    *, incident_id: str = "default",
 ) -> list[BaseTool]:
     """Wrap each tool's coroutine so every call reports its latency and outcome to
     the health monitor.
@@ -408,7 +411,17 @@ def _instrument(
         if inner is None:  # nothing to time; a sync-only tool is not an MCP tool
             continue
         tool.coroutine = _timed(inner, monitor, server_name, tool.name)
-    return loaded
+    from app.tool_trust import compatibility_gateway
+
+    settings = get_settings()
+    return compatibility_gateway(
+        loaded,
+        server_name,
+        incident_id=incident_id,
+        timeout_seconds=settings.tool_gateway_timeout_seconds,
+        max_request_bytes=settings.tool_gateway_max_request_bytes,
+        max_response_bytes=settings.tool_gateway_max_response_bytes,
+    )
 
 
 def _timed(inner, monitor: MCPHealthMonitor, server_name: str, tool_name: str):

@@ -93,7 +93,7 @@ class CopilotSession:
         stack = AsyncExitStack()
         try:
             async with stack:
-                tools, client = await load_mcp_tools(stack)
+                tools, client = await load_mcp_tools(stack, incident_id=self.thread_id)
                 checkpointer = await stack.enter_async_context(make_checkpointer())
                 if ready.done():  # caller gave up while we were starting
                     return
