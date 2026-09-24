@@ -24,9 +24,9 @@ from app.contracts.common import (
     VerificationOutcome,
 )
 from app.contracts.evidence import EvidenceDomain, EvidenceItem, EvidenceReference, EvidenceTrustLevel
-from app.contracts.hypothesis import Hypothesis
+from app.contracts.hypothesis import Hypothesis, HypothesisStatus
 from app.contracts.receipt import ExecutionReceipt
-from app.contracts.root_cause import RootCauseAssessment, RootCauseStatus
+from app.contracts.root_cause import RootCauseAssessment, RootCauseReasonCode, RootCauseStatus
 from app.contracts.trust import TrustDecision
 from app.contracts.verification import ExecutionResult, PredicateResult, VerificationResult
 
@@ -34,7 +34,7 @@ __all__ = [
     "ActionContract", "ActionLifecycleState", "ActionTarget", "ApprovalRequirement",
     "BlastRadiusAssessment", "Environment", "EvidenceDomain", "EvidenceItem", "EvidenceReference", "EvidenceTrustLevel",
     "ExecutionReceipt", "ExecutionResult", "ExecutionStrategy", "ExpectedOutcome",
-    "Hypothesis", "Precondition", "PredicateResult", "RiskLevel", "RollbackPlan",
-    "RootCauseAssessment", "RootCauseStatus", "TrustDecision", "TrustDecisionKind",
+    "Hypothesis", "HypothesisStatus", "Precondition", "PredicateResult", "RiskLevel", "RollbackPlan",
+    "RootCauseAssessment", "RootCauseReasonCode", "RootCauseStatus", "TrustDecision", "TrustDecisionKind",
     "TrustReasonCode", "VerificationOutcome", "VerificationPredicate", "VerificationResult",
 ]
