@@ -342,8 +342,8 @@ class ToolTrustGateway:
             query_or_operation=identity.name,
             observed_at=now,
         )
-        content = evidence.payload
-        response_bytes = _canonical(content)
+        sanitized_content: JsonValue = evidence.payload
+        response_bytes = _canonical(sanitized_content)
         evidence_provenance = create_provenance(evidence, recorded_at=now)
         from app import guardrails
 
@@ -371,7 +371,7 @@ class ToolTrustGateway:
                 ),
                 latency_ms=(time.perf_counter() - started) * 1000,
             ),
-            untrusted_content=content,
+            untrusted_content=sanitized_content,
             content_sha256=hashlib.sha256(response_bytes).hexdigest(),
             prompt_injection_flags=injection_flags,
             instruction_allowed=False,
