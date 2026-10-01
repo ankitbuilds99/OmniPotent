@@ -2858,6 +2858,351 @@ input:focus-visible {
   .empty__title { font-size: 22px; }
 }
 
+/* =====================================================================
+   CONSOLE WORKSPACE REDESIGN
+   The console intentionally owns a calm light workspace surface. The
+   landing page and the theme picker remain on the existing global theme.
+   ===================================================================== */
+
+.omni-console {
+  --console-bg: #f7f9fd;
+  --console-surface: rgba(255, 255, 255, .94);
+  --console-surface-soft: #f7f9ff;
+  --console-text: #15233f;
+  --console-text-2: #52627e;
+  --console-muted: #7d8aa3;
+  --console-border: #e1e7f1;
+  --console-blue: #2864db;
+  --console-violet: #6542ee;
+  --console-green: #16a35b;
+  --console-amber: #d88900;
+  background: var(--console-bg) !important;
+  color: var(--console-text);
+  position: relative;
+  isolation: isolate;
+}
+
+.omni-console .omni-page-background { display: none; }
+.omni-console .nav {
+  position: relative;
+  z-index: 20;
+  flex: 0 0 74px;
+  gap: 24px;
+  padding: 12px 24px;
+  background: rgba(255, 255, 255, .9);
+  border-bottom: 1px solid var(--console-border);
+  box-shadow: 0 1px 10px rgba(34, 58, 100, .04);
+}
+.omni-console .nav__brand { color: var(--console-text); gap: 11px; }
+.omni-console .nav__logo {
+  width: 38px; height: 38px; border-radius: 11px;
+  color: #fff; background: linear-gradient(145deg, #4e79f6, #6f4df1);
+  box-shadow: 0 5px 14px rgba(78, 121, 246, .2);
+}
+.omni-console .nav__name { font-size: 17px; letter-spacing: -.02em; }
+.omni-console .nav__links { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.omni-console .nav__link {
+  padding: 9px 12px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--console-text-2); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.omni-console .nav__link:hover, .omni-console .nav__link:focus-visible { color: var(--console-blue); background: #edf3ff; outline: none; }
+.omni-console .nav__right { gap: 8px; }
+.omni-console .nav__btn {
+  color: var(--console-text-2); border-color: transparent; background: transparent;
+  border-radius: 8px; font-size: 13px; font-weight: 600;
+}
+.omni-console .nav__btn:hover { color: var(--console-blue); background: #edf3ff; border-color: transparent; }
+.omni-console .nav__btn--accent { color: #fff; background: var(--console-blue); border-color: var(--console-blue); }
+.omni-console .nav__btn--accent:hover { color: #fff; background: #1d52bd; }
+.omni-console .nav__tag { color: var(--console-text-2); background: #f1f4fa; border: 1px solid var(--console-border); }
+.omni-console .nav__sep { background: var(--console-border); }
+.omni-console .nav__dot { background: #c8d0dd; }
+.omni-console .nav__status.on .nav__dot { background: var(--console-green); box-shadow: 0 0 0 4px rgba(22,163,91,.1); }
+.omni-console .nav__avatar { color: var(--console-text); background: #e9eef8; }
+.omni-console .theme-btn { color: var(--console-text-2); border-color: var(--console-border); background: #fff; }
+.omni-console .theme-btn__label { display: none; }
+.nav__mobile-tools { display: none; }
+
+.omni-console .app__body { display: grid; grid-template-columns: 286px minmax(0, 1fr) 306px; gap: 18px; padding: 18px 22px 24px; background: var(--console-bg); }
+.omni-console .sidebar {
+  position: relative; z-index: 5; width: auto; min-width: 0; overflow: auto;
+  padding: 20px 14px 16px; border: 1px solid var(--console-border); border-radius: 16px;
+  background: var(--console-surface); box-shadow: 0 8px 28px rgba(53, 77, 122, .06);
+}
+.omni-console .side-section { border-bottom-color: var(--console-border); }
+.omni-console .side-title { color: var(--console-muted); letter-spacing: .12em; font-size: 11px; }
+.omni-console .model-card, .omni-console .server { background: var(--console-surface-soft); border-color: var(--console-border); }
+.omni-console .model-card:hover, .omni-console .server:hover { border-color: #c5d3ef; background: #f2f6ff; }
+.omni-console .model-row__k, .omni-console .model-row__v, .omni-console .server__name { color: var(--console-text-2); }
+.omni-console .model-row__v { color: var(--console-text); }
+.omni-console .provider-pill { color: var(--console-violet); background: #efeaff; }
+.omni-console .model-card__provider { display: inline-flex; align-items: center; gap: 8px; }
+.integration-logo { flex: 0 0 auto; display: inline-grid; place-items: center; border-radius: 9px; background: color-mix(in srgb, currentColor 12%, white); font-weight: 800; line-height: 1; overflow: hidden; }
+.integration-logo__svg { width: 64%; height: 64%; display: block; }
+.integration-logo__svg--filled { width: 68%; height: 68%; }
+.integration-logo__svg--brand { width: 68%; height: 68%; }
+.integration-logo__label { font-size: 10px; letter-spacing: -.04em; }
+.integration-logo--openai { color: #fff !important; background: #6538ed; }
+.integration-logo--pagerduty { color: #fff !important; background: #18a957; }
+.integration-logo--datadog { color: #fff !important; background: #632ca6; }
+.integration-logo--github, .integration-logo--repo { background: #eef1f5; }
+.integration-logo--kubernetes { color: #326ce5; background: #e8f0ff; }
+.integration-logo--slack { background: #f3edf5; }
+.integration-logo__aws { position: relative; display: block; color: #111827; font-size: 9px; font-weight: 900; letter-spacing: -.08em; }
+.integration-logo__aws em { position: absolute; left: 2px; top: 7px; color: #e28b18; font-size: 12px; font-style: normal; line-height: 5px; transform: rotate(-7deg); }
+.integration-logo__terraform { color: #7c3aed; font-size: 18px; font-weight: 900; }
+.integration-logo__docker { color: #2496ed; font-size: 17px; transform: rotate(-12deg); }
+.integration-logo__google { color: #4285f4; font-size: 16px; font-weight: 800; }
+.integration-logo__sentry { color: #6d43d8; font-size: 17px; font-weight: 900; }
+.integration-logo__argocd { color: #ef7b4d; font-size: 16px; font-weight: 900; }
+.omni-console .server__head { gap: 8px; }
+.omni-console .server__icon { display: none; }
+.omni-console .online-pill--off, .omni-console .server__badge--unknown { color: var(--console-muted); background: #edf0f5; }
+.omni-console .server__badge--live { color: var(--console-green); background: #e6f8ef; }
+.omni-console .server__badge--demo { color: var(--console-amber); background: #fff4dd; }
+.omni-console .tool-chip { color: #536887; background: #edf2fb; border-color: transparent; }
+.omni-console .side-help { color: var(--console-blue); border-color: #d9e4fa; background: #f0f5ff; }
+.sidebar__mobile-head, .sidebar__scrim { display: none; }
+
+.omni-console .main { min-width: 0; border: 1px solid var(--console-border); border-radius: 16px; background: rgba(255,255,255,.64); box-shadow: 0 8px 28px rgba(53, 77, 122, .04); overflow: hidden; }
+.omni-console .empty { position: relative; align-items: flex-start; padding: 48px 38px 34px; overflow: hidden; }
+.empty__content { position: relative; z-index: 1; max-width: 760px; margin: auto; }
+.omni-console .empty__icon { width: 58px; height: 58px; margin-bottom: 18px; border-radius: 17px; color: var(--console-violet); background: #eeeaff; border-color: #dbd2ff; }
+.omni-console .empty__title { color: var(--console-text); font-size: clamp(30px, 3vw, 42px); }
+.omni-console .empty__sub { color: var(--console-text-2); font-size: 16px; }
+.omni-console .empty__tip { color: var(--console-text-2); background: #f3f6fc; border-left-color: var(--console-blue); text-align: left; }
+.omni-console .empty__tip strong { color: var(--console-blue); }
+.omni-console .prompts { gap: 12px; margin: 26px 0 24px; }
+.omni-console .prompt { min-height: 82px; display: grid; grid-template-columns: 42px 1fr 18px; align-items: center; gap: 12px; padding: 15px 16px; color: var(--console-text); background: #fff; border-color: var(--console-border); box-shadow: 0 3px 12px rgba(53,77,122,.04); }
+.omni-console .prompt:hover:not(:disabled) { color: var(--console-blue); border-color: #b9cdf5; background: #f8fbff; transform: translateY(-1px); }
+.prompt__icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; color: var(--console-blue); background: #eaf1ff; }
+.prompt__icon--1 { color: var(--console-violet); background: #efeaff; }
+.prompt__icon--2 { color: #0b86c9; background: #e7f7ff; }
+.prompt__icon--3 { color: var(--console-amber); background: #fff5df; }
+.prompt__arrow { color: var(--console-muted); font-size: 20px; }
+.omni-console .composer { border: 1px solid #cad8f5; border-radius: 16px; background: #fff; box-shadow: 0 8px 24px rgba(53,77,122,.08); }
+.omni-console .composer:focus-within { border-color: #8bacf2; box-shadow: 0 0 0 3px rgba(40,100,219,.1), 0 8px 24px rgba(53,77,122,.08); }
+.omni-console .composer__field { color: var(--console-text); }
+.omni-console .composer__field::placeholder { color: #9aa8be; }
+.omni-console .btn--icon { color: var(--console-text-2); background: #f4f6fb; border-color: var(--console-border); }
+.omni-console .btn--send { color: #fff; background: linear-gradient(135deg, #6750f2, #3f73ef); border-color: transparent; box-shadow: 0 5px 12px rgba(91,77,235,.2); }
+.omni-console .composer__hint { color: var(--console-muted); }
+.console-orbit { position: absolute; width: 420px; height: 420px; top: 65px; left: 50%; transform: translateX(-50%); opacity: .42; pointer-events: none; }
+.console-orbit span { position: absolute; inset: 12%; border: 1px solid #d8e3ff; border-radius: 50%; transform: rotate(28deg) skewX(-12deg); }
+.console-orbit span:nth-child(2) { inset: 2%; transform: rotate(-32deg) skewX(13deg); border-color: #e6dcff; }
+.console-orbit span:nth-child(3) { inset: 25%; border-style: dashed; border-color: #cfe9ff; }
+.console-orbit svg { position: absolute; inset: 0; margin: auto; color: #6d87ec; }
+
+.console-rail { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.rail-card { padding: 20px 16px 14px; border: 1px solid var(--console-border); border-radius: 16px; background: var(--console-surface); box-shadow: 0 8px 28px rgba(53,77,122,.06); }
+.rail-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.rail-eyebrow { display: block; margin-bottom: 5px; color: var(--console-muted); font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.rail-card h2 { margin: 0; color: var(--console-text); font-size: 16px; letter-spacing: -.02em; }
+.rail-link, .rail-footer-link { color: var(--console-blue); border: 0; background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+.rail-empty { padding: 24px 10px 16px; text-align: center; border: 1px dashed #d9e2f1; border-radius: 12px; background: #fafcff; }
+.rail-empty__icon { width: 38px; height: 38px; display: grid; place-items: center; margin: 0 auto 10px; color: var(--console-blue); background: #eaf1ff; border-radius: 11px; }
+.rail-empty strong { display: block; color: var(--console-text); font-size: 13px; }
+.rail-empty p { margin: 6px 0 14px; color: var(--console-muted); font-size: 12px; line-height: 1.45; }
+.rail-action { padding: 7px 10px; color: var(--console-blue); border: 1px solid #cfddf7; border-radius: 7px; background: #fff; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.rail-count { color: var(--console-green); font-size: 11px; font-weight: 800; white-space: nowrap; }
+.rail-status-list { display: grid; gap: 4px; }
+.rail-status { display: flex; align-items: center; gap: 9px; padding: 8px 4px; border-bottom: 1px solid #edf0f5; }
+.rail-status:last-child { border-bottom: 0; }
+.rail-status__icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; color: var(--console-blue); background: #edf3ff; }
+.rail-status__icon--live { color: var(--console-green); background: #e9f8ef; }
+.rail-status__icon--demo { color: var(--console-amber); background: #fff4df; }
+.rail-status__name { min-width: 0; overflow: hidden; color: var(--console-text); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.rail-status__state { margin-left: auto; color: var(--console-muted); font-size: 10px; white-space: nowrap; }
+.rail-status__state i { display: inline-block; width: 6px; height: 6px; margin-right: 3px; border-radius: 50%; background: #bdc5d2; }
+.rail-status__state--live { color: var(--console-green); }.rail-status__state--live i { background: var(--console-green); }
+.rail-status__state--demo { color: var(--console-amber); }.rail-status__state--demo i { background: var(--console-amber); }
+.rail-footer-link { display: flex; justify-content: space-between; width: 100%; margin-top: 12px; padding: 10px 2px 0; border-top: 1px solid #edf0f5; }
+.omni-console .main__scroll { padding: 30px; }
+.omni-console .main__dock { padding: 16px 30px 24px; border-top-color: var(--console-border); background: rgba(255,255,255,.86); }
+
+/* =====================================================================
+   LIGHT WORKSPACE PAGES
+   History, Dashboard, and Team are product surfaces rather than part of
+   the dark marketing site. Keep this palette scoped so the landing page
+   retains its cinematic theme while routed workspace pages match Console.
+   ===================================================================== */
+
+.omni-workspace-page {
+  --bg: #f7f9fd;
+  --surface: rgba(255, 255, 255, .94);
+  --panel: #fff;
+  --panel-2: #f7f9ff;
+  --shell: #f7f9ff;
+  --border: #e1e7f1;
+  --border-soft: #edf0f5;
+  --text: #15233f;
+  --text-2: #52627e;
+  --text-dim: #52627e;
+  --text-faint: #7d8aa3;
+  --accent: #2864db;
+  --accent-dim: #edf3ff;
+  --ok: #16a35b;
+  --warn: #d88900;
+  --bad: #ef4d5b;
+  min-height: 100vh;
+  background: var(--bg) !important;
+  color: var(--text);
+  isolation: isolate;
+}
+
+.omni-workspace-page .omni-page-background { display: none; }
+.omni-workspace-page .nav {
+  position: relative;
+  z-index: 20;
+  min-height: 74px;
+  padding: 12px 24px;
+  background: rgba(255, 255, 255, .92);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 10px rgba(34, 58, 100, .04);
+}
+.omni-workspace-page .nav__btn {
+  color: var(--text-2);
+  border-color: transparent;
+  background: transparent;
+  font-weight: 600;
+}
+.omni-workspace-page .nav__btn:hover { color: var(--accent); background: var(--accent-dim); border-color: transparent; }
+.omni-workspace-page .nav__tag { color: var(--text-2); background: #f1f4fa; border: 1px solid var(--border); }
+
+/* Dashboard still uses legacy utility classes. Normalize those utilities
+   inside this page instead of changing their behavior or the marketing CSS. */
+.omni-workspace-page .bg-white,
+.omni-workspace-page .dark\:bg-gray-800 { background-color: #fff !important; }
+.omni-workspace-page .bg-gray-50,
+.omni-workspace-page .dark\:bg-gray-900 { background-color: #f7f9fd !important; }
+.omni-workspace-page .border-gray-200,
+.omni-workspace-page .dark\:border-gray-700,
+.omni-workspace-page .border-gray-300,
+.omni-workspace-page .dark\:border-gray-600 { border-color: var(--border) !important; }
+.omni-workspace-page .text-gray-400,
+.omni-workspace-page .dark\:text-gray-400 { color: var(--text-faint) !important; }
+.omni-workspace-page .text-gray-500,
+.omni-workspace-page .dark\:text-gray-500 { color: var(--text-2) !important; }
+.omni-workspace-page .text-gray-600,
+.omni-workspace-page .dark\:text-gray-600 { color: var(--text-2) !important; }
+.omni-workspace-page .text-gray-700,
+.omni-workspace-page .dark\:text-gray-700 { color: var(--text) !important; }
+.omni-workspace-page .hover\:bg-gray-50:hover,
+.omni-workspace-page .dark\:hover\:bg-gray-700:hover { background-color: #f2f6ff !important; }
+.omni-workspace-page input,
+.omni-workspace-page select,
+.omni-workspace-page textarea { color: var(--text); background-color: #fff; border-color: var(--border); }
+.omni-workspace-page input::placeholder,
+.omni-workspace-page textarea::placeholder { color: #9aa8be; }
+.omni-workspace-page .bg-white\/10 { background-color: #f1f4fa !important; }
+
+/* Billing is built from reusable child cards with the older slate utility
+   palette. Re-skin those children at the page boundary so the cards, plan
+   grid, usage bars, invoices, and payment methods all share Console tokens. */
+.omni-billing-page .bg-slate-950,
+.omni-billing-page .bg-slate-950\/80 { background-color: var(--bg) !important; }
+.omni-billing-page .bg-slate-800\/30,
+.omni-billing-page .bg-slate-900\/50,
+.omni-billing-page .bg-slate-800\/50 { background-color: #fff !important; }
+.omni-billing-page .bg-slate-800 { background-color: #f1f4fa !important; }
+.omni-billing-page .border-slate-800,
+.omni-billing-page .border-slate-700\/50,
+.omni-billing-page .border-slate-700 { border-color: var(--border) !important; }
+.omni-billing-page .text-white { color: var(--text) !important; }
+.omni-billing-page .text-slate-300,
+.omni-billing-page .text-slate-400 { color: var(--text-2) !important; }
+.omni-billing-page .text-slate-500,
+.omni-billing-page .text-slate-600 { color: var(--text-faint) !important; }
+.omni-billing-page .text-primary { color: var(--accent) !important; }
+.omni-billing-page .bg-primary { background-color: var(--accent) !important; }
+.omni-billing-page .hover\:bg-slate-800:hover,
+.omni-billing-page .hover\:bg-slate-800\/50:hover { background-color: #edf3ff !important; }
+.omni-billing-page .hover\:text-white:hover { color: var(--accent) !important; }
+.omni-billing-page header { background: rgba(255, 255, 255, .92) !important; border-color: var(--border) !important; }
+
+/* Status uses semantic inline tokens; these rules add the same quiet surface
+   treatment to its service and incident sections without changing status
+   meaning or severity colors. */
+.omni-status-page button:hover { filter: brightness(.98); }
+.omni-status-page main > div,
+.omni-status-page main > section { box-shadow: 0 8px 24px rgba(53, 77, 122, .05); }
+
+/* Authentication is the entry point to the light product workspace. Keep the
+   form behavior intact, but remove the marketing-era black/olive treatment so
+   labels, controls, and the primary action read like the Console. */
+.omni-auth-page {
+  --bg: #f7f9fd;
+  --shell: #f7f9ff;
+  --panel: rgba(255, 255, 255, .96);
+  --border: #e1e7f1;
+  --text: #15233f;
+  --text-dim: #52627e;
+  --accent: #2864db;
+  --accent-2: #6542ee;
+  background: var(--bg) !important;
+  color: var(--text);
+}
+.omni-auth-page .omni-page-background { display: none; }
+.omni-auth-page .text-white { color: var(--text) !important; }
+.omni-auth-page .text-white\/70 { color: var(--text-dim) !important; }
+.omni-auth-page input::placeholder { color: #9aa8be; }
+.omni-auth-page input:focus-visible {
+  border-color: #8bacf2 !important;
+  box-shadow: 0 0 0 3px rgba(40, 100, 219, .12);
+}
+.omni-auth-page button:hover { filter: brightness(.98); }
+.omni-auth-page .omni-auth-back {
+  top: 24px;
+  left: max(24px, calc(50% - 500px));
+  border: 1px solid var(--border);
+  color: var(--text-dim) !important;
+  box-shadow: 0 8px 24px rgba(53, 77, 122, .08);
+}
+.omni-auth-page .omni-auth-back:hover {
+  color: var(--text) !important;
+  border-color: #b9c9e5;
+  background-color: #ffffff !important;
+}
+.omni-auth-page > .relative.z-10 > div {
+  box-shadow: 0 18px 50px rgba(53, 77, 122, .1);
+}
+
+@media (max-width: 540px) {
+  .omni-auth-page { align-items: flex-start; padding-top: 84px; }
+  .omni-auth-page .omni-auth-back { top: 16px; left: 16px; }
+}
+
+@media (max-width: 640px) {
+  .omni-workspace-page .nav { padding: 10px 14px; }
+}
+
+@media (max-width: 1180px) {
+  .omni-console .app__body { grid-template-columns: 250px minmax(0, 1fr); }
+  .console-rail { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 820px) {
+  .omni-console .nav { padding: 10px 14px; }
+  .omni-console .nav__links { display: none; }
+  .omni-console .nav__right .nav__btn:not(.nav__btn--accent) { display: none; }
+  .omni-console .nav__mobile-tools { display: inline-flex; order: -1; align-items: center; gap: 5px; padding: 8px; color: var(--console-blue); border: 1px solid #d8e4fb; border-radius: 8px; background: #f1f6ff; font: inherit; font-size: 12px; font-weight: 700; }
+  .omni-console .nav__brand { margin-right: auto; }
+  .omni-console .app__body { display: block; padding: 12px; }
+  .omni-console .sidebar { display: block; position: fixed; inset: 0 auto 0 0; z-index: 40; width: min(320px, 88vw); border-radius: 0 16px 16px 0; transform: translateX(-105%); transition: transform .2s ease; }
+  .omni-console .sidebar--mobile-open { transform: translateX(0); }
+  .sidebar__scrim { display: block; position: fixed; inset: 0; z-index: 35; border: 0; background: rgba(20,32,55,.28); }
+  .sidebar__mobile-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 16px; color: var(--console-text); }
+  .sidebar__mobile-head button { display: grid; place-items: center; padding: 6px; color: var(--console-text-2); border: 0; border-radius: 7px; background: #eef2f8; cursor: pointer; }
+  .console-rail { display: grid; grid-template-columns: 1fr; margin-top: 12px; }
+  .omni-console .empty { padding: 34px 18px 24px; }
+}
+@media (max-width: 540px) {
+  .omni-console .nav__logo { width: 34px; height: 34px; }.omni-console .nav__name { font-size: 15px; }
+  .omni-console .nav__tag, .omni-console .nav__status, .omni-console .theme { display: none; }
+  .omni-console .prompts { grid-template-columns: 1fr; }
+  .omni-console .empty__title { font-size: 28px; }
+  .omni-console .main__scroll, .omni-console .main__dock { padding-left: 16px; padding-right: 16px; }
+}
+
 @media (max-width: 480px) {
   .nav__tag { display: none; }
 }

@@ -19,7 +19,7 @@ import {
   X,
   CheckCircle
 } from 'lucide-react'
-import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { useFirebaseAuth } from '../hooks/useFirebaseAuth'
 import { apiFetch } from '../lib/apiClient'
 import { sendInvitationEmail, isEmailServiceConfigured } from '../lib/emailService'
 
@@ -83,7 +83,7 @@ interface TeamProps {
 }
 
 export function Team({ onBack }: TeamProps) {
-  const { user } = useSupabaseAuth()
+  const { user } = useFirebaseAuth()
   const [team, setTeam] = useState<TeamSummary | null>(null)
   const [members, setMembers] = useState<TeamMember[]>([])
   const [invitations, setInvitations] = useState<Invitation[]>([])
@@ -381,7 +381,7 @@ export function Team({ onBack }: TeamProps) {
   }
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: 'var(--bg)' }}>
+    <div className="min-h-screen omni-workspace-page" style={{ backgroundColor: 'var(--bg)' }}>
       {/* Header */}
       <header className="nav">
         <button

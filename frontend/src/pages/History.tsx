@@ -24,8 +24,6 @@ import {
 } from 'lucide-react'
 import { downloadInvestigation } from '../utils/exportReport'
 import { shareToSlack } from '../api'
-import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
-import { initSupabase } from '../lib/supabase'
 import { apiFetch, describeFailure } from "../lib/apiClient";
 
 interface Investigation {
@@ -48,7 +46,6 @@ interface HistoryProps {
 }
 
 export function History({ onBack, onViewInvestigation }: HistoryProps) {
-  const { user } = useSupabaseAuth()
   const [investigations, setInvestigations] = useState<Investigation[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -64,45 +61,16 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
     setError(null)
 
     try {
-      const supabase = await initSupabase()
-      let rows: Investigation[]
+      const params = new URLSearchParams({
+        limit: String(pageSize),
+        offset: String((page - 1) * pageSize),
+      })
+      if (statusFilter !== 'all') params.set('status', statusFilter)
 
-      if (!supabase) {
-        // Fallback when Supabase is not configured.
-        //
-        // This request used to be the literal string '/api/investigations?limit=50'.
-        // Neither the status dropdown nor the pager reached it: every page of
-        // every filter fetched the same first fifty rows, so "Next" advanced the
-        // page counter and redrew an identical list, and selecting "Error" showed
-        // completed investigations. The endpoint has taken `status`, `limit` and
-        // `offset` the whole time (app/api/main.py:2546).
-        const params = new URLSearchParams({
-          limit: String(pageSize),
-          offset: String((page - 1) * pageSize),
-        })
-        if (statusFilter !== 'all') params.set('status', statusFilter)
-
-        const res = await apiFetch(`/api/investigations?${params}`)
-        // A non-OK response used to leave `investigations` at its previous value
-        // and stop, so a 401 or a 500 looked like whatever was already on screen.
-        if (!res.ok) throw new Error(await describeFailure(res))
-        const data = await res.json()
-        rows = (data.investigations || []) as Investigation[]
-      } else {
-        let query = supabase
-          .from('investigations')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .range((page - 1) * pageSize, page * pageSize - 1)
-
-        if (statusFilter !== 'all') {
-          query = query.eq('status', statusFilter)
-        }
-
-        const { data, error: queryError } = await query
-        if (queryError) throw queryError
-        rows = (data || []) as Investigation[]
-      }
+      const res = await apiFetch(`/api/investigations?${params}`)
+      if (!res.ok) throw new Error(await describeFailure(res))
+      const data = await res.json()
+      const rows = (data.investigations || []) as Investigation[]
 
       setInvestigations(rows)
       // A full page back means there is plausibly another one. Measured on what
@@ -118,11 +86,7 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
     } finally {
       setLoading(false)
     }
-    // `user` is not read in the body, but the Supabase rows are scoped by the
-    // signed-in session under RLS: signing in or out changes what this query
-    // returns, so the identity belongs in the dependency list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, page, statusFilter])
+  }, [page, statusFilter])
 
   useEffect(() => {
     loadInvestigations()
@@ -174,7 +138,7 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
   }
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: 'var(--bg)' }}>
+    <div className="min-h-screen omni-workspace-page" style={{ backgroundColor: 'var(--bg)' }}>
       {/* Header */}
       <header className="nav">
         <button

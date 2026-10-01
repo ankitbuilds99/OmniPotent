@@ -593,7 +593,7 @@ export function ServiceMap({ onBack }: { onBack: () => void }) {
   const selectedNodeData = mapData.nodes.find(n => n.id === selectedNode);
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--bg)" }}>
+    <div className="min-h-screen flex flex-col omni-workspace-page" style={{ backgroundColor: "var(--bg)" }}>
       <header className="nav flex-shrink-0">
         <div className="flex items-center gap-4">
           <button

@@ -90,7 +90,7 @@ describe('the auth bootstrap always finishes', () => {
       }),
     })
     initSupabase.mockResolvedValue(client)
-    setSessionToken('stale-jwt', 'supabase')
+    setSessionToken('stale-jwt', 'firebase')
 
     const { result } = renderHook(() => useSupabaseAuth())
 
@@ -108,7 +108,7 @@ describe('the auth bootstrap always finishes', () => {
     // with null rather than rejecting. The token it mirrored here earlier is
     // dead all the same, and a login page that finds one redirects on it.
     initSupabase.mockResolvedValue(stubClient())
-    setSessionToken('stale-jwt', 'supabase')
+    setSessionToken('stale-jwt', 'firebase')
 
     const { result } = renderHook(() => useSupabaseAuth())
 

@@ -13,8 +13,7 @@ import {
   CheckCircle,
   User
 } from 'lucide-react'
-import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
-import { fetchSupabaseProviders } from '../lib/supabase'
+import { useFirebaseAuth } from '../hooks/useFirebaseAuth'
 import { getAuthToken, setSessionToken } from '../lib/authToken'
 import { PageBackground } from '../components/PageBackground'
 
@@ -44,8 +43,6 @@ export function Login({ onBack, onSuccess }: LoginProps) {
   const [success, setSuccess] = useState<string | null>(null)
   const [backendProviders, setBackendProviders] = useState<AuthProvider[]>([])
   const [checkingProviders, setCheckingProviders] = useState(true)
-  // null = not known yet, or the probe failed. See fetchSupabaseProviders.
-  const [supabaseProviders, setSupabaseProviders] = useState<Set<string> | null>(null)
 
   const {
     signInWithGitHub,
@@ -55,9 +52,9 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     resetPassword,
     loading: authLoading,
     error: authError,
-    isConfigured: supabaseConfigured,
+    isConfigured: firebaseConfigured,
     user
-  } = useSupabaseAuth()
+  } = useFirebaseAuth()
 
   const loading = localLoading || authLoading
   const error = localError || (authError?.message ?? null)
@@ -79,22 +76,6 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     }
     checkProviders()
   }, [])
-
-  // Which social logins the Supabase project will actually accept.
-  useEffect(() => {
-    if (!supabaseConfigured) return
-    let mounted = true
-    fetchSupabaseProviders()
-      .then((names) => {
-        if (mounted) setSupabaseProviders(names)
-      })
-      .catch(() => {
-        // Unknown, which leaves every button on offer.
-      })
-    return () => {
-      mounted = false
-    }
-  }, [supabaseConfigured])
 
   // Check for token in URL (from OAuth callback)
   useEffect(() => {
@@ -125,20 +106,15 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     window.location.href = `${API_BASE}/auth/${provider}/login?redirect_uri=${redirectUri}`
   }
 
-  // Offer a provider only where something can actually complete it. Supabase
-  // being configured says nothing about which social logins the project has
-  // switched on, and a button for one that is off just returns "Unsupported
-  // provider". While the answer is unknown, show it — a slow probe should not
-  // take away a working button.
-  const viaSupabase = (id: string) =>
-    supabaseConfigured && (supabaseProviders === null || supabaseProviders.has(id))
+  // Firebase provider availability is controlled in the Firebase console. The
+  // popup reports a useful error when a provider is disabled, while the
+  // backend OAuth route remains available as a deployment fallback.
+  const viaFirebase = () => firebaseConfigured
 
   const handleOAuthLogin = async (provider: 'github' | 'google') => {
     setLocalError(null)
 
-    // Try Supabase first, but only where the project accepts this provider —
-    // otherwise fall through to a backend that might.
-    if (viaSupabase(provider)) {
+    if (viaFirebase()) {
       try {
         await (provider === 'github' ? signInWithGitHub() : signInWithGoogle())
       } catch (err) {
@@ -182,8 +158,8 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     setLocalLoading(true)
 
     try {
-      if (supabaseConfigured) {
-        // Use Supabase auth. Each call below throws when the user was not signed
+      if (firebaseConfigured) {
+        // Use Firebase auth. Each call below throws when the user was not signed
         // in, which is what keeps a rejected password from reaching onSuccess().
         if (mode === 'login') {
           await signInWithEmail(email, password)
@@ -208,11 +184,8 @@ export function Login({ onBack, onSuccess }: LoginProps) {
           setMode('login')
         }
       } else {
-        // For demo/dev mode without auth, just proceed
         if (mode === 'login' || mode === 'signup') {
-          // Store a simple session
-          localStorage.setItem('demo_user', JSON.stringify({ email, name: name || email }))
-          onSuccess()
+          setLocalError('Firebase Authentication is not configured for this deployment.')
         } else if (mode === 'forgot') {
           // No password store and no reset endpoint on this deployment, so say
           // what the user can actually do instead of implying mail is coming.
@@ -237,12 +210,12 @@ export function Login({ onBack, onSuccess }: LoginProps) {
     onSuccess()
   }
 
-  const hasGitHub = viaSupabase('github') || backendProviders.some(p => p.id === 'github')
-  const hasGoogle = viaSupabase('google') || backendProviders.some(p => p.id === 'google')
+  const hasGitHub = viaFirebase() || backendProviders.some(p => p.id === 'github')
+  const hasGoogle = viaFirebase() || backendProviders.some(p => p.id === 'google')
 
   if (checkingProviders) {
     return (
-      <div className="min-h-screen flex items-center justify-center omni-page-shell" style={{ backgroundColor: 'var(--bg)' }}>
+      <div className="min-h-screen flex items-center justify-center omni-page-shell omni-auth-page" style={{ backgroundColor: 'var(--bg)' }}>
         <PageBackground />
         <Loader2 className="w-8 h-8 animate-spin" style={{ color: 'var(--accent)' }} />
       </div>
@@ -250,7 +223,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden omni-page-shell" style={{ backgroundColor: 'var(--bg)' }}>
+    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden omni-page-shell omni-auth-page" style={{ backgroundColor: 'var(--bg)' }}>
       <PageBackground />
       {/* Background effects */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
@@ -266,7 +239,7 @@ export function Login({ onBack, onSuccess }: LoginProps) {
 
       {/* Back button */}
       <motion.button
-        className="absolute top-6 left-6 flex items-center gap-2 px-4 py-2 rounded-lg text-white/70 hover:text-white transition-colors"
+        className="absolute omni-auth-back z-20 flex items-center gap-2 px-4 py-2 rounded-lg text-white/70 hover:text-white transition-colors"
         style={{ backgroundColor: 'var(--panel)' }}
         onClick={onBack}
         initial={{ opacity: 0, x: -20 }}

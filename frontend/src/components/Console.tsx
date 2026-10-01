@@ -4,7 +4,7 @@ import { health } from "../api";
 import { useCopilot } from "../hooks/useCopilot";
 import { modelShort, useConfig } from "../hooks/useConfig";
 import { useMe } from "../hooks/useMe";
-import { useSupabaseAuth } from "../hooks/useSupabaseAuth";
+import { useFirebaseAuth } from "../hooks/useFirebaseAuth";
 import { AdminPanel } from "./AdminPanel";
 import { SignupModal } from "./SignupModal";
 import { Composer } from "./Composer";
@@ -13,6 +13,7 @@ import { Message } from "./Message";
 import { Sidebar } from "./Sidebar";
 import { ThemePicker } from "./ThemePicker";
 import { PageBackground } from "./PageBackground";
+import { ConsoleRightRail } from "./ConsoleRightRail";
 
 const SUGGESTIONS = [
   "Why is the checkout API throwing 500 errors?",
@@ -35,6 +36,7 @@ function TopBar({
   onTeam,
   isLoggedIn,
   userAvatar,
+  onToggleSidebar,
 }: {
   onHome: () => void;
   onNew: () => void;
@@ -49,6 +51,7 @@ function TopBar({
   onTeam?: () => void;
   isLoggedIn?: boolean;
   userAvatar?: string | null;
+  onToggleSidebar?: () => void;
 }) {
   const { config: cfg } = useConfig();
   const me = useMe();
@@ -70,22 +73,29 @@ function TopBar({
 
   return (
     <header className="nav">
+      {onToggleSidebar && (
+        <button className="nav__mobile-tools" onClick={onToggleSidebar} type="button">
+          <Icon name="server" size={15} /> Tools
+        </button>
+      )}
       <button className="nav__brand" onClick={onHome}>
         <span className="nav__logo"><Icon name="sparkles" size={16} /></span>
         <span className="nav__name">OmniPotent</span>
       </button>
 
+      <nav className="nav__links" aria-label="Console navigation">
+        {onHistory && <button className="nav__link" onClick={onHistory}>History</button>}
+        {onDashboard && <button className="nav__link" onClick={onDashboard}>Dashboard</button>}
+        {onTeam && <button className="nav__link" onClick={onTeam}>Team</button>}
+        {onStatus && <button className="nav__link" onClick={onStatus}>Status</button>}
+        {onBilling && <button className="nav__link" onClick={onBilling}>Billing</button>}
+      </nav>
       <div className="nav__right">
         <button className="nav__btn nav__btn--accent" onClick={onNew}>
           <Icon name="refresh" size={14} />
           <span>New</span>
         </button>
         {!isLoggedIn && <button className="nav__btn" onClick={onSignup}>Sign up</button>}
-        {onHistory && <button className="nav__btn" onClick={onHistory}>History</button>}
-        {onTeam && <button className="nav__btn" onClick={onTeam}>Team</button>}
-        {onStatus && <button className="nav__btn" onClick={onStatus}>Status</button>}
-        {onDashboard && <button className="nav__btn" onClick={onDashboard}>Dashboard</button>}
-        {onBilling && <button className="nav__btn" onClick={onBilling}>Billing</button>}
         <button className="nav__btn" onClick={onAdmin}>Admin</button>
         {isLoggedIn && onLogout && (
           <button className="nav__btn" onClick={onLogout}>
@@ -150,9 +160,10 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
   void _wsEnabled; void _wsAvailable; void _wsStatus; void _toggleWebSocket;
   const endRef = useRef<HTMLDivElement>(null);
   useMe();
-  const { user, signOut } = useSupabaseAuth();
+  const { user, signOut } = useFirebaseAuth();
   const [adminOpen, setAdminOpen] = useState(false);
   const [signupOpen, setSignupOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const disabled = busy || awaitingApproval;
 
   const handleLogout = async () => {
@@ -168,7 +179,7 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
   const empty = turns.length === 0;
 
   return (
-    <div className="app omni-page-shell">
+    <div className="app omni-page-shell omni-console">
       <PageBackground />
       <TopBar
         onHome={onHome}
@@ -187,15 +198,17 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
           const avatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
           return typeof avatar === 'string' ? avatar : null
         })()}
+        onToggleSidebar={() => setSidebarOpen(true)}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       {signupOpen && <SignupModal onClose={() => setSignupOpen(false)} />}
 
       <div className="app__body">
-        <Sidebar />
+        <Sidebar mobileOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <main className="main">
           {empty ? (
             <div className="empty">
+              <div className="console-orbit" aria-hidden="true"><span /><span /><span /><Icon name="sparkles" size={30} /></div>
               <div className="empty__content">
                 <div className="empty__icon">
                   <Icon name="sparkles" size={28} />
@@ -210,14 +223,16 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
                 </p>
 
                 <div className="prompts">
-                  {SUGGESTIONS.map((text) => (
+                  {SUGGESTIONS.map((text, index) => (
                     <button
                       key={text}
                       className="prompt"
                       disabled={disabled}
                       onClick={() => send(text)}
                     >
-                      {text}
+                      <span className={`prompt__icon prompt__icon--${index}`}><Icon name={index === 0 ? "alert-circle" : index === 1 ? "branch" : index === 2 ? "server" : "history"} size={17} /></span>
+                      <span>{text}</span>
+                      <span className="prompt__arrow" aria-hidden="true">→</span>
                     </button>
                   ))}
                 </div>
@@ -259,6 +274,7 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
             </>
           )}
         </main>
+        <ConsoleRightRail onHistory={onHistory} />
       </div>
     </div>
   );

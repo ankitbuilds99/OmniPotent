@@ -57,13 +57,13 @@ export function useSupabaseAuth(): UseSupabaseAuthReturn {
     setSession(sess)
     setUser(sess?.user ?? null)
     if (sess?.access_token) {
-      setSessionToken(sess.access_token, 'supabase')
+      setSessionToken(sess.access_token, 'firebase')
     } else {
       // Supabase having no session means the token it mirrored here is dead.
       // Leaving it behind is worse than having none: the login page sees a
       // credential, redirects on it, and every request from the console then
       // comes back 401 with no route back to the form.
-      clearSessionTokenFrom('supabase')
+      clearSessionTokenFrom('firebase')
     }
   }, [])
 

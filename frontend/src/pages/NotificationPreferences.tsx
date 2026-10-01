@@ -490,7 +490,7 @@ export function NotificationPreferences({ onBack }: { onBack: () => void }) {
   const enabledChannels = channels.filter(c => c.enabled);
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: "var(--bg)" }}>
+    <div className="min-h-screen omni-workspace-page" style={{ backgroundColor: "var(--bg)" }}>
       <header className="nav">
         <div className="flex items-center gap-4">
           <button

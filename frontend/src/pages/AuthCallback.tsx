@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Sparkles, Loader2, CheckCircle, XCircle } from 'lucide-react'
-import { initSupabase, checkSupabaseConfigured } from '../lib/supabase'
 import { setSessionToken } from '../lib/authToken'
 
 /** Pull the session token the backend OAuth callback handed us and store it.
@@ -32,11 +31,9 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
 
   useEffect(() => {
     const handleCallback = async () => {
-      // The backend OAuth flow (GET /auth/{provider}/callback) redirects here
-      // with the session token attached. Check that before Supabase: this used
-      // to fall straight through to the Supabase branch and report "not
-      // configured", so signing in with GitHub or Google ended on an error
-      // screen even though the login had succeeded.
+      // Firebase provider sign-in uses a popup and completes in the login page.
+      // This callback is retained only for the backend OAuth fallback, which
+      // redirects here with a session token attached.
       if (consumeTokenFromUrl()) {
         setStatus('success')
         setMessage('Welcome! Redirecting to console...')
@@ -44,47 +41,10 @@ export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
         return
       }
 
-      // Inside the try: this awaits the network, and a rejection outside it
-      // left the page on "Completing sign in..." for good, with no error and no
-      // redirect back to the form.
       try {
-        const configured = await checkSupabaseConfigured()
-        if (!configured) {
-          setStatus('error')
-          setMessage('Supabase is not configured')
-          setTimeout(onError, 2000)
-          return
-        }
-
-        const supabase = await initSupabase()
-        if (!supabase) {
-          setStatus('error')
-          setMessage('Failed to initialize Supabase')
-          setTimeout(onError, 2000)
-          return
-        }
-
-        const { data, error } = await supabase.auth.getSession()
-
-        if (error) {
-          setStatus('error')
-          setMessage(error.message)
-          setTimeout(onError, 2000)
-          return
-        }
-
-        if (data.session) {
-          // Persist it where every API call looks; Supabase keeps its own copy
-          // under a different key that the fetch wrapper does not read.
-          setSessionToken(data.session.access_token, 'supabase')
-          setStatus('success')
-          setMessage('Welcome! Redirecting to console...')
-          setTimeout(onSuccess, 1500)
-        } else {
-          setStatus('error')
-          setMessage('Authentication failed. Please try again.')
-          setTimeout(onError, 2000)
-        }
+        setStatus('error')
+        setMessage('Authentication callback did not include a session token.')
+        setTimeout(onError, 2000)
       } catch (err) {
         setStatus('error')
         setMessage(err instanceof Error ? err.message : 'An error occurred')

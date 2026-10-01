@@ -176,7 +176,7 @@ export function Billing({ onBack }: BillingProps) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="min-h-screen omni-workspace-page omni-billing-page flex items-center justify-center">
         <div className="text-center">
           <Loader2 className="w-8 h-8 text-primary animate-spin mx-auto mb-4" />
           <p className="text-slate-400">Loading billing data...</p>
@@ -186,7 +186,7 @@ export function Billing({ onBack }: BillingProps) {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950">
+    <div className="min-h-screen omni-workspace-page omni-billing-page">
       {/* Header */}
       <header className="sticky top-0 z-40 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800">
         <div className="max-w-7xl mx-auto px-6 py-4">

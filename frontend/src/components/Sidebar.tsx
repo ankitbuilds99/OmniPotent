@@ -6,16 +6,7 @@ import { GithubConnect } from "./GithubConnect";
 import { Icon } from "./Icon";
 import { ModelConfig } from "./ModelConfig";
 import { SourceConnect } from "./SourceConnect";
-
-// Per-server glyphs (keyed by backend server name). "datadog" is the
-// logs/metrics connector -- it was called "logs-metrics" until the Datadog
-// connector superseded it, and this map still said so, so it drew the generic
-// fallback icon.
-const SERVER_ICON: Record<string, string> = {
-  datadog: "database",
-  repo: "folder",
-  github: "branch",
-};
+import { IntegrationLogo } from "./IntegrationLogo";
 
 // Connectors with no live mode to be offline from: the repo card points at a
 // checkout on this disk and incident memory is a local table. Everything else
@@ -65,7 +56,7 @@ function badgeFor(name: string, status: IntegrationStatus | null, failed: boolea
       };
 }
 
-export function Sidebar() {
+export function Sidebar({ mobileOpen = false, onClose }: { mobileOpen?: boolean; onClose?: () => void }) {
   const { config: cfg, failed } = useConfig();
   const placeholder = failed ? "Backend offline — start the API" : "Connecting…";
 
@@ -95,13 +86,22 @@ export function Sidebar() {
     ) : null;
 
   return (
-    <aside className="sidebar">
+    <>
+      {mobileOpen && <button className="sidebar__scrim" onClick={onClose} aria-label="Close tools" type="button" />}
+    <aside className={`sidebar${mobileOpen ? " sidebar--mobile-open" : ""}`}>
+      <div className="sidebar__mobile-head">
+        <strong>Workspace tools</strong>
+        <button onClick={onClose} aria-label="Close tools" type="button"><Icon name="x" size={17} /></button>
+      </div>
       <section className="side-section">
         <h3 className="side-title">Model</h3>
         {cfg ? (
           <div className="model-card">
             <div className="model-card__top">
-              <span className="provider-pill">{providerLabel(cfg.provider)}</span>
+              <span className="model-card__provider">
+                <IntegrationLogo name={cfg.provider} size={28} />
+                <span className="provider-pill">{providerLabel(cfg.provider)}</span>
+              </span>
               {/* Was a hardcoded "online" -- a status no state could change,
                   shown even with no API key configured at all, which is exactly
                   when the model cannot answer. `has_key` is what decides it. */}
@@ -142,7 +142,7 @@ export function Sidebar() {
             return (
               <div key={s.name} className="server">
                 <div className="server__head">
-                  <Icon name={SERVER_ICON[s.name] ?? "server"} size={15} className="server__icon" />
+                  <IntegrationLogo name={s.name} size={28} />
                   <span className="server__name">{s.label}</span>
                   <span
                     className={`server__badge${badge.modifier ? ` server__badge${badge.modifier}` : ""}`}
@@ -178,5 +178,6 @@ export function Sidebar() {
         <Icon name="send" size={15} />
       </a>
     </aside>
+    </>
   );
 }

@@ -12,15 +12,10 @@ import { clearAuthToken } from '../lib/authToken'
 const resetPassword = vi.fn()
 const signInWithEmail = vi.fn()
 const signInWithGitHub = vi.fn()
-const fetchSupabaseProviders = vi.fn(async (): Promise<Set<string> | null> => null)
-let supabaseConfigured = true
+let firebaseConfigured = true
 
-vi.mock('../lib/supabase', () => ({
-  fetchSupabaseProviders: () => fetchSupabaseProviders(),
-}))
-
-vi.mock('../hooks/useSupabaseAuth', () => ({
-  useSupabaseAuth: () => ({
+vi.mock('../hooks/useFirebaseAuth', () => ({
+  useFirebaseAuth: () => ({
     user: null,
     session: null,
     loading: false,
@@ -31,7 +26,7 @@ vi.mock('../hooks/useSupabaseAuth', () => ({
     signUp: vi.fn(),
     resetPassword,
     signOut: vi.fn(),
-    isConfigured: supabaseConfigured,
+    isConfigured: firebaseConfigured,
   }),
 }))
 
@@ -72,7 +67,7 @@ async function signIn(onSuccess: () => void, password = 'correct horse') {
 
 describe('Sign in', () => {
   beforeEach(() => {
-    supabaseConfigured = true
+    firebaseConfigured = true
     signInWithEmail.mockReset()
     signInWithGitHub.mockReset()
     clearAuthToken()
@@ -123,8 +118,7 @@ describe('Sign in', () => {
 
 describe('Social login buttons', () => {
   beforeEach(() => {
-    supabaseConfigured = true
-    fetchSupabaseProviders.mockReset().mockResolvedValue(null)
+    firebaseConfigured = true
     clearAuthToken()
     localStorage.clear()
   })
@@ -135,49 +129,30 @@ describe('Social login buttons', () => {
     localStorage.clear()
   })
 
-  it('does not offer a provider the Supabase project has switched off', async () => {
-    // The deployed project has only GitHub enabled, yet the page offered
-    // "Continue with Google" because Supabase was configured at all. Clicking it
-    // came back "Unsupported provider" from a project that was never going to
-    // accept it.
+  it('offers the Firebase providers when Firebase is configured', async () => {
     installFetch()
-    fetchSupabaseProviders.mockResolvedValue(new Set(['github', 'email']))
-
-    render(<Login onBack={() => {}} onSuccess={() => {}} />)
-
-    expect(await screen.findByText('Continue with GitHub')).toBeInTheDocument()
-    await waitFor(() =>
-      expect(screen.queryByText('Continue with Google')).not.toBeInTheDocument()
-    )
-  })
-
-  it('still offers a provider the backend can complete', async () => {
-    // Supabase has Google off, but the backend OAuth route serves it — the
-    // button works, it just takes the other path.
-    installFetch([{ id: 'google', name: 'Google', icon: 'google' }])
-    fetchSupabaseProviders.mockResolvedValue(new Set(['github']))
-
-    render(<Login onBack={() => {}} onSuccess={() => {}} />)
-
-    expect(await screen.findByText('Continue with Google')).toBeInTheDocument()
-  })
-
-  it('shows every button while the answer is unknown', async () => {
-    // A probe that fails is not evidence a provider is off, and hiding the
-    // buttons on it would leave no way to sign in.
-    installFetch()
-    fetchSupabaseProviders.mockResolvedValue(null)
 
     render(<Login onBack={() => {}} onSuccess={() => {}} />)
 
     expect(await screen.findByText('Continue with GitHub')).toBeInTheDocument()
     expect(screen.getByText('Continue with Google')).toBeInTheDocument()
   })
+
+  it('still offers a provider the backend can complete', async () => {
+    // The backend OAuth route remains available when Firebase is not used.
+    firebaseConfigured = false
+    installFetch([{ id: 'google', name: 'Google', icon: 'google' }])
+
+    render(<Login onBack={() => {}} onSuccess={() => {}} />)
+
+    expect(await screen.findByText('Continue with Google')).toBeInTheDocument()
+  })
+
 })
 
 describe('Password reset', () => {
   beforeEach(() => {
-    supabaseConfigured = true
+    firebaseConfigured = true
     resetPassword.mockReset()
     clearAuthToken()
     localStorage.clear()
@@ -212,7 +187,7 @@ describe('Password reset', () => {
   })
 
   it('says there is no password to reset when sign-in is by OAuth', async () => {
-    supabaseConfigured = false
+    firebaseConfigured = false
     installFetch([{ id: 'github', name: 'GitHub', icon: 'github' }])
 
     await requestReset()
@@ -224,7 +199,7 @@ describe('Password reset', () => {
   })
 
   it('says reset is unavailable when nothing can sign the user in', async () => {
-    supabaseConfigured = false
+    firebaseConfigured = false
     installFetch([])
 
     await requestReset()
