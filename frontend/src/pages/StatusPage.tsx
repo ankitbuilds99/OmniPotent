@@ -230,7 +230,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
 
   if (error && !status) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: 'var(--bg)' }}>
+      <div className="min-h-screen omni-workspace-page omni-status-page flex items-center justify-center" style={{ backgroundColor: 'var(--bg)' }}>
         <div className="text-center">
           <XCircle size={48} className="mx-auto mb-4" style={{ color: 'var(--bad)' }} />
           <p style={{ color: 'var(--text)' }}>{error}</p>
@@ -259,7 +259,7 @@ export function StatusPage({ onBack }: StatusPageProps) {
   const upcomingMaintenances = status?.upcoming_maintenances || []
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: 'var(--bg)' }}>
+    <div className="min-h-screen omni-workspace-page omni-status-page" style={{ backgroundColor: 'var(--bg)' }}>
       {/* Header */}
       <header
         className="py-6"

@@ -5,14 +5,14 @@
 // credential and every request came back 401 — the app could not authenticate
 // itself no matter how the user logged in.
 
-const SESSION_TOKEN_KEY = "session_token"; // OAuth / Supabase session JWT
+const SESSION_TOKEN_KEY = "session_token"; // OAuth / Firebase session JWT
 const SESSION_SOURCE_KEY = "session_token_source"; // which flow wrote it
 const API_KEY_KEY = "api_key"; // tenant API key (dcp_…) from self-serve signup
 
 /** Which login flow produced the stored session token. Two flows write to the
  *  same slot, and one of them must be able to retract its own credential
  *  without signing out a session the other established. */
-export type TokenSource = "supabase" | "oauth";
+export type TokenSource = "firebase" | "oauth";
 
 // Build-time fallback, still useful for local dev against a backend with
 // COPILOT_API_TOKEN set and no login flow in the way.
@@ -43,7 +43,7 @@ export function getAuthToken(): string {
   return read(SESSION_TOKEN_KEY) || read(API_KEY_KEY) || BUILD_TIME_TOKEN;
 }
 
-/** Persist the session token issued by an OAuth callback or Supabase login. */
+/** Persist the session token issued by an OAuth callback or Firebase login. */
 export function setSessionToken(
   token: string,
   source: TokenSource = "oauth"
@@ -54,7 +54,7 @@ export function setSessionToken(
 
 /** Drop the stored session token, but only if `source` is what wrote it.
  *
- *  Supabase reporting "no session" means its own token is dead; it says nothing
+ *  Firebase reporting "no session" means its own token is dead; it says nothing
  *  about a token the backend OAuth callback put here. Clearing unconditionally
  *  would sign out a perfectly good backend session every time a Supabase-enabled
  *  deployment loaded with no Supabase session of its own. */

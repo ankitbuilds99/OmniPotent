@@ -746,7 +746,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 omni-workspace-page flex items-center justify-center">
         <LoadingState />
       </div>
     );
@@ -754,7 +754,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
 
   if (!runbook) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 omni-workspace-page flex items-center justify-center">
         <div className="text-center text-gray-500">
           <p>Failed to load runbook</p>
           <button onClick={fetchRunbook} className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg">
@@ -766,7 +766,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 omni-workspace-page">
       <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">

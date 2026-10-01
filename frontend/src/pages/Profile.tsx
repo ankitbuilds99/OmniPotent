@@ -17,7 +17,7 @@ import {
   Clock,
   AlertTriangle
 } from 'lucide-react'
-import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
+import { useFirebaseAuth } from '../hooks/useFirebaseAuth'
 import { apiFetch, describeFailure } from '../lib/apiClient'
 import { getAuthToken } from '../lib/authToken'
 
@@ -44,7 +44,7 @@ function providerIcon(provider: string) {
 }
 
 export function Profile({ onBack, onLogout }: ProfileProps) {
-  const { user, session, signOut } = useSupabaseAuth()
+  const { user, session, signOut } = useFirebaseAuth()
   const [loggingOut, setLoggingOut] = useState(false)
 
   // This page used to read identity from Supabase alone. On a deployment that
