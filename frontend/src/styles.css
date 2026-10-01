@@ -3163,7 +3163,7 @@ input:focus-visible {
   border-color: #b9c9e5;
   background-color: #ffffff !important;
 }
-.omni-auth-page > .relative.z-10 > div {
+.omni-auth-page .omni-auth-card > div {
   box-shadow: 0 18px 50px rgba(53, 77, 122, .1);
 }
 
