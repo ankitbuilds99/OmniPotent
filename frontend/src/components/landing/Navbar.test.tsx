@@ -9,13 +9,18 @@
 
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 
 import { API_BASE_URL } from '../../config'
 import { Navbar } from './Navbar'
 
 describe('landing navbar', () => {
   it('builds the API docs link from the shared base, not an inline literal', () => {
-    render(<Navbar onLaunch={() => {}} />)
+    render(
+      <MemoryRouter initialEntries={['/marketing']}>
+        <Navbar onLaunch={() => {}} />
+      </MemoryRouter>
+    )
 
     const apiLink = screen.getAllByRole('link', { name: /API/ })[0]
     expect(apiLink).toHaveAttribute('href', `${API_BASE_URL}/docs`)
