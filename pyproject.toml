@@ -31,7 +31,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "rich>=13.9.0",
     "pyyaml>=6.0",
-    "pyjwt[crypto]>=2.9.0",  # verify Supabase / OIDC JWTs against a JWKS
+    "pyjwt[crypto]>=2.14.0",  # verify Supabase / OIDC JWTs against a JWKS
     # Transitive deps pinned for security patches (CVE-2026-59885, CVE-2026-59886)
     "pyasn1>=0.6.4",
     # Timezone handling for on-call scheduling
