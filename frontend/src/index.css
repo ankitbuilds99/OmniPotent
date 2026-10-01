@@ -1018,6 +1018,12 @@ body {
   .omni-landing .omni-landing__pipeline .text-white\/40 { color: rgb(255 255 255 / 80%) !important; }
   .omni-landing .omni-landing__pipeline .text-white\/60 { color: rgb(255 255 255 / 88%) !important; }
 
+  /* The global theme remaps this utility for light workspace pages. The
+     pipeline log is intentionally terminal-dark, so keep its surface local
+     to the marketing demo instead of allowing it to become a white panel. */
+  .omni-landing .bg-\[\#0d1117\] { background-color: #0d1117 !important; }
+  .omni-landing .bg-\[\#161b22\] { background-color: #161b22 !important; }
+
   .omni-landing__hero-content .bg-white\/\[0\.03\] {
     background: rgb(4 8 10 / 62%) !important;
     border-color: rgb(255 255 255 / 22%) !important;

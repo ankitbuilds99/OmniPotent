@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { motion, useInView, AnimatePresence } from 'framer-motion'
-import { CheckCircle, Play, Clock, Zap, RotateCcw } from 'lucide-react'
+import { CheckCircle, Play, Clock, Zap, RotateCcw, FlaskConical, ShieldCheck, CloudCog, Triangle } from 'lucide-react'
+import { IntegrationLogo } from '../IntegrationLogo'
 
 const PIPELINE_STAGES = [
   {
@@ -76,6 +77,27 @@ const PIPELINE_STAGES = [
     logs: ['Traffic routing: 100%', 'Health checks: passing', 'Metrics collection: active', '✨ Deployment successful!']
   }
 ]
+
+const STAGE_BRANDS: Record<string, string> = {
+  github: 'github',
+  docker: 'docker',
+  terraform: 'terraform',
+  provision: 'aws',
+  kubernetes: 'kubernetes',
+}
+
+function StageIcon({ stage, size }: { stage: typeof PIPELINE_STAGES[0]; size: number }) {
+  const brand = STAGE_BRANDS[stage.id]
+  if (brand) return <IntegrationLogo name={brand} size={size} />
+
+  const FallbackIcon = {
+    testing: FlaskConical,
+    security: ShieldCheck,
+    production: Triangle,
+  }[stage.id] ?? CloudCog
+
+  return <FallbackIcon size={Math.round(size * 0.76)} strokeWidth={1.8} aria-hidden="true" />
+}
 
 function FlowingParticles({ isActive, color }: { isActive: boolean; color: string }) {
   if (!isActive) return null
@@ -186,14 +208,12 @@ function PipelineStage({
         aria-label={`Show pipeline stage ${index + 1}: ${stage.name}`}
         aria-pressed={isCurrent}
       >
-        <img
-          src={`https://cdn.simpleicons.org/${stage.icon}/${stage.color.replace('#', '')}`}
-          alt={stage.name}
-          className="w-9 h-9 transition-all duration-300"
-          style={{
-            filter: isActive ? 'none' : 'grayscale(100%) opacity(0.3)'
-          }}
-        />
+        <span
+          className="flex items-center justify-center w-9 h-9 transition-all duration-300"
+          style={{ opacity: isActive ? 1 : 0.3, filter: isActive ? 'none' : 'grayscale(100%)' }}
+        >
+          <StageIcon stage={stage} size={36} />
+        </span>
 
         <motion.div
           className="absolute -top-2 -right-2"
@@ -289,11 +309,7 @@ function LogPanel({ stage, isCompleted }: { stage: typeof PIPELINE_STAGES[0]; is
             <div className="w-3 h-3 rounded-full bg-[#28c840]" />
           </div>
           <div className="flex-1 flex items-center justify-center gap-2">
-            <img
-              src={`https://cdn.simpleicons.org/${stage.icon}/${stage.color.replace('#', '')}`}
-              alt=""
-              className="w-4 h-4"
-            />
+            <StageIcon stage={stage} size={18} />
             <span className="text-white/60 text-sm font-mono">
               {stage.name.toLowerCase().replace(' ', '_')}.log
             </span>
