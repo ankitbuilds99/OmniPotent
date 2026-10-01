@@ -246,7 +246,9 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
    * turns both of those on.
    */
   prometheus: {
-    statusKey: null,
+    // Prometheus is not an MCP server, but it is a live API-backed integration
+    // for the Service Map and dashboard health cards.
+    statusKey: "prometheus",
     fields: [],
     envNames: ["PROMETHEUS_URL"],
     unsupported:

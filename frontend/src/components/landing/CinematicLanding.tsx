@@ -1,21 +1,21 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Lenis from 'lenis'
 import { Navbar } from './Navbar'
 import { HeroSection } from './HeroSection'
 import { HowItWorks } from './HowItWorks'
 import { Terminal } from './Terminal'
-import { FeatureCards } from './FeatureCards'
 import { Pipeline } from './Pipeline'
-import { GlobalMap } from './GlobalMap'
 import { Dashboard } from './Dashboard'
 import { AIChat } from './AIChat'
 import { SecuritySection } from './SecuritySection'
 import { Metrics } from './Metrics'
-import { Pricing } from './Pricing'
 import { Documentation } from './Documentation'
 import { Blog } from './Blog'
 import { Footer } from './Footer'
 import { CursorGlow } from './CursorGlow'
+import { DecorativeVideo } from './DecorativeVideo'
+import { LANDING_MEDIA } from './landingMedia'
+import { PageBackground } from '../PageBackground'
 
 export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling }: { onLaunch: () => void; onDashboard?: () => void; onBilling?: () => void }) {
   const handleTryDemo = () => {
@@ -23,9 +23,33 @@ export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling 
     if (onDashboard) onDashboard()
   }
   const containerRef = useRef<HTMLDivElement>(null)
+  const [ambientPaused, setAmbientPaused] = useState(false)
 
   // Smooth scrolling with Lenis
   useEffect(() => {
+    const previousScrollRestoration = window.history.scrollRestoration
+    window.history.scrollRestoration = 'manual'
+
+    // Browsers can restore the previous scroll position on a hard reload. A
+    // fresh marketing route should begin at the hero unless an explicit
+    // section hash was requested.
+    if (!window.location.hash) {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    } else {
+      const targetId = decodeURIComponent(window.location.hash.slice(1))
+      requestAnimationFrame(() => {
+        document.getElementById(targetId)?.scrollIntoView({
+          behavior: 'auto',
+          block: 'start'
+        })
+      })
+    }
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      return () => {
+        window.history.scrollRestoration = previousScrollRestoration
+      }
+    }
     const lenis = new Lenis({
       duration: 1.2,
       easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
@@ -44,15 +68,24 @@ export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling 
     return () => {
       cancelAnimationFrame(rafId)
       lenis.destroy()
+      window.history.scrollRestoration = previousScrollRestoration
     }
   }, [])
 
   return (
     <div
       ref={containerRef}
-      className="relative min-h-screen overflow-hidden"
+      className="relative min-h-screen omni-landing"
       style={{ backgroundColor: 'var(--bg)' }}
     >
+      <PageBackground />
+      <DecorativeVideo
+        src={LANDING_MEDIA.hero}
+        mode="hero-loop"
+        preload="auto"
+        paused={ambientPaused}
+        className="fixed inset-0 z-[1] h-full w-full object-cover object-center omni-landing__shared-video"
+      />
       {/* Cursor glow effect */}
       <CursorGlow />
 
@@ -65,7 +98,12 @@ export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling 
       {/* Main content */}
       <main>
         {/* Hero with 3D scene + integrations */}
-        <HeroSection onLaunch={onLaunch} onTryDemo={handleTryDemo} />
+        <HeroSection
+          onLaunch={onLaunch}
+          onTryDemo={handleTryDemo}
+          ambientPaused={ambientPaused}
+          onAmbientPauseChange={setAmbientPaused}
+        />
 
         {/* How It Works - Interactive Tutorial */}
         <HowItWorks onLaunch={onLaunch} />
@@ -73,18 +111,10 @@ export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling 
         {/* Terminal demo */}
         <Terminal />
 
-        {/* Features section */}
-        <section id="features">
-          <FeatureCards />
-        </section>
-
         {/* Pipeline visualization */}
         <section id="pipeline">
           <Pipeline />
         </section>
-
-        {/* Global cloud map */}
-        <GlobalMap />
 
         {/* Live dashboard */}
         <section id="dashboard">
@@ -99,11 +129,6 @@ export function CinematicLanding({ onLaunch, onDashboard, onBilling: _onBilling 
 
         {/* Metrics */}
         <Metrics />
-
-        {/* Pricing */}
-        <section id="pricing">
-          <Pricing onLaunch={onLaunch} />
-        </section>
 
         {/* Documentation */}
         <Documentation />

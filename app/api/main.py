@@ -1240,6 +1240,27 @@ preferred code generator (openapi-generator, swagger-codegen, etc.).
     },
 )
 
+
+@app.get("/sentry-debug", include_in_schema=False)
+async def sentry_debug() -> None:
+    """Send a development-only exception and log smoke test to Sentry."""
+    settings = get_settings()
+    if settings.is_production or not settings.sentry_dsn:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    import sentry_sdk
+
+    sentry_sdk.logger.info("Sentry debug info log")
+    sentry_sdk.logger.warning("Sentry debug warning log")
+    sentry_sdk.logger.error("Sentry debug error log")
+
+    log.info("Sentry debug application info log")
+    log.warning("Sentry debug application warning log")
+    log.error("Sentry debug application error log")
+
+    # Deliberately uncaught: Sentry's FastAPI integration should capture it.
+    1 / 0
+
 # Body-size + rate-limit guard. Added FIRST so it ends up INSIDE the CORS
 # middleware (add_middleware is LIFO) — that way a 413/429 still gets CORS
 # headers and the browser can read it.
@@ -2316,6 +2337,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # Started before the try so the failure path below has a latency to report:
     # a turn that dies inside _get_session never reaches the inner assignment.
     _t0 = time.monotonic()
+    session = None
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -2349,9 +2371,15 @@ async def chat(req: ChatRequest) -> ChatResponse:
     except Exception as exc:  # noqa: BLE001 — surface a clean error to the UI
         log.exception("chat turn failed (thread=%s)", tid)
         _record_slo_failure(time.monotonic() - _t0)
-        # If this session was just created and its first turn failed, drop it so
-        # a retry rebuilds cleanly instead of reusing a half-initialized session.
-        if not existed:
+        # A failed agent turn may leave an assistant tool call without a matching
+        # ToolMessage in the checkpoint. Reset the failed thread so the next
+        # request cannot reuse invalid provider history.
+        if session is not None:
+            try:
+                await session.reset_after_failure()
+            except Exception:  # noqa: BLE001 — cleanup must not mask the error
+                log.warning("could not reset failed thread=%s", tid, exc_info=True)
+        if existed or session is not None:
             await _evict(tid)
         return ChatResponse(
             thread_id=req.thread_id, status="error", answer=_friendly_error(exc)
@@ -3100,6 +3128,7 @@ async def integration_status() -> dict:
         "pagerduty": bool(settings.pagerduty_api_token),
         "datadog": bool(settings.dd_api_key and settings.dd_app_key),
         "sentry": bool(settings.sentry_api_token),
+        "prometheus": bool(settings.prometheus_url),
         "kubernetes": bool(settings.kube_config_path),
         "traces": bool(settings.traces_api_url),
         "deploys": bool(settings.deploys_api_url),

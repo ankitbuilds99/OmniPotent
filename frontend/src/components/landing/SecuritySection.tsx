@@ -17,9 +17,8 @@ const SECURITY_FEATURES = [
 
 export function SecuritySection() {
   return (
-    <section className="relative py-32 overflow-hidden">
+    <section className="relative py-32 overflow-hidden omni-landing__section omni-landing__security">
       <div className="absolute inset-0 bg-gradient-to-b from-[#030508] via-[#050a14] to-[#030508]" />
-
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-[#7C3AED]/5 rounded-full blur-[120px]" />
 
       <div className="max-w-7xl mx-auto px-6 relative z-10">

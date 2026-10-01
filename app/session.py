@@ -49,6 +49,7 @@ class CopilotSession:
         self.thread_id = thread_id
         self._graph: Any = None  # compiled LangGraph, built in __aenter__
         self._mcp_client: Any = None
+        self._checkpointer: Any = None
         self._tools: list = []
         # Dedicated task that owns the MCP stdio sessions + checkpointer for the
         # whole session lifetime, plus the event that tells it to let go.
@@ -68,6 +69,7 @@ class CopilotSession:
         try:
             tools, self._mcp_client, checkpointer = await ready
             self._tools = list(tools)
+            self._checkpointer = checkpointer
             self._graph = build_graph(tools, checkpointer)
         except BaseException:
             # Don't leak half-started MCP subprocesses if init fails partway.
@@ -130,6 +132,20 @@ class CopilotSession:
 
     async def __aexit__(self, *exc) -> None:
         await self._release()
+
+    async def reset_after_failure(self) -> None:
+        """Remove a failed turn's checkpoint before the thread is reused.
+
+        A provider/MCP exception can leave an assistant tool-call message in the
+        checkpoint without its ToolMessage response. Reusing that thread then
+        causes OpenAI to reject the next request with "tool_calls must be
+        followed by tool messages". Failed turns are not resumable approvals,
+        so discard the incomplete thread state and let the API create a clean
+        session on the next request.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is not None:
+            await checkpointer.adelete_thread(self.thread_id)
 
     @property
     def _config(self) -> dict:

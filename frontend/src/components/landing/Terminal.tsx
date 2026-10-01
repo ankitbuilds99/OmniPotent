@@ -105,8 +105,8 @@ export function Terminal() {
   const isComplete = visibleLines.length === TERMINAL_LINES.length
 
   return (
-    <section className="relative py-32 overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-b from-background via-background-secondary to-background" />
+    <section className="relative py-32 overflow-hidden omni-landing__section omni-landing__terminal">
+      <div className="absolute inset-0 omni-landing__terminal-canvas" />
 
       <div className="container-wide relative z-10">
         <motion.div

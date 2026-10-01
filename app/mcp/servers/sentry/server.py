@@ -135,7 +135,10 @@ def get_issue(issue_id: str) -> dict:
 
     import httpx
 
-    resp = httpx.get(f"{SENTRY_BASE}/api/0/issues/{issue_id}/", headers=_headers(), timeout=20)
+    resp = httpx.get(
+        f"{SENTRY_BASE}/api/0/organizations/{SENTRY_ORG}/issues/{issue_id}/",
+        headers=_headers(), timeout=20,
+    )
     resp.raise_for_status()
     it = resp.json()
     return {
@@ -165,7 +168,8 @@ def get_latest_event(issue_id: str) -> dict:
     import httpx
 
     resp = httpx.get(
-        f"{SENTRY_BASE}/api/0/issues/{issue_id}/events/latest/", headers=_headers(), timeout=20
+        f"{SENTRY_BASE}/api/0/organizations/{SENTRY_ORG}/issues/{issue_id}/events/latest/",
+        headers=_headers(), timeout=20,
     )
     resp.raise_for_status()
     ev = resp.json()

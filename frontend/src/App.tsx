@@ -23,6 +23,8 @@ import { SLOTracker } from "./pages/SLOTracker";
 import { RunbookBuilder } from "./pages/RunbookBuilder";
 import { IntegrationMarketplace } from "./pages/IntegrationMarketplace";
 import { KnowledgeBase } from "./pages/KnowledgeBase";
+import { PricingPage } from "./pages/PricingPage";
+import { CapabilitiesPage } from "./pages/CapabilitiesPage";
 
 // Every page used to be a value of a `view` useState, so nothing had a URL:
 // reload dropped you back on the landing page, no screen could be linked to or
@@ -58,8 +60,12 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {/* Open the application console by default. */}
+      <Route path="/" element={<Navigate to="/console" replace />} />
+      {/* Keep the old landing URL from trapping users on the marketing page. */}
+      <Route path="/landing" element={<Navigate to="/console" replace />} />
       <Route
-        path="/"
+        path="/marketing"
         element={
           <CinematicLanding
             onLaunch={() => navigate("/login")}
@@ -68,9 +74,11 @@ function AppRoutes() {
           />
         }
       />
+      <Route path="/pricing" element={<PricingPage onLaunch={() => navigate("/login")} />} />
+      <Route path="/capabilities" element={<CapabilitiesPage onLaunch={() => navigate("/login")} />} />
       <Route
         path="/login"
-        element={<Login onBack={() => navigate("/")} onSuccess={afterLogin} />}
+        element={<Login onBack={() => navigate("/marketing")} onSuccess={afterLogin} />}
       />
       <Route
         path="/auth/callback"
@@ -91,10 +99,10 @@ function AppRoutes() {
         path="/console"
         element={
           <Console
-            onHome={() => navigate("/")}
+            onHome={() => navigate("/marketing")}
             onDashboard={() => navigate("/dashboard")}
             onBilling={() => navigate("/settings/billing")}
-            onLogout={() => navigate("/", { replace: true })}
+            onLogout={() => navigate("/marketing", { replace: true })}
             onProfile={() => navigate("/profile")}
             onHistory={() => navigate("/history")}
             onStatus={() => navigate("/status")}
@@ -102,7 +110,7 @@ function AppRoutes() {
           />
         }
       />
-      <Route path="/api-docs" element={<ApiDocs onBack={() => navigate("/")} />} />
+      <Route path="/api-docs" element={<ApiDocs onBack={() => navigate("/marketing")} />} />
       <Route
         path="/dashboard"
         element={
@@ -131,7 +139,7 @@ function AppRoutes() {
         element={
           <Profile
             onBack={() => navigate("/console")}
-            onLogout={() => navigate("/", { replace: true })}
+            onLogout={() => navigate("/marketing", { replace: true })}
           />
         }
       />
@@ -186,7 +194,7 @@ function AppRoutes() {
       />
       {/* The server serves index.html for any unknown non-API path, so an
           unrecognised URL arrives here rather than as a 404. Send it home. */}
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to="/console" replace />} />
     </Routes>
   );
 }

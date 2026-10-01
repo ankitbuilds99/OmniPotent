@@ -12,6 +12,7 @@ import { Icon } from "./Icon";
 import { Message } from "./Message";
 import { Sidebar } from "./Sidebar";
 import { ThemePicker } from "./ThemePicker";
+import { PageBackground } from "./PageBackground";
 
 const SUGGESTIONS = [
   "Why is the checkout API throwing 500 errors?",
@@ -167,7 +168,8 @@ export function Console({ onHome, onDashboard, onBilling, onLogout, onProfile, o
   const empty = turns.length === 0;
 
   return (
-    <div className="app">
+    <div className="app omni-page-shell">
+      <PageBackground />
       <TopBar
         onHome={onHome}
         onNew={newConversation}

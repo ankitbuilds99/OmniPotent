@@ -205,10 +205,9 @@ function FeatureCard({
 
 export function FeatureCards() {
   return (
-    <section className="relative py-32 overflow-hidden">
+    <section className="relative py-32 overflow-hidden omni-landing__section omni-landing__features">
       {/* Background */}
       <div className="absolute inset-0 bg-gradient-to-b from-background to-background-secondary" />
-
       {/* Decorative orbs */}
       <div className="absolute top-1/4 -left-40 w-80 h-80 bg-primary/5 rounded-full blur-3xl" />
       <div className="absolute bottom-1/4 -right-40 w-80 h-80 bg-secondary/5 rounded-full blur-3xl" />

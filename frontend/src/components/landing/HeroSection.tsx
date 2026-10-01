@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, Suspense } from 'react'
 import { motion, useScroll, useTransform } from 'framer-motion'
 import { ArrowRight, Sparkles, ChevronDown } from 'lucide-react'
 import { Canvas, useFrame } from '@react-three/fiber'
-import { Float, Sphere, MeshDistortMaterial, Stars } from '@react-three/drei'
+import { Float, Stars } from '@react-three/drei'
 import * as THREE from 'three'
 import { useThemeColors } from '../../hooks/useThemeColors'
 import { useCatalog } from '../../hooks/useCatalog'
@@ -13,6 +13,7 @@ function RotatingText({ words }: { words: string[] }) {
   const [index, setIndex] = useState(0)
 
   useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
     const interval = setInterval(() => {
       setIndex((prev) => (prev + 1) % words.length)
     }, 2500)
@@ -20,7 +21,7 @@ function RotatingText({ words }: { words: string[] }) {
   }, [words.length])
 
   return (
-    <span className="inline-block relative">
+    <span className="inline-block relative omni-landing__rotating-word" aria-live="polite">
       {words.map((word, i) => (
         <motion.span
           key={word}
@@ -64,120 +65,6 @@ function FloatingOrb({ position, color, size = 1, speed = 1 }: {
       </mesh>
       <pointLight position={position} color={color} intensity={2} distance={8} />
     </Float>
-  )
-}
-
-// Central AI core visualization
-function AICore({ colors }: { colors: { accent: string; accent2: string; ok: string } }) {
-  const coreRef = useRef<THREE.Group>(null)
-  const innerRef = useRef<THREE.Mesh>(null)
-  const ring1Ref = useRef<THREE.Mesh>(null)
-  const ring2Ref = useRef<THREE.Mesh>(null)
-  const ring3Ref = useRef<THREE.Mesh>(null)
-
-  useFrame((state) => {
-    const t = state.clock.elapsedTime
-
-    if (coreRef.current) {
-      coreRef.current.rotation.y = t * 0.1
-    }
-    if (innerRef.current) {
-      innerRef.current.rotation.x = t * 0.2
-      innerRef.current.rotation.z = t * 0.15
-    }
-    if (ring1Ref.current) {
-      ring1Ref.current.rotation.z = t * 0.3
-    }
-    if (ring2Ref.current) {
-      ring2Ref.current.rotation.z = -t * 0.2
-      ring2Ref.current.rotation.x = Math.PI / 4
-    }
-    if (ring3Ref.current) {
-      ring3Ref.current.rotation.z = t * 0.15
-      ring3Ref.current.rotation.y = Math.PI / 3
-    }
-  })
-
-  return (
-    <group ref={coreRef}>
-      {/* Inner glowing sphere */}
-      <Float speed={1.5} rotationIntensity={0.3} floatIntensity={0.3}>
-        <Sphere ref={innerRef} args={[1.2, 64, 64]}>
-          <MeshDistortMaterial
-            color={colors.accent}
-            emissive={colors.accent}
-            emissiveIntensity={0.4}
-            roughness={0.2}
-            metalness={0.8}
-            distort={0.3}
-            speed={2}
-            transparent
-            opacity={0.8}
-          />
-        </Sphere>
-      </Float>
-
-      {/* Orbital ring 1 */}
-      <mesh ref={ring1Ref} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[2, 0.02, 16, 100]} />
-        <meshBasicMaterial color={colors.accent} transparent opacity={0.4} />
-      </mesh>
-
-      {/* Orbital ring 2 */}
-      <mesh ref={ring2Ref}>
-        <torusGeometry args={[2.5, 0.015, 16, 100]} />
-        <meshBasicMaterial color={colors.accent2} transparent opacity={0.3} />
-      </mesh>
-
-      {/* Orbital ring 3 */}
-      <mesh ref={ring3Ref}>
-        <torusGeometry args={[3, 0.01, 16, 100]} />
-        <meshBasicMaterial color={colors.ok} transparent opacity={0.2} />
-      </mesh>
-
-      {/* Orbiting particles */}
-      {[...Array(8)].map((_, i) => {
-        const angle = (i / 8) * Math.PI * 2
-        const radius = 2 + (i % 3) * 0.5
-        return (
-          <OrbitingParticle
-            key={i}
-            radius={radius}
-            angle={angle}
-            speed={0.3 + (i % 3) * 0.1}
-            color={i % 2 === 0 ? colors.accent : colors.accent2}
-          />
-        )
-      })}
-
-      {/* Central glow */}
-      <pointLight color={colors.accent} intensity={3} distance={15} />
-    </group>
-  )
-}
-
-function OrbitingParticle({ radius, angle, speed, color }: {
-  radius: number
-  angle: number
-  speed: number
-  color: string
-}) {
-  const meshRef = useRef<THREE.Mesh>(null)
-
-  useFrame((state) => {
-    if (meshRef.current) {
-      const t = state.clock.elapsedTime * speed + angle
-      meshRef.current.position.x = Math.cos(t) * radius
-      meshRef.current.position.z = Math.sin(t) * radius
-      meshRef.current.position.y = Math.sin(t * 2) * 0.5
-    }
-  })
-
-  return (
-    <mesh ref={meshRef}>
-      <sphereGeometry args={[0.06, 16, 16]} />
-      <meshBasicMaterial color={color} />
-    </mesh>
   )
 }
 
@@ -229,7 +116,6 @@ function Scene3D({ colors }: { colors: { accent: string; accent2: string; ok: st
         speed={0.3}
       />
 
-      <AICore colors={colors} />
       <ConnectionLines colors={colors} />
     </>
   )
@@ -246,9 +132,25 @@ const INTEGRATIONS = [
   { name: 'Sentry', icon: 'sentry', color: '362D59' }
 ]
 
-export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onTryDemo?: () => void }) {
+export function HeroSection({
+  onLaunch,
+  onTryDemo,
+  ambientPaused = false,
+  onAmbientPauseChange,
+}: {
+  onLaunch: () => void
+  onTryDemo?: () => void
+  ambientPaused?: boolean
+  onAmbientPauseChange?: (paused: boolean) => void
+}) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const colors = useThemeColors()
+  const themeColors = useThemeColors()
+  const colors = {
+    ...themeColors,
+    accent: '#c8cdd4',
+    accent2: '#8f98a5',
+    ok: '#b8c0ca'
+  }
   const catalog = useCatalog()
 
   /*
@@ -281,11 +183,11 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
   return (
     <section
       ref={containerRef}
-      className="relative min-h-screen flex items-center justify-center overflow-hidden"
+      className="relative min-h-screen flex items-center justify-center overflow-hidden omni-landing__hero"
       style={{ backgroundColor: colors.bg }}
     >
       {/* 3D Canvas Background */}
-      <div className="absolute inset-0 z-0">
+      <div className="absolute inset-0 z-[1] omni-landing__hero-scene" aria-hidden="true">
         <Canvas
           camera={{ position: [0, 0, 10], fov: 45 }}
           dpr={[1, 2]}
@@ -296,30 +198,11 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
         </Canvas>
       </div>
 
-      {/* Gradient overlays for depth */}
-      <div className="absolute inset-0 z-[1] pointer-events-none">
-        {/* Top fade */}
-        <div
-          className="absolute top-0 left-0 right-0 h-32"
-          style={{ background: `linear-gradient(to bottom, ${colors.bg}, transparent)` }}
-        />
-        {/* Bottom fade */}
-        <div
-          className="absolute bottom-0 left-0 right-0 h-48"
-          style={{ background: `linear-gradient(to top, ${colors.bg}, transparent)` }}
-        />
-        {/* Center radial for text readability */}
-        <div
-          className="absolute inset-0"
-          style={{
-            background: `radial-gradient(ellipse at center, ${colors.bg}66 0%, transparent 60%)`
-          }}
-        />
-      </div>
+      <div className="absolute inset-0 z-[2] pointer-events-none omni-landing__hero-scrim" />
 
       {/* Content */}
       <motion.div
-        className="relative z-10 max-w-5xl mx-auto px-6 text-center"
+        className="relative z-10 max-w-5xl mx-auto px-6 text-center omni-landing__hero-content"
         style={{ y, opacity }}
       >
         {/* Badge */}
@@ -346,7 +229,7 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
 
         {/* Main headline */}
         <motion.h1
-          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight mb-6 leading-[1.05]"
+          className="omni-landing__hero-heading text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight mb-6 leading-[1.05]"
           initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.1 }}
@@ -359,7 +242,7 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
 
         {/* Description */}
         <motion.p
-          className="text-white/50 text-lg md:text-xl max-w-2xl mx-auto mb-10 leading-relaxed"
+          className="text-white/75 text-lg md:text-xl max-w-2xl mx-auto mb-10 leading-relaxed"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.2 }}
@@ -404,7 +287,7 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
               <div className="text-3xl md:text-4xl font-bold text-white mb-1">
                 {stat.value}
               </div>
-              <div className="text-white/40 text-sm">{stat.label}</div>
+              <div className="text-white/65 text-sm">{stat.label}</div>
             </div>
           ))}
         </motion.div>
@@ -415,7 +298,7 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
           animate={{ opacity: 1 }}
           transition={{ duration: 0.6, delay: 0.5 }}
         >
-          <p className="text-white/30 text-sm uppercase tracking-wider mb-6">
+          <p className="text-white/60 text-sm uppercase tracking-wider mb-6">
             Integrates with tools you use
           </p>
           <div className="flex items-center justify-center flex-wrap gap-6 md:gap-8">
@@ -434,12 +317,22 @@ export function HeroSection({ onLaunch, onTryDemo }: { onLaunch: () => void; onT
                   className="w-5 h-5"
                   loading="lazy"
                 />
-                <span className="text-white/60 text-sm font-medium">{tool.name}</span>
+                <span className="text-white/75 text-sm font-medium">{tool.name}</span>
               </motion.div>
             ))}
           </div>
         </motion.div>
       </motion.div>
+
+      <button
+        type="button"
+        className="absolute bottom-8 right-6 z-20 rounded-full border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70 backdrop-blur-md transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+        onClick={() => onAmbientPauseChange?.(!ambientPaused)}
+        aria-pressed={ambientPaused}
+        aria-label={ambientPaused ? 'Play background video' : 'Pause background video'}
+      >
+        {ambientPaused ? 'Play ambience' : 'Pause ambience'}
+      </button>
 
       {/* Scroll indicator */}
       <motion.div
