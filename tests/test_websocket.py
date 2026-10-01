@@ -51,6 +51,12 @@ def test_parse_message_valid():
     assert msg is not None
     assert msg.type == "ping"
 
+    # Client heartbeat acknowledgement. The server must accept this silently
+    # when replying to its own server-side ping.
+    msg = parse_message('{"type": "pong"}')
+    assert msg is not None
+    assert msg.type == "pong"
+
 
 def test_parse_message_invalid():
     """Test parsing invalid WebSocket messages."""

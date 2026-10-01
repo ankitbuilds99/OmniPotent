@@ -331,9 +331,9 @@ export function Dashboard() {
   const last = (series: number[]) => series[series.length - 1]
 
   return (
-    <section ref={containerRef} className="relative py-32 overflow-hidden">
+    <section ref={containerRef} className="relative py-32 overflow-hidden omni-landing__section omni-landing__ops">
       {/* Background */}
-      <div className="absolute inset-0 bg-gradient-to-b from-background-secondary to-background" />
+      <div className="absolute inset-0 omni-landing__ops-canvas" />
 
       {/* Grid overlay */}
       <div

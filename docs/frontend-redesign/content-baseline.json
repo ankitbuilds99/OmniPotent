@@ -1,0 +1,69 @@
+{
+  "capturedAt": "2026-10-01",
+  "commit": "d8646e5b7755bb80daaf9f588ae6f0f65273ffdd",
+  "route": "/marketing",
+  "rootRouteBehavior": "/ redirects to /console; /landing redirects to /console",
+  "contentPolicy": "Independent pre-edit baseline for the landing redesign. Existing copy, values, labels, destinations, data sources, and actions must remain unchanged.",
+  "sectionOrder": [
+    "Navbar",
+    "HeroSection",
+    "HowItWorks",
+    "Terminal",
+    "FeatureCards (#features)",
+    "Pipeline (#pipeline)",
+    "Dashboard (#dashboard)",
+    "AIChat",
+    "SecuritySection",
+    "Metrics",
+    "Pricing (#pricing)",
+    "Documentation (#docs)",
+    "Blog (#blog)",
+    "Footer"
+  ],
+  "heroContent": {
+    "badge": "Now Generally Available",
+    "headlineStatic": ["AI agents that", "resolve"],
+    "rotatingWords": ["incidents", "outages", "alerts", "failures", "pages"],
+    "description": "Your on-call engineers get back to building. AI investigates incidents, identifies root causes, and proposes fixes — with human approval before any production change.",
+    "actions": ["Start Free Trial", "Try Demo - No Login"],
+    "integrationLabel": "Integrates with tools you use",
+    "integrations": ["Kubernetes", "Docker", "Google Cloud", "Terraform", "GitHub", "Datadog", "Prometheus", "Sentry"],
+    "stats": "Runtime catalog values from GET /config for MCP Servers and AI Tools; static provider count is 5 LLM Providers"
+  },
+  "navigation": {
+    "links": [
+      {"label": "Features", "href": "#features"},
+      {"label": "Pipeline", "href": "#pipeline"},
+      {"label": "Docs", "href": "#docs"},
+      {"label": "Blog", "href": "#blog"},
+      {"label": "Pricing", "href": "#pricing"},
+      {"label": "API", "href": "${API_BASE_URL}/docs"}
+    ],
+    "actions": ["Change theme", "Sign in", "Launch Console", "mobile menu"],
+    "themeStorageKey": "copilot-theme"
+  },
+  "knownInteractiveContent": {
+    "HowItWorks": ["tutorial steps", "step selection", "approval controls", "play/pause", "reset/replay", "Launch Console"],
+    "Terminal": ["exact terminal/code output", "Replay"],
+    "Pipeline": ["stages", "progress", "logs", "stage selection", "restart/replay"],
+    "Dashboard": ["metrics", "infrastructure health", "containers", "incident log replay"],
+    "AIChat": ["prompts", "responses", "input placeholder: Ask anything about DevOps...", "copy", "play/pause", "replay", "Launch Console"],
+    "Pricing": ["API-backed plans", "monthly/yearly toggle", "plan selection", "contact actions"],
+    "Documentation": ["copy controls", "expand/collapse", "section selection", "Full Docs on GitHub", "Close"],
+    "Blog": ["article links", "Subscribe/contact mail action"],
+    "Footer": ["Launch Console", "mailto contact", "LinkedIn", "footer links"]
+  },
+  "sourceFiles": {
+    "frontend/src/App.tsx": "8ae105fb578e2028950ea9304f5348e78c18846d4459ba3012dc1ea6b7fca3f7",
+    "frontend/src/main.tsx": "a6055693b14042d098dd328a7c5c3366fac7b889a7df651f460a842b0a68e5c8",
+    "frontend/src/components/landing/CinematicLanding.tsx": "f4a652302fc907f62fadb36d7742a4ea8516ec25ce3dd545af046a2739726722",
+    "frontend/src/components/landing/HeroSection.tsx": "d380db74c4281bbc2ada95e2541160e92e032c214faa1df1d09672cca8b08c2b",
+    "frontend/src/components/landing/Navbar.tsx": "ad694cc57344a12cc6af1d1cbc7c5a7cb1e28ff79c8d76e3728be8055557a767",
+    "frontend/src/index.css": "9ce645e16d16223ff13f50c1206c02936541265d18424e6467cbdd92ff182ab4",
+    "frontend/src/styles.css": "5af8a7a85148b513f765d404315b18f1711acff5389e8e6d1d411f709a7e749e",
+    "frontend/src/styles/responsive.css": "5e6c09fd4511a1f93283807ae35332d869f18a4e5abf347ef1fcbb71fabc357e",
+    "frontend/tailwind.config.js": "fcd3c4c7b38c1095aec12c2808bf5793e0023416e2096f1c0550d518497e692b",
+    "frontend/package.json": "c2f2c512d436e2848512c419fc37362022d67961c5430dd0df3a973d41b32e86",
+    "frontend/package-lock.json": "655585d2ca12e44234b9268e6a2a253783ddbbe9e9dfcbac02ee14b58579a028"
+  }
+}

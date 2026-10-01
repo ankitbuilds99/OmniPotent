@@ -277,12 +277,18 @@ export function AIChat({ onLaunch }: { onLaunch?: () => void }) {
   const [currentPromptIndex, setCurrentPromptIndex] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
   const hasAutoPlayed = useRef(false)
   const demoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const messagesContainer = messagesContainerRef.current
+    if (messagesContainer) {
+      messagesContainer.scrollTo({
+        top: messagesContainer.scrollHeight,
+        behavior: 'smooth'
+      })
+    }
   }, [])
 
   useEffect(() => {
@@ -515,7 +521,7 @@ export function AIChat({ onLaunch }: { onLaunch?: () => void }) {
             </div>
 
             {/* Messages */}
-            <div className="p-5 space-y-5 min-h-[350px] max-h-[500px] overflow-y-auto">
+            <div ref={messagesContainerRef} className="p-5 space-y-5 min-h-[350px] max-h-[500px] overflow-y-auto">
               <AnimatePresence mode="wait">
                 {messages.map((msg, i) => (
                   <ChatMessage
@@ -542,8 +548,6 @@ export function AIChat({ onLaunch }: { onLaunch?: () => void }) {
                   </div>
                 </motion.div>
               )}
-
-              <div ref={messagesEndRef} />
             </div>
 
             {/* Input */}

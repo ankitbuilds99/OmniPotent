@@ -73,17 +73,15 @@ describe('IntegrationMarketplace', () => {
     vi.restoreAllMocks()
   })
 
-  it('reports why the list is empty instead of implying nothing is connected', async () => {
+  it('does not show an admin error for an intentional single-tenant deployment', async () => {
     installFetch({
       'GET /admin/integrations': () =>
         json({ detail: 'Admin endpoints require multi-tenant mode + a tenant API key.' }, 400),
     })
     render(<IntegrationMarketplace onBack={() => {}} />)
 
-    const alert = await screen.findByRole('alert')
-    expect(alert.textContent).toContain(
-      'Admin endpoints require multi-tenant mode + a tenant API key.'
-    )
+    await screen.findByText('Integrations')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   describe('what counts as connected', () => {

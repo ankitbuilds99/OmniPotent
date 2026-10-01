@@ -361,6 +361,7 @@ class TestIntegrationStatus:
         """False means "serving bundled fixtures", which is the default state."""
         for var in (
             "PAGERDUTY_API_TOKEN", "DD_API_KEY", "DD_APP_KEY", "SENTRY_API_TOKEN",
+            "PROMETHEUS_URL",
             "KUBE_CONFIG_PATH", "TRACES_API_URL", "DEPLOYS_API_URL",
             "ARGOCD_SERVER_URL", "ARGOCD_AUTH_TOKEN",
             "TERRAFORM_CLOUD_TOKEN", "TERRAFORM_ORGANIZATION",
@@ -379,6 +380,13 @@ class TestIntegrationStatus:
         status = client.get("/integrations/status").json()
         assert status["sentry"] is True
         assert [k for k, v in status.items() if v] == ["sentry"]
+
+    def test_reports_prometheus_when_url_is_configured(self, client, monkeypatch):
+        monkeypatch.setenv("PROMETHEUS_URL", "http://127.0.0.1:9090")
+        cfg.get_settings.cache_clear()
+
+        status = client.get("/integrations/status").json()
+        assert status["prometheus"] is True
 
     def test_a_connector_needing_two_settings_is_not_live_on_one(self, client, monkeypatch):
         """Terraform needs both a token and an org; half of it queries nothing."""

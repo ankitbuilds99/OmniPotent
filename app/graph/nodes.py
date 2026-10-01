@@ -36,6 +36,80 @@ from app.model_router import usage_ledger
 log = logging.getLogger("omnipotent.agent")
 
 
+# OpenAI-compatible chat-completions endpoints reject requests containing more
+# than 128 function tools.  The MCP executor still receives the complete tool
+# list; this limit applies only to the schemas advertised to the model.
+_OPENAI_TOOL_LIMIT = 128
+
+
+def _tools_for_model(tools):
+    """Return the tool schemas safe to send to the active model.
+
+    MCP tools are loaded in the configured server order.  The first servers are
+    the core incident integrations (Datadog, repository, GitHub, PagerDuty,
+    Kubernetes, etc.), so truncating only the model-facing list preserves those
+    capabilities when an installation has more than the provider's limit.
+    ToolNode still owns the original full list and can execute any valid call.
+    """
+    selected = list(tools)
+    if runtime.provider() not in {"openai", "deepseek"}:
+        return selected
+    if len(selected) <= _OPENAI_TOOL_LIMIT:
+        return selected
+
+    dropped = selected[_OPENAI_TOOL_LIMIT:]
+    log.warning(
+        "model tool limit reached for provider=%s: exposing %d of %d tools; "
+        "not advertised: %s",
+        runtime.provider(),
+        _OPENAI_TOOL_LIMIT,
+        len(selected),
+        ", ".join(getattr(tool, "name", "?") for tool in dropped),
+    )
+    return selected[:_OPENAI_TOOL_LIMIT]
+
+
+def _valid_messages_for_llm(messages):
+    """Drop incomplete tool-call turns before sending history to a provider.
+
+    A failed MCP/provider call can leave an assistant AIMessage with tool_calls
+    but no immediately following ToolMessages in a persisted LangGraph thread.
+    OpenAI rejects the entire next request in that situation. Keep complete
+    tool-call pairs, but discard malformed pairs and orphan ToolMessages so a
+    retry can continue from the remaining conversation history.
+    """
+    clean = []
+    i = 0
+    while i < len(messages):
+        message = messages[i]
+        calls = getattr(message, "tool_calls", None) or []
+        if calls:
+            expected = {call.get("id") for call in calls if call.get("id")}
+            responses = []
+            j = i + 1
+            while j < len(messages) and isinstance(messages[j], ToolMessage):
+                responses.append(messages[j])
+                j += 1
+            actual = {getattr(response, "tool_call_id", None) for response in responses}
+            if expected and expected == actual and len(expected) == len(responses):
+                clean.extend([message, *responses])
+            else:
+                log.warning(
+                    "discarding incomplete tool-call history: expected=%s actual=%s",
+                    sorted(expected), sorted(actual),
+                )
+            i = j if responses else i + 1
+            continue
+        if isinstance(message, ToolMessage):
+            log.warning("discarding orphan tool response: tool_call_id=%s",
+                        getattr(message, "tool_call_id", None))
+            i += 1
+            continue
+        clean.append(message)
+        i += 1
+    return clean
+
+
 def _log_usage(node: str, resp) -> int:
     """Log per-call LLM token usage so cost is observable (carries the request-id
     via the logging filter), RECORD its dollar cost to the spend ledger, and
@@ -192,16 +266,18 @@ def make_agent_node(tools):
         llm_tools_fast = get_llm(fast=True)
         llm_plain_fast = get_llm(fast=True)
     else:
+        model_tools = _tools_for_model(tools)
         # Build both tiers up front so the agent can triage per request (model routing):
         # the main reasoning model for real incidents, the cheap fast model for simple
         # informational lookups. Falls back to main on any doubt (see app/routing.py).
-        llm_tools = get_llm().bind_tools(tools)
+        llm_tools = get_llm().bind_tools(model_tools)
         llm_plain = get_llm()  # no tools — used to force a final answer at the cap
-        llm_tools_fast = get_llm(fast=True).bind_tools(tools)
+        llm_tools_fast = get_llm(fast=True).bind_tools(model_tools)
         llm_plain_fast = get_llm(fast=True)
 
     def agent_node(state: AgentState) -> dict:
         iteration = state.get("iteration", 0) + 1
+        history = _valid_messages_for_llm(list(state.get("messages", [])))
         plan_text = "\n".join(state.get("plan", [])) or "(no explicit plan)"
         feedback = state.get("feedback", "")
         # Force a final answer at EITHER the step cap or the token-budget ceiling —
@@ -228,14 +304,14 @@ def make_agent_node(tools):
                 "If they ask about specific incidents or data you don't have, "
                 "explain that tool access is not available with the current LLM provider."
             )
-            resp = plain_llm.invoke([cached_system(stable, volatile), *state["messages"]])
+            resp = plain_llm.invoke([cached_system(stable, volatile), *history])
         elif at_cap:
             limit = "token budget" if over_budget else "investigation step limit"
             volatile = (
                 f"You have reached the {limit}. Do NOT call any tools. "
                 "Summarize the root cause and your recommendation now."
             )
-            resp = plain_llm.invoke([cached_system(stable, volatile), *state["messages"]])
+            resp = plain_llm.invoke([cached_system(stable, volatile), *history])
         else:
             # The reflect node judged the last answer incomplete — tell the agent
             # exactly what to close so it doesn't repeat itself.
@@ -245,7 +321,7 @@ def make_agent_node(tools):
                 if feedback
                 else ""
             )
-            resp = tools_llm.invoke([cached_system(stable, volatile), *state["messages"]])
+            resp = tools_llm.invoke([cached_system(stable, volatile), *history])
 
         tokens = _log_usage("agent", resp)
         return {"messages": [resp], "iteration": iteration, "tokens_used": tokens}

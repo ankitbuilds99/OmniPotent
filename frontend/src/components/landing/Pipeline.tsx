@@ -149,9 +149,10 @@ function PipelineStage({
       )}
 
       {/* Stage card */}
-      <motion.div
+      <motion.button
+        type="button"
         className={`
-          relative z-10 w-20 h-20 rounded-2xl flex items-center justify-center cursor-pointer
+          omni-landing__pipeline-stage relative z-10 w-20 h-20 rounded-2xl flex items-center justify-center cursor-pointer
           transition-all duration-300 border-2
           ${isActive
             ? 'bg-white/5 backdrop-blur-sm'
@@ -182,6 +183,8 @@ function PipelineStage({
         onMouseEnter={onHover}
         onMouseLeave={onLeave}
         onClick={onClick}
+        aria-label={`Show pipeline stage ${index + 1}: ${stage.name}`}
+        aria-pressed={isCurrent}
       >
         <img
           src={`https://cdn.simpleicons.org/${stage.icon}/${stage.color.replace('#', '')}`}
@@ -223,7 +226,7 @@ function PipelineStage({
             transition={{ duration: 2, repeat: Infinity }}
           />
         )}
-      </motion.div>
+      </motion.button>
 
       <motion.span
         className={`mt-4 text-sm font-semibold transition-colors duration-300 ${
@@ -464,9 +467,8 @@ export function Pipeline() {
   const isComplete = activeIndex === PIPELINE_STAGES.length - 1
 
   return (
-    <section ref={containerRef} className="relative py-32 overflow-hidden">
+    <section ref={containerRef} className="relative py-32 overflow-hidden omni-landing__section omni-landing__pipeline">
       <div className="absolute inset-0 bg-gradient-to-b from-[#030508] via-background to-[#030508]" />
-
       <div
         className="absolute inset-0 opacity-[0.03]"
         style={{

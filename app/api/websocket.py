@@ -405,6 +405,13 @@ async def _handle_messages(conn: ClientConnection, thread_id: str) -> None:
             await manager.send(conn, {"type": "pong", "timestamp": time.time()})
             conn.last_ping = time.time()
 
+        elif msg.type == "pong":
+            # The browser replies to server heartbeats with a pong. It is a
+            # valid heartbeat acknowledgement, not an application message.
+            # Previously it fell through to the generic "Unknown message type"
+            # response and appeared as an error after otherwise successful runs.
+            conn.last_ping = time.time()
+
         elif msg.type == "chat":
             # Start a new investigation
             await _handle_chat(
@@ -526,6 +533,7 @@ async def _handle_chat(
     existed = tid in _SESSIONS
 
     _t0 = time_mod.monotonic()
+    session = None
     try:
         async with _running_turn(tid):
             session = await _get_session(tid)
@@ -564,7 +572,15 @@ async def _handle_chat(
     except Exception as exc:
         log.exception("WebSocket chat failed: thread=%s", tid)
         _record_slo_failure(time_mod.monotonic() - _t0)
-        if not existed:
+        # A failed agent turn may leave an assistant tool call without a matching
+        # ToolMessage in the checkpoint. Reset the failed thread so a retry starts
+        # with valid provider history instead of another generic 400 error.
+        if session is not None:
+            try:
+                await session.reset_after_failure()
+            except Exception:  # noqa: BLE001 — cleanup must not mask the error
+                log.warning("could not reset failed websocket thread=%s", tid, exc_info=True)
+        if existed or session is not None:
             await _evict(tid)
         await manager.send(conn, {
             "type": "error",

@@ -73,6 +73,17 @@ def _headers() -> dict:
     }
 
 
+def _request_error(exc: Exception) -> dict:
+    """Return a model-safe Datadog outage result instead of crashing MCP."""
+    import httpx
+
+    if isinstance(exc, httpx.RequestError):
+        detail = "Datadog network request failed; check DD_SITE and network/DNS connectivity"
+    else:
+        detail = "Datadog API request failed; check the API key, app key, site, and permissions"
+    return {"error": detail, "retryable": True}
+
+
 # --------------------------------------------------------------------------- #
 # Offline fixtures (mirror the demo logs-metrics behaviour exactly)
 # --------------------------------------------------------------------------- #
@@ -267,14 +278,17 @@ def search_logs(
     if contains:
         terms.append(contains)
     query = " ".join(terms) or "*"
-    resp = httpx.post(
-        f"{_base_url()}/api/v2/logs/events/search",
-        headers=_headers(),
-        json={"filter": {"query": query, "from": "now-1h", "to": "now"},
-              "page": {"limit": min(limit, 1000)}, "sort": "-timestamp"},
-        timeout=20,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            f"{_base_url()}/api/v2/logs/events/search",
+            headers=_headers(),
+            json={"filter": {"query": query, "from": "now-1h", "to": "now"},
+                  "page": {"limit": min(limit, 1000)}, "sort": "-timestamp"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        return _request_error(exc)
     lines = []
     for ev in resp.json().get("data", []):
         a = ev.get("attributes", {})
@@ -298,14 +312,17 @@ def get_error_summary(service: str | None = None) -> dict:
     import httpx
 
     query = "status:error" + (f" service:{service}" if service else "")
-    resp = httpx.post(
-        f"{_base_url()}/api/v2/logs/events/search",
-        headers=_headers(),
-        json={"filter": {"query": query, "from": "now-1h", "to": "now"},
-              "page": {"limit": 1000}, "sort": "-timestamp"},
-        timeout=20,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            f"{_base_url()}/api/v2/logs/events/search",
+            headers=_headers(),
+            json={"filter": {"query": query, "from": "now-1h", "to": "now"},
+                  "page": {"limit": 1000}, "sort": "-timestamp"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        return _request_error(exc)
     counter: Counter[str] = Counter()
     for ev in resp.json().get("data", []):
         msg = (ev.get("attributes", {}).get("message", "") or "").strip()[:200]
@@ -345,13 +362,16 @@ def get_metric(service: str, metric: str) -> dict:
         query = tmpl.format(service=service)
 
     now = int(time.time())
-    resp = httpx.get(
-        f"{_base_url()}/api/v1/query",
-        headers=_headers(),
-        params={"from": now - 3600, "to": now, "query": query},
-        timeout=20,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.get(
+            f"{_base_url()}/api/v1/query",
+            headers=_headers(),
+            params={"from": now - 3600, "to": now, "query": query},
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        return _request_error(exc)
     series = resp.json().get("series") or []
     if not series:
         return {"service": service, "metric": metric, "query": query, "series": [],
@@ -535,13 +555,16 @@ def list_services() -> list[str] | dict:
 
     import httpx
 
-    resp = httpx.post(
-        f"{_base_url()}/api/v2/logs/events/search",
-        headers=_headers(),
-        json={"filter": {"query": "*", "from": "now-1h", "to": "now"}, "page": {"limit": 1000}},
-        timeout=20,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            f"{_base_url()}/api/v2/logs/events/search",
+            headers=_headers(),
+            json={"filter": {"query": "*", "from": "now-1h", "to": "now"}, "page": {"limit": 1000}},
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        return _request_error(exc)
     services = {
         ev.get("attributes", {}).get("service")
         for ev in resp.json().get("data", [])

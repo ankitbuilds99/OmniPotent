@@ -1,5 +1,5 @@
-import { useRef, Suspense } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { useRef } from 'react'
+import { useFrame } from '@react-three/fiber'
 import { Stars, Sphere, Box, Float } from '@react-three/drei'
 import { motion } from 'framer-motion'
 import {
@@ -169,9 +169,13 @@ function FooterScene({ colors }: { colors: ThemeColors }) {
   )
 }
 
+// Kept as an isolated legacy scene definition for now; the landing footer no
+// longer mounts it because the shared landing background is used everywhere.
+void FooterScene
+
 const FOOTER_LINKS = {
   Product: [
-    { label: 'Features', href: '#features' },
+    { label: 'Capabilities', href: '/capabilities' },
     { label: 'Pipeline', href: '#pipeline' },
     { label: 'Dashboard', href: '#dashboard' },
     { label: 'Pricing', href: '#pricing' }
@@ -200,20 +204,9 @@ export function Footer({ onLaunch }: { onLaunch: () => void }) {
   const colors = useThemeColors()
 
   return (
-    <footer className="relative overflow-hidden" style={{ backgroundColor: colors.bg }}>
-      {/* 3D Scene Background */}
-      <div className="absolute inset-0 h-[400px]">
-        <Canvas camera={{ position: [0, 0, 5], fov: 60 }}>
-          <Suspense fallback={null}>
-            <FooterScene colors={colors} />
-          </Suspense>
-        </Canvas>
-        {/* Gradient overlay */}
-        <div className="absolute inset-0 bg-gradient-to-t from-background via-background/80 to-transparent" />
-      </div>
-
+    <footer className="relative overflow-hidden omni-landing__footer" style={{ backgroundColor: colors.bg }}>
       {/* Content */}
-      <div className="relative z-10 pt-64 pb-12">
+      <div className="relative z-10 pt-32 pb-12">
         <div className="container-wide">
           {/* CTA Section */}
           <motion.div

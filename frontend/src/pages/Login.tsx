@@ -16,6 +16,7 @@ import {
 import { useSupabaseAuth } from '../hooks/useSupabaseAuth'
 import { fetchSupabaseProviders } from '../lib/supabase'
 import { getAuthToken, setSessionToken } from '../lib/authToken'
+import { PageBackground } from '../components/PageBackground'
 
 type AuthMode = 'login' | 'signup' | 'forgot'
 
@@ -241,14 +242,16 @@ export function Login({ onBack, onSuccess }: LoginProps) {
 
   if (checkingProviders) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: 'var(--bg)' }}>
+      <div className="min-h-screen flex items-center justify-center omni-page-shell" style={{ backgroundColor: 'var(--bg)' }}>
+        <PageBackground />
         <Loader2 className="w-8 h-8 animate-spin" style={{ color: 'var(--accent)' }} />
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden" style={{ backgroundColor: 'var(--bg)' }}>
+    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden omni-page-shell" style={{ backgroundColor: 'var(--bg)' }}>
+      <PageBackground />
       {/* Background effects */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div

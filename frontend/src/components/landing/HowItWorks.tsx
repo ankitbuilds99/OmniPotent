@@ -114,8 +114,11 @@ function StepIndicator({
         return (
           <button
             key={step.id}
+            type="button"
             onClick={() => onStepClick(index)}
-            className="flex items-center gap-2 group"
+            aria-label={`Show step ${index + 1}: ${step.title}`}
+            aria-current={isActive ? 'step' : undefined}
+            className="flex items-center gap-2 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 focus-visible:ring-offset-2 focus-visible:ring-offset-black group"
           >
             <motion.div
               className={`
@@ -502,19 +505,9 @@ export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
   const step = STEPS[currentStep]
 
   return (
-    <section ref={containerRef} className="relative py-32 overflow-hidden">
+    <section ref={containerRef} className="relative py-32 overflow-hidden omni-landing__section omni-landing__how-it-works">
       {/* Background */}
       <div className="absolute inset-0 bg-gradient-to-b from-[#030508] to-background" />
-
-      {/* Grid pattern */}
-      <div
-        className="absolute inset-0 opacity-[0.02]"
-        style={{
-          backgroundImage: `radial-gradient(circle at center, rgba(255,255,255,0.3) 1px, transparent 1px)`,
-          backgroundSize: '40px 40px'
-        }}
-      />
-
       <div className="container-wide relative z-10">
         {/* Header */}
         <div className="text-center mb-12">
@@ -536,7 +529,7 @@ export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
             From question to <span className="gradient-text">resolution</span>
           </motion.h2>
           <motion.p
-            className="text-white/50 text-lg max-w-2xl mx-auto"
+            className="text-white/75 text-lg max-w-2xl mx-auto"
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
@@ -575,7 +568,7 @@ export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
               <h3 className="text-2xl md:text-3xl font-bold text-white mb-3">
                 {step.title}
               </h3>
-              <p className="text-white/60 text-lg mb-6">
+              <p className="text-white/80 text-lg mb-6">
                 {step.description}
               </p>
 
@@ -593,8 +586,11 @@ export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
                 </div>
                 <div className="flex items-center gap-2">
                   <button
+                    type="button"
                     onClick={handlePlayPause}
-                    className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                    aria-label={isPlaying ? 'Pause walkthrough' : 'Play walkthrough'}
+                    title={isPlaying ? 'Pause walkthrough' : 'Play walkthrough'}
+                    className="p-2 rounded-lg bg-black/45 border border-white/20 hover:bg-white/15 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
                   >
                     {isPlaying ? (
                       <Pause className="w-4 h-4 text-white/70" />
@@ -603,8 +599,11 @@ export function HowItWorks({ onLaunch }: { onLaunch?: () => void }) {
                     )}
                   </button>
                   <button
+                    type="button"
                     onClick={handleReset}
-                    className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                    aria-label="Restart walkthrough"
+                    title="Restart walkthrough"
+                    className="p-2 rounded-lg bg-black/45 border border-white/20 hover:bg-white/15 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
                   >
                     <RotateCcw className="w-4 h-4 text-white/70" />
                   </button>

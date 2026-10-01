@@ -289,7 +289,7 @@ export function Blog() {
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
         >
-          <div className="inline-flex flex-col sm:flex-row items-center gap-4 p-6 bg-white/5 rounded-2xl border border-white/10">
+          <div className="omni-landing__newsletter inline-flex flex-col sm:flex-row items-center gap-4 p-6 bg-white/5 rounded-2xl border border-white/10">
             <div className="text-left">
               <h4 className="font-semibold text-white mb-1">Stay updated</h4>
               <p className="text-white/50 text-sm">Get notified about new features and releases</p>

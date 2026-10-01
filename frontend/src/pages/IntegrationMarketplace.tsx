@@ -659,7 +659,16 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
         setLoadError(null);
       } else {
         setConnectedIntegrations(new Set());
-        setLoadError(await errorDetail(adminRes, "Could not list integrations"));
+        const detail = await errorDetail(adminRes, "Could not list integrations");
+        // Single-tenant deployments intentionally reject the tenant-admin
+        // endpoint. Deployment credentials are still reported by
+        // /integrations/status, so this is not an unavailable-integrations
+        // condition and should not appear as a red page-level error.
+        if (detail.includes("multi-tenant mode + a tenant API key")) {
+          setLoadError(null);
+        } else {
+          setLoadError(detail);
+        }
       }
 
       // Fetch from /integrations/status (individual status per integration)
