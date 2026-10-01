@@ -186,6 +186,29 @@ describe('RunbookBuilder round trip', () => {
     expect(body.enabled).toBe(true)
   })
 
+  it('preserves backend step types instead of coercing them to command', async () => {
+    const backendDetail = {
+      ...DETAIL,
+      steps: [{
+        ...DETAIL.steps[0],
+        step_type: 'kubernetes',
+        action: 'rollout_restart',
+        params: { deployment: 'checkout', namespace: 'prod' },
+      }],
+    }
+    installFetch({
+      'GET /api/runbooks/restart-service': () => json(backendDetail),
+      'PUT /api/runbooks/restart-service': () => json(backendDetail),
+    })
+    render(<RunbookBuilder onBack={() => {}} />)
+    await screen.findByText('Save Draft')
+    fireEvent.click(screen.getByText('Save Draft'))
+
+    await waitFor(() => expect(calls.some(c => c.method === 'PUT')).toBe(true))
+    const payload = calls.find(c => c.method === 'PUT')!.body as Record<string, unknown>
+    expect((payload.steps as Record<string, unknown>[])[0].step_type).toBe('kubernetes')
+  })
+
   it('does not blank the command or drop the approval gate on an untouched save', async () => {
     const body = await loadAndSave()
     const step = (body.steps as Record<string, unknown>[])[0]

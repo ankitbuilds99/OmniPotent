@@ -24,7 +24,9 @@ import { apiFetch, describeFailure } from "../lib/apiClient";
  *  silent delete. */
 interface RunbookStep {
   id: string;
-  type: "command" | "approval" | "condition" | "notification" | "wait" | "script" | "ai_action";
+  /** Keep the backend's raw vocabulary intact, including legacy values this UI
+   * does not understand. The server remains the authority on accepted values. */
+  type: string;
   name: string;
   description: string;
   /** The command / API call this step performs. Lives beside `params` on the
@@ -70,13 +72,13 @@ interface Runbook {
 }
 
 const STEP_TEMPLATES = [
-  { type: "command", name: "Run Command", icon: "terminal", description: "Execute shell command or kubectl" },
-  { type: "script", name: "Run Script", icon: "code", description: "Execute Python or Bash script" },
-  { type: "ai_action", name: "AI Action", icon: "cpu", description: "Let AI decide the best action" },
-  { type: "approval", name: "Request Approval", icon: "check-circle", description: "Wait for human approval" },
-  { type: "condition", name: "Condition", icon: "git-branch", description: "Branch based on condition" },
-  { type: "notification", name: "Send Notification", icon: "bell", description: "Notify via Slack, email, etc." },
-  { type: "wait", name: "Wait", icon: "clock", description: "Wait for duration or condition" },
+  { type: "command", name: "Command", icon: "terminal", description: "Legacy command step; approval and executor policy still apply" },
+  { type: "kubernetes", name: "Kubernetes", icon: "box", description: "Kubernetes integration action" },
+  { type: "terraform", name: "Terraform", icon: "box", description: "Legacy backend step type" },
+  { type: "http", name: "HTTP", icon: "globe", description: "Configured HTTP integration action" },
+  { type: "slack", name: "Slack", icon: "bell", description: "Slack notification action" },
+  { type: "wait", name: "Wait", icon: "clock", description: "Wait for a duration" },
+  { type: "condition", name: "Condition", icon: "git-branch", description: "Legacy backend step type" },
 ];
 
 function StepCard({
@@ -102,11 +104,11 @@ function StepCard({
 }) {
   const typeIcons: Record<string, string> = {
     command: "terminal",
-    script: "code",
-    ai_action: "cpu",
-    approval: "check-circle",
+    kubernetes: "box",
+    terraform: "box",
+    http: "globe",
+    slack: "bell",
     condition: "git-branch",
-    notification: "bell",
     wait: "clock",
   };
 
@@ -136,8 +138,7 @@ function StepCard({
           </div>
           <div className="text-sm text-gray-500 mt-1">
             {step.type === "command" && <code className="text-xs">{step.action}</code>}
-            {step.type === "notification" && `Channels: ${(step.config.channels as string[])?.join(", ") || ""}`}
-            {step.type === "approval" && `Approvers: ${(step.config.approvers as string[])?.join(", ") || ""}`}
+            {["kubernetes", "terraform", "http", "slack"].includes(step.type) && <code className="text-xs">{step.action}</code>}
             {step.type === "condition" && <code className="text-xs">{String(step.config.condition || "")}</code>}
             {step.type === "wait" && `${step.config.duration_seconds || 30}s`}
           </div>
@@ -217,82 +218,17 @@ function StepEditor({ step, onChange }: { step: RunbookStep; onChange: (step: Ru
           />
         </div>
 
-        {step.type === "command" && (
+        {["command", "kubernetes", "terraform", "http", "slack"].includes(step.type) && (
           <div>
-            <label className="block text-sm font-medium mb-1">Command</label>
-            {/* Bound to `action` -- the field the executor actually runs.
-                This read `config.command`, which the server never sends back,
-                so every load showed an empty box and every save wiped it. */}
+            <label className="block text-sm font-medium mb-1">Action</label>
             <textarea
               value={step.action}
               onChange={(e) => onChange({ ...step, action: e.target.value })}
               rows={3}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 font-mono text-sm"
-              placeholder="kubectl rollout restart deployment/{{service}}"
+              placeholder="Backend action identifier"
             />
           </div>
-        )}
-
-        {step.type === "notification" && (
-          <>
-            <div>
-              <label className="block text-sm font-medium mb-1">Channels</label>
-              <div className="flex flex-wrap gap-2">
-                {["slack", "email", "pagerduty", "teams"].map((ch) => (
-                  <label key={ch} className="flex items-center gap-1 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={(step.config.channels as string[])?.includes(ch)}
-                      onChange={(e) => {
-                        const channels = (step.config.channels as string[]) || [];
-                        if (e.target.checked) {
-                          updateConfig("channels", [...channels, ch]);
-                        } else {
-                          updateConfig("channels", channels.filter((c: string) => c !== ch));
-                        }
-                      }}
-                      className="rounded"
-                    />
-                    {ch}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Message</label>
-              <textarea
-                value={String(step.config.message || "")}
-                onChange={(e) => updateConfig("message", e.target.value)}
-                rows={3}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
-                placeholder="Use {{variable}} for dynamic values"
-              />
-            </div>
-          </>
-        )}
-
-        {step.type === "approval" && (
-          <>
-            <div>
-              <label className="block text-sm font-medium mb-1">Approvers</label>
-              <input
-                type="text"
-                value={(step.config.approvers as string[])?.join(", ") || ""}
-                onChange={(e) => updateConfig("approvers", e.target.value.split(",").map(s => s.trim()))}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
-                placeholder="oncall-primary, team-lead"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Timeout (minutes)</label>
-              <input
-                type="number"
-                value={Number(step.config.timeout_minutes) || 5}
-                onChange={(e) => updateConfig("timeout_minutes", parseInt(e.target.value))}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
-              />
-            </div>
-          </>
         )}
 
         {step.type === "condition" && (
@@ -344,20 +280,10 @@ function StepEditor({ step, onChange }: { step: RunbookStep; onChange: (step: Ru
           </div>
         )}
 
-        {step.type === "ai_action" && (
-          <div>
-            <label className="block text-sm font-medium mb-1">AI Instruction</label>
-            <textarea
-              value={String(step.config.instruction || "")}
-              onChange={(e) => updateConfig("instruction", e.target.value)}
-              rows={3}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
-              placeholder="Analyze the situation and suggest the best remediation action"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              AI will use the 6-agent system to determine the best action
-            </p>
-          </div>
+        {!STEP_TEMPLATES.some((template) => template.type === step.type) && (
+          <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">
+            Unsupported legacy step type “{step.type}”. It is preserved as-is; the API may reject edits until it is migrated.
+          </p>
         )}
 
         {/* Execution controls the server enforces on every step type. None of
@@ -534,10 +460,6 @@ function EmptyRunbook(): Runbook {
   };
 }
 
-const STEP_TYPES = new Set([
-  "command", "approval", "condition", "notification", "wait", "script", "ai_action",
-]);
-
 /** Read a runbook exactly as the server stores it.
  *
  *  Paired with `toPayload` below; the two must stay symmetric, because the save
@@ -556,9 +478,10 @@ function fromDetail(detail: Record<string, unknown>, executionCount: number | nu
       const type = String(s.step_type ?? "command");
       return {
         id: String(s.id ?? `step-${i}`),
-        // An unrecognised step_type is kept in `action`/`params` but shown with
-        // the generic command editor rather than crashing the type union.
-        type: (STEP_TYPES.has(type) ? type : "command") as RunbookStep["type"],
+        // Preserve the exact backend value. Coercing unknown values to command
+        // changes the meaning of a step and can turn an unsupported action into
+        // a shell action when the full runbook is saved.
+        type,
         name: String(s.name ?? `Step ${i + 1}`),
         description: String(s.description ?? ""),
         action: String(s.action ?? ""),
@@ -787,7 +710,7 @@ export function RunbookBuilder({ onBack }: { onBack: () => void }) {
       continue_on_failure: false,
       // A new step is gated by default. The safe default for something that may
       // run a shell command is to ask first.
-      requires_approval: type === "command" || type === "script",
+      requires_approval: type === "command",
       rollback_step: null,
     };
     setRunbook({ ...runbook, steps: [...runbook.steps, newStep] });

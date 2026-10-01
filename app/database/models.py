@@ -1683,3 +1683,26 @@ class AuditEventRecord(Base):
         # GET /audit?event_prefix=... filters on this.
         Index("ix_audit_events_event", "event"),
     )
+
+
+class EvidenceObservation(Base):
+    """Immutable structured evidence and provenance, scoped to one tenant."""
+
+    __tablename__ = "evidence_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    evidence_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    incident_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    artifact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "evidence_id", name="uq_evidence_observations_org_id"),
+        Index("ix_evidence_observations_org_incident", "org_id", "incident_id"),
+        Index("ix_evidence_observations_org_hash", "org_id", "artifact_hash"),
+    )

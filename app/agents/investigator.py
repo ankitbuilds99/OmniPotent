@@ -11,6 +11,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.agents.active_diagnosis import ActiveDiagnosisEngine, DiagnosisResult
 from app.agents.base import BaseAgent
 from app.agents.protocol import AgentRole, MessageType, SharedContext
 from app.graph.prompts import INVESTIGATOR_AGENT_SYSTEM
@@ -70,6 +71,18 @@ class InvestigatorAgent(BaseAgent):
             super().__init__(tools=filtered or tools, fast=fast)
         else:
             super().__init__(tools=tools, fast=fast)
+
+    async def diagnose_active(
+        self, engine: ActiveDiagnosisEngine, *, incident_id: str, tenant_id: str
+    ) -> DiagnosisResult:
+        """Run the typed evidence-gap diagnosis alongside the legacy LangGraph.
+
+        The injected engine owns only read-only diagnostic adapters. This method
+        does not route to RemediationAgent or any execution capability.
+        """
+        if not isinstance(engine, ActiveDiagnosisEngine):
+            raise TypeError("engine must be an ActiveDiagnosisEngine")
+        return await engine.diagnose(incident_id=incident_id, tenant_id=tenant_id)
 
     def process(
         self,

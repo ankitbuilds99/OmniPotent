@@ -418,6 +418,7 @@ def _build_steps(raw: list[dict[str, Any]]) -> list[RunbookStep]:
                 timeout_seconds=step_data.get("timeout_seconds", 300),
                 continue_on_failure=step_data.get("continue_on_failure", False),
                 requires_approval=step_data.get("requires_approval", False),
+                rollback_step=step_data.get("rollback_step"),
             )
         )
     return steps

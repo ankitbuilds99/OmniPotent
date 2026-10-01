@@ -244,6 +244,11 @@ class Settings(BaseSettings):
     # server's env as HTTP_TIMEOUT_MCP, which app/mcp/servers/github/server.py
     # (_mcp_timeout) reads. Unforwarded it was inert whatever the operator set.
     http_timeout_mcp: float = 20.0
+    # Agent-to-tool gateway limits. These can be tuned per deployment without
+    # editing MCP definitions or connector implementations.
+    tool_gateway_timeout_seconds: float = Field(default=30.0, gt=0)
+    tool_gateway_max_request_bytes: int = Field(default=1_048_576, gt=0)
+    tool_gateway_max_response_bytes: int = Field(default=4_194_304, gt=0)
 
     # --- Redis Connection Pool ---
     # These are PER-WORKLOAD baselines, not process-wide totals. app/redis_pool.py
