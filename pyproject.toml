@@ -13,8 +13,12 @@ dependencies = [
     "langchain-google-genai>=2.0.0", # Google Gemini
     "langchain-groq>=0.2.0",
     # Orchestration brain
-    "langgraph>=0.2.50",
-    "langgraph-checkpoint-sqlite>=2.0.0",
+    # Keep the graph runtime and checkpoint providers on the same API
+    # generation. Older unconstrained installs can pair sqlite 3.x with
+    # checkpoint 3.0.x and fail at import time (DeltaChannelHistory missing),
+    # preventing the session/approval path from starting at all.
+    "langgraph>=1.2.6",
+    "langgraph-checkpoint-sqlite>=3.1.0",
     # MCP: protocol SDK + LangChain adapter
     "mcp>=1.26.0,<2.0.0",
     "langchain-mcp-adapters>=0.1.0,<0.3.0",
@@ -28,6 +32,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "jsonschema>=4.0.0",
+    "packaging>=24.0",
     "python-dotenv>=1.0.0",
     "rich>=13.9.0",
     "pyyaml>=6.0",
@@ -56,7 +61,7 @@ providers = [
 ]
 # Multi-tenant foundations (opt-in; base install stays single-instance/SQLite):
 postgres = [
-    "langgraph-checkpoint-postgres>=2.0.0",  # COPILOT_CHECKPOINT_DB=postgres://...
+    "langgraph-checkpoint-postgres>=3.1.0",  # COPILOT_CHECKPOINT_DB=postgres://...
     "asyncpg>=0.29.0",                       # Async PostgreSQL driver
     "sqlalchemy[asyncio]>=2.0.0",            # Async SQLAlchemy
 ]

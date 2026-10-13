@@ -55,9 +55,9 @@ function WelcomeStep({ onTryPlayground }: { onTryPlayground: () => void }) {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         {[
-          { icon: <Zap className="w-5 h-5" />, title: "5x Faster MTTR", desc: "AI investigates while you sleep" },
+          { icon: <Zap className="w-5 h-5" />, title: "Faster triage", desc: "Evidence-backed investigation workflow" },
           { icon: <Shield className="w-5 h-5" />, title: "Safety Gates", desc: "Human approval for risky actions" },
-          { icon: <Users className="w-5 h-5" />, title: "6-Agent System", desc: "Parallel AI investigation" },
+          { icon: <Users className="w-5 h-5" />, title: "Team-ready", desc: "Share evidence and investigation reports" },
         ].map((feature, i) => (
           <motion.div
             key={i}
@@ -85,7 +85,7 @@ function WelcomeStep({ onTryPlayground }: { onTryPlayground: () => void }) {
         Try the Playground First
       </button>
       <p className="text-sm text-gray-500 mt-3">
-        See AI investigate a sample incident before connecting your tools
+        Run a clearly labeled sample workflow before connecting your tools
       </p>
     </div>
   );
@@ -157,7 +157,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
     <div>
       <h2 className="text-2xl font-bold mb-3 text-center">See AI Investigation in Action</h2>
       <p className="text-gray-400 mb-6 text-center">
-        Watch how OmniPotent investigates a sample incident
+        Watch the investigation workflow using a sample incident (no customer telemetry)
       </p>
 
       <div
@@ -173,7 +173,7 @@ function PlaygroundStep({ onNext }: { onNext: () => void }) {
 
         {!investigating && steps.length === 0 && (
           <div className="text-center py-12">
-            <p className="text-gray-500 mb-4">Click below to run a real AI investigation</p>
+            <p className="text-gray-500 mb-4">Run a sample investigation; results are not production evidence.</p>
             <button
               onClick={runDemo}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium"

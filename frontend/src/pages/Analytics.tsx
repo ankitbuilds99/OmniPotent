@@ -433,7 +433,13 @@ type Record_ = Record<string, unknown>;
 
 function timestamp(value: unknown): number | null {
   if (typeof value !== "string" || !value) return null;
-  const ms = new Date(value).getTime();
+  // The API's SQLite timestamps are UTC but may omit the offset. Treat those
+  // values as UTC; parsing them as browser-local time shifts investigations by
+  // several hours and can place them outside the selected analytics window.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+    ? value
+    : `${value.replace(" ", "T")}Z`;
+  const ms = new Date(normalized).getTime();
   return Number.isFinite(ms) ? ms : null;
 }
 
@@ -499,11 +505,12 @@ export function Analytics({ onBack }: { onBack: () => void }) {
       // regardless of which range button was selected.
       const INCIDENT_LIMIT = 200;
       const ALERT_LIMIT = 200;
-      const [incidentsRes, alertsRes, teamsRes, routingRes] = await Promise.all([
+      const [incidentsRes, alertsRes, teamsRes, routingRes, historyRes] = await Promise.all([
         apiFetch(`/api/incidents?limit=${INCIDENT_LIMIT}`),
         apiFetch(`/oncall/alerts?limit=${ALERT_LIMIT}`),
         apiFetch(`/oncall/teams`),
         apiFetch(`/api/model-router/stats`),
+        apiFetch(`/api/investigations?limit=${INCIDENT_LIMIT}`),
       ]);
       if (!incidentsRes.ok) {
         throw new Error(`Incidents: ${await describeFailure(incidentsRes)}`);
@@ -511,6 +518,23 @@ export function Analytics({ onBack }: { onBack: () => void }) {
       const incidents: Record_[] = await incidentsRes.json();
       const alerts: Record_[] = alertsRes.ok ? await alertsRes.json() : [];
       const teamsData: Record_[] = teamsRes.ok ? await teamsRes.json() : [];
+      // Standalone copilot investigations are valid analytics events even when
+      // they were not created from an incident or alert. Convert them into the
+      // small incident-shaped record this page already aggregates.
+      const historyPayload = historyRes.ok
+        ? (await historyRes.json()) as { investigations?: Record_[] }
+        : { investigations: [] };
+      const investigationRecords: Record_[] = (historyPayload.investigations ?? []).map((item) => ({
+        id: item.thread_id ?? item.id,
+        triggered_at: item.created_at,
+        resolved_at: item.status === "completed" ? item.completed_at : null,
+        acknowledged_at: item.created_at,
+        status: item.status === "completed" ? "resolved" : "open",
+        severity: (item.report as Record<string, unknown> | null)?.severity ?? "low",
+        service: "investigation",
+        has_investigation: true,
+        investigation_confidence: 0,
+      }));
       setTruncated(incidents.length >= INCIDENT_LIMIT || alerts.length >= ALERT_LIMIT);
 
       // Routing stats are a separate concern from the incident window: they are
@@ -532,7 +556,7 @@ export function Analytics({ onBack }: { onBack: () => void }) {
       const windowStart = nowMs - days * 86400000;
       const prevStart = windowStart - days * 86400000;
 
-      const all = [...incidents, ...alerts];
+      const all = [...incidents, ...alerts, ...investigationRecords];
       const inWindow = (r: Record_) => {
         const t = startedAt(r);
         return t !== null && t >= windowStart;
@@ -544,7 +568,7 @@ export function Analytics({ onBack }: { onBack: () => void }) {
 
       const current = all.filter(inWindow);
       const previous = all.filter(inPrevWindow);
-      const windowIncidents = incidents.filter(inWindow);
+      const windowIncidents = [...incidents, ...investigationRecords].filter(inWindow);
 
       // Only compare against the previous window when the fetched data plainly
       // reaches back past its start. Otherwise the API's `limit` cut the older

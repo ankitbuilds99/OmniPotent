@@ -288,7 +288,16 @@ def search_logs(
         )
         resp.raise_for_status()
     except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-        return _request_error(exc)
+        # Metrics are optional evidence. Keep the failure typed so the graph
+        # can preserve the rest of the investigation instead of treating a
+        # missing series or provider outage as a fatal tool exception.
+        return {
+            "status": "unavailable",
+            "provider": "datadog",
+            "reason": "provider_error",
+            "service": service,
+            "detail": _request_error(exc)["error"],
+        }
     lines = []
     for ev in resp.json().get("data", []):
         a = ev.get("attributes", {})
@@ -347,7 +356,8 @@ def get_metric(service: str, metric: str) -> dict:
     if OFFLINE:
         err = _gate()
         if err:
-            return err
+            return {"status": "unavailable", "provider": "datadog", "reason": "not_configured",
+                    "service": service, "metric": metric}
         return _offline_metric(service, metric)
 
     import httpx
@@ -358,7 +368,8 @@ def get_metric(service: str, metric: str) -> dict:
     else:
         tmpl = _METRIC_QUERIES.get(metric)
         if not tmpl:
-            return {"error": f"unknown metric '{metric}'", "available": list(_METRIC_QUERIES)}
+            return {"status": "unavailable", "provider": "datadog", "reason": "metric_not_found",
+                    "service": service, "metric": metric, "available": list(_METRIC_QUERIES)}
         query = tmpl.format(service=service)
 
     now = int(time.time())
@@ -371,11 +382,18 @@ def get_metric(service: str, metric: str) -> dict:
         )
         resp.raise_for_status()
     except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-        return _request_error(exc)
+        return {
+            "status": "unavailable",
+            "provider": "datadog",
+            "reason": "provider_error",
+            "service": service,
+            "metric": metric,
+            "detail": _request_error(exc)["error"],
+        }
     series = resp.json().get("series") or []
     if not series:
-        return {"service": service, "metric": metric, "query": query, "series": [],
-                "trend": "unknown", "latest": None}
+        return {"status": "unavailable", "provider": "datadog", "reason": "metric_not_found",
+                "service": service, "metric": metric, "query": query, "series": []}
     points = [{"ts": int(ts / 1000), "value": val} for ts, val in series[0].get("pointlist", [])]
     values = [p["value"] for p in points if p["value"] is not None]
     return {

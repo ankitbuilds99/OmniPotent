@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from app import config as cfg
 from app.agents.parallel_coordinator import (
     ConfidenceFactor,
     Finding,
@@ -196,10 +197,18 @@ class TestSpecialistType:
 class TestCoordinatorInitialization:
     """Tests for ParallelInvestigationCoordinator initialization."""
 
-    def test_init_default(self):
+    def test_init_default(self, monkeypatch):
+        # The default-model contract is independent of a developer's local
+        # deployment configuration. Do not let .env's COPILOT_MODEL override
+        # this unit test.
+        monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
+        cfg.get_settings.cache_clear()
         coord = ParallelInvestigationCoordinator()
         assert coord._client is None
         assert coord._model == "claude-sonnet-4-20250514"
+        # Restore the cached deployment settings before the next test module
+        # constructs Settings directly.
+        cfg.get_settings.cache_clear()
 
     def test_init_with_client(self):
         mock_client = MagicMock()

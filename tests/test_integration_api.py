@@ -359,12 +359,16 @@ class TestIntegrationStatus:
 
     def test_reports_false_when_no_credentials_are_configured(self, client, monkeypatch):
         """False means "serving bundled fixtures", which is the default state."""
+        # Do not let the developer's real .env turn this fixture into a live
+        # deployment. Production still loads .env; this test needs an explicit
+        # empty deployment configuration so it can verify the fail-closed path.
+        monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
         for var in (
             "PAGERDUTY_API_TOKEN", "DD_API_KEY", "DD_APP_KEY", "SENTRY_API_TOKEN",
             "PROMETHEUS_URL",
             "KUBE_CONFIG_PATH", "TRACES_API_URL", "DEPLOYS_API_URL",
             "ARGOCD_SERVER_URL", "ARGOCD_AUTH_TOKEN",
-            "TERRAFORM_CLOUD_TOKEN", "TERRAFORM_ORGANIZATION",
+            "TERRAFORM_CLOUD_TOKEN", "TERRAFORM_ORGANIZATION", "GRAFANA_URL",
         ):
             monkeypatch.delenv(var, raising=False)
         cfg.get_settings.cache_clear()
@@ -374,6 +378,7 @@ class TestIntegrationStatus:
 
     def test_reports_true_only_for_the_connector_that_was_configured(self, client, monkeypatch):
         """One credential must not light up the rest."""
+        monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
         monkeypatch.setenv("SENTRY_API_TOKEN", "sntrys_test")
         cfg.get_settings.cache_clear()
 
@@ -382,6 +387,7 @@ class TestIntegrationStatus:
         assert [k for k, v in status.items() if v] == ["sentry"]
 
     def test_reports_prometheus_when_url_is_configured(self, client, monkeypatch):
+        monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
         monkeypatch.setenv("PROMETHEUS_URL", "http://127.0.0.1:9090")
         cfg.get_settings.cache_clear()
 
@@ -390,6 +396,7 @@ class TestIntegrationStatus:
 
     def test_a_connector_needing_two_settings_is_not_live_on_one(self, client, monkeypatch):
         """Terraform needs both a token and an org; half of it queries nothing."""
+        monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
         monkeypatch.setenv("TERRAFORM_CLOUD_TOKEN", "tf-token")
         monkeypatch.delenv("TERRAFORM_ORGANIZATION", raising=False)
         cfg.get_settings.cache_clear()

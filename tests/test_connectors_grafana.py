@@ -1,6 +1,7 @@
 """Tests for Grafana Connector."""
 
 from datetime import datetime, timezone
+import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,6 +25,17 @@ def grafana_config_no_key():
     """Create a Grafana connector config without API key."""
     return ConnectorConfig(
         url="https://grafana.example.com",
+        timeout_seconds=30.0,
+    )
+
+
+@pytest.fixture
+def grafana_config_basic_auth():
+    """Create a Grafana config using the supported admin Basic Auth path."""
+    return ConnectorConfig(
+        url="https://grafana.example.com",
+        username="admin",
+        password="secret",
         timeout_seconds=30.0,
     )
 
@@ -57,6 +69,12 @@ class TestGrafanaConnectorInit:
         assert headers["Accept"] == "application/json"
         assert headers["Content-Type"] == "application/json"
         assert "Authorization" not in headers
+
+    def test_default_headers_with_basic_auth(self, grafana_config_basic_auth):
+        connector = GrafanaConnector(grafana_config_basic_auth)
+        headers = connector._default_headers()
+        expected = base64.b64encode(b"admin:secret").decode()
+        assert headers["Authorization"] == f"Basic {expected}"
 
     def test_config_stored(self, grafana_connector, grafana_config):
         assert grafana_connector.config == grafana_config

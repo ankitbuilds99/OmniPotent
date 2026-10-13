@@ -210,6 +210,7 @@ async def _record_started(
             initial_context=dict(context or {}),
             accumulated_context=dict(context or {}),
             execution_levels=dag.get_execution_levels(),
+            org_id=org_id,
         ),
     )
 
@@ -242,6 +243,7 @@ async def _run_and_record(
             context=context,
             execution_id=execution_id,
             resume_from=resume_from,
+            org_id=org_id,
         )
     except Exception as exc:
         # Outcome and reason only: the object `execute()` built is not returned
@@ -549,7 +551,13 @@ async def approve_task(
     is why the executor's pending-approval state stays on the single-replica
     pin list even now that execution records are durable.
     """
-    success = await executor.approve_task(execution_id, task_id, approval.approved)
+    org_id = storage_org_id()
+    success = await store.record_approval_decision(
+        org_id, execution_id, task_id, approval.approved, approval.reason
+    )
+    # Wake a worker in this process immediately when possible. The durable
+    # decision above is authoritative for cross-replica delivery.
+    await executor.approve_task(execution_id, task_id, approval.approved)
 
     if not success:
         raise HTTPException(
@@ -578,6 +586,14 @@ async def approve_task(
 async def get_resource_usage() -> dict[str, Any]:
     """Get current resource usage for the org on the current request."""
     return await _state.get().resource_pool.get_usage()
+
+
+@router.post("/executions/{execution_id}/cancel")
+async def cancel_execution(execution_id: str) -> dict[str, Any]:
+    """Request cancellation through durable tenant-scoped control state."""
+    if not await store.request_cancel(storage_org_id(), execution_id):
+        raise HTTPException(status_code=404, detail="Execution not pending or running")
+    return {"status": "cancellation_requested", "execution_id": execution_id}
 
 
 @router.get("/handlers")

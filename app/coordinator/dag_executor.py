@@ -319,6 +319,9 @@ class DAGExecution:
     # Without it, a DAG that never got off the ground was indistinguishable
     # from one still working, for as long as anyone cared to poll.
     error: str | None = None
+    # Tenant scope used by the durable approval control path. It is runtime
+    # metadata and is deliberately not serialized into checkpoint payloads.
+    org_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -657,6 +660,7 @@ class DAGExecutor:
         context: dict[str, Any] | None = None,
         execution_id: str | None = None,
         resume_from: str | None = None,
+        org_id: str | None = None,
     ) -> DAGExecution:
         """Execute a DAG."""
         errors = dag.validate()
@@ -685,6 +689,7 @@ class DAGExecutor:
             )
 
         execution.state = ExecutionState.RUNNING
+        execution.org_id = org_id
         execution.started_at = datetime.now(timezone.utc)
 
         try:
@@ -760,6 +765,12 @@ class DAGExecutor:
     async def _execute_dag(self, dag: TaskDAG, execution: DAGExecution) -> None:
         """Execute DAG level by level."""
         for level_idx in range(execution.current_level, len(execution.execution_levels)):
+            if execution.org_id:
+                from app.coordinator import store
+                if await store.is_cancel_requested(execution.org_id, execution.id):
+                    execution.state = ExecutionState.CANCELLED
+                    execution.error = "Cancellation requested by operator"
+                    return
             level = execution.execution_levels[level_idx]
             execution.current_level = level_idx
 
@@ -1045,13 +1056,35 @@ class DAGExecutor:
 
         future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
         self._pending_approvals[(execution.id, task.id)] = future
+        await self._save_checkpoint(execution)
+        if execution.org_id:
+            # Make the waiting task visible and approvable through the shared
+            # database before the worker blocks on its local future.
+            from app.coordinator import store
+            await store.save_execution(execution.org_id, execution)
 
         try:
-            approved = await asyncio.wait_for(
-                future,
-                timeout=task.approval_timeout_minutes * 60,
-            )
-            return approved
+            # The future is a low-latency local fast path. Polling the durable
+            # decision makes approval work when the API request lands on a
+            # different replica than the worker running this task.
+            deadline = asyncio.get_running_loop().time() + task.approval_timeout_minutes * 60
+            while True:
+                if future.done():
+                    return future.result()
+                if execution.org_id:
+                    from app.coordinator import store
+                    decision = await store.get_approval_decision(
+                        execution.org_id, execution.id, task.id
+                    )
+                    if decision is not None:
+                        return decision
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return False
+                try:
+                    await asyncio.wait_for(asyncio.shield(future), min(remaining, 1.0))
+                except asyncio.TimeoutError:
+                    continue
         except asyncio.TimeoutError:
             return False
         finally:

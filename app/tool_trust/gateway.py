@@ -11,6 +11,7 @@ import asyncio
 import contextvars
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
@@ -26,6 +27,8 @@ from app import audit, policy, tenant_context
 from app.contracts.common import DomainContract, require_aware_datetime
 from app.evidence.models import EvidenceContext, EvidenceSource, EvidenceSourceType
 
+log = logging.getLogger("omnipotent.tool_gateway")
+
 
 class ToolGatewayCode(StrEnum):
     TENANT_MISMATCH = "tenant_mismatch"
@@ -40,14 +43,25 @@ class ToolGatewayCode(StrEnum):
     TIMEOUT = "timeout"
     RATE_LIMITED = "rate_limited"
     TOOL_FAILURE = "tool_failure"
+    MUTATIONS_FROZEN = "mutations_frozen"
 
 
 class ToolGatewayError(ToolException):
     """Stable, sanitized error exposed to existing LangChain tool callers."""
 
-    def __init__(self, code: ToolGatewayCode, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: ToolGatewayCode,
+        *,
+        retryable: bool = False,
+        tool_name: str = "",
+        provider: str = "",
+    ) -> None:
         self.code = code
         self.retryable = retryable
+        # Names only; never retain provider exception text or request args.
+        self.tool_name = tool_name
+        self.provider = provider
         super().__init__(f"Tool gateway rejected the call ({code.value}).")
 
 
@@ -286,17 +300,32 @@ class ToolTrustGateway:
         call = response or getattr(tool, "coroutine", None)
         if call is None:
             raise self._deny(ToolGatewayCode.UNKNOWN_TOOL, identity, resolved_tenant)
+        # Independent kill switch: it is checked immediately before the
+        # provider call and cannot be bypassed by an approved/stale LLM plan.
+        if policy.classify(identity.name)["write"]:
+            from app.mutation_freeze import is_frozen
+            if is_frozen(resolved_tenant):
+                self._audit("mutation_frozen", identity, resolved_tenant, definition.required_capability)
+                raise self._deny(ToolGatewayCode.MUTATIONS_FROZEN, identity, resolved_tenant)
         started = time.perf_counter()
         try:
             raw = await asyncio.wait_for(call(**dict(args)), timeout=definition.timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError) as exc:
             self._audit("timeout", identity, resolved_tenant, definition.required_capability)
-            raise ToolGatewayError(ToolGatewayCode.TIMEOUT, retryable=True) from exc
+            self._log_execution(identity, started, False, ToolGatewayCode.TIMEOUT)
+            raise ToolGatewayError(
+                ToolGatewayCode.TIMEOUT, retryable=True,
+                tool_name=identity.name, provider=identity.server,
+            ) from exc
         except ToolGatewayError:
             raise
         except Exception as exc:
             self._audit("tool_failure", identity, resolved_tenant, definition.required_capability)
-            raise ToolGatewayError(ToolGatewayCode.TOOL_FAILURE, retryable=False) from exc
+            self._log_execution(identity, started, False, ToolGatewayCode.TOOL_FAILURE)
+            raise ToolGatewayError(
+                ToolGatewayCode.TOOL_FAILURE, retryable=False,
+                tool_name=identity.name, provider=identity.server,
+            ) from exc
 
         try:
             artifact: Any = None
@@ -378,7 +407,25 @@ class ToolTrustGateway:
         )
         self._audit("completed", identity, resolved_tenant, definition.required_capability,
                     injection_flags=list(injection_flags), response_sha256=result.content_sha256)
+        self._log_execution(identity, started, True, None)
         return result
+
+    @staticmethod
+    def _log_execution(
+        identity: ToolIdentity,
+        started: float,
+        success: bool,
+        error: ToolGatewayCode | None,
+    ) -> None:
+        """Emit safe per-tool timing logs without request args or credentials."""
+        log.info(
+            "tool_execution tool=%s provider=%s duration_ms=%.1f success=%s%s",
+            identity.name,
+            identity.server,
+            (time.perf_counter() - started) * 1000,
+            str(success).lower(),
+            f" error={error.value}" if error else "",
+        )
 
     def wrap(self, tool: BaseTool, server: str, *, incident_id: str = "default") -> BaseTool:
         """Wrap an existing async LangChain tool, preserving its public schema/API."""

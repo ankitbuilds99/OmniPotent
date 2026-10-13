@@ -56,6 +56,7 @@ from app.deduplication.models import AlertSeverity, AlertSource, RawAlert
 from app.deduplication.pipeline import DeduplicationPipeline, PipelineConfig
 from app.deduplication.suppression import DigestEntry
 from app.tenant_context import TenantConfig, get_tenant
+from app.config import get_settings
 
 log = logging.getLogger("omnipotent.deduplication.api")
 
@@ -84,8 +85,9 @@ _pipelines: dict[str, DeduplicationPipeline] = {}
 _pipeline_tenants: dict[str, TenantConfig | None] = {}
 
 
-def _config_for(features: dict[str, bool]) -> PipelineConfig:
+def _config_for(features: dict[str, bool], org: UUID | None = None) -> PipelineConfig:
     """Translate resolved plan flags into per-layer pipeline configuration."""
+    tenant_key = org or UUID(int=0)
     return PipelineConfig(
         # Included in every plan via basic_deduplication.
         enable_layer1_fingerprint=True,
@@ -94,6 +96,11 @@ def _config_for(features: dict[str, bool]) -> PipelineConfig:
         enable_layer5_ml=features.get("advanced_deduplication", False),
         enable_layer3_temporal=features.get("cascade_detection", False),
         enable_layer4_topology=features.get("service_dependency_map", False),
+        shared_state_url=get_settings().copilot_dedup_state_url,
+        # A tenant must never restore another tenant's incident snapshot. The
+        # tenant-scoped key is part of the configuration, not caller input.
+        shared_state_key=f"omnipotent:dedup:v1:{tenant_key}",
+        require_shared_state=get_settings().copilot_dedup_state_required,
     )
 
 
@@ -193,7 +200,7 @@ async def get_pipeline(org_id: UUID | None = None) -> DeduplicationPipeline:
     """
     org = org_id if org_id is not None else current_org_id()
     features = await enabled_features(GATING_FEATURES, org)
-    config = _config_for(features)
+    config = _config_for(features, org)
 
     key = str(org)
     pipeline = _pipelines.get(key)

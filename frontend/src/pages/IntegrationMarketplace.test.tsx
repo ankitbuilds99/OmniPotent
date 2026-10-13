@@ -95,6 +95,30 @@ describe('IntegrationMarketplace', () => {
       expect(screen.getAllByText('Connected')).toHaveLength(1)
     })
 
+    it('renders backend capability and configuration-boundary metadata', async () => {
+      installFetch({
+        'GET /integrations/status': () => json({
+          kubernetes: true,
+          details: {
+            kubernetes: {
+              mode: 'deployment',
+              capabilities: ['read_workloads', 'rollback_deployment'],
+              write_capable: true,
+              freshness: 'configuration-derived',
+            },
+          },
+        }),
+      })
+      render(<IntegrationMarketplace onBack={() => {}} />)
+
+      const kubernetes = await screen.findByText('Kubernetes')
+      const card = kubernetes.closest('div.rounded-xl') as HTMLElement
+      expect(card).toHaveTextContent('Deployment configured')
+      expect(card).toHaveTextContent('Read/write boundary')
+      expect(card).toHaveTextContent('read_workloads')
+      expect(card).toHaveTextContent('rollback_deployment')
+    })
+
     it('separates a stored credential from a working one', async () => {
       // Every required Sentry secret is present, but nothing has proved them.
       installFetch({
@@ -119,8 +143,8 @@ describe('IntegrationMarketplace', () => {
     })
   })
 
-  describe('integrations this build cannot connect', () => {
-    it('stops offering a Connect button for a tool with no connector', async () => {
+  describe('deployment-configured integrations', () => {
+    it('does not offer a per-user Connect button for Grafana', async () => {
       installFetch()
       render(<IntegrationMarketplace onBack={() => {}} />)
       await screen.findByText('0 connected')
@@ -129,9 +153,7 @@ describe('IntegrationMarketplace', () => {
       const button = grafana.querySelector('button:last-of-type') as HTMLButtonElement
       expect(button).toBeDisabled()
       expect(button.textContent).toBe('Not available')
-      expect(
-        screen.getByText(/This build has no Grafana connector\./)
-      ).toBeInTheDocument()
+      expect(screen.getByText(/Configured by the deployment, through GRAFANA_URL/)).toBeInTheDocument()
     })
 
     it('no longer labels a working connector "Coming Soon"', async () => {

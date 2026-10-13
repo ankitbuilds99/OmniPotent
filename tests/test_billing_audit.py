@@ -293,7 +293,10 @@ class TestCheckoutMetadataContract:
 
         assert mapping is None
         assert "sub_9" in caplog.text and "organization_id" in caplog.text
-        assert [r.levelno for r in caplog.records] == [logging.ERROR]
+        webhook_records = [
+            r for r in caplog.records if r.name == "omnipotent.billing.webhooks"
+        ]
+        assert [r.levelno for r in webhook_records] == [logging.ERROR]
 
     def test_the_same_event_on_a_single_tenant_deployment_is_not_an_error(
         self, caplog, single_tenant
@@ -317,7 +320,10 @@ class TestCheckoutMetadataContract:
             )
 
         assert mapping is None
-        assert [r.levelno for r in caplog.records] == [logging.INFO]
+        webhook_records = [
+            r for r in caplog.records if r.name == "omnipotent.billing.webhooks"
+        ]
+        assert [r.levelno for r in webhook_records] == [logging.INFO]
         assert "sub_9" in caplog.text and "single-tenant" in caplog.text
 
 

@@ -472,6 +472,14 @@ async def _dedup_digest_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Mutation freeze is a fleet-wide safety control when Redis is configured;
+    # otherwise the module intentionally falls back to process-local state.
+    from app import mutation_freeze
+    from app.redis_sessions import get_redis_client
+    shared_redis = get_redis_client()
+    mutation_freeze.configure_backend(shared_redis)
+    from app import execution_control
+    execution_control.configure_backend(shared_redis)
     # Multi-tenant: ensure the tenant store schema exists before serving.
     if get_settings().copilot_multi_tenant:
         await tenant_auth.get_store().setup()
@@ -1681,6 +1689,68 @@ async def healthz() -> dict:
 
 
 @app.get(
+    "/api/integrations/grafana/health",
+    tags=["Integrations"],
+    summary="Check Grafana connectivity",
+)
+async def grafana_health() -> dict:
+    """Read-only Grafana health probe used by the marketplace and dashboard."""
+    settings = get_settings()
+    url = settings.grafana_url.strip()
+    if not url:
+        raise HTTPException(503, "Grafana is not configured. Set GRAFANA_URL.")
+    from app.connectors.base import ConnectorConfig
+    from app.connectors.grafana import GrafanaConnector
+
+    connector = GrafanaConnector(
+        ConnectorConfig(
+            url=url,
+            api_key=settings.grafana_api_key,
+            username=settings.grafana_admin_user,
+            password=settings.grafana_admin_password,
+        )
+    )
+    try:
+        healthy = await connector.health_check()
+    finally:
+        await connector.close()
+    if not healthy:
+        raise HTTPException(502, "Grafana is configured but did not pass its health check")
+    return {"status": "ok", "source": url}
+
+
+@app.get(
+    "/api/integrations/grafana/dashboards",
+    tags=["Integrations"],
+    summary="List Grafana dashboards",
+)
+async def grafana_dashboards(query: str = "") -> dict:
+    """Return real Grafana dashboards; never fabricate dashboards on failure."""
+    settings = get_settings()
+    url = settings.grafana_url.strip()
+    if not url:
+        raise HTTPException(503, "Grafana is not configured. Set GRAFANA_URL.")
+    from app.connectors.base import ConnectorConfig
+    from app.connectors.grafana import GrafanaConnector
+
+    connector = GrafanaConnector(
+        ConnectorConfig(
+            url=url,
+            api_key=settings.grafana_api_key,
+            username=settings.grafana_admin_user,
+            password=settings.grafana_admin_password,
+        )
+    )
+    try:
+        result = await connector.search_dashboards(query=query)
+    finally:
+        await connector.close()
+    if not result.success:
+        raise HTTPException(502, f"Grafana dashboard query failed: {result.error}")
+    return {"dashboards": result.data, "source": url}
+
+
+@app.get(
     "/readyz",
     tags=["Health"],
     summary="Readiness probe",
@@ -2545,6 +2615,9 @@ async def _stream_chat_turn(tid: str, req: "ChatRequest", session: Any):
         elif t == "done":
             _AWAITING.discard(tid)
             await _meter_and_spend(ev.get("tokens_used", 0))
+            # Keep the stable thread for conversation state, but persist each
+            # completed question as its own history/analytics investigation.
+            history_id = f"{req.thread_id}:{uuid.uuid4().hex[:12]}"
             # This is the path the UI actually uses. It recorded neither an SLO
             # sample nor a history row, which is why the SLO dashboard read as
             # zero investigations and the history page had nothing to list.
@@ -2556,7 +2629,7 @@ async def _stream_chat_turn(tid: str, req: "ChatRequest", session: Any):
                 elapsed,
             )
             await investigation_history.record(
-                req.thread_id,
+                history_id,
                 req.message,
                 status="completed",
                 summary=(ev.get("report") or {}).get("root_cause")
@@ -2568,7 +2641,7 @@ async def _stream_chat_turn(tid: str, req: "ChatRequest", session: Any):
             # ...and the analytics columns of the same row, which is what the
             # dashboard aggregates over. Same key as above (the client's thread
             # id) so both writers upsert one row per investigation.
-            await _record_dashboard_history_from_stream(req.thread_id, ev, elapsed)
+            await _record_dashboard_history_from_stream(history_id, ev, elapsed)
         yield {"data": json.dumps(_stream_payload(req.thread_id, ev))}
 
 
@@ -3122,19 +3195,67 @@ async def integration_status() -> dict:
     from app.integrations.slack_notify import is_slack_configured
 
     settings = get_settings()
-    return {
+    grafana_live = False
+    if settings.grafana_url.strip():
+        from app.connectors.base import ConnectorConfig
+        from app.connectors.grafana import GrafanaConnector
+
+        connector = GrafanaConnector(
+            ConnectorConfig(
+                url=settings.grafana_url.strip(),
+                api_key=settings.grafana_api_key,
+                username=settings.grafana_admin_user,
+                password=settings.grafana_admin_password,
+            )
+        )
+        try:
+            grafana_live = await connector.health_check()
+        finally:
+            await connector.close()
+    status = {
         "slack": is_slack_configured(),
         "github": runtime.github_connected(),
         "pagerduty": bool(settings.pagerduty_api_token),
         "datadog": bool(settings.dd_api_key and settings.dd_app_key),
         "sentry": bool(settings.sentry_api_token),
         "prometheus": bool(settings.prometheus_url),
+        "grafana": grafana_live,
         "kubernetes": bool(settings.kube_config_path),
         "traces": bool(settings.traces_api_url),
         "deploys": bool(settings.deploys_api_url),
         "argocd": bool(settings.argocd_server_url and settings.argocd_auth_token),
         "terraform": bool(settings.terraform_cloud_token and settings.terraform_organization),
     }
+    # Additive metadata for onboarding/admin views. The legacy boolean keys are
+    # intentionally preserved for existing clients; these details make the
+    # operational boundary explicit instead of implying that "configured"
+    # means every capability is available.
+    capabilities = {
+        "slack": ("notify",),
+        "github": ("read_changes", "write_pull_request"),
+        "pagerduty": ("read_incidents", "notify"),
+        "datadog": ("read_metrics", "read_logs"),
+        "sentry": ("read_errors",),
+        "prometheus": ("read_metrics",),
+        "grafana": ("read_dashboards", "read_logs"),
+        "kubernetes": ("read_workloads", "rollback_deployment"),
+        "traces": ("read_traces",),
+        "deploys": ("read_deployments",),
+        "argocd": ("read_applications",),
+        "terraform": ("read_runs",),
+    }
+    deployment_only = {"slack", "prometheus", "grafana", "kubernetes", "argocd", "terraform", "deploys"}
+    status["details"] = {
+        name: {
+            "configured": bool(status[name]),
+            "mode": "deployment" if name in deployment_only else "organization",
+            "capabilities": list(capabilities[name]),
+            "write_capable": name in {"github", "kubernetes", "pagerduty", "slack"},
+            "freshness": "configuration-derived",
+        }
+        for name in capabilities
+    }
+    return status
 
 
 @app.get(

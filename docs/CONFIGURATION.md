@@ -26,7 +26,9 @@ UI** — those overrides are in-memory only, not persisted across restarts.
 | `COPILOT_CONFIDENCE_GATE` | `true` | Refuse programmatic auto-approval of a high-risk write on thin evidence (humans can still approve) |
 | `COPILOT_LLM_RETRIES` | `3` | Bounded retries + circuit breaker around each LLM call (1 disables) |
 | `COPILOT_FALLBACK_PROVIDER` | — | Cross-provider failover when the primary is unavailable (needs that provider's key) |
-| `COPILOT_REDIS_URL` | — | Redis URL for the shared cross-replica rate limiter (empty = in-memory, single-instance) |
+| `COPILOT_REDIS_URL` | — | Redis URL for shared cross-replica sessions, rate limits, and coordination; required in production, while development may use the in-memory fallback |
+| `COPILOT_DEDUP_STATE_URL` | — | Shared Redis snapshots for restart-safe alert deduplication (empty = process-local) |
+| `COPILOT_DEDUP_STATE_REQUIRED` | `false` | Fail closed when shared deduplication state is not configured |
 | `COPILOT_LEARN_INCIDENTS` | `true` | After a confident RCA, append a runbook to the learned corpus so future runs warm-start from it |
 | `COPILOT_LEARNED_CORPUS` | *(root)* | Path to the learned-incidents JSON (empty = `learned_incidents.json` in the project root) |
 | `COPILOT_ADVERSARIAL_CRITIQUE` | `true` | Prosecutor/Defender panel stress-tests the root cause; abstains/downgrades on a standing objection |
@@ -38,7 +40,7 @@ UI** — those overrides are in-memory only, not persisted across restarts.
 | `COPILOT_AUTONOMY` | `false` | Enable `POST /remediate` (apply reversible fix → watch → auto-revert). Off = 403 |
 | `COPILOT_AUTONOMY_DRYRUN` | `true` | Even when enabled, only simulate remediation unless set false |
 | `COPILOT_AUTONOMY_WATCH_S` | `60` | Seconds to watch the signal after a remediation before judging recovery |
-| `COPILOT_CHECKPOINT_DB` | `./copilot_checkpoints.sqlite` | SQLite path or a `postgres://…` URL |
+| `COPILOT_CHECKPOINT_DB` | `./copilot_checkpoints.sqlite` | SQLite path for development/staging; a `postgres://…` URL is required in production |
 
 ## Data sources & connectors
 `TARGET_REPO_PATH`, `LOGS_DATA_PATH`, `COPILOT_SOURCES_ROOT`; and per-connector creds
@@ -79,3 +81,16 @@ runs offline fixtures. See [Connectors](CONNECTORS.md).
 | `POST /webhooks/pagerduty` | PagerDuty trigger → auto-investigate (HMAC-verified) |
 | `POST /webhooks/slack/interactions` | Slack Approve/Reject callback (signature-verified) |
 | `GET /healthz` · `GET /readyz` | Liveness / readiness probes (auth-exempt) |
+
+## Runtime dependency verification
+
+Before starting the API in CI or a deployment image, run:
+
+```bash
+python scripts/verify_runtime.py
+```
+
+The check reads the declared dependency policy from `pyproject.toml`, reports
+missing packages, checks declared version specifiers, and imports the configured
+LangGraph SQLite checkpoint provider. This catches mixed global installations
+before they surface as an opaque `DeltaChannelHistory` import error.

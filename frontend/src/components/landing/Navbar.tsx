@@ -80,7 +80,7 @@ export function Navbar({ onLaunch }: { onLaunch: () => void }) {
       >
         <div className={`flex items-center justify-between px-4 sm:px-6 transition-[padding] duration-300 ${isScrolled ? 'py-2.5' : 'py-4'}`}>
           {/* Logo */}
-          <a href="/" className="flex items-center gap-2 group" data-testid="nav-brand">
+          <a href="/marketing" className="flex items-center gap-2 group" data-testid="nav-brand">
             <motion.div
               className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center"
               whileHover={{ rotate: 180, scale: 1.1 }}

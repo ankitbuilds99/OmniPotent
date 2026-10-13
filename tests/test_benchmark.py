@@ -15,7 +15,26 @@ from evals.benchmark import (
     pass_pow_k,
     score_case,
     score_rca,
+    validate_release_corpus,
 )
+
+
+def test_release_corpus_gate_rejects_small_or_non_abstaining_corpus():
+    valid, reasons = validate_release_corpus([{"difficulty": "easy", "ground_truth": {}}])
+    assert valid is False
+    assert "benchmark_case_count_below_30" in reasons
+    assert "benchmark_abstention_case_missing" in reasons
+
+
+def test_release_corpus_gate_accepts_qualified_corpus():
+    cases = [
+        {"difficulty": "easy", "ground_truth": {"should_abstain": False}}
+        for _ in range(15)
+    ] + [
+        {"difficulty": "hard", "ground_truth": {"should_abstain": index == 0}}
+        for index in range(15)
+    ]
+    assert validate_release_corpus(cases)[0] is True
 
 _CHECKOUT_TRUTH = {"component": "checkout-svc", "layer": "application", "fault_type": "null-dereference"}
 

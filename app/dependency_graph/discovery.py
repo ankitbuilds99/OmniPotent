@@ -71,6 +71,45 @@ class DiscoveredService:
         return f"{self.name}.{self.namespace}"
 
 
+@dataclass(frozen=True)
+class CatalogValidation:
+    valid: bool
+    duplicate_fqdns: tuple[str, ...] = ()
+    stale_fqdns: tuple[str, ...] = ()
+    missing_names: tuple[str, ...] = ()
+
+
+def validate_catalog(
+    services: list[DiscoveredService],
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = 900,
+) -> CatalogValidation:
+    """Validate identity and freshness before a catalog is used for reasoning."""
+    now = now or datetime.now(timezone.utc)
+    counts: dict[str, int] = {}
+    stale: list[str] = []
+    missing: list[str] = []
+    for service in services:
+        fqdn = service.fqdn
+        counts[fqdn] = counts.get(fqdn, 0) + 1
+        if not service.name.strip() or not service.namespace.strip():
+            missing.append(fqdn)
+        observed = service.discovered_at
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        if (now - observed).total_seconds() > max_age_seconds:
+            stale.append(fqdn)
+    duplicates = tuple(sorted(k for k, count in counts.items() if count > 1))
+    result = CatalogValidation(
+        valid=not duplicates and not stale and not missing,
+        duplicate_fqdns=duplicates,
+        stale_fqdns=tuple(sorted(set(stale))),
+        missing_names=tuple(sorted(set(missing))),
+    )
+    return result
+
+
 @dataclass
 class DiscoveryConfig:
     """Service discovery configuration."""
@@ -168,6 +207,16 @@ class ServiceDiscovery:
         # Auto-detect dependencies
         if self.config.auto_detect_dependencies:
             await self._detect_dependencies(services)
+
+        validation = validate_catalog(services, max_age_seconds=max(1, self.config.discovery_interval_seconds * 3))
+        if not validation.valid:
+            log.warning("service catalog validation failed: %s", validation)
+            # Do not publish ambiguous or stale identities. A stale dependency
+            # is not safe evidence for blast-radius reasoning: retaining it in
+            # the active catalog would turn an age warning into a confident,
+            # wrong impact answer.
+            invalid = set(validation.duplicate_fqdns) | set(validation.missing_names) | set(validation.stale_fqdns)
+            services = [s for s in services if s.fqdn not in invalid]
 
         # Update cache
         self._services = {s.fqdn: s for s in services}

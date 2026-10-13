@@ -33,6 +33,8 @@ from app.policy_engine import (
 )
 from app.policy_engine.change_windows import RecurrencePattern
 from app.api.main import require_perm
+from app import mutation_freeze
+from app.tenant_context import storage_org_id
 
 log = logging.getLogger("omnipotent.api.policy")
 
@@ -67,6 +69,13 @@ log = logging.getLogger("omnipotent.api.policy")
 _MANAGE = [Depends(require_perm("manage_integrations"))]
 _APPROVE = [Depends(require_perm("approve_action"))]
 _AUDIT = [Depends(require_perm("view_audit"))]
+
+
+class MutationFreezeRequest(BaseModel):
+    """Operator-controlled mutation freeze scope."""
+
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=256)
+    global_scope: bool = False
 
 router: APIRouter = APIRouter(
     prefix="/policy",
@@ -180,6 +189,8 @@ class KyvernoResultResponse(BaseModel):
     mutations: list[dict[str, Any]]
     warnings: list[str]
     evaluated_at: str
+    engine: str
+    authoritative: bool
 
 
 class ChangeWindowRequest(BaseModel):
@@ -410,10 +421,16 @@ async def evaluate_kyverno_policies(
                     mutations=r.mutations,
                     warnings=r.warnings,
                     evaluated_at=r.evaluated_at.isoformat(),
+                    engine=r.engine,
+                    authoritative=r.authoritative,
                 ).model_dump()
                 for r in results
             ],
-            "all_allowed": all(r.allowed for r in results),
+            # An embedded evaluator can explain a local approximation, but it
+            # cannot authorize a cluster mutation. Keep the aggregate fail
+            # closed until every result came from the authoritative engine.
+            "all_allowed": all(r.allowed and r.authoritative for r in results),
+            "all_authoritative": all(r.authoritative for r in results),
             "count": len(results),
         }
 
@@ -826,3 +843,36 @@ async def rollback_policy_version(
         "policy_name": policy_name,
         "version": version,
     }
+
+
+@router.post("/mutation-freeze", dependencies=_MANAGE)
+async def freeze_mutations(request: MutationFreezeRequest) -> dict[str, Any]:
+    """Disable mutations independently of agent/LLM approval state."""
+    if request.global_scope:
+        mutation_freeze.freeze()
+        scope = "global"
+    else:
+        tenant = request.tenant_id or storage_org_id()
+        mutation_freeze.freeze(tenant_id=tenant)
+        scope = tenant
+    return {"status": "frozen", "scope": scope}
+
+
+@router.delete("/mutation-freeze", dependencies=_MANAGE)
+async def unfreeze_mutations(request: MutationFreezeRequest) -> dict[str, Any]:
+    """Re-enable mutations for a tenant or globally."""
+    if request.global_scope:
+        mutation_freeze.unfreeze()
+        scope = "global"
+    else:
+        tenant = request.tenant_id or storage_org_id()
+        mutation_freeze.unfreeze(tenant_id=tenant)
+        scope = tenant
+    return {"status": "unfrozen", "scope": scope}
+
+
+@router.get("/mutation-freeze")
+async def mutation_freeze_status() -> dict[str, Any]:
+    """Return whether the current tenant is mutation-frozen."""
+    tenant = storage_org_id()
+    return {"tenant_id": tenant, "frozen": mutation_freeze.is_frozen(tenant)}

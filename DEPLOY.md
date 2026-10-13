@@ -39,7 +39,7 @@ its stdio MCP servers in-process.
 | `<PROVIDER>_API_KEY` | yes (one) | e.g. `ANTHROPIC_API_KEY`. May instead be pasted at runtime via the UI, but then `/readyz` is 503 until it is. |
 | `CORS_ORIGINS` | only if SPA is hosted elsewhere | Not needed when the SPA is served same-origin from this backend. |
 | `COPILOT_SOURCES_ROOT` | recommended | Confines `/sources/*` (the agent's file tools) to a directory tree. Defaults to the project root. |
-| `COPILOT_CHECKPOINT_DB` | no | Defaults to `/data/copilot_checkpoints.sqlite` in the image. |
+| `COPILOT_CHECKPOINT_DB` | yes for prod | PostgreSQL URL required in production; SQLite is for development/staging only. |
 
 Safety limits (sensible defaults; override only if needed):
 `COPILOT_RATE_LIMIT_PER_MIN` (120), `COPILOT_MAX_BODY_BYTES` (1000000),
@@ -122,6 +122,8 @@ The shared-state seams are now in place — set these and run `replicaCount > 1`
   (install the `postgres` extra) — `make_checkpointer()` switches to the Postgres
   saver automatically, and because graph state is keyed by `thread_id`, an evicted
   session **rehydrates from the checkpointer on any replica** (`_get_session`).
+  SQLite is local to one process and production startup rejects it because it
+  cannot safely resume approval-gated state after restart or on another replica.
 - **Shared limiter / job queue / spend cap.** Set `COPILOT_REDIS_URL` to a
   `redis://...` URL — the rate limiter (`app/ratelimit.py`), the durable
   investigation queue (`app/jobqueue.py`), and the fleet-wide token cap

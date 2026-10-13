@@ -70,6 +70,7 @@ class PolicyEvaluationResult:
     # Component results
     opa_allowed: bool | None
     kyverno_allowed: bool | None
+    kyverno_authoritative: bool | None
     window_allowed: bool | None
     criteria_passed: bool | None
 
@@ -87,6 +88,7 @@ class PolicyEvaluationResult:
             "warnings": [w.to_dict() for w in self.warnings],
             "opa_allowed": self.opa_allowed,
             "kyverno_allowed": self.kyverno_allowed,
+            "kyverno_authoritative": self.kyverno_authoritative,
             "window_allowed": self.window_allowed,
             "criteria_passed": self.criteria_passed,
             "evaluated_at": self.evaluated_at.isoformat(),
@@ -277,6 +279,7 @@ class PolicyEngine:
 
         # Process Kyverno result
         kyverno_allowed = None
+        kyverno_authoritative = None
         if isinstance(kyverno_raw, Exception):
             log.error("Kyverno evaluation failed: %s", kyverno_raw)
             if self.deny_on_error:
@@ -287,7 +290,21 @@ class PolicyEngine:
                     source="kyverno",
                 ))
         elif kyverno_result:
-            kyverno_allowed = kyverno_result.get("allowed", True)
+            authoritative = kyverno_result.get("authoritative", False)
+            kyverno_authoritative = authoritative
+            kyverno_allowed = kyverno_result.get("allowed", True) and authoritative
+            if not authoritative:
+                violations.append(PolicyViolation(
+                    policy_name="kyverno_authority_required",
+                    message=(
+                        "Kyverno returned an embedded approximation; "
+                        "cluster-authoritative policy evaluation is required "
+                        "before a mutation can be allowed"
+                    ),
+                    severity=ViolationSeverity.HIGH,
+                    source="kyverno",
+                    remediation="Connect to the cluster Kyverno admission evaluator and retry",
+                ))
             for v in kyverno_result.get("violations", []):
                 violations.append(PolicyViolation(
                     policy_name=v.get("policy", "unknown"),
@@ -368,6 +385,7 @@ class PolicyEngine:
             warnings=warnings,
             opa_allowed=opa_allowed,
             kyverno_allowed=kyverno_allowed,
+            kyverno_authoritative=kyverno_authoritative,
             window_allowed=window_allowed,
             criteria_passed=criteria_passed,
             evaluation_id=evaluation_id,

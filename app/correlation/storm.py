@@ -105,9 +105,26 @@ def correlate_storm(failing_services: list[str], edges: list[list[str]]) -> dict
     """Full correlation over a set of concurrently-failing services: the ranked
     root-cause candidates and the single most-likely shared root (or None)."""
     ranked = rank_root_causes(failing_services, edges)
-    root = next((r["service"] for r in ranked if r["is_root_candidate"]), None)
+    candidates = [r for r in ranked if r["is_root_candidate"]]
+    # A deterministic name tie-break is useful for display but unsafe as a root
+    # cause claim. If multiple candidates explain the same storm equally, abstain
+    # and make the ambiguity explicit to the caller.
+    top = ranked[0] if ranked else None
+    ambiguous = bool(
+        top and len(ranked) > 1 and
+        all(
+            r["explains_count"] == top["explains_count"] and
+            len(r["depends_on_failing"]) == len(top["depends_on_failing"])
+            for r in ranked[:2]
+        )
+    )
+    if ambiguous:
+        for candidate in candidates:
+            candidate["is_root_candidate"] = False
+    root = None if ambiguous else next((r["service"] for r in candidates), None)
     return {
         "failing_services": list(dict.fromkeys(s for s in failing_services if s)),
         "likely_root": root,
+        "ambiguous": ambiguous,
         "ranked": ranked,
     }

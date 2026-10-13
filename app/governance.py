@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -62,5 +63,17 @@ def export_audit(events: list[dict], path: str) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as fh:
         for e in events:
-            fh.write(json.dumps(e, default=str) + "\n")
-    return {"exported": len(events), "path": str(out), "chain_ok": bool(verdict.get("valid"))}
+            fh.write(json.dumps(e, default=str, sort_keys=True) + "\n")
+    payload = out.read_bytes()
+    digest = sha256(payload).hexdigest()
+    manifest = {
+        "schema": "omnipotent.audit-export.v1",
+        "event_count": len(events),
+        "chain_ok": bool(verdict.get("valid")),
+        "sha256": digest,
+        "path": str(out),
+    }
+    manifest_path = out.with_suffix(out.suffix + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {"exported": len(events), "path": str(out), "manifest": str(manifest_path),
+            "chain_ok": bool(verdict.get("valid")), "sha256": digest}

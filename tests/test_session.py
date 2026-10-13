@@ -2,7 +2,7 @@
 
 import asyncio
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.config import get_settings
 from app.session import CopilotSession, _describe, _last_ai_text
@@ -40,6 +40,18 @@ def test_describe_renders_each_node():
     )
     assert _describe("reflect", {"status": "done"})
     assert _describe("__interrupt__", None)
+
+
+def test_describe_marks_unavailable_evidence_as_warning():
+    message = ToolMessage(
+        name="get_metric",
+        tool_call_id="metric-1",
+        content='{"untrusted_content":"{\\"status\\":\\"unavailable\\",\\"provider\\":\\"datadog\\",\\"reason\\":\\"metric_not_found\\"}"}',
+    )
+    line = _describe("tools", {"messages": [message]})
+    assert line.startswith("⚠")
+    assert "datadog" in line
+    assert "metric_not_found" in line
 
 
 def test_confidence_gate_blocks_programmatic_auto_approval(monkeypatch):

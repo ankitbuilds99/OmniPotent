@@ -33,6 +33,9 @@ async function errorDetail(res: Response, fallback: string): Promise<string> {
  * `unavailable` — no connector, or one the deployment configures, not the org.
  */
 type IntegrationStatus = "live" | "saved" | "available" | "unavailable";
+type IntegrationStatusPayload = Record<string, boolean> & {
+  details?: Record<string, Integration["details"]>;
+};
 
 interface Integration {
   id: string;
@@ -54,6 +57,13 @@ interface Integration {
    * deployment's own environment with nothing stored here to manage.
    */
   storedNames: string[];
+  /** Additive metadata from /integrations/status; absent on older backends. */
+  details?: {
+    mode?: "deployment" | "organization";
+    capabilities?: string[];
+    write_capable?: boolean;
+    freshness?: string;
+  };
 }
 
 /*
@@ -377,6 +387,21 @@ function IntegrationCard({ integration, onConnect, onDisconnect }: {
             </span>
           </div>
           <p className="text-sm text-gray-400 mb-3">{integration.description}</p>
+          {integration.details && (
+            <div className="flex flex-wrap gap-1 mb-3 text-xs" aria-label={`${integration.name} operational boundary`}>
+              <span className="rounded px-2 py-0.5" style={{ backgroundColor: "var(--panel)" }}>
+                {integration.details.mode === "deployment" ? "Deployment configured" : "Organization configured"}
+              </span>
+              <span className="rounded px-2 py-0.5" style={{ backgroundColor: "var(--panel)" }}>
+                {integration.details.write_capable ? "Read/write boundary" : "Read-only"}
+              </span>
+              {integration.details.capabilities?.slice(0, 3).map((capability) => (
+                <span key={capability} className="rounded px-2 py-0.5 font-mono" style={{ backgroundColor: "var(--panel)" }}>
+                  {capability}
+                </span>
+              ))}
+            </div>
+          )}
           {integration.reason && (
             <p className="text-xs mb-3" style={{ color: "var(--text-2)" }}>{integration.reason}</p>
           )}
@@ -636,7 +661,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
   const [search, setSearch] = useState("");
   const [connectingIntegration, setConnectingIntegration] = useState<Integration | null>(null);
   const [connectedIntegrations, setConnectedIntegrations] = useState<Set<string>>(new Set());
-  const [integrationStatus, setIntegrationStatus] = useState<Record<string, boolean>>({});
+  const [integrationStatus, setIntegrationStatus] = useState<IntegrationStatusPayload>({});
   // connector name -> the tools its MCP server exposes, from GET /config.
   const [serverTools, setServerTools] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
@@ -716,6 +741,9 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
   // thirds of the catalog.
   const integrations: Integration[] = INTEGRATION_CATALOG.map((cat) => {
     const spec = specFor(cat.id);
+    const details = spec.statusKey
+      ? (integrationStatus.details?.[spec.statusKey] as Integration["details"] | undefined)
+      : undefined;
     const live = Boolean(spec.statusKey && integrationStatus[spec.statusKey]);
     const stored =
       spec.fields.length > 0 &&
@@ -735,6 +763,7 @@ export function IntegrationMarketplace({ onBack }: { onBack: () => void }) {
       // finds nothing here and shows no capability chips at all.
       tools: (spec.statusKey && serverTools[spec.statusKey]) || [],
       storedNames: spec.fields.map((f) => f.env).filter((env) => connectedIntegrations.has(env)),
+      details,
     };
   });
 

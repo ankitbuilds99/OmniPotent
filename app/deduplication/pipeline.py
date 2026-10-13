@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -14,6 +17,7 @@ from app.deduplication.models import (
     DeduplicationDecision,
     Decision,
     IncidentGroup,
+    AlertSeverity,
 )
 from app.deduplication.fingerprint import (
     FingerprintCalculator,
@@ -42,6 +46,7 @@ from app.deduplication.suppression import (
     SuppressionEngine,
     SuppressionConfig,
 )
+from app.deduplication.state_store import DedupStateStore, RedisDedupStateStore, local_lock
 
 log = logging.getLogger("omnipotent.deduplication.pipeline")
 
@@ -66,6 +71,13 @@ class PipelineConfig:
 
     min_confidence_to_merge: float = 0.7
     max_alerts_per_incident: int = 100
+    # Empty means process-local state, suitable only for development.  A
+    # production deployment should set this through environment/configuration.
+    shared_state_url: str = field(
+        default_factory=lambda: os.getenv("COPILOT_DEDUP_STATE_URL", "")
+    )
+    shared_state_key: str = "omnipotent:dedup:v1"
+    require_shared_state: bool = False
 
 
 @dataclass
@@ -148,8 +160,22 @@ class PipelineMetrics:
 class DeduplicationPipeline:
     """Main deduplication pipeline combining all 6 layers."""
 
-    def __init__(self, config: PipelineConfig | None = None):
+    def __init__(
+        self,
+        config: PipelineConfig | None = None,
+        *,
+        state_store: DedupStateStore | None = None,
+    ):
         self.config = config or PipelineConfig()
+        self._state_store = state_store
+        if self._state_store is None and self.config.shared_state_url.strip():
+            self._state_store = RedisDedupStateStore(
+                self.config.shared_state_url, self.config.shared_state_key
+            )
+        if self.config.require_shared_state and self._state_store is None:
+            raise RuntimeError(
+                "shared deduplication state is required but no state store is configured"
+            )
         self._metrics = PipelineMetrics()
 
         self._fingerprint_calculator = FingerprintCalculator(
@@ -177,8 +203,22 @@ class DeduplicationPipeline:
         self._incidents: dict[UUID, IncidentGroup] = {}
         self._alert_to_incident: dict[UUID, UUID] = {}
         self._recent_alerts: list[RawAlert] = []
+        self._state_digest: str | None = None
+        self._restore_state()
 
     def process_alert(self, alert: RawAlert) -> DeduplicationDecision:
+        """Process one alert atomically when shared state is configured."""
+        lock_factory = getattr(self._state_store, "lock", None)
+        lock = lock_factory() if lock_factory is not None else local_lock()
+        with lock:
+            # Another worker may have committed a newer snapshot while this
+            # process was idle. Rehydrate before deciding, while preserving the
+            # current object's configuration and notification sink.
+            if self._state_store is not None:
+                self._restore_state()
+            return self._process_alert_unlocked(alert)
+
+    def _process_alert_unlocked(self, alert: RawAlert) -> DeduplicationDecision:
         """Process an alert through the deduplication pipeline."""
         start_time = time.time()
         layers_applied: list[str] = []
@@ -201,6 +241,7 @@ class DeduplicationPipeline:
                     fingerprint=fingerprint.fingerprint,
                 )
                 self._record_decision(alert, decision, start_time)
+                self._persist_state()
                 return decision
 
         if self.config.enable_layer1_fingerprint:
@@ -222,6 +263,7 @@ class DeduplicationPipeline:
                     )
                     self._add_to_incident(alert, fp_match.incident_id, fingerprint)
                     self._record_decision(alert, decision, start_time)
+                    self._persist_state()
                     return decision
 
         if self.config.enable_layer2_semantic:
@@ -242,6 +284,7 @@ class DeduplicationPipeline:
                     )
                     self._add_to_incident(alert, semantic_match.incident_id, fingerprint)
                     self._record_decision(alert, decision, start_time)
+                    self._persist_state()
                     return decision
 
         if self.config.enable_layer3_temporal:
@@ -263,6 +306,7 @@ class DeduplicationPipeline:
                     )
                     self._add_to_incident(alert, temporal_match.incident_id, fingerprint)
                     self._record_decision(alert, decision, start_time)
+                    self._persist_state()
                     return decision
 
             cascade = self._cascade_detector.detect_cascade(alert)
@@ -282,6 +326,7 @@ class DeduplicationPipeline:
                     )
                     self._add_to_incident(alert, root_incident_id, fingerprint)
                     self._record_decision(alert, decision, start_time)
+                    self._persist_state()
                     return decision
 
         if self.config.enable_layer4_topology:
@@ -302,6 +347,7 @@ class DeduplicationPipeline:
                     )
                     self._add_to_incident(alert, topo_match.upstream_incident_id, fingerprint)
                     self._record_decision(alert, decision, start_time)
+                    self._persist_state()
                     return decision
 
         if self.config.enable_layer5_ml:
@@ -337,7 +383,82 @@ class DeduplicationPipeline:
             fingerprint=fingerprint.fingerprint,
         )
         self._record_decision(alert, decision, start_time)
+        self._persist_state()
         return decision
+
+    def _snapshot(self) -> dict[str, Any]:
+        alerts = {str(a.alert_id): a.to_dict() for a in self._recent_alerts}
+        return {
+            "schema": "omnipotent.dedup-state.v1",
+            "incidents": [i.to_dict() for i in self._incidents.values()],
+            "alerts": list(alerts.values()),
+        }
+
+    def _persist_state(self) -> None:
+        if self._state_store is not None:
+            state = self._snapshot()
+            self._state_store.save(state)
+            self._state_digest = self._digest_state(state)
+
+    @staticmethod
+    def _digest_state(state: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(state, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+
+    def _restore_state(self) -> None:
+        if self._state_store is None:
+            return
+        state = self._state_store.load()
+        if not state:
+            return
+        digest = self._digest_state(state)
+        if digest == self._state_digest:
+            return
+        if state.get("schema") != "omnipotent.dedup-state.v1":
+            raise RuntimeError("unsupported deduplication state schema")
+        incidents = {
+            UUID(item["incident_id"]): self._incident_from_dict(item)
+            for item in state.get("incidents", [])
+        }
+        alerts = [RawAlert.from_dict(item) for item in state.get("alerts", [])]
+        by_id = {a.alert_id: a for a in alerts}
+        self._incidents = incidents
+        self._recent_alerts = alerts[-100:]
+        for incident in incidents.values():
+            for alert_id in incident.alerts:
+                alert = by_id.get(alert_id)
+                if alert is None or incident.status != "active":
+                    continue
+                fingerprint = self._fingerprint_calculator.calculate(alert)
+                self._alert_to_incident[alert.alert_id] = incident.incident_id
+                self._fingerprint_matcher.register_alert(fingerprint, alert, incident.incident_id)
+                self._semantic_engine.register_alert(alert, incident.incident_id)
+                self._temporal_correlator.register_alert(alert, incident.incident_id, fingerprint.fingerprint)
+                self._cascade_detector.register_alert(alert, incident.incident_id)
+                self._topology_correlator.register_incident(alert.service, incident.incident_id)
+        self._state_digest = digest
+
+    @staticmethod
+    def _incident_from_dict(item: dict[str, Any]) -> IncidentGroup:
+        def dt(value: str | None) -> datetime | None:
+            return datetime.fromisoformat(value) if value else None
+
+        return IncidentGroup(
+            incident_id=UUID(item["incident_id"]),
+            title=item.get("title", ""),
+            alerts=[UUID(value) for value in item.get("alerts", [])],
+            root_cause_alert_id=UUID(item["root_cause_alert_id"]) if item.get("root_cause_alert_id") else None,
+            root_cause_service=item.get("root_cause_service"),
+            severity=AlertSeverity(item.get("severity", "medium")),
+            status=item.get("status", "active"),
+            created_at=dt(item.get("created_at")) or datetime.utcnow(),
+            updated_at=dt(item.get("updated_at")) or datetime.utcnow(),
+            resolved_at=dt(item.get("resolved_at")),
+            grouping_reason=item.get("grouping_reason", ""),
+            grouping_confidence=float(item.get("grouping_confidence", 0.0)),
+            ai_analysis=item.get("ai_analysis", ""),
+        )
 
     def _mergeable_incident(self, incident_id: UUID | None) -> IncidentGroup | None:
         """The incident a layer's match may join, or None if it may not.

@@ -7,7 +7,9 @@ human-in-the-loop interrupts so the caller can approve/reject write actions.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -331,8 +333,44 @@ def _describe(node: str, update: Any) -> str:
         return "🤖 reasoning"
     if node == "tools":
         msgs = (update or {}).get("messages", [])
-        names = ", ".join(getattr(m, "name", "?") for m in msgs if isinstance(m, ToolMessage))
-        return f"🔧 tool result: {names}"
+        lines: list[str] = []
+        for message in msgs:
+            if not isinstance(message, ToolMessage):
+                continue
+            name = getattr(message, "name", "?")
+            raw = message.content if isinstance(message.content, str) else str(message.content)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("untrusted_content"), str):
+                try:
+                    nested = json.loads(payload["untrusted_content"])
+                    if isinstance(nested, dict):
+                        payload = nested
+                except (TypeError, ValueError):
+                    pass
+            # Trusted-tool compatibility text may wrap the JSON under an
+            # ``untrusted_content`` envelope. Search only for the fixed status
+            # fields, never arbitrary provider/error text.
+            unavailable = isinstance(payload, dict) and payload.get("status") == "unavailable"
+            compact = raw.replace(" ", "").replace('\\"', '"')
+            if not unavailable and '"status":"unavailable"' in compact:
+                unavailable = True
+            if unavailable:
+                provider = payload.get("provider", "provider") if isinstance(payload, dict) else "provider"
+                reason = payload.get("reason", "unavailable") if isinstance(payload, dict) else "unavailable"
+                if not isinstance(payload, dict):
+                    provider_match = re.search(r'"provider":"([^"}]+)', compact)
+                    reason_match = re.search(r'"reason":"([^"}]+)', compact)
+                    provider = provider_match.group(1) if provider_match else provider
+                    reason = reason_match.group(1) if reason_match else reason
+                lines.append(f"⚠ {provider} {name} unavailable ({reason})")
+            else:
+                provider = payload.get("provider") if isinstance(payload, dict) else None
+                label = f"{provider} {name}" if provider else name
+                lines.append(f"✓ {label} collected")
+        return " | ".join(lines) if lines else "⚠ no tool result returned"
     if node == "approval":
         return "⏸️  awaiting human approval"
     if node == "reflect":

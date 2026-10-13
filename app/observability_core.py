@@ -197,6 +197,11 @@ def setup_sentry() -> None:
 
     sentry_sdk.init(
         dsn=s.sentry_dsn,
+        # Use the explicit integrations below. Sentry's default auto-discovery
+        # imports its LangChain integration, which pulls in optional
+        # sentence-transformers/Transformers/TensorFlow dependencies and can
+        # prevent the API from starting when those extras are not configured.
+        default_integrations=False,
         environment=s.copilot_env,
         # Without a release, Sentry cannot say which deploy introduced an issue
         # and "regressed in" is blank on every event. SERVICE_NAME/SERVICE_VERSION

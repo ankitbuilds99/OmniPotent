@@ -1,30 +1,33 @@
-import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { lazy, Suspense } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { Console } from "./components/Console";
-import { CinematicLanding } from "./components/landing/CinematicLanding";
 import { OnboardingWizard } from "./components/OnboardingWizard";
-import { ApiDocs } from "./pages/ApiDocs";
-import { Dashboard } from "./pages/Dashboard";
-import { Billing } from "./pages/Billing";
-import { Login } from "./pages/Login";
-import { AuthCallback } from "./pages/AuthCallback";
-import { Profile } from "./pages/Profile";
-import { History } from "./pages/History";
-import { StatusPage } from "./pages/StatusPage";
-import { Team } from "./pages/Team";
-import { AcceptInvite, PENDING_INVITATION_KEY } from "./pages/AcceptInvite";
-import { Incidents } from "./pages/Incidents";
-import { OnCall } from "./pages/OnCall";
-import { ServiceMap } from "./pages/ServiceMap";
-import { NotificationPreferences } from "./pages/NotificationPreferences";
-import { Postmortem } from "./pages/Postmortem";
-import { Analytics } from "./pages/Analytics";
-import { SLOTracker } from "./pages/SLOTracker";
-import { RunbookBuilder } from "./pages/RunbookBuilder";
-import { IntegrationMarketplace } from "./pages/IntegrationMarketplace";
-import { KnowledgeBase } from "./pages/KnowledgeBase";
-import { PricingPage } from "./pages/PricingPage";
-import { CapabilitiesPage } from "./pages/CapabilitiesPage";
+const ApiDocs = lazy(() => import("./pages/ApiDocs").then((m) => ({ default: m.ApiDocs })));
+const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const Billing = lazy(() => import("./pages/Billing").then((m) => ({ default: m.Billing })));
+const Login = lazy(() => import("./pages/Login").then((m) => ({ default: m.Login })));
+const AuthCallback = lazy(() => import("./pages/AuthCallback").then((m) => ({ default: m.AuthCallback })));
+const Profile = lazy(() => import("./pages/Profile").then((m) => ({ default: m.Profile })));
+const History = lazy(() => import("./pages/History").then((m) => ({ default: m.History })));
+const StatusPage = lazy(() => import("./pages/StatusPage").then((m) => ({ default: m.StatusPage })));
+const Team = lazy(() => import("./pages/Team").then((m) => ({ default: m.Team })));
+const AcceptInvite = lazy(() => import("./pages/AcceptInvite").then((m) => ({ default: m.AcceptInvite })));
+const Incidents = lazy(() => import("./pages/Incidents").then((m) => ({ default: m.Incidents })));
+const OnCall = lazy(() => import("./pages/OnCall").then((m) => ({ default: m.OnCall })));
+const ServiceMap = lazy(() => import("./pages/ServiceMap").then((m) => ({ default: m.ServiceMap })));
+const NotificationPreferences = lazy(() => import("./pages/NotificationPreferences").then((m) => ({ default: m.NotificationPreferences })));
+const Postmortem = lazy(() => import("./pages/Postmortem").then((m) => ({ default: m.Postmortem })));
+const Analytics = lazy(() => import("./pages/Analytics").then((m) => ({ default: m.Analytics })));
+const SLOTracker = lazy(() => import("./pages/SLOTracker").then((m) => ({ default: m.SLOTracker })));
+const RunbookBuilder = lazy(() => import("./pages/RunbookBuilder").then((m) => ({ default: m.RunbookBuilder })));
+const IntegrationMarketplace = lazy(() => import("./pages/IntegrationMarketplace").then((m) => ({ default: m.IntegrationMarketplace })));
+const KnowledgeBase = lazy(() => import("./pages/KnowledgeBase").then((m) => ({ default: m.KnowledgeBase })));
+const PricingPage = lazy(() => import("./pages/PricingPage").then((m) => ({ default: m.PricingPage })));
+const CapabilitiesPage = lazy(() => import("./pages/CapabilitiesPage").then((m) => ({ default: m.CapabilitiesPage })));
+const CinematicLanding = lazy(() => import("./components/landing/CinematicLanding").then((m) => ({ default: m.CinematicLanding })));
+import { isPublicRoute, PENDING_INVITATION_KEY } from "./lib/navigation";
+import { isAuthenticated } from "./lib/authToken";
 
 // Every page used to be a value of a `view` useState, so nothing had a URL:
 // reload dropped you back on the landing page, no screen could be linked to or
@@ -38,6 +41,14 @@ import { CapabilitiesPage } from "./pages/CapabilitiesPage";
 
 function AppRoutes() {
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Backend authorization remains authoritative. This client-side gate only
+  // prevents an unauthenticated browser from rendering customer workspace
+  // screens before its first API request; it never grants access by itself.
+  if (!isPublicRoute(location.pathname) && !isAuthenticated()) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
 
   // Where a fresh login lands: the wizard until it has been completed once.
   const afterLogin = () => {
@@ -59,6 +70,7 @@ function AppRoutes() {
   };
 
   return (
+    <Suspense fallback={<div role="status" aria-live="polite" className="route-loading">Loading workspace…</div>}>
     <Routes>
       {/* Open the application console by default. */}
       <Route path="/" element={<Navigate to="/console" replace />} />
@@ -196,6 +208,7 @@ function AppRoutes() {
           unrecognised URL arrives here rather than as a 404. Send it home. */}
       <Route path="*" element={<Navigate to="/console" replace />} />
     </Routes>
+    </Suspense>
   );
 }
 

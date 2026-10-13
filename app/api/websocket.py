@@ -25,6 +25,7 @@ from starlette.websockets import WebSocketState
 
 from app import audit
 from app.config import get_settings
+from app import investigation_history
 
 log = logging.getLogger("omnipotent.websocket")
 
@@ -556,6 +557,32 @@ async def _handle_chat(
                 elif t == "done":
                     _AWAITING.discard(tid)
                     await _meter_and_spend(ev.get("tokens_used", 0))
+                    # A thread is the agent conversation/checkpointer key, but
+                    # each completed question is a separate investigation in
+                    # History and Analytics. Do not let the stable browser
+                    # thread id upsert every question into one row.
+                    history_id = f"{thread_id}:{uuid.uuid4().hex[:12]}"
+                    # The browser's live console uses WebSocket transport. Keep
+                    # it consistent with the SSE path: a completed interactive
+                    # investigation must be persisted before the done event is
+                    # delivered to the client.
+                    report = ev.get("report") or {}
+                    await investigation_history.record(
+                        history_id,
+                        message,
+                        status="completed",
+                        summary=report.get("root_cause") or ev.get("final_text") or None,
+                        report=report or None,
+                        latency_ms=int((time_mod.monotonic() - _t0) * 1000),
+                    )
+                    # Analytics reads the dashboard metrics projection, which
+                    # is separate from the narrative history row above.
+                    from app.api.main import _record_dashboard_history_from_stream
+                    await _record_dashboard_history_from_stream(
+                        history_id,
+                        ev,
+                        time_mod.monotonic() - _t0,
+                    )
                     _record_slo(
                         type("Result", (), {
                             "report": ev.get("report"),

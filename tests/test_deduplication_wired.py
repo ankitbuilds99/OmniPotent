@@ -280,6 +280,12 @@ async def test_gating_features_matches_what_the_config_reads() -> None:
     assert changed == expected
 
 
+def test_shared_state_key_is_tenant_scoped() -> None:
+    first = dedup_api._config_for({}, uuid4())
+    second = dedup_api._config_for({}, uuid4())
+    assert first.shared_state_key != second.shared_state_key
+
+
 async def test_upgrade_takes_effect_without_losing_incidents() -> None:
     """Plans are re-resolved per call; an upgrade must not reset accumulated state."""
     org = uuid4()

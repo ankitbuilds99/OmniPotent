@@ -1,6 +1,7 @@
 """Data governance — retention purge, GDPR erasure, audit export."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -67,6 +68,10 @@ async def test_export_audit_writes_jsonl_and_reports_chain(tmp_path, monkeypatch
     events = (await audit.recent(limit=10))[::-1]
     out = governance.export_audit(events, str(tmp_path / "audit_export.jsonl"))
     assert out["exported"] == 2
+    assert len(out["sha256"]) == 64
+    manifest = tmp_path / "audit_export.jsonl.manifest.json"
+    assert manifest.exists()
+    assert json.loads(manifest.read_text())["event_count"] == 2
     assert out["chain_ok"] is True
     lines = (tmp_path / "audit_export.jsonl").read_text().strip().splitlines()
     assert len(lines) == 2

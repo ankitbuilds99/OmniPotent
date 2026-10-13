@@ -464,6 +464,57 @@ class IncidentInvestigation(Base):
     )
 
 
+class OperatorAnnotationDB(Base):
+    """Append-only operator judgement attached to an incident."""
+
+    __tablename__ = "operator_annotations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False
+    )
+    field: Mapped[str] = mapped_column(String(200), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_hash: Mapped[str | None] = mapped_column(String(64))
+    digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "incident_id", "revision", name="uq_operator_annotation_revision"),
+        Index("ix_operator_annotations_org_incident", "org_id", "incident_id", "revision"),
+    )
+
+
+class ConfirmedMemoryDB(Base):
+    """A confirmed memory claim linked to the exact authored annotation digest."""
+
+    __tablename__ = "confirmed_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False
+    )
+    field: Mapped[str] = mapped_column(String(200), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmed_by: Mapped[str] = mapped_column(String(256), nullable=False)
+    confirmation: Mapped[str] = mapped_column(Text, nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "incident_id", "field", name="uq_confirmed_memory_field"),
+        Index("ix_confirmed_memories_org_incident", "org_id", "incident_id"),
+    )
+
+
 class Postmortem(Base):
     """The postmortem document for one incident.
 

@@ -33,6 +33,11 @@ _ov: dict[str, str] = {
     "logs_path": "",
 }
 
+# An explicit disconnect must override the static .env fallback until the user
+# connects GitHub again. Otherwise POST /github/disconnect appears successful
+# but github_connected() immediately re-reads GITHUB_TOKEN from Settings.
+_github_disconnected = False
+
 # Per-provider API key overrides — remembered separately so switching provider in
 # the UI doesn't wipe the key you pasted for another one.
 _keys: dict[str, str] = {p: "" for p in PROVIDERS}
@@ -136,16 +141,22 @@ def set_model(provider: str, api_key: str, model: str = "", fast_model: str = ""
 
 # ---- github ----
 def set_github(token: str, repo: str) -> None:
+    global _github_disconnected
+    _github_disconnected = False
     _ov["github_token"] = (token or "").strip()
     _ov["github_repo"] = (repo or "").strip()
 
 
 def clear_github() -> None:
+    global _github_disconnected
+    _github_disconnected = True
     _ov["github_token"] = ""
     _ov["github_repo"] = ""
 
 
 def github_token() -> str:
+    if _github_disconnected:
+        return ""
     t = tenant_context.get_tenant()
     if t is not None:
         return t.github_token
@@ -153,6 +164,8 @@ def github_token() -> str:
 
 
 def github_repo() -> str:
+    if _github_disconnected:
+        return ""
     t = tenant_context.get_tenant()
     if t is not None:
         return t.github_repo

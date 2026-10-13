@@ -103,8 +103,60 @@ drove the fix for, an early gameable version).
 ```bash
 uv run python -m evals.run_benchmark              # scorecard (replay) + baseline self-check
 uv run python -m evals.run_benchmark --baselines  # non-gameability self-check only (fully offline)
+uv run python -m evals.run_benchmark --output outputs/rca-benchmark.json
 uv run python -m evals.run_benchmark --live        # run the agent against a real LLM
+uv run python -m evals.run_benchmark --release-gate # fail closed unless corpus is release-sized
 ```
+
+`--output` writes a versioned JSON artifact containing benchmark mode,
+timestamp, case-file provenance, and the complete stratified scorecard. Store
+it with release evidence; it does not replace live-environment validation.
+
+The checked-in corpus is development-sized. `--release-gate` requires at least
+30 independently labeled cases, multiple difficulty tiers, and abstention
+coverage; it fails until such a corpus is supplied.
+Every JSON artifact also records `release_corpus_ready` and the exact rejection
+reasons for audit automation.
+
+For a complete handoff report, run:
+
+```bash
+uv run python scripts/prd_readiness.py
+```
+
+The command exits nonzero while any external release gate remains unresolved.
+
+## Incident-memory isolation benchmark
+
+Run the deterministic cross-tenant memory benchmark:
+
+```bash
+uv run python scripts/benchmark_memory_isolation.py --organizations 25
+```
+
+The versioned JSON result reports every foreign read as a leak. A release
+requires `isolation_preserved: true`; this local benchmark does not replace a
+live database/RLS acceptance run.
+
+## Deduplication restart benchmark
+
+Run the alert-clustering restart check separately from the RCA scorecard:
+
+```bash
+uv run python scripts/benchmark_dedup_restart.py \
+  --events 1000 --restart-at 500 --output outputs/dedup-restart.json
+```
+
+The versioned artifact records p50/p95 latency, incident counts for both worker
+lifetimes, and an explicit `continuity_preserved` result. `false` is a release
+blocker: the current pipeline still owns state in process memory and must not
+be described as restart-safe until a shared store is configured and the
+benchmark passes.
+
+Local live evidence (Redis database 15, 2026-10-14) passed 1,000 events across
+two worker lifetimes with `continuity_preserved: true`, zero post-restart new
+incidents, p50 7.331 ms, and p95 8.157 ms. Production Redis failover testing
+is still required.
 
 ## The learning loop
 
