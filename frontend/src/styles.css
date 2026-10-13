@@ -248,6 +248,41 @@ input {
   box-shadow: var(--shadow);
   overflow-y: auto;
 }
+
+/* Authenticated dashboard reference shell. The shell uses the screenshot's
+   dense navy visual language while its content remains API-backed. It is
+   intentionally scoped to Dashboard so the existing console and onboarding
+   surfaces keep their own contracts. */
+.omni-reference-dashboard {
+  --reference-bg: #070d19;
+  --reference-surface: #0d192b;
+  --reference-border: #223149;
+  --reference-text: #f2f6ff;
+  --reference-muted: #99a8bf;
+  background: var(--reference-bg) !important;
+  color: var(--reference-text);
+}
+
+.omni-reference-dashboard .omni-reference-dashboard__header {
+  background: #080f1c !important;
+  border-color: var(--reference-border) !important;
+}
+
+.omni-reference-dashboard .omni-reference-dashboard__header > div,
+.omni-reference-dashboard > div:not(.page-background) {
+  max-width: 1500px;
+}
+
+.omni-reference-dashboard .bg-white.dark\\:bg-gray-800,
+.omni-reference-dashboard .bg-white.dark\\:bg-gray-900 {
+  background-color: var(--reference-surface);
+  border-color: var(--reference-border);
+}
+
+.omni-reference-dashboard .text-gray-500,
+.omni-reference-dashboard .dark\\:text-gray-400 {
+  color: var(--reference-muted);
+}
 .side-section {
   display: flex;
   flex-direction: column;
