@@ -9,7 +9,13 @@ from app.config import Settings
 
 # Every credential production fails closed without, so env-normalization tests
 # can vary one thing at a time.
-PROD = {"copilot_env": "production", "copilot_api_token": "x", "copilot_secret_key": "k"}
+PROD = {
+    "copilot_env": "production",
+    "copilot_api_token": "x",
+    "copilot_secret_key": "k",
+    "copilot_checkpoint_db": "postgresql://db/omnipotent",
+    "copilot_redis_url": "redis://redis:6379/0",
+}
 
 
 def test_provider_normalized_and_validated():
@@ -46,6 +52,26 @@ def test_demo_mode_off_by_default_and_refused_in_production():
     with pytest.raises(ValidationError):
         Settings(**PROD, copilot_demo_mode=True)
     assert Settings(copilot_env="development", copilot_demo_mode=True).copilot_demo_mode is True
+
+
+def test_production_requires_durable_postgres_checkpointer():
+    with pytest.raises(ValidationError, match="COPILOT_CHECKPOINT_DB"):
+        Settings(**{**PROD, "copilot_checkpoint_db": "./checkpoints.sqlite"})
+
+    settings = Settings(**{**PROD, "copilot_checkpoint_db": "postgresql://db/omnipotent"})
+    assert settings.copilot_checkpoint_db.startswith("postgresql://")
+
+
+def test_production_requires_shared_redis():
+    with pytest.raises(ValidationError, match="COPILOT_REDIS_URL"):
+        Settings(**{**PROD, "copilot_redis_url": ""})
+    settings = Settings(**PROD)
+    assert settings.copilot_redis_url.startswith("redis://")
+
+
+def test_non_production_may_use_sqlite_checkpointer():
+    settings = Settings(copilot_env="staging", copilot_checkpoint_db="./checkpoints.sqlite")
+    assert settings.copilot_checkpoint_db.endswith(".sqlite")
 
 
 def test_database_and_redis_urls_accept_unprefixed_env(monkeypatch):

@@ -37,6 +37,8 @@ human-in-the-loop interrupt resumable across separate API calls.
 from __future__ import annotations
 
 import logging
+import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -67,12 +69,68 @@ from app.graph.state import AgentState
 log = logging.getLogger("omnipotent.guardrails")
 
 
+def _tool_failure_message(exc: Exception) -> str:
+    """Convert one failed evidence call into a model-readable result.
+
+    Read-only connector failures are evidence gaps, not graph failures. Keep
+    the payload structured and sanitized so the agent can continue with the
+    successful sources. Approval/policy failures retain their normal error
+    semantics because they are not optional evidence calls.
+    """
+    from app.tool_trust.gateway import ToolGatewayError
+
+    if isinstance(exc, ToolGatewayError):
+        provider = exc.provider or "unknown"
+        tool_name = exc.tool_name or "unknown"
+        reason = exc.code.value
+    else:
+        provider = "unknown"
+        tool_name = "unknown"
+        reason = "tool_failure"
+    return json.dumps({
+        "status": "unavailable",
+        "provider": provider,
+        "tool": tool_name,
+        "reason": reason,
+    }, separators=(",", ":"))
+
+
+def _apply_requested_kubernetes_namespace(state: AgentState, calls: list[dict]) -> list[dict]:
+    """Fill omitted Kubernetes namespaces from the user's explicit request.
+
+    Models sometimes infer the pod correctly but omit the namespace on a later
+    call. That silently sends the request to the deployment default namespace.
+    Only an explicit ``namespace X`` in the current user turn is trusted; no
+    namespace is invented.
+    """
+    text = ""
+    for message in reversed(state.get("messages") or []):
+        if isinstance(message, HumanMessage):
+            text = str(message.content)
+            break
+    match = re.search(r"\bnamespace\s+([a-z0-9][a-z0-9.-]*)", text, re.IGNORECASE)
+    if not match:
+        return calls
+    namespace = match.group(1)
+    k8s_tools = {"list_pods", "describe_pod", "get_events", "get_deployment_status", "rollout_history"}
+    return [
+        {**call, "args": {**(call.get("args") or {}), "namespace": namespace}}
+        if call.get("name") in k8s_tools and not (call.get("args") or {}).get("namespace")
+        else call
+        for call in calls
+    ]
+
+
 def make_guarded_tool_node(tools):
     """ToolNode wrapped with prompt-injection defenses: every tool result is
     provenance-boxed and scanned for injection patterns before it re-enters the
     model's context, and any hit is audited. The agent therefore never sees raw
     untrusted telemetry — only labeled, defanged data."""
-    inner = ToolNode(tools)
+    # LangGraph's default handler re-raises ToolException. That made one
+    # missing pod/metric terminate an otherwise useful investigation. Return a
+    # structured unavailable evidence item instead, preserving the tool-call
+    # pair so the model can continue and report partial evidence.
+    inner = ToolNode(tools, handle_tool_errors=_tool_failure_message)
 
     async def guarded(state: AgentState) -> dict:
         from app import otel
@@ -87,7 +145,13 @@ def make_guarded_tool_node(tools):
         payload = state
         queued = state.get("pending_tool_calls") or []
         messages = list(state.get("messages") or [])
+        if messages and getattr(messages[-1], "tool_calls", None):
+            rewritten = _apply_requested_kubernetes_namespace(state, list(messages[-1].tool_calls))
+            if rewritten != list(messages[-1].tool_calls):
+                messages[-1] = AIMessage(content=messages[-1].content, tool_calls=rewritten)
+                payload = {**state, "messages": messages}
         if queued and not getattr(messages[-1] if messages else None, "tool_calls", None):
+            queued = _apply_requested_kubernetes_namespace(state, list(queued))
             payload = {**state, "messages": [*messages, AIMessage(content="", tool_calls=queued)]}
 
         from app.tool_trust.gateway import approved_tool_execution

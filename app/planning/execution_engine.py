@@ -219,6 +219,8 @@ class ExecutionEngine:
 
     async def cancel(self, execution_id: str) -> bool:
         """Cancel an active execution."""
+        from app import execution_control
+        execution_control.request(execution_id, "cancel")
         if execution_id in self._active_executions:
             self._cancelled.add(execution_id)
             log.info("Cancellation requested for execution %s", execution_id)
@@ -227,6 +229,8 @@ class ExecutionEngine:
 
     async def pause(self, execution_id: str) -> Checkpoint | None:
         """Pause an execution and return a checkpoint."""
+        from app import execution_control
+        execution_control.request(execution_id, "pause")
         ctx = self._active_executions.get(execution_id)
         if not ctx:
             return None
@@ -271,6 +275,15 @@ class ExecutionEngine:
                     task._handler = tool
 
         while True:
+            from app import execution_control
+            control = execution_control.requested(ctx.execution_id)
+            if control in {"cancel", "pause"}:
+                if control == "pause":
+                    await self._create_checkpoint(ctx)
+                log.info("Execution %s cancelled", ctx.execution_id)
+                execution_control.clear(ctx.execution_id)
+                self._cancelled.add(ctx.execution_id)
+                break
             if ctx.execution_id in self._cancelled:
                 log.info("Execution %s cancelled", ctx.execution_id)
                 break

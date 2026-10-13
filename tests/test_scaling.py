@@ -15,12 +15,28 @@ from app.redis_pool import (
     RedisPoolType,
     reset_redis_pools,
 )
+
 from app.session_store import (
     DistributedSessionStore,
     InvestigationState,
     SessionData,
     reset_session_store,
 )
+
+
+@pytest.mark.asyncio
+async def test_production_redis_requires_shared_backend(monkeypatch):
+    import app.redis_pool as redis_pool
+
+    class ProductionSettings:
+        copilot_redis_url = ""
+        is_production = True
+
+    monkeypatch.setattr("app.config.get_settings", lambda: ProductionSettings())
+    redis_pool.reset_redis_pools()
+    with pytest.raises(RuntimeError, match="COPILOT_REDIS_URL"):
+        await redis_pool.get_redis()
+    redis_pool.reset_redis_pools()
 
 # Database routing requires SQLAlchemy (optional dependency)
 try:

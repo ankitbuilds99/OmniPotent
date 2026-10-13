@@ -23,13 +23,14 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 from rich.console import Console
 from rich.table import Table
 
-from evals.benchmark import Scorecard, score_case
+from evals.benchmark import Scorecard, score_case, validate_release_corpus
 
 console = Console()
 CASES = Path(__file__).parent / "benchmark_cases.yaml"
@@ -136,11 +137,19 @@ def main() -> int:
     ap.add_argument("--baselines", action="store_true", help="run only the baseline self-check (offline)")
     ap.add_argument("--live", action="store_true", help="run the agent live (needs an LLM key)")
     ap.add_argument("--json", action="store_true", help="emit the scorecard as JSON")
+    ap.add_argument("--output", type=Path, help="write an auditable JSON scorecard artifact")
+    ap.add_argument("--release-gate", action="store_true", help="fail closed unless the corpus is release-sized")
     args = ap.parse_args()
     if not args.live:
         os.environ.setdefault("COPILOT_REPLAY_MODE", "replay")
 
     cases = yaml.safe_load(CASES.read_text())
+    corpus_ready, corpus_reasons = validate_release_corpus(cases)
+
+    if args.release_gate:
+        if not corpus_ready:
+            console.print(f"[red]RELEASE CORPUS REJECTED: {', '.join(corpus_reasons)}[/red]")
+            return 2
 
     if args.baselines:
         return 0 if baseline_selfcheck(cases) else 1
@@ -154,8 +163,22 @@ def main() -> int:
         if row:
             rows.append(row)
 
+    summary = Scorecard(rows).summary()
+    artifact = {
+        "schema": "omnipotent.rca-benchmark.v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "live" if args.live else "replay",
+        "case_file": str(CASES),
+        "release_corpus_ready": corpus_ready,
+        "release_corpus_rejection_reasons": list(corpus_reasons),
+        "scorecard": summary,
+    }
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        console.print(f"  wrote scorecard artifact: {args.output}")
     if args.json:
-        print(json.dumps(Scorecard(rows).summary(), indent=2))
+        print(json.dumps(artifact, indent=2))
     elif rows:
         _print_scorecard(rows, "DevOps Copilot RCA scorecard")
     else:

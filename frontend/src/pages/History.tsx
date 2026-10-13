@@ -118,7 +118,13 @@ export function History({ onBack, onViewInvestigation }: HistoryProps) {
   }
 
   const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr)
+    // SQLite returns created_at without an offset even though the value is UTC.
+    // Without this normalization, browsers interpret `YYYY-MM-DD HH:mm:ss` as
+    // local time, making a fresh investigation appear ~5.5 hours old in IST.
+    const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(dateStr)
+      ? dateStr
+      : `${dateStr.replace(' ', 'T')}Z`
+    const date = new Date(normalized)
     const now = new Date()
     const diffMs = now.getTime() - date.getTime()
     const diffMins = Math.floor(diffMs / 60000)

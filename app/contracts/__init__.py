@@ -15,6 +15,7 @@ from app.contracts.action import (
 )
 from app.contracts.common import (
     ActionLifecycleState,
+    ExecutionResultState,
     ApprovalRequirement,
     Environment,
     ExecutionStrategy,
@@ -33,7 +34,7 @@ from app.contracts.verification import ExecutionResult, PredicateResult, Verific
 __all__ = [
     "ActionContract", "ActionLifecycleState", "ActionTarget", "ApprovalRequirement",
     "BlastRadiusAssessment", "Environment", "EvidenceDomain", "EvidenceItem", "EvidenceReference", "EvidenceTrustLevel",
-    "ExecutionReceipt", "ExecutionResult", "ExecutionStrategy", "ExpectedOutcome",
+    "ExecutionReceipt", "ExecutionResult", "ExecutionResultState", "ExecutionStrategy", "ExpectedOutcome",
     "Hypothesis", "HypothesisStatus", "Precondition", "PredicateResult", "RiskLevel", "RollbackPlan",
     "RootCauseAssessment", "RootCauseReasonCode", "RootCauseStatus", "TrustDecision", "TrustDecisionKind",
     "TrustReasonCode", "VerificationOutcome", "VerificationPredicate", "VerificationResult",

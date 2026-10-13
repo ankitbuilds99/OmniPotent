@@ -479,12 +479,6 @@ async def flush_digest(now: datetime | None = None) -> dict[str, Any]:
     an org with quiet hours switched off — a "daily digest" that arrives at
     whatever minute the process happened to start is not a daily digest.
     """
-    from sqlalchemy import delete, select
-
-    from app.database.engine import get_session
-    from app.database.orgs import org_uuid
-    from app.notifications.models import NotificationDigestEntry
-
     prefs = await get_preferences()
     mode = str(prefs.get("digest_mode") or "realtime")
     if mode == "realtime":
@@ -501,26 +495,10 @@ async def flush_digest(now: datetime | None = None) -> dict[str, Any]:
         if stamp.hour != due_hour:
             return {"status": "not_due", "sent": 0}
 
-    org = org_uuid()
-    async with get_session() as session:
-        entries = list(
-            (
-                await session.execute(
-                    select(NotificationDigestEntry)
-                    .where(NotificationDigestEntry.org_id == org)
-                    .order_by(NotificationDigestEntry.created_at)
-                )
-            ).scalars()
-        )
-        if not entries:
-            return {"status": "empty", "sent": 0}
-        channels = sorted({c for e in entries for c in (e.channels or [])})
-        await session.execute(
-            delete(NotificationDigestEntry).where(
-                NotificationDigestEntry.id.in_([e.id for e in entries])
-            )
-        )
-        await session.commit()
+    entries = await _load_digest_entries()
+    if not entries:
+        return {"status": "empty", "sent": 0}
+    channels = sorted({c for e in entries for c in (e.channels or [])})
 
     note = Notification(
         event=entries[-1].event,
@@ -532,8 +510,39 @@ async def flush_digest(now: datetime | None = None) -> dict[str, Any]:
     # entry was queued, and re-deriving them now would drop everything an org
     # had already collected the moment it edited its rules.
     result = await _fan_out(note, channels, prefs)
-    result["sent"] = len(entries)
+    if result.get("status") == "sent":
+        await _delete_digest_entries(entries)
+        result["sent"] = len(entries)
+    else:
+        result["sent"] = 0
+        result["retained_for_retry"] = len(entries)
     return result
+
+
+async def _load_digest_entries() -> list[Any]:
+    """Read the durable outbox without claiming delivery."""
+    from sqlalchemy import select
+    from app.database.engine import get_session
+    from app.database.orgs import org_uuid
+    from app.notifications.models import NotificationDigestEntry
+    async with get_session() as session:
+        return list((await session.execute(
+            select(NotificationDigestEntry)
+            .where(NotificationDigestEntry.org_id == org_uuid())
+            .order_by(NotificationDigestEntry.created_at)
+        )).scalars())
+
+
+async def _delete_digest_entries(entries: list[Any]) -> None:
+    """Acknowledge only rows whose delivery was accepted by a channel."""
+    from sqlalchemy import delete
+    from app.database.engine import get_session
+    from app.notifications.models import NotificationDigestEntry
+    async with get_session() as session:
+        await session.execute(delete(NotificationDigestEntry).where(
+            NotificationDigestEntry.id.in_([entry.id for entry in entries])
+        ))
+        await session.commit()
 
 
 async def flush_due_digests(now: datetime | None = None) -> list[dict[str, Any]]:

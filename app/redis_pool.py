@@ -348,6 +348,11 @@ async def get_redis(pool_type: RedisPoolType = RedisPoolType.CACHE) -> Any:
 
         url = getattr(settings, "copilot_redis_url", None)
         if not url:
+            if getattr(settings, "is_production", False):
+                raise RuntimeError(
+                    "COPILOT_REDIS_URL must be configured in production; "
+                    "refusing to use an in-memory Redis substitute"
+                )
             log.debug("COPILOT_REDIS_URL not configured, using mock")
             if _mock_redis is None:
                 _mock_redis = MockRedis()

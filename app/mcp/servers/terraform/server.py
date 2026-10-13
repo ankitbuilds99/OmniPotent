@@ -2152,6 +2152,8 @@ def generate_terraform_module(
 
     if not code:
         return {
+            "status": "unsupported",
+            "simulated": False,
             "error": f"Code template for '{template}' not yet implemented",
             "template_info": template_info,
         }

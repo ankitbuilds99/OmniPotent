@@ -244,7 +244,7 @@ def scale_deployment(deployment: str, replicas: int | str, namespace: str = "") 
 
 
 @mcp.tool()
-def rollback_deployment(deployment: str, namespace: str = "") -> dict:
+def rollback_deployment(deployment: str, namespace: str = "", revision: int | str = "") -> dict:
     """(WRITE) Roll a deployment back to its previous revision — the highest-value
     remediation for a change-induced incident. Requires human approval."""
     ns = namespace or KUBE_NAMESPACE
@@ -257,10 +257,57 @@ def rollback_deployment(deployment: str, namespace: str = "") -> dict:
                       "deployment": deployment, "namespace": ns,
                       "to_revision": prev["revision"] if prev else None,
                       "to_image": prev["image"] if prev else None})
-    # Live rollback = restore the previous ReplicaSet's pod template (kubectl
-    # rollout undo semantics). Left to the operator's GitOps in this build.
-    return {"status": "not_implemented_live",
-            "detail": "Live rollback should go through your GitOps/CD; offline demo simulates it."}
+    _, apps = _client()
+    current = apps.read_namespaced_deployment(deployment, ns)
+    annotations = current.metadata.annotations or {}
+    # Direct cluster writes are unsafe for controller-owned workloads: the
+    # desired-state controller would immediately reconcile them away.
+    if any(key.startswith(("argocd.argoproj.io/", "kustomize.toolkit.fluxcd.io/", "helm.toolkit.fluxcd.io/"))
+           for key in annotations):
+        return {"status": "unsupported", "reason": "gitops_controller_owns_workload",
+                "deployment": deployment, "namespace": ns}
+    current_revision = _as_int(annotations.get("deployment.kubernetes.io/revision"), 0)
+    replica_sets = apps.list_namespaced_replica_set(ns).items
+    candidates = []
+    for rs in replica_sets:
+        rs_ann = rs.metadata.annotations or {}
+        rs_revision = _as_int(rs_ann.get("deployment.kubernetes.io/revision"), 0)
+        owners = rs.metadata.owner_references or []
+        if rs_revision < current_revision and any(o.kind == "Deployment" and o.name == deployment for o in owners):
+            candidates.append((rs_revision, rs))
+    if not candidates:
+        return {"status": "unsupported", "reason": "no_retained_prior_revision",
+                "deployment": deployment, "namespace": ns}
+    requested_revision = _as_int(revision, 0) if str(revision).strip() else 0
+    if requested_revision:
+        matching = [item for item in candidates if item[0] == requested_revision]
+        if not matching:
+            return {"status": "unsupported", "reason": "requested_revision_unavailable",
+                    "deployment": deployment, "namespace": ns,
+                    "requested_revision": requested_revision}
+        target_revision, target = matching[0]
+    else:
+        return {"status": "unsupported", "reason": "explicit_revision_required",
+                "deployment": deployment, "namespace": ns}
+    # The Kubernetes SDK is an optional extra.  Keep the write path usable with
+    # compatible clients and test doubles that already expose a plain mapping
+    # or ``to_dict`` representation, while using the SDK serializer when it is
+    # installed to handle model objects correctly.
+    template_object = target.spec.template
+    try:
+        from kubernetes.client import ApiClient
+    except ImportError:
+        serializer = getattr(template_object, "to_dict", None)
+        template = serializer() if callable(serializer) else template_object
+    else:
+        template = ApiClient().sanitize_for_serialization(template_object)
+    patched = apps.patch_namespaced_deployment(
+        deployment, ns, {"metadata": {"annotations": {"kubernetes.io/change-cause": f"rollback to revision {target_revision}"}},
+                         "spec": {"template": template}},
+    )
+    return {"status": "submitted", "deployment": deployment, "namespace": ns,
+            "from_revision": current_revision, "to_revision": target_revision,
+            "resource_version": getattr(patched.metadata, "resource_version", None)}
 
 
 @mcp.tool()

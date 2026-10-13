@@ -52,6 +52,11 @@ def env(tmp_path, monkeypatch):
     """A scratch database, auth off, and no provider key unless a test sets one."""
     monkeypatch.setenv("COPILOT_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/incidents.db")
     monkeypatch.setenv("COPILOT_API_TOKEN", "")
+    monkeypatch.setenv("COPILOT_PROVIDER", "anthropic")
+    # These HTTP tests exercise the single-tenant incident workflow. Multi-
+    # tenant credential isolation is covered separately by the tenancy suites;
+    # enabling it here would correctly reject the host-level test key.
+    monkeypatch.setenv("COPILOT_MULTI_TENANT", "false")
     for key in _PROVIDER_KEYS:  # empty, not delenv: .env would otherwise supply one
         monkeypatch.setenv(key, "")
     _reset()

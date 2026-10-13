@@ -141,6 +141,11 @@ class KyvernoResult:
     # to tell an approximate local answer from an authoritative one.
     engine: str = "embedded"
 
+    @property
+    def authoritative(self) -> bool:
+        """Whether a real cluster Kyverno admission check produced this result."""
+        return self.engine == "cluster"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "allowed": self.allowed,
@@ -150,6 +155,7 @@ class KyvernoResult:
             "warnings": self.warnings,
             "evaluated_at": self.evaluated_at.isoformat(),
             "engine": self.engine,
+            "authoritative": self.authoritative,
         }
 
 

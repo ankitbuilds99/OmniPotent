@@ -468,6 +468,114 @@ function IncidentRow({ incident, onSelect }: { incident: Incident; onSelect: () 
   );
 }
 
+interface OperatorAnnotation {
+  field: string;
+  value: string;
+  author: string;
+  digest: string;
+  revision: number;
+  kind: "operator_annotation";
+}
+
+function AnnotationWorkbench({ incidentId }: { incidentId: string }) {
+  const [annotations, setAnnotations] = useState<OperatorAnnotation[]>([]);
+  const [field, setField] = useState("root_cause");
+  const [value, setValue] = useState("");
+  const [author, setAuthor] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const load = async () => {
+    const response = await apiFetch(`/api/incidents/${incidentId}/annotations`);
+    if (!response.ok) throw new Error(await describeFailure(response));
+    const body = await response.json();
+    setAnnotations(body.annotations ?? []);
+    setLoaded(true);
+  };
+
+  const submit = async () => {
+    if (!value.trim() || !author.trim()) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await apiFetch(`/api/incidents/${incidentId}/annotations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ field, value, author }),
+      });
+      if (!response.ok) throw new Error(await describeFailure(response));
+      setValue("");
+      await load();
+      setMessage("Correction recorded as an authored annotation.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not record correction");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const promote = async () => {
+    const latest = annotations[annotations.length - 1];
+    if (!latest || !author.trim() || !confirmation.trim()) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await apiFetch(`/api/incidents/${incidentId}/memory/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ field: latest.field, author, confirmation }),
+      });
+      if (!response.ok) throw new Error(await describeFailure(response));
+      setMessage(`Confirmed memory linked to annotation ${latest.digest.slice(0, 12)}…`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not promote memory");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl p-4 space-y-3" style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}>
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold" style={{ color: "var(--text)" }}>Operator corrections</h3>
+        <button className="text-xs underline" onClick={() => void load()} disabled={busy}>
+          {loaded ? "Refresh" : "Load history"}
+        </button>
+      </div>
+      <p className="text-xs" style={{ color: "var(--text-2)" }}>
+        Corrections never overwrite collected evidence. Confirmed memory keeps the source digest.
+      </p>
+      {loaded && annotations.length > 0 && (
+        <div className="space-y-1 text-xs" aria-label="Annotation history">
+          {annotations.map((annotation) => (
+            <div key={annotation.digest} className="rounded p-2" style={{ backgroundColor: "var(--bg)", color: "var(--text)" }}>
+              <span className="font-medium">r{annotation.revision} · {annotation.field}</span>: {annotation.value}
+              <span className="block" style={{ color: "var(--text-2)" }}>by {annotation.author} · {annotation.digest.slice(0, 12)}…</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <input aria-label="Correction field" value={field} onChange={(event) => setField(event.target.value)} className="w-full rounded px-2 py-1 text-sm" placeholder="Field" />
+      <textarea aria-label="Correction value" value={value} onChange={(event) => setValue(event.target.value)} className="w-full rounded px-2 py-1 text-sm" placeholder="What should the workbench record?" rows={2} />
+      <input aria-label="Annotation author" value={author} onChange={(event) => setAuthor(event.target.value)} className="w-full rounded px-2 py-1 text-sm" placeholder="Author" />
+      <button onClick={() => void submit()} disabled={busy || !value.trim() || !author.trim()} className="w-full rounded px-3 py-2 text-sm" style={{ backgroundColor: "var(--accent)", color: "var(--bg)", opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Saving…" : "Record correction"}
+      </button>
+      {loaded && annotations.length > 0 && (
+        <>
+          <textarea aria-label="Memory confirmation" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} className="w-full rounded px-2 py-1 text-sm" placeholder="Why is this correction confirmed?" rows={2} />
+          <button onClick={() => void promote()} disabled={busy || !confirmation.trim() || !author.trim()} className="w-full rounded px-3 py-2 text-sm" style={{ border: "1px solid var(--ok)", color: "var(--ok)" }}>
+            Promote confirmed memory
+          </button>
+        </>
+      )}
+      {message && <div role="status" className="text-xs" style={{ color: "var(--text-2)" }}>{message}</div>}
+    </div>
+  );
+}
+
 function IncidentDetail({
   seed,
   onBack,
@@ -678,6 +786,7 @@ function IncidentDetail({
         </div>
 
         <div className="space-y-6">
+          <AnnotationWorkbench incidentId={incidentId} />
           <div
             className="rounded-xl p-4"
             style={{ backgroundColor: "var(--surface)", border: "1px solid var(--border)" }}

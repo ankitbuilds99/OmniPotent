@@ -167,17 +167,20 @@ def get_metric(service: str, metric: str) -> dict:
     """
     metrics_file = DATA_DIR / "metrics.json"
     if not metrics_file.exists():
-        return {"error": "no metrics data available"}
+        return {"status": "unavailable", "provider": "prometheus", "reason": "metric_not_found",
+                "service": service, "metric": metric}
 
     data = json.loads(metrics_file.read_text())
     svc = data.get(service)
     if svc is None:
-        return {"error": f"unknown service '{service}'", "available": list(data)}
+        return {"status": "unavailable", "provider": "prometheus", "reason": "metric_not_found",
+                "service": service, "metric": metric, "available": list(data)}
     series = svc.get(metric)
     if series is None:
-        return {"error": f"unknown metric '{metric}'", "available": list(svc)}
+        return {"status": "unavailable", "provider": "prometheus", "reason": "metric_not_found",
+                "service": service, "metric": metric, "available": list(svc)}
     if not series:
-        return {"error": f"metric '{metric}' has no data points",
+        return {"status": "unavailable", "provider": "prometheus", "reason": "metric_not_found",
                 "service": service, "metric": metric}
 
     first, last = series[0].get("value"), series[-1].get("value")

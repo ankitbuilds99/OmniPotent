@@ -73,6 +73,17 @@ class ActionLifecycleState(StrEnum):
     REJECTED = "rejected"
 
 
+class ExecutionResultState(StrEnum):
+    """Provider-facing outcome states; acceptance is not proof of effect."""
+
+    UNSUPPORTED = "unsupported"
+    SIMULATED = "simulated"
+    SUBMITTED = "submitted"
+    APPLIED = "applied"
+    FAILED = "failed"
+    INDETERMINATE = "indeterminate"
+
+
 class TrustReasonCode(StrEnum):
     ALLOWED = "allowed"
     POLICY_DENIED = "policy_denied"

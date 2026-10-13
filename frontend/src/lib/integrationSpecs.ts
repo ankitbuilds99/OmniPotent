@@ -258,7 +258,7 @@ export const INTEGRATION_SPECS: Record<string, IntegrationSpec> = {
       "a deployment setting rather than a per-organisation secret, so ask whoever runs " +
       "this instance to set it.",
   },
-  grafana: noConnector("Grafana"),
+  grafana: deploymentOnly("grafana", ["GRAFANA_URL"]),
   cloudwatch: noConnector("CloudWatch"),
   newrelic: noConnector("New Relic"),
   opsgenie: noConnector("Opsgenie"),

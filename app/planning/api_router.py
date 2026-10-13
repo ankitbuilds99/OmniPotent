@@ -492,15 +492,15 @@ async def list_executions() -> dict[str, Any]:
 
 @router.post("/executions/{execution_id}/cancel")
 async def cancel_execution(execution_id: str) -> dict[str, Any]:
-    """Cancel an active execution. Only affects runs started by this process."""
+    """Cancel an execution, including one owned by another Redis-backed replica."""
     engine = get_execution_engine()
     cancelled = await engine.cancel(execution_id)
-    return {"cancelled": cancelled}
+    return {"cancelled": cancelled, "control_requested": True}
 
 
 @router.post("/executions/{execution_id}/pause")
 async def pause_execution(execution_id: str) -> dict[str, Any]:
-    """Pause an execution and get checkpoint. This process's runs only."""
+    """Pause an execution; a Redis-backed worker creates the checkpoint."""
     engine = get_execution_engine()
     checkpoint = await engine.pause(execution_id)
 
@@ -509,4 +509,6 @@ async def pause_execution(execution_id: str) -> dict[str, Any]:
             "paused": True,
             "checkpoint": checkpoint.to_dict(),
         }
-    return {"paused": False}
+    from app import execution_control
+    execution_control.request(execution_id, "pause")
+    return {"paused": False, "control_requested": True}

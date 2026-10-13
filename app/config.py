@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # refuse to answer (503) instead of reporting an unverifiable claim as
     # "refuted". Never point these at a stub.
     prometheus_url: str = ""   # Prometheus HTTP API base, e.g. http://prom:9090
+    # Grafana dashboard/annotation connector. The deployment owns this URL;
+    # credentials, when needed, are supplied through the connector configuration.
+    grafana_url: str = ""
+    grafana_api_key: str = ""
+    grafana_admin_user: str = ""
+    grafana_admin_password: str = ""
     # Alertmanager HTTP API base, e.g. http://alertmanager:9093. Read by the
     # knowledge-graph Prometheus sync source; blank means that source skips
     # alert ingestion rather than guessing a localhost address.
@@ -382,6 +388,13 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("COPILOT_REDIS_URL", "REDIS_URL"),
     )
+    # Shared alert deduplication snapshots. Empty is process-local and should be
+    # used only for development or a deliberately single-replica deployment.
+    copilot_dedup_state_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("COPILOT_DEDUP_STATE_URL"),
+    )
+    copilot_dedup_state_required: bool = False
     # Response cache backend: "memory" (default), "redis", or "none" (disabled).
     # Redis uses COPILOT_REDIS_URL; falls back to memory if unavailable.
     copilot_cache_backend: str = "memory"
@@ -613,6 +626,28 @@ class Settings(BaseSettings):
             return "staging"
         return "development"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _prefer_nonempty_service_urls(cls, values):
+        """Do not let empty dotenv placeholders hide managed URLs.
+
+        ``AliasChoices`` selects the first present key, even when its value is
+        empty. Local dotenv files commonly contain empty COPILOT_* placeholders
+        while deployments inject the bare DATABASE_URL/REDIS_URL names.
+        """
+        if not isinstance(values, dict):
+            return values
+        normalized = dict(values)
+        for preferred, fallback in (
+            ("COPILOT_DATABASE_URL", "DATABASE_URL"),
+            ("COPILOT_REDIS_URL", "REDIS_URL"),
+        ):
+            if not str(normalized.get(preferred, "") or "").strip():
+                fallback_value = normalized.get(fallback)
+                if str(fallback_value or "").strip():
+                    normalized[preferred] = fallback_value
+        return normalized
+
     @model_validator(mode="after")
     def _fail_closed_in_production(self) -> "Settings":
         # Refuse to start an unauthenticated API in production: a public, open
@@ -639,6 +674,22 @@ class Settings(BaseSettings):
                 "COPILOT_DEMO_MODE must be false when COPILOT_ENV=production "
                 "(it makes remediation and runbook steps report success without "
                 "doing anything)."
+            )
+        # Human-in-the-loop graph state must survive a process restart and be
+        # resumable by any worker. SQLite is intentionally supported for local
+        # development, but a local file is not a production durability or
+        # multi-replica boundary. Require the explicitly documented Postgres
+        # checkpointer before allowing a production process to start.
+        if self.copilot_env == "production" and not self.copilot_checkpoint_db.strip().lower().startswith(("postgres://", "postgresql://")):
+            raise ValueError(
+                "COPILOT_CHECKPOINT_DB must be a PostgreSQL URL when "
+                "COPILOT_ENV=production (SQLite checkpoints are single-process "
+                "and cannot safely resume approvals across restarts/workers)."
+            )
+        if self.copilot_env == "production" and not self.copilot_redis_url.strip().lower().startswith(("redis://", "rediss://")):
+            raise ValueError(
+                "COPILOT_REDIS_URL must be a Redis URL when COPILOT_ENV=production "
+                "(in-memory Redis substitutes cannot provide shared state or failover)."
             )
         return self
 

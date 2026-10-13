@@ -232,9 +232,17 @@ class VerificationAgent:
         elif len(contradicting) > len(supporting):
             status = VerificationStatus.REFUTED
             confidence = 0.3
-        elif len(supporting) > 0 and len(contradicting) == 0:
+        elif len(supporting) > 0 and len(contradicting) == 0 and (
+            len(supporting) < 2
+            or len({e.source for e in supporting}) >= 2
+        ):
             status = VerificationStatus.VERIFIED
             confidence = min(0.9, 0.5 + len(supporting) * 0.1)
+        elif len(supporting) >= 2 and len({e.source for e in supporting}) < 2:
+            # Repeated samples from one backend are not independent
+            # corroboration; remain conservative until another source agrees.
+            status = VerificationStatus.UNCERTAIN
+            confidence = 0.4
         elif len(evidence) == 0:
             status = VerificationStatus.INSUFFICIENT_DATA
             confidence = 0.2

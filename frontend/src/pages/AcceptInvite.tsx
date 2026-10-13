@@ -13,10 +13,10 @@ import { CheckCircle, AlertCircle, Loader2, ChevronLeft } from 'lucide-react'
 
 import { apiFetch, describeFailure } from '../lib/apiClient'
 import { getAuthToken } from '../lib/authToken'
+import { PENDING_INVITATION_KEY } from '../lib/navigation'
+export { PENDING_INVITATION_KEY } from '../lib/navigation'
 
 /** Where AppRoutes looks after a login to send the user back to their invite. */
-export const PENDING_INVITATION_KEY = 'pending_invitation'
-
 interface AcceptResponse {
   message: string
   team: { id: string | null; name: string | null }

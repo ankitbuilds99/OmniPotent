@@ -12,6 +12,7 @@ from app.health import (
     SystemHealth,
     check_database,
     check_redis,
+    check_dedup_state,
     check_llm,
     get_health_checker,
 )
@@ -129,6 +130,24 @@ class TestHealthChecker:
         started, _ = await checker.startup()
         assert started is True
 
+    @pytest.mark.asyncio
+    async def test_dedup_state_is_degraded_when_optional_and_unconfigured(self, monkeypatch):
+        from app.config import get_settings
+        settings = get_settings()
+        monkeypatch.setattr(settings, "copilot_dedup_state_url", "")
+        monkeypatch.setattr(settings, "copilot_dedup_state_required", False)
+        result = await check_dedup_state()
+        assert result.status == HealthStatus.DEGRADED
+
+    @pytest.mark.asyncio
+    async def test_dedup_state_is_unhealthy_when_required_and_unconfigured(self, monkeypatch):
+        from app.config import get_settings
+        settings = get_settings()
+        monkeypatch.setattr(settings, "copilot_dedup_state_url", "")
+        monkeypatch.setattr(settings, "copilot_dedup_state_required", True)
+        result = await check_dedup_state()
+        assert result.status == HealthStatus.UNHEALTHY
+
     def test_system_health_to_dict(self):
         """SystemHealth should serialize to dict."""
         health = SystemHealth(
@@ -174,7 +193,7 @@ class TestComponentHealthChecks:
 
     @pytest.mark.asyncio
     async def test_check_redis_not_configured(self):
-        """Redis check should return degraded when not configured (in-memory fallback)."""
+        """Redis health remains degraded when development uses the fallback."""
         with patch("app.config.get_settings") as mock:
             mock.return_value.copilot_redis_url = ""
             result = await check_redis()

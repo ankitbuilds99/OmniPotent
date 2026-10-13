@@ -436,6 +436,42 @@ def _fake_tool():
 
 
 class TestGuardedToolNodeState:
+    async def test_one_tool_failure_becomes_partial_unavailable_evidence(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+        from langchain_core.tools import tool
+        from langgraph.graph import END, START, StateGraph
+
+        from app.graph.builder import make_guarded_tool_node
+        from app.graph.state import AgentState
+
+        @tool
+        async def failing_evidence(query: str) -> str:
+            """Evidence source that is unavailable for this test."""
+            raise RuntimeError("provider credential must never reach the model")
+
+        g = StateGraph(AgentState)
+        g.add_node("tools", make_guarded_tool_node([failing_evidence]))
+        g.add_edge(START, "tools")
+        g.add_edge("tools", END)
+        call = {"name": "failing_evidence", "args": {"query": "x"}, "id": "fail-1",
+                "type": "tool_call"}
+        out = await g.compile().ainvoke({"messages": [AIMessage(content="", tool_calls=[call])]})
+        result = next(m for m in out["messages"] if isinstance(m, ToolMessage))
+        assert '"status":"unavailable"' in result.content
+        assert "provider" in result.content
+        assert "credential" not in result.content
+
+    async def test_explicit_namespace_is_added_to_omitted_kubernetes_calls(self):
+        from app.graph.builder import _apply_requested_kubernetes_namespace
+        from langchain_core.messages import HumanMessage
+
+        state = {"messages": [HumanMessage(content=(
+            "Investigate crashloop-demo in namespace omnipotent-demo"
+        ))]}
+        calls = [{"name": "describe_pod", "args": {"name": "crashloop-demo"}, "id": "p-1"}]
+        rewritten = _apply_requested_kubernetes_namespace(state, calls)
+        assert rewritten[0]["args"]["namespace"] == "omnipotent-demo"
+
     async def test_the_tools_node_clears_the_pending_tool_queue(self):
         """A node writes state; the router that used to `pop` it could not.
 

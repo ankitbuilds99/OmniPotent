@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.config import get_settings
@@ -14,6 +14,10 @@ from app.config import get_settings
 log = logging.getLogger("omnipotent.redis_sessions")
 
 _redis_client = None
+
+
+class RedisUnavailableError(RuntimeError):
+    """Raised when production cannot reach the required shared Redis backend."""
 
 
 def get_redis_client():
@@ -26,6 +30,10 @@ def get_redis_client():
     redis_url = settings.copilot_redis_url
 
     if not redis_url:
+        if settings.is_production:
+            raise RedisUnavailableError(
+                "COPILOT_REDIS_URL is required for production session and rate-limit state"
+            )
         log.info("Redis not configured, using in-memory fallback")
         return None
 
@@ -54,6 +62,10 @@ def get_redis_client():
         return _redis_client
     except Exception as e:
         log.warning("Failed to connect to Redis: %s", e)
+        if settings.is_production:
+            raise RedisUnavailableError(
+                "Production Redis is unavailable; refusing in-memory session/rate-limit fallback"
+            ) from e
         return None
 
 
@@ -89,7 +101,7 @@ class RedisRateLimiter:
             return RateLimitResult(
                 allowed=True,
                 remaining=self.burst_size,
-                reset_at=datetime.utcnow() + timedelta(minutes=1),
+                reset_at=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
 
         key = self._get_key(identifier)
@@ -122,7 +134,7 @@ class RedisRateLimiter:
         pipe.expire(key, 120)
         pipe.execute()
 
-        reset_at = datetime.utcnow() + timedelta(
+        reset_at = datetime.now(timezone.utc) + timedelta(
             seconds=int((self.burst_size - tokens) / self.refill_rate)
         )
 

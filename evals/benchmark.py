@@ -333,6 +333,18 @@ def _mean(xs: list[float]) -> float:
     return round(sum(xs) / len(xs), 3) if xs else 0.0
 
 
+def validate_release_corpus(cases: list[dict], *, minimum_cases: int = 30) -> tuple[bool, tuple[str, ...]]:
+    """Fail closed when a corpus is too small or lacks abstention coverage."""
+    reasons: list[str] = []
+    if len(cases) < minimum_cases:
+        reasons.append(f"benchmark_case_count_below_{minimum_cases}")
+    if len({c.get("difficulty") for c in cases}) < 2:
+        reasons.append("benchmark_difficulty_diversity_missing")
+    if not any(c.get("ground_truth", {}).get("should_abstain") for c in cases):
+        reasons.append("benchmark_abstention_case_missing")
+    return not reasons, tuple(reasons)
+
+
 @dataclass
 class Scorecard:
     """Aggregate the per-case rows into an overall + per-difficulty-tier report."""

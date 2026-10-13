@@ -182,6 +182,8 @@ class TestKyvernoClient:
 
         all_allowed = all(r.allowed for r in results)
         assert all_allowed or len(results) == 0
+        if results:
+            assert all(r.authoritative is False for r in results)
 
     @pytest.mark.asyncio
     async def test_evaluate_deployment_missing_labels(self, kyverno):
@@ -431,6 +433,33 @@ class TestPolicyEngine:
         assert result.decision in list(PolicyDecision)
         assert result.evaluation_id is not None
         assert result.duration_ms >= 0
+
+    @pytest.mark.asyncio
+    async def test_embedded_kyverno_result_cannot_allow_mutation(self):
+        class EmbeddedResult:
+            def to_dict(self):
+                return {
+                    "allowed": True,
+                    "authoritative": False,
+                    "violations": [],
+                    "warnings": [],
+                }
+
+        class EmbeddedKyverno:
+            async def evaluate(self, resource):
+                return EmbeddedResult()
+
+        engine = create_policy_engine(kyverno_client=EmbeddedKyverno())
+        result = await engine.evaluate(
+            action="rollback",
+            resource={"kind": "Deployment", "metadata": {"name": "api"}},
+            context={},
+        )
+
+        assert result.kyverno_allowed is False
+        assert result.kyverno_authoritative is False
+        assert result.decision is PolicyDecision.DENY
+        assert any(v.policy_name == "kyverno_authority_required" for v in result.violations)
 
     @pytest.mark.asyncio
     async def test_request_approval(self, engine):

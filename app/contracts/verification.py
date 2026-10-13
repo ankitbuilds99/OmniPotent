@@ -8,6 +8,7 @@ from pydantic import Field, field_validator
 from app.contracts.common import (
     ActionLifecycleState,
     DomainContract,
+    ExecutionResultState,
     VerificationOutcome,
     require_aware_datetime,
     utc_now,
@@ -17,7 +18,9 @@ from app.contracts.common import (
 class ExecutionResult(DomainContract):
     execution_id: UUID = Field(default_factory=uuid4)
     action_id: UUID
-    state: ActionLifecycleState
+    # Accept legacy lifecycle values while exposing distinct provider-result
+    # states for new runners and reconciliation paths.
+    state: ActionLifecycleState | ExecutionResultState
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
     simulated: bool

@@ -18,7 +18,18 @@ def test_rank_root_causes_picks_deepest_downstream():
 def test_correlate_storm_reports_single_root():
     out = correlate_storm(["frontend", "checkout-svc", "payments-svc"], _CHAIN)
     assert out["likely_root"] == "payments-svc"
+    assert out["ambiguous"] is False
     assert out["failing_services"] == ["frontend", "checkout-svc", "payments-svc"]
+
+
+def test_correlate_storm_abstains_on_equally_plausible_roots():
+    out = correlate_storm(
+        ["api-a", "api-b", "db-a", "db-b"],
+        [["api-a", "db-a"], ["api-b", "db-b"]],
+    )
+    assert out["likely_root"] is None
+    assert out["ambiguous"] is True
+    assert all(not item["is_root_candidate"] for item in out["ranked"])
 
 
 def test_independent_failures_have_no_clear_root():

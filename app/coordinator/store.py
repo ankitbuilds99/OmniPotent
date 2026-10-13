@@ -80,12 +80,82 @@ async def save_execution(org_id: str, execution: DAGExecution) -> None:
         else:
             # Reassigned, not mutated in place: SQLAlchemy only marks a JSON
             # column dirty on assignment.
+            # Approval decisions are control-plane state and must survive a
+            # concurrent worker checkpoint write.
+            prior_decisions = (row.execution or {}).get("approval_decisions", {})
+            if prior_decisions:
+                payload["approval_decisions"] = prior_decisions
             row.execution = payload
             row.dag_id = execution.dag_id
             row.state = execution.state.value
             row.current_level = execution.current_level
             row.completed_at = completed_at
         await session.commit()
+
+
+async def record_approval_decision(
+    org_id: str,
+    execution_id: str,
+    task_id: str,
+    approved: bool,
+    reason: str = "",
+) -> bool:
+    """Persist one idempotent approval decision for any worker to observe."""
+    async with _session() as session:
+        row = await session.get(
+            CoordinatorExecution, {"id": execution_id, "org_id": org_id}
+        )
+        if row is None:
+            return False
+        payload = dict(row.execution or {})
+        task_state = (payload.get("task_executions") or {}).get(task_id, {}).get("state")
+        if row.state != "running" or task_state != "running":
+            return False
+        decisions = dict(payload.get("approval_decisions") or {})
+        key = task_id
+        if key in decisions:
+            return True
+        decisions[key] = {"approved": bool(approved), "reason": reason}
+        payload["approval_decisions"] = decisions
+        row.execution = payload
+        await session.commit()
+        return True
+
+
+async def get_approval_decision(
+    org_id: str, execution_id: str, task_id: str
+) -> bool | None:
+    """Read a durable approval decision, returning None while undecided."""
+    async with _session() as session:
+        row = await session.get(
+            CoordinatorExecution, {"id": execution_id, "org_id": org_id}
+        )
+        if row is None:
+            return None
+        decision = (row.execution or {}).get("approval_decisions", {}).get(task_id)
+        if decision is None:
+            return None
+        return bool(decision.get("approved", False))
+
+
+async def request_cancel(org_id: str, execution_id: str) -> bool:
+    """Persist a cancellation request for a worker running on any replica."""
+    async with _session() as session:
+        row = await session.get(CoordinatorExecution, {"id": execution_id, "org_id": org_id})
+        if row is None or row.state not in {"pending", "running"}:
+            return False
+        payload = dict(row.execution or {})
+        payload["cancel_requested"] = True
+        row.execution = payload
+        await session.commit()
+        return True
+
+
+async def is_cancel_requested(org_id: str, execution_id: str) -> bool:
+    """Return whether a durable cancellation request has been recorded."""
+    async with _session() as session:
+        row = await session.get(CoordinatorExecution, {"id": execution_id, "org_id": org_id})
+        return bool(row and (row.execution or {}).get("cancel_requested"))
 
 
 async def mark_failed(

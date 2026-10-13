@@ -26,10 +26,19 @@ Nearly every finding is the same shape: **a control that looks like it works, or
 - **KnowledgeBase** — a 401 rendered as "No articles found". An operator searching during an incident was told the runbook does not exist when their session had expired.
 - **GlobalMap** — "Live metrics from AWS, Azure and GCP" were simulated from the time of day. Replaced with the one quantity a browser can measure: the HEAD round trip to each region's public endpoint, `null` and labelled unmeasured when the probe fails.
 
+## Current verification addendum (2026-10-14)
+
+The older verification notes below describe the original PR snapshot and are not the release verdict for the current checkout. The current PRD matrix is maintained in [`docs/PRD_REQUIREMENTS_STATUS.md`](docs/PRD_REQUIREMENTS_STATUS.md).
+
+- Alembic migrations were applied locally through `021_operator_annotations` to `omnipotent_it`; a separate disposable database also migrated from empty to head and was removed.
+- The Redis-backed deduplication restart benchmark passed 1,000 events with two workers and a restart at event 500: zero post-restart duplicate incidents, p50 7.331 ms, p95 8.157 ms.
+- Runtime, targeted backend, release-gate, connector, and frontend checks have been run locally. The full backend suite still contains provider/network/live-infrastructure failures; those are recorded in the PRD status matrix rather than counted as passing evidence.
+- The implementation is not release-verified until the named external gates are run: crash/restart and restore drills, production Redis failover, customer connector permissions, independent 30-case RCA corpus, browser acceptance/accessibility, customer-runner execution, external incident-provider contract, and signed pilot review.
+
 ## Verification
 
 - `ruff` clean; `mypy` clean over 405 files
-- `pytest --cov=app --cov-fail-under=48` — **3373 passed, 57 skipped, 0 failed**, coverage **55.86%**; integration **10 passed, 20 skipped**
+- Historical snapshot: `pytest --cov=app --cov-fail-under=48` — **3373 passed, 57 skipped, 0 failed**, coverage **55.86%**; integration **10 passed, 20 skipped**
   <br>Run in a CI-matched venv (`uv sync --frozen`, Python 3.12, fastapi 0.138) with `REDIS_URL` exported, no `frontend/dist`, and no leftover sqlite files — the four conditions that separated a green local run from a red CI one.
 - `tsc --noEmit` clean; `eslint` 0 errors
 - `vitest` — **13 files, 78 tests passed**, coverage thresholds met
@@ -37,7 +46,7 @@ Nearly every finding is the same shape: **a control that looks like it works, or
 
 ## Note for review
 
-`main` has been merged in — this branch is up to date with it, and there is nothing left to resolve. The merge was large (84 files, 282 hunks) and worth knowing the shape of before reading the diff.
+The historical PR snapshot said that `main` had been merged in. That statement is retained as historical context; current release readiness is governed by the matrix and external gates above.
 
 The dominant cause was not the hardcoded-values sweep but PR #34 reviving four packages this branch had deleted as unreachable — `app/dashboard`, `app/cost_optimizer`, `app/dependency_graph`, `app/deduplication`. Those are restored here, along with main's router mounts. The ~20 files still unreachable on either side stay deleted. One deletion was reverted outright: `app/security/secrets.py` is reachable from `scripts/scan_staged_secrets.py`, which the pre-commit hook execs.
 

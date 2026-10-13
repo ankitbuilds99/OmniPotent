@@ -321,6 +321,45 @@ async def check_redis() -> ComponentHealth:
         )
 
 
+async def check_dedup_state() -> ComponentHealth:
+    """Check the separately configured cross-replica deduplication store."""
+    try:
+        from app.config import get_settings
+
+        settings = get_settings()
+        url = settings.copilot_dedup_state_url.strip()
+        if not url:
+            required = bool(settings.copilot_dedup_state_required)
+            return ComponentHealth(
+                name="dedup_state",
+                status=HealthStatus.UNHEALTHY if required else HealthStatus.DEGRADED,
+                message=(
+                    "Required shared deduplication state is not configured"
+                    if required
+                    else "Not configured (deduplication is process-local)"
+                ),
+            )
+
+        import redis.asyncio as redis
+        start = time.monotonic()
+        client = redis.from_url(url)
+        await client.ping()
+        latency = (time.monotonic() - start) * 1000
+        await client.aclose()
+        return ComponentHealth(
+            name="dedup_state",
+            status=HealthStatus.HEALTHY,
+            latency_ms=latency,
+            message="Shared deduplication store connected",
+        )
+    except Exception as exc:
+        return ComponentHealth(
+            name="dedup_state",
+            status=HealthStatus.UNHEALTHY,
+            message=f"Shared deduplication store failed: {exc}",
+        )
+
+
 async def check_llm() -> ComponentHealth:
     """Health check for LLM API connectivity."""
     try:
@@ -374,5 +413,6 @@ def setup_health_checks() -> HealthChecker:
     checker = get_health_checker()
     checker.register("database", check_database)
     checker.register("redis", check_redis)
+    checker.register("dedup_state", check_dedup_state)
     checker.register("llm", check_llm)
     return checker

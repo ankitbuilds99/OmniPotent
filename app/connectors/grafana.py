@@ -30,6 +30,13 @@ class GrafanaConnector(Connector):
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
+        elif self.config.username and self.config.password:
+            import base64
+
+            encoded = base64.b64encode(
+                f"{self.config.username}:{self.config.password}".encode()
+            ).decode()
+            headers["Authorization"] = f"Basic {encoded}"
         return headers
 
     async def health_check(self) -> bool:

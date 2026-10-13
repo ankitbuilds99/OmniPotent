@@ -10,7 +10,8 @@ import {
   sendPasswordResetEmail,
   setPersistence,
   signInWithEmailAndPassword,
-  signInWithPopup,
+  getRedirectResult,
+  signInWithRedirect,
   signOut as firebaseSignOut,
   type User as FirebaseUser,
 } from 'firebase/auth'
@@ -123,6 +124,15 @@ export function useFirebaseAuth(): UseFirebaseAuthReturn {
       if (mounted) setError({ message: describeError(authError, 'Could not persist your session.') })
     })
 
+    // Complete a social login that returned through Firebase's full-page
+    // redirect flow. Redirects avoid browser popup blockers and popup-close
+    // races on localhost.
+    void getRedirectResult(firebaseAuth)
+      .then((result) => result && adoptUser(result.user))
+      .catch((authError) => {
+        if (mounted) setError({ message: describeError(authError, 'Could not complete sign-in.') })
+      })
+
     return () => {
       mounted = false
       unsubscribe()
@@ -152,14 +162,18 @@ export function useFirebaseAuth(): UseFirebaseAuthReturn {
   const signInWithGitHub = useCallback(() => {
     return runAuth(async () => {
       if (!firebaseAuth) throw new Error('Firebase Authentication is unavailable.')
-      return (await signInWithPopup(firebaseAuth, new GithubAuthProvider())).user
+      await signInWithRedirect(firebaseAuth, new GithubAuthProvider())
+      // The browser navigates away; this keeps the promise type honest for
+      // the shared auth runner while the redirect completes in the next load.
+      return new Promise<FirebaseUser>(() => {})
     })
   }, [runAuth])
 
   const signInWithGoogle = useCallback(() => {
     return runAuth(async () => {
       if (!firebaseAuth) throw new Error('Firebase Authentication is unavailable.')
-      return (await signInWithPopup(firebaseAuth, new GoogleAuthProvider())).user
+      await signInWithRedirect(firebaseAuth, new GoogleAuthProvider())
+      return new Promise<FirebaseUser>(() => {})
     })
   }, [runAuth])
 
