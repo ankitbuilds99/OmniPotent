@@ -261,7 +261,7 @@ jobs:
           uv venv .audit-venv
           source .audit-venv/bin/activate
           pip install pip-audit
-          pip-audit -r requirements.txt --desc --format json > pip-audit-results.json || true
+          pip-audit -r requirements.txt --desc --format json > pip-audit-results.json
           cat pip-audit-results.json
 
       - name: Run Safety check

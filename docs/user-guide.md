@@ -120,7 +120,7 @@ Monitor service health and view incident history.
 Use API keys for programmatic access:
 
 ```bash
-curl -H "X-API-Key: dcp_your_api_key" \
+curl -H "X-API-Key: <API_KEY>" \
   https://your-instance.com/api/chat \
   -d '{"message": "Why is the API slow?"}'
 ```

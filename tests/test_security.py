@@ -162,15 +162,24 @@ class TestConnectSrcFollowsConfiguration:
             "wss://a.co",
         )
 
-    def test_extra_sources_join_the_defaults(self):
+    def test_extra_sources_join_the_defaults(self, monkeypatch):
         from app.security.headers import SecurityHeadersMiddleware
 
         class MockApp:
             pass
 
-        middleware = SecurityHeadersMiddleware(
-            MockApp(), extra_connect_src=("https://abc.supabase.co",)
-        )
+        # Pin the provider so this test does not inherit a developer's local
+        # LLM configuration. Production still derives CSP from its settings.
+        monkeypatch.setenv("COPILOT_PROVIDER", "anthropic")
+        cfg.get_settings.cache_clear()
+        try:
+            middleware = SecurityHeadersMiddleware(
+                MockApp(), extra_connect_src=("https://abc.supabase.co",)
+            )
+        finally:
+            cfg.get_settings.cache_clear()
+            monkeypatch.undo()
+            cfg.get_settings.cache_clear()
 
         # connect-src is derived from the configured provider (anthropic in the
         # test env), so only that provider's origin appears alongside the extras.

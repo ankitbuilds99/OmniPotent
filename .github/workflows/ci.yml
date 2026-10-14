@@ -24,7 +24,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-        continue-on-error: true
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
@@ -44,7 +43,7 @@ jobs:
           source .audit-venv/bin/activate
           uv pip install pip-audit
           uv export --no-hashes > requirements.txt
-          pip-audit -r requirements.txt || true
+          pip-audit -r requirements.txt
 
       - name: Check for hardcoded secrets in code
         run: |
