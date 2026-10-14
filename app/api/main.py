@@ -3195,8 +3195,54 @@ async def integration_status() -> dict:
     from app.integrations.slack_notify import is_slack_configured
 
     settings = get_settings()
+    tenant = tenant_context.get_tenant()
+
+    def configured(name: str, fallback: str = "") -> bool:
+        """Read connector configuration from the active tenant only.
+
+        A tenant request must never report the host process' integration
+        credentials as available. Single-tenant deployments retain the
+        existing Settings-backed behavior.
+        """
+        if tenant is not None:
+            return bool(tenant_context.integration_secret(name).strip())
+        return bool(fallback.strip())
+
+    if tenant is not None:
+        # These values are resolved from the tenant store by auth.py. They are
+        # intentionally not inferred from the host's Settings object.
+        github_live = bool(tenant.github_token.strip() and tenant.github_repo.strip())
+        pagerduty_live = configured("PAGERDUTY_API_TOKEN")
+        datadog_live = bool(
+            configured("DD_API_KEY") and configured("DD_APP_KEY")
+        )
+        sentry_live = configured("SENTRY_API_TOKEN")
+        prometheus_live = configured("PROMETHEUS_URL")
+        kubernetes_live = configured("KUBE_CONFIG_PATH")
+        traces_live = configured("TRACES_API_URL")
+        deploys_live = configured("DEPLOYS_API_URL")
+        argocd_live = bool(configured("ARGOCD_SERVER_URL") and configured("ARGOCD_AUTH_TOKEN"))
+        terraform_live = bool(
+            configured("TERRAFORM_CLOUD_TOKEN") and configured("TERRAFORM_ORGANIZATION")
+        )
+        slack_live = bool(
+            configured("SLACK_BOT_TOKEN") or configured("SLACK_WEBHOOK_URL")
+        )
+    else:
+        github_live = runtime.github_connected()
+        pagerduty_live = bool(settings.pagerduty_api_token)
+        datadog_live = bool(settings.dd_api_key and settings.dd_app_key)
+        sentry_live = bool(settings.sentry_api_token)
+        prometheus_live = bool(settings.prometheus_url)
+        kubernetes_live = bool(settings.kube_config_path)
+        traces_live = bool(settings.traces_api_url)
+        deploys_live = bool(settings.deploys_api_url)
+        argocd_live = bool(settings.argocd_server_url and settings.argocd_auth_token)
+        terraform_live = bool(settings.terraform_cloud_token and settings.terraform_organization)
+        slack_live = is_slack_configured()
+
     grafana_live = False
-    if settings.grafana_url.strip():
+    if tenant is None and settings.grafana_url.strip():
         from app.connectors.base import ConnectorConfig
         from app.connectors.grafana import GrafanaConnector
 
@@ -3213,18 +3259,18 @@ async def integration_status() -> dict:
         finally:
             await connector.close()
     status = {
-        "slack": is_slack_configured(),
-        "github": runtime.github_connected(),
-        "pagerduty": bool(settings.pagerduty_api_token),
-        "datadog": bool(settings.dd_api_key and settings.dd_app_key),
-        "sentry": bool(settings.sentry_api_token),
-        "prometheus": bool(settings.prometheus_url),
+        "slack": slack_live,
+        "github": github_live,
+        "pagerduty": pagerduty_live,
+        "datadog": datadog_live,
+        "sentry": sentry_live,
+        "prometheus": prometheus_live,
         "grafana": grafana_live,
-        "kubernetes": bool(settings.kube_config_path),
-        "traces": bool(settings.traces_api_url),
-        "deploys": bool(settings.deploys_api_url),
-        "argocd": bool(settings.argocd_server_url and settings.argocd_auth_token),
-        "terraform": bool(settings.terraform_cloud_token and settings.terraform_organization),
+        "kubernetes": kubernetes_live,
+        "traces": traces_live,
+        "deploys": deploys_live,
+        "argocd": argocd_live,
+        "terraform": terraform_live,
     }
     # Additive metadata for onboarding/admin views. The legacy boolean keys are
     # intentionally preserved for existing clients; these details make the

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 import app.api.main as api
 import app.config as cfg
 from app import runtime
+from app import tenant_context
 
 
 @pytest.fixture(autouse=True)
@@ -374,7 +375,8 @@ class TestIntegrationStatus:
         cfg.get_settings.cache_clear()
 
         status = client.get("/integrations/status").json()
-        assert not any(status.values()), f"claimed live with no credentials: {status}"
+        boolean_status = {k: v for k, v in status.items() if isinstance(v, bool)}
+        assert not any(boolean_status.values()), f"claimed live with no credentials: {status}"
 
     def test_reports_true_only_for_the_connector_that_was_configured(self, client, monkeypatch):
         """One credential must not light up the rest."""
@@ -384,7 +386,7 @@ class TestIntegrationStatus:
 
         status = client.get("/integrations/status").json()
         assert status["sentry"] is True
-        assert [k for k, v in status.items() if v] == ["sentry"]
+        assert [k for k, v in status.items() if isinstance(v, bool) and v] == ["sentry"]
 
     def test_reports_prometheus_when_url_is_configured(self, client, monkeypatch):
         monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
@@ -405,6 +407,26 @@ class TestIntegrationStatus:
         monkeypatch.setenv("TERRAFORM_ORGANIZATION", "acme")
         cfg.get_settings.cache_clear()
         assert client.get("/integrations/status").json()["terraform"] is True
+
+    def test_tenant_status_never_reads_host_connector_credentials(self, client, monkeypatch):
+        """A tenant request cannot inherit integrations configured on the host."""
+        monkeypatch.setitem(cfg.Settings.model_config, "env_file", None)
+        monkeypatch.setenv("SENTRY_API_TOKEN", "host-only-test-value")
+        cfg.get_settings.cache_clear()
+        token = tenant_context.set_tenant(
+            tenant_context.TenantConfig(
+                org_id="org-a",
+                role="owner",
+                integration_secrets={},
+            )
+        )
+        try:
+            status = client.get("/integrations/status")
+        finally:
+            tenant_context.reset_tenant(token)
+
+        assert status.status_code == 200
+        assert status.json()["sentry"] is False
 
 
 class TestMetricsEndpoints:

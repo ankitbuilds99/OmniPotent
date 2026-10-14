@@ -328,9 +328,22 @@ export interface IntegrationStatus {
   deploys: boolean;
   argocd: boolean;
   terraform: boolean;
+  details?: Record<string, {
+    configured: boolean;
+    mode: "deployment" | "organization";
+    capabilities: string[];
+    write_capable: boolean;
+    freshness: string;
+  }>;
   /** A catalog entry this endpoint says nothing about reads `undefined`, and is
    *  shown as unknown rather than guessed at in either direction. */
-  [server: string]: boolean | undefined;
+  [server: string]: boolean | Record<string, {
+    configured: boolean;
+    mode: "deployment" | "organization";
+    capabilities: string[];
+    write_capable: boolean;
+    freshness: string;
+  }> | undefined;
 }
 
 /** Get status of configured integrations. */
