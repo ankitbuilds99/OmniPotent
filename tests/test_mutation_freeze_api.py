@@ -16,7 +16,7 @@ def test_mutation_freeze_api_controls_tenant_scope(monkeypatch):
         assert response.status_code == 200
         assert client.get("/policy/mutation-freeze").json()["frozen"] is True
 
-        response = client.delete("/policy/mutation-freeze", json={})
+        response = client.request("DELETE", "/policy/mutation-freeze", json={})
         assert response.status_code == 200
         assert client.get("/policy/mutation-freeze").json()["frozen"] is False
     finally:

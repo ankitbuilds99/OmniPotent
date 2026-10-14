@@ -63,6 +63,8 @@ CONFIGURED_AWAY = {
 # name, so "unconfigured" stays distinguishable from "crashed".
 UNCONFIGURED_READS = {
     "/api/knowledge-graph/service-metrics": "PROMETHEUS_URL",
+    "/api/integrations/grafana/dashboards": "GRAFANA_URL",
+    "/api/integrations/grafana/health": "GRAFANA_URL",
 }
 
 # A syntactically valid UUID that owns nothing, so path-parameter routes reach

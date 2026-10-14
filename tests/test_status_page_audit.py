@@ -56,6 +56,8 @@ def client(tmp_path, monkeypatch):
     # live only where a credential is configured.
     monkeypatch.setenv("COPILOT_ENV", "production")
     monkeypatch.setenv("COPILOT_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("COPILOT_CHECKPOINT_DB", "postgresql://localhost/test")
+    monkeypatch.setenv("COPILOT_REDIS_URL", "redis://localhost/0")
     cfg.get_settings.cache_clear()
     tenant_context.current_tenant.set(None)
     api._RL.clear()

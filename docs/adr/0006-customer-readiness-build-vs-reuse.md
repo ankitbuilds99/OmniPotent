@@ -4,6 +4,14 @@
 
 Accepted for the read-only customer wedge.
 
+## Context
+
+The repository already contains the customer-facing React console, FastAPI
+control plane, LangGraph investigation workflow, MCP connector boundary, and
+tenant-aware persistence. Replacing those layers would increase migration and
+security risk, so the readiness work is constrained to verified vertical
+slices that preserve the existing architecture.
+
 ## Decision
 
 Reuse the existing React/Vite application, FastAPI routes, LangGraph graph,

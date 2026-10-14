@@ -469,6 +469,8 @@ def test_copilot_log_format_text_overrides_the_production_default(monkeypatch):
         COPILOT_ENV="production",
         COPILOT_API_TOKEN="t",
         COPILOT_SECRET_KEY="s",
+        COPILOT_CHECKPOINT_DB="postgresql://localhost/test",
+        COPILOT_REDIS_URL="redis://localhost/0",
     )
     handler = logging.getLogger().handlers[0]
     record = logging.LogRecord("t", logging.INFO, __file__, 1, "hello", None, None)

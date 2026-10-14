@@ -350,6 +350,8 @@ EXPECTED_ACTIONS = {
     ("POST", "/policy/approvals/request"): "approve_action",
     ("POST", "/policy/approvals/{approval_id}/approve"): "approve_action",
     ("POST", "/policy/approvals/{approval_id}/reject"): "approve_action",
+    ("POST", "/policy/mutation-freeze"): "manage_integrations",
+    ("DELETE", "/policy/mutation-freeze"): "manage_integrations",
     ("POST", "/decision/record-outcome/{prediction_id}"): "approve_action",
 }
 

@@ -247,7 +247,7 @@ def test_an_execution_is_listable_before_it_has_finished(coordinator_db):
 def test_a_background_failure_lands_on_the_execution_instead_of_vanishing(
     coordinator_db,
 ):
-    async def explode(dag, context=None, execution_id=None, resume_from=None):
+    async def explode(dag, context=None, execution_id=None, resume_from=None, **kwargs):
         raise RuntimeError("checkpoint exec_missing not found")
 
     executor = DAGExecutor(handlers={})
