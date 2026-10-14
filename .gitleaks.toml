@@ -5,9 +5,44 @@
 useDefault = true
 
 # Global allowlist for test files containing fake secrets
-[allowlist]
+[[allowlists]]
 description = "Test files with fake secrets for redaction testing"
 paths = [
     '''tests/test_vpc_connector\.py''',
     '''tests/test_safety_gates\.py''',
+]
+
+# Exact, path-scoped test/documentation fixtures verified by the audit.
+[[allowlists]]
+description = "Known synthetic secret-detection fixtures only"
+regexTarget = "line"
+paths = [
+    '''tests/test_teams_auth\.py''',
+    '''tests/test_roadmap_features\.py''',
+    '''tests/test_validation\.py''',
+    '''tests/test_security\.py''',
+]
+regexes = [
+    '''TOTALLYFAKESIG''',
+    '''AKIAIOSFODNN7EXAMPL[AB]''',
+    '''sk-1234567890abcdef''',
+    '''xoxb-test''',
+]
+
+[[allowlists]]
+description = "Verified non-secret documentation and audit text"
+regexTarget = "line"
+paths = [
+    '''frontend/src/styles\.css''',
+    '''app/mcp/servers/jira/server\.py''',
+    '''docs/user-guide\.md''',
+    '''frontend/src/hooks/useCopilot\.ts''',
+    '''AUDIT_REPORT\.md''',
+]
+regexes = [
+    '''\.omni-auth-page >''',
+    '''SIMULATED-(INC-999|10999)''',
+    '''X-API-Key: (dcp_)?your_api_key''',
+    '''STORE_KEY = "copilot-conversation-v1"''',
+    '''token=eyJ[A-Za-z0-9_.-]+''',
 ]

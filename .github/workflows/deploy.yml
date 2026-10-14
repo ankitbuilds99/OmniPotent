@@ -165,8 +165,7 @@ jobs:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-        continue-on-error: true
+          exit-code: '1'
 
       - name: Skip notification (no AWS)
         if: steps.check-aws.outputs.has_aws == 'false'
